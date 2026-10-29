@@ -115,27 +115,12 @@ fn official_rectangle_generator(grids: &[([Rational; 2], [[u32; 4]; 3])]) {
     // Explicit canonical corners and colours, independent of project or SDK
     // defaults. At PAR2, canonical X coordinates are twice raster X coordinates.
     let cases = [
-        (
-            [2.0, 1.0],
-            [10.0, 4.0],
-            [0.25, 0.5, 0.75, 1.0],
-            [1, 1, 5, 4],
-        ),
-        (
-            [4.0, 2.0],
-            [14.0, 5.0],
-            [0.5, 0.25, 0.125, 0.5],
-            [2, 2, 7, 5],
-        ),
-        (
-            [2.0, 1.0],
-            [10.0, 4.0],
-            [0.25, 0.5, 0.75, 0.0],
-            [1, 1, 5, 4],
-        ),
+        ([2.0, 1.0], [10.0, 4.0], [0.25, 0.5, 0.75, 1.0]),
+        ([4.0, 2.0], [14.0, 5.0], [0.5, 0.25, 0.125, 0.5]),
+        ([2.0, 1.0], [10.0, 4.0], [0.25, 0.5, 0.75, 0.0]),
     ];
     let mut programs = Vec::new();
-    for (corner1, corner2, colour, _) in cases {
+    for (corner1, corner2, colour) in cases {
         for (name, value) in [
             ("corner1", PropertyValue::DoubleVec2(corner1)),
             ("corner2", PropertyValue::DoubleVec2(corner2)),
@@ -207,7 +192,7 @@ fn official_rectangle_generator(grids: &[([Rational; 2], [[u32; 4]; 3])]) {
                 assert_eq!(output.extent(), EffectFrameExtent::new(width, height));
                 assert_eq!(output.format().alpha(), ColorFrameAlpha::PremultipliedFloat);
                 assert_eq!(output.sampling(), sampling);
-                let (_, _, colour, _) = cases[case];
+                let (_, _, colour) = cases[case];
                 let [x1, y1, x2, y2] = boxes[case];
                 for (index, actual) in output.pixels().iter().enumerate() {
                     let x = index as u32 % width;

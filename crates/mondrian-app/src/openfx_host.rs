@@ -388,11 +388,6 @@ pub enum OpenFxHostError {
     /// The complete Float image cannot satisfy its declared representation.
     #[error(transparent)]
     Frame(#[from] mondrian_effects::EffectFloatFrameError),
-    /// The actual image cannot enter this host's unit render-scale contract.
-    #[error("OpenFX requires unit image render scale, got {sampling:?}")]
-    UnsupportedImageSampling {
-        sampling: mondrian_core::ImageSampling,
-    },
     /// The request cannot be represented by the admitted filter contract.
     #[error("invalid OpenFX host request: {0}")]
     Invalid(String),
@@ -447,6 +442,7 @@ struct NativeFrameInfo {
     first_frame: f64,
     last_frame: f64,
     pixel_aspect_ratio: f64,
+    render_scale: [f64; 2],
 }
 
 #[repr(C)]
@@ -1388,21 +1384,24 @@ fn validate_render_request(
     checkpoint()?;
     validate_frame(frame.width(), frame.height(), frame.pixels().len())?;
     validate_timing(timing)?;
-    validate_native_sampling(frame.width(), frame.sampling())?;
+    validate_native_sampling(frame.width(), frame.height(), frame.sampling())?;
     validate_parameters(parameters)?;
     frame.view().validate_controlled(&mut || checkpoint())
 }
 
-// The native ABI advertises unit render scale. PAR is the original sample
-// shape; it must never absorb a Reduced or nonuniform raster density.
+// Project only the actual invocation's checked sampling into the native ABI.
+// PAR is sample shape and must never absorb a Reduced/nonuniform density.
 fn validate_native_sampling(
     width: u32,
+    height: u32,
     sampling: mondrian_core::ImageSampling,
 ) -> Result<(), OpenFxHostError> {
-    if !sampling.is_unit_scale() {
-        return Err(OpenFxHostError::UnsupportedImageSampling { sampling });
-    }
-    if !(f64::from(width) * sampling.sample_aspect_ratio().to_f64()).is_finite() {
+    let [sx, sy] = sampling.render_scale().map(|axis| axis.to_f64());
+    let canonical = [
+        f64::from(width) * sampling.sample_aspect_ratio().to_f64() / sx,
+        f64::from(height) / sy,
+    ];
+    if canonical.iter().any(|axis| !axis.is_finite() || *axis <= 0.0) {
         return Err(invalid(
             "OpenFX canonical frame extent is not representable",
         ));
@@ -1740,7 +1739,7 @@ pub(crate) mod shared_frame_tests {
     use super::*;
 
     #[test]
-    fn actual_sampling_requires_unit_density_and_admits_maximum_typed_par() {
+    fn actual_sampling_admits_reduced_nonuniform_and_maximum_typed_par() {
         let format = mondrian_effects::EffectValueFormat::new(
             mondrian_effects::EffectWorkingPrecision::Float32,
             mondrian_effects::EffectColorDomain::SceneLinearRgb,
@@ -1754,6 +1753,7 @@ pub(crate) mod shared_frame_tests {
         };
         let par = mondrian_core::SampleAspectRatio::new(u32::MAX, 1).unwrap();
         for scale in [
+            [mondrian_core::Rational::new(1, 1); 2],
             [mondrian_core::Rational::new(1, 2); 2],
             [
                 mondrian_core::Rational::new(1, 1),
@@ -1768,21 +1768,9 @@ pub(crate) mod shared_frame_tests {
                 vec![[0.0; 4]; 6],
             )
             .unwrap();
-            assert!(matches!(
-                validate_render_request(&timing, &BTreeMap::new(), &frame, &mut || Ok(())),
-                Err(OpenFxHostError::UnsupportedImageSampling { sampling: actual }) if actual == sampling
-            ));
+            validate_render_request(&timing, &BTreeMap::new(), &frame, &mut || Ok(()))
+                .expect("positive typed density and sample shape have finite canonical extents");
         }
-        let frame = EffectFloatFrame::from_pixels(
-            mondrian_effects::EffectFrameExtent::new(3, 2),
-            format,
-            mondrian_core::ImageSampling::new(par, [mondrian_core::Rational::new(1, 1); 2])
-                .unwrap(),
-            vec![[0.0; 4]; 6],
-        )
-        .unwrap();
-        validate_render_request(&timing, &BTreeMap::new(), &frame, &mut || Ok(()))
-            .expect("maximum typed SAR is valid; raw f64 ABI overflow remains separately rejected");
     }
 
     #[test]
@@ -1797,7 +1785,7 @@ pub(crate) mod shared_frame_tests {
         let bytes = unsafe {
             std::slice::from_raw_parts(input.as_ptr().cast(), std::mem::size_of_val(&input))
         };
-        let info = NativeFrameInfo {
+        let mut info = NativeFrameInfo {
             source_alpha: 0,
             width: 3,
             height: 2,
@@ -1806,6 +1794,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 1.0,
             pixel_aspect_ratio: f64::MAX,
+            render_scale: [1.0; 2],
 
             project_width: 3,
             project_height: 2,
@@ -1824,6 +1813,30 @@ pub(crate) mod shared_frame_tests {
             .err(),
             Some(2)
         );
+        info.pixel_aspect_ratio = 1.0;
+        for scale in [
+            [0.0, 1.0],
+            [-1.0, 1.0],
+            [f64::NAN, 1.0],
+            [1.0, f64::INFINITY],
+            [f64::from_bits(1), 1.0],
+        ] {
+            info.render_scale = scale;
+            assert_eq!(
+                NativeSession::create(
+                    mondrian_core::EffectProcessorOwnerId::new(),
+                    &binary,
+                    &bundle,
+                    &identifier,
+                    bytes,
+                    &info,
+                    &[],
+                )
+                .err(),
+                Some(2),
+                "invalid raw ABI scale refuses before binary loading: {scale:?}"
+            );
+        }
     }
 
     #[test]
@@ -1856,6 +1869,7 @@ pub(crate) mod shared_frame_tests {
                 first_frame: 0.0,
                 last_frame: 100.0,
                 pixel_aspect_ratio: 1.0,
+                render_scale: [1.0; 2],
             };
             assert_eq!(
                 NativeSession::create(
@@ -1921,6 +1935,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
         };
         let mut session = NativeSession::create(
             mondrian_core::EffectProcessorOwnerId::new(),
@@ -2606,6 +2621,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,
@@ -2801,6 +2817,7 @@ pub(crate) mod shared_frame_tests {
                 first_frame: 0.0,
                 last_frame: 100.0,
                 pixel_aspect_ratio: 1.0,
+                render_scale: [1.0; 2],
 
                 project_width: 1,
                 project_height: 1,
@@ -2913,6 +2930,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
 
             project_width: 2,
             project_height: 3,
@@ -3059,6 +3077,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 2.0,
             pixel_aspect_ratio: 2.0,
+            render_scale: [1.0; 2],
 
             project_width: 3,
             project_height: 2,
@@ -3257,6 +3276,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 2.0,
+            render_scale: [1.0; 2],
 
             project_width: 2,
             project_height: 2,
@@ -3357,6 +3377,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,
@@ -3480,6 +3501,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 2.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,
@@ -3691,6 +3713,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,
@@ -3753,6 +3776,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 10.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,
@@ -4008,6 +4032,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.5,
+            render_scale: [1.0; 2],
 
             project_width: 2,
             project_height: 2,
@@ -4184,6 +4209,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 2.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,
@@ -4300,6 +4326,7 @@ pub(crate) mod shared_frame_tests {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 2.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,

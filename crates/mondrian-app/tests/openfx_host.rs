@@ -43,6 +43,9 @@ mod checkerboard;
 #[path = "openfx_host/image_domain.rs"]
 mod image_domain;
 
+#[path = "openfx_host/sampling.rs"]
+mod sampling;
+
 fn constant_parameters<const N: usize>(
     values: [(String, OpenFxParameterValue); N],
 ) -> BTreeMap<String, OpenFxParameterBinding> {

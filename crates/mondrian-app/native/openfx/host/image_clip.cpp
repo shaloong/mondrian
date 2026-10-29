@@ -56,9 +56,7 @@ namespace MondrianOpenFx {
         std::to_string(state.sourceBindingRevision) + ":sample:" + std::to_string(sourceIndex)); }
     setStringProperty(kOfxImagePropField, kOfxImageFieldNone);
 
-    // render scale x and y of 1.0
-    setDoubleProperty(kOfxImageEffectPropRenderScale, 1.0, 0);
-    setDoubleProperty(kOfxImageEffectPropRenderScale, 1.0, 1);
+    setDoublePropertyN(kOfxImageEffectPropRenderScale, state.info.render_scale, 2);
 
     // data ptr
     setPointerProperty(kOfxImagePropData, _data + (height - 1) * width);
@@ -221,8 +219,12 @@ namespace MondrianOpenFx {
     if (!getConnected() || !frameState().sourceFrame(time, source, index, &failure)) {
       throw OFX::Host::Property::Exception(failure);
     }
-    return OfxRectD{source.x * source.pixelAspectRatio, static_cast<double>(source.y),
-        (source.x + source.width) * source.pixelAspectRatio, static_cast<double>(source.y + source.height)};
+    OfxRectD canonical{};
+    if (!canonicalRegionOfDefinition({source.x, source.y, source.x + source.width, source.y + source.height},
+        source.pixelAspectRatio, frameState().renderScale(), canonical)) {
+      throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
+    }
+    return canonical;
   }
 
   /// override this to fill in the image at the given time.

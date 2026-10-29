@@ -60,7 +60,7 @@ namespace MondrianOpenFx {
     if (action == kOfxImageEffectActionGetRegionOfDefinition) {
       // HostSupport initializes this to zero; the specification requires the
       // context default even when a handled action writes only some components.
-      const auto rod = calcDefaultRegionOfDefinition(_frameState.info.frame, OfxPointD{1, 1});
+      const auto rod = calcDefaultRegionOfDefinition(_frameState.info.frame, _frameState.renderScale());
       outArgs.setDoublePropertyN(kOfxImageEffectPropRegionOfDefinition, &rod.x1, 4);
       return;
     }
@@ -89,12 +89,12 @@ namespace MondrianOpenFx {
       ~QueryScope() { flag.store(false); }
     } scope{_frameState.queryingOutputRod};
     OfxRectD rod{};
-    const auto status = getRegionOfDefinitionAction(time, OfxPointD{1, 1}, rod);
+    const auto status = getRegionOfDefinitionAction(time, _frameState.renderScale(), rod);
     if (status != kOfxStatOK && status != kOfxStatReplyDefault) {
       throw OFX::Host::Property::Exception(status);
     }
     OfxRectI pixels{}; size_t count = 0;
-    if (!pixelRegionOfDefinition(rod, _frameState.info.pixel_aspect_ratio, pixels, count)) {
+    if (!pixelRegionOfDefinition(rod, _frameState.info.pixel_aspect_ratio, _frameState.renderScale(), pixels, count)) {
       throw OFX::Host::Property::Exception(kOfxStatErrUnsupported);
     }
     return rod;
@@ -280,7 +280,8 @@ namespace MondrianOpenFx {
   /// renderScale
   void FilterEffectInstance::getRenderScaleRecursive(double &x, double &y) const
   {
-    x = y = 1.0;
+    x = _frameState.info.render_scale[0];
+    y = _frameState.info.render_scale[1];
   }
 
   // make a parameter instance

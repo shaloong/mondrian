@@ -318,9 +318,11 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
       !std::isfinite(info.frame) || !std::isfinite(info.frame_rate) ||
       !std::isfinite(info.first_frame) || !std::isfinite(info.last_frame) ||
       !std::isfinite(info.pixel_aspect_ratio) || info.frame_rate <= 0.0 ||
-      info.pixel_aspect_ratio <= 0.0 ||
-      !std::isfinite(info.width * info.pixel_aspect_ratio) || info.first_frame > info.frame ||
+      info.pixel_aspect_ratio <= 0.0 || info.first_frame > info.frame ||
       info.frame > info.last_frame) { return 2; }
+  OfxRectD canonical{};
+  if (!MondrianOpenFx::canonicalRegionOfDefinition({0, 0, info.width, info.height},
+      info.pixel_aspect_ratio, {info.render_scale[0], info.render_scale[1]}, canonical)) { return 2; }
   const size_t pixels = size_t(info.width) * size_t(info.height);
   if (frameBytes != pixels * sizeof(OfxRGBAColourF) ||
       frameBytes > 128u * 1024u * 1024u) { return 2; }
@@ -604,7 +606,7 @@ struct MondrianOpenFxSession {
           frame.constantParameter(update.parameter->getName()) ? 0 : 1);
     }
     if (bracket && !accepted(instance->beginInstanceChangedAction(reason))) { return 4; }
-    const OfxPointD scale{1.0, 1.0};
+    const auto scale = frame.renderScale();
     if (bracket && status == kOfxStatOK) {
       for (const auto& update : updates) {
         if (!update.changed) { continue; }
@@ -697,7 +699,8 @@ struct MondrianOpenFxSession {
     phase = probe.start();
     const bool clipsChanged = previous.frame_rate != info.frame_rate ||
         previous.first_frame != info.first_frame || previous.last_frame != info.last_frame ||
-        previous.pixel_aspect_ratio != info.pixel_aspect_ratio;
+        previous.pixel_aspect_ratio != info.pixel_aspect_ratio ||
+        previous.render_scale[0] != info.render_scale[0] || previous.render_scale[1] != info.render_scale[1];
     const int applied = applyParameters(parameters, count, true,
         previous.frame != info.frame ? kOfxChangeTime : kOfxChangeUserEdited, clipsChanged);
     if (applied != 0) {
@@ -763,7 +766,7 @@ struct MondrianOpenFxSession {
     const auto region = outputClip->getRegionOfDefinition(info.frame);
     OfxRectI window{};
     size_t domainPixels = 0;
-    if (!MondrianOpenFx::pixelRegionOfDefinition(region, info.pixel_aspect_ratio, window, domainPixels)) { return 7; }
+    if (!MondrianOpenFx::pixelRegionOfDefinition(region, info.pixel_aspect_ratio, frame.renderScale(), window, domainPixels)) { return 7; }
     if (!instance->supportsMultiResolution() && domainPixels != 0 && !MondrianOpenFx::sameRegion(window, viewport)) { return 7; }
     frame.outputCanonicalRod = region;
     frame.outputPixelRod = window;
@@ -822,10 +825,10 @@ struct MondrianOpenFxSession {
     const auto& window = plan.pixelRod;
     const size_t domainPixels = plan.pixelCount;
     const auto& premultiplication = instance->getOutputPreMultiplication();
-    const OfxPointD scale{1.0, 1.0};
+    const auto scale = frame.renderScale();
     const OfxRectI viewport{0, 0, info.width, info.height};
-    const OfxRectD viewportCanonical{0.0, 0.0, info.width * info.pixel_aspect_ratio,
-                                    static_cast<double>(info.height)};
+    const OfxRectD viewportCanonical{0.0, 0.0, info.width * info.pixel_aspect_ratio / scale.x,
+                                    info.height / scale.y};
     // Empty support has no Render action or Output fetch. In particular, do not
     // begin a render sequence whose mandatory Render action would be omitted.
     if (domainPixels == 0) {

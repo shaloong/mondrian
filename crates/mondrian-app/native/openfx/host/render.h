@@ -69,10 +69,13 @@ struct MondrianOpenFxFrameInfo {
   double first_frame;
   double last_frame;
   double pixel_aspect_ratio;
+  double render_scale[2];
 };
 
 // Borrowed immutable upstream pixels, valid through this one serialized call.
 // Coordinates and time are native OFX pixel/frame coordinates, not seconds.
+// Every Source uses the invocation FrameInfo's render scale. The Rust delivery
+// boundary requires the same ImageSampling for current and temporal images.
 struct OfxRGBAColourF;
 struct MondrianOpenFxSourceFrame {
   double time;

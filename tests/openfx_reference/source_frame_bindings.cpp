@@ -75,6 +75,7 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
   }
   const auto savedCurrent = current, savedPast = past, savedFuture = future;
   MondrianOpenFx::FrameState frame;
+  frame.info.render_scale[0] = frame.info.render_scale[1] = 1;
   frame.info.width = 3; frame.info.height = 2; frame.info.frame = .25;
   frame.info.first_frame = -1000; frame.info.last_frame = 1000;
   frame.info.frame_rate = 24; frame.info.pixel_aspect_ratio = 2;

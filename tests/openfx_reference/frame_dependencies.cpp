@@ -38,6 +38,7 @@ int exercise(const char* group, MondrianOpenFx::Host& host, const char* binaryPa
   auto* plugin = dynamic_cast<ImageEffectPlugin*>(&binary.getPlugin(0));
   require(plugin && plugin->getIdentifier() == "org.mondrian.fixture.frame-dependencies", "exact protocol fixture");
   MondrianOpenFx::FrameState frame;
+  frame.info.render_scale[0] = frame.info.render_scale[1] = 1;
   frame.info.width = frame.info.height = 1;
   frame.info.frame_rate = 24; frame.info.first_frame = -1000; frame.info.last_frame = 1000;
   frame.info.pixel_aspect_ratio = 1;

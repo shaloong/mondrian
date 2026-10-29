@@ -448,6 +448,7 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
     throw std::runtime_error("unexpected plugin class");
   }
   MondrianOpenFx::FrameState frame;
+  frame.info.render_scale[0] = frame.info.render_scale[1] = 1;
   frame.info.width = frame.info.height = 1;
   frame.info.frame_rate = 24.0;
   frame.info.last_frame = frame.info.pixel_aspect_ratio = 1.0;

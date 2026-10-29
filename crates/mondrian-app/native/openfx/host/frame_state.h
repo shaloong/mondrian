@@ -4,6 +4,7 @@
 #include "render.h"
 #include "ofxCore.h"
 #include "ofxPixels.h"
+#include "image_domain.h"
 #include <cstddef>
 #include <atomic>
 #include <map>
@@ -44,6 +45,9 @@ namespace MondrianOpenFx {
   using SourceFrameView = MondrianOpenFxSourceFrame;
   struct FrameState {
     MondrianOpenFxFrameInfo info{};
+    OfxPointD renderScale() const noexcept {
+      return {info.render_scale[0], info.render_scale[1]};
+    }
     // Borrowed only for an explicitly measured action. Legal callback threads
     // join before CABI return; only Output first-fetch writes the nested clear.
     MondrianOpenFxNativeDiagnostic* renderDiagnostic = nullptr;
@@ -112,9 +116,10 @@ namespace MondrianOpenFx {
           !std::isfinite(value.pixelAspectRatio) || value.pixelAspectRatio <= 0.0) { return false; }
       const int64_t right = int64_t(value.x) + value.width;
       const int64_t top = int64_t(value.y) + value.height;
-      if (right > std::numeric_limits<int>::max() || top > std::numeric_limits<int>::max() ||
-          !std::isfinite(value.x * value.pixelAspectRatio) ||
-          !std::isfinite(right * value.pixelAspectRatio)) { return false; }
+      if (right > std::numeric_limits<int>::max() || top > std::numeric_limits<int>::max()) { return false; }
+      OfxRectD canonical{};
+      if (!canonicalRegionOfDefinition({value.x, value.y, int(right), int(top)},
+          value.pixelAspectRatio, renderScale(), canonical)) { return false; }
       const size_t bytes = size_t(value.width) * size_t(value.height) * sizeof(OfxRGBAColourF);
       return bytes == value.bytes && bytes <= 128u * 1024u * 1024u;
     }

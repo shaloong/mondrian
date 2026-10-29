@@ -104,6 +104,7 @@ fn native_generic_gui_pairs_failed_begin_end_and_honest_question_replies() {
             first_frame: 0.0,
             last_frame: 100.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 1,
@@ -594,6 +595,7 @@ fn run_parameter_permission_session(gui_open: bool) {
         first_frame: 0.0,
         last_frame: 100.0,
         pixel_aspect_ratio: 1.0,
+        render_scale: [1.0; 2],
 
         project_width: 1,
         project_height: 1,

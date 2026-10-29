@@ -21,8 +21,8 @@ fn input(par: SampleAspectRatio, scale: [Rational; 2]) -> EffectFloatFrame {
 
 #[test]
 #[ignore = "requires current Product and owned SessionProbe image_sampling mode"]
-fn actual_image_sampling_binds_create_and_preserves_owner_after_refusal() {
-    const TEST: &str = "openfx_host::resident::image_sampling_tests::actual_image_sampling_binds_create_and_preserves_owner_after_refusal";
+fn actual_image_sampling_binds_create_and_preserves_owner_across_density_changes() {
+    const TEST: &str = "openfx_host::resident::image_sampling_tests::actual_image_sampling_binds_create_and_preserves_owner_across_density_changes";
     if !super::super::shared_frame_tests::qualification_child(
         TEST,
         &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "image_sampling")],
@@ -65,70 +65,45 @@ fn actual_image_sampling_binds_create_and_preserves_owner_after_refusal() {
     )]);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut native_owner = None;
-        for (index, (numerator, denominator, blue)) in [
+        let mut invocation = 0;
+        for (numerator, denominator, blue) in [
             (6, 5, 1.075_f32),
             (1, 1, 1.0625),
             (2, 1, 1.125),
             (6, 5, 1.075),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        ] {
             let par = SampleAspectRatio::new(numerator, denominator).unwrap();
-            // The first refusals precede native Create; later ones preserve the
-            // already-created owner and its last accepted image binding.
             for scale in [
                 [Rational::new(1, 2); 2],
                 [Rational::new(1, 2), Rational::new(3, 4)],
+                [Rational::new(1, 1); 2],
             ] {
-                let reduced = input(par, scale);
-                let original = reduced.clone();
-                session.shared[..session.frame_bytes].fill(0xa5);
-                let sequence = session.sequence;
-                let invocation = session.last_invocation;
-                let bound_native = session.native_owner;
-                let output = session.render_with_output_reservation(
-                    &timing,
-                    &parameters,
-                    &reduced,
-                    &mut || Ok(()),
-                    |_, _| panic!("nonunit sampling cannot allocate an output owner"),
-                );
-                assert!(
-                    matches!(output, Err(OpenFxHostError::UnsupportedImageSampling { sampling })
-                    if sampling == reduced.sampling())
-                );
-                assert_eq!(reduced, original);
-                assert_eq!(session.sequence, sequence);
-                assert_eq!(session.last_invocation, invocation);
-                assert_eq!(session.native_owner, bound_native);
-                assert!(session.shared[..session.frame_bytes].iter().all(|byte| *byte == 0xa5));
-                assert_eq!(session.process.state, ProcessState::Running);
+                let source = input(par, scale);
+                let original = source.clone();
+                let timing = OpenFxRenderTiming { frame: invocation as f64, ..timing.clone() };
+                let output = session.render(&timing, &parameters, &source, &mut || Ok(())).unwrap();
+                assert_eq!(output.sampling(), source.sampling());
+                assert_eq!(output.extent(), source.extent());
+                for pixel in output.pixels() {
+                    assert_eq!(
+                        pixel.map(f32::to_bits),
+                        [0.1875_f32, 0.359375, blue, 0.125].map(f32::to_bits)
+                    );
+                }
+                assert_eq!(source, original);
+                invocation += 1;
+                let feedback = session.take_feedback().unwrap();
+                assert_eq!(feedback.owner, owner);
+                assert_eq!(feedback.snapshot.invocation(), invocation);
+                if let Some(expected) = native_owner {
+                    assert_eq!(feedback.snapshot.native_owner(), expected);
+                }
+                native_owner = Some(feedback.snapshot.native_owner());
                 assert_eq!(session.worker_process_id(), worker);
+                assert_eq!(session.sequence, invocation);
+                assert_eq!(session.process.state, ProcessState::Running);
                 assert!(session.process.child.try_wait().unwrap().is_none());
             }
-            let source = input(par, [Rational::new(1, 1); 2]);
-            let original = source.clone();
-            let timing = OpenFxRenderTiming { frame: index as f64, ..timing.clone() };
-            let output = session.render(&timing, &parameters, &source, &mut || Ok(())).unwrap();
-            assert_eq!(output.sampling(), source.sampling());
-            assert_eq!(output.extent(), source.extent());
-            for pixel in output.pixels() {
-                assert_eq!(
-                    pixel.map(f32::to_bits),
-                    [0.1875_f32, 0.359375, blue, 0.125].map(f32::to_bits)
-                );
-            }
-            assert_eq!(source, original);
-            let feedback = session.take_feedback().unwrap();
-            assert_eq!(feedback.owner, owner);
-            assert_eq!(feedback.snapshot.invocation(), index as u64 + 1);
-            if let Some(expected) = native_owner {
-                assert_eq!(feedback.snapshot.native_owner(), expected);
-            }
-            native_owner = Some(feedback.snapshot.native_owner());
-            assert_eq!(session.worker_process_id(), worker);
-            assert_eq!(session.sequence, index as u64 + 1);
         }
     }));
     let cleanup = session.shutdown();

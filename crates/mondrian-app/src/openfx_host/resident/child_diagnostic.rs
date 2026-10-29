@@ -545,6 +545,7 @@ mod tests {
             first_frame: 0.0,
             last_frame: 9.0,
             pixel_aspect_ratio: 1.0,
+            render_scale: [1.0; 2],
 
             project_width: 1,
             project_height: 2,

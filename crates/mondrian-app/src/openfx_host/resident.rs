@@ -30,7 +30,7 @@ pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v13
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
 // v17: explicit source-resolution admission and work-bound input services.
-const VERSION: u16 = 17;
+const VERSION: u16 = 18;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
 // Resource settlement after an asynchronous kill is separate from graceful exit.
@@ -1252,7 +1252,7 @@ impl OpenFxFilterSession {
             {
                 return Err(invalid("frame extent differs from the native session"));
             }
-            validate_native_sampling(self.width, frame.sampling)?;
+            validate_native_sampling(self.width, self.height, frame.sampling)?;
             match (self.context, frame.input) {
                 (OpenFxContext::Filter, Some(input)) => {
                     validate_render_request(timing, parameters, input, &mut || {
@@ -2822,7 +2822,7 @@ fn render_worker_request(
     } = context;
     let phase = probe.start();
     validate_timing(&timing)?;
-    validate_native_sampling(prepare.width, sampling)?;
+    validate_native_sampling(prepare.width, prepare.height, sampling)?;
     validate_parameters(&parameters)?;
     let mapped_sources =
         source_frames::MappedSources::open(sources, prepare, &timing, sampling, &mut || {
@@ -2923,6 +2923,7 @@ fn render_worker_request(
         first_frame: timing.first_frame,
         last_frame: timing.last_frame,
         pixel_aspect_ratio: sampling.sample_aspect_ratio().to_f64(),
+        render_scale: sampling.render_scale().map(|axis| axis.to_f64()),
     };
 
     probe.finish(OpenFxChildRenderPhase::ParameterArena, phase);

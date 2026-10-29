@@ -82,6 +82,7 @@ int main(int argc, char** argv) {
     info.project_pixel_aspect_ratio = generator ? 2.0 : 1.0;
     info.frame = 0; info.frame_rate = 24; info.first_frame = 0; info.last_frame = 20;
     info.pixel_aspect_ratio = generator ? 2.0 : 1.0;
+    info.render_scale[0] = info.render_scale[1] = 1.0;
     MondrianOpenFxParameter scale{};
     scale.name = "scale"; scale.kind = 1; scale.value[0] = 0.5;
     MondrianOpenFxParameter alpha{};
