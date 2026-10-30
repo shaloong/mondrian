@@ -103,6 +103,10 @@ pub enum EffectGpuSpatialPass {
         grade: crate::PolarCoordinatesGrade,
     },
     /// Camera lens flare added over the source frame.
+    Bulge {
+        /// The authored bulge controls.
+        grade: crate::BulgeGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -126,6 +130,7 @@ impl EffectGpuSpatialPass {
             Self::Mirror { .. } => "mirror",
             Self::PolarCoordinates { .. } => "polar_coordinates",
             Self::LensFlare { .. } => "lens_flare",
+            Self::Bulge { .. } => "bulge",
         }
     }
 
@@ -160,6 +165,7 @@ impl EffectGpuSpatialPass {
             | Self::PolarCoordinates { .. } => u32::MAX,
             // A flare reads only the pixel it writes, so it needs no neighbour.
             Self::LensFlare { .. } => 0,
+            Self::Bulge { .. } => u32::MAX,
         }
     }
 
@@ -187,6 +193,7 @@ impl EffectGpuSpatialPass {
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
+            Self::Bulge { .. } => u32::MAX,
         }
     }
 }
