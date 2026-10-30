@@ -54,6 +54,7 @@ pub(crate) struct EffectSpatialGpu {
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
+    linear_color_key: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
@@ -485,6 +486,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let linear_color_key = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.linear_color_key"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_linear_color_key"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let split = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.split"),
             layout: Some(&layout),
@@ -528,6 +559,7 @@ impl EffectSpatialGpu {
             lens_flare,
             bulge,
             split,
+            linear_color_key,
             convolution,
             find_edges,
             bindings,
@@ -562,6 +594,41 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.bulge,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+
+    /// Records the linear colour key stage.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_linear_color_key(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.linear_color_key,
             &input_view,
             &output_view,
             &uniform,
@@ -669,6 +736,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
             EffectGpuSpatialPass::Split { .. } => Ok(1),
+            EffectGpuSpatialPass::LinearColorKey { .. } => Ok(1),
         }
     }
 
@@ -824,6 +892,20 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_bulge(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::LinearColorKey { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_linear_color_key(
                     device,
                     encoder,
                     params,
@@ -1737,6 +1819,61 @@ fn bulge_sample_position(coordinate: vec2<f32>) -> vec2<f32> {
     let rim = min(radius.x, radius.y);
     let magnification = max(bulge_magnification(distance, height, taper, rim), 1.0e-6);
     return centre + delta / magnification;
+}
+
+/// Normalised chromaticity `(r, g) / (r + g + b)` with the same fallback as the CPU key.
+fn linear_key_chromaticity(rgb: vec3<f32>) -> vec2<f32> {
+    let total = rgb.r + rgb.g + rgb.b;
+    if (abs(total) <= 1.0e-6) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    return vec2<f32>(rgb.r / total, rgb.g / total);
+}
+
+/// Coverage the pixel keeps: `0` fully keyed away, `1` untouched.
+fn linear_key_coverage(rgb: vec3<f32>) -> f32 {
+    let key = uniforms.params.xyz;
+    let tolerance = uniforms.params.w;
+    let softness = uniforms.extra.x;
+    let mode = u32(uniforms.extra.y);
+    let operation = u32(uniforms.extra.z);
+    var distance = 0.0;
+    if (mode == 0u) {
+        let difference = abs(rgb - key);
+        distance = max(difference.r, max(difference.g, difference.b));
+    } else if (mode == 1u) {
+        distance = abs(rgb.g - key.g);
+    } else if (mode == 2u) {
+        distance = abs(rgb.b - key.b);
+    } else {
+        distance = length(linear_key_chromaticity(rgb) - linear_key_chromaticity(key));
+    }
+    var near = 0.0;
+    if (softness <= 0.0) {
+        if (distance <= tolerance) {
+            near = 0.0;
+        } else {
+            near = 1.0;
+        }
+    } else {
+        let ramp = clamp((distance - tolerance) / softness, 0.0, 1.0);
+        near = ramp * ramp * (3.0 - 2.0 * ramp);
+    }
+    if (operation == 0u) {
+        return near;
+    }
+    return 1.0 - near;
+}
+
+/// Linear colour key: moves coverage only, leaving the authored colour untouched.
+@fragment
+fn fs_linear_color_key(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(max(position.xy, vec2<f32>(0.0))));
+    let sample = load_clamped(pixel);
+    if (sample.a <= 0.0) {
+        return sample;
+    }
+    return vec4<f32>(sample.rgb, sample.a * linear_key_coverage(sample.rgb));
 }
 
 /// Split: samples one side of the authored line and slides it along the normal.
@@ -2667,6 +2804,92 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             }
         }
     }
+    #[test]
+    fn gpu_linear_color_key_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU linear colour key parity test: no GPU adapter available");
+            return;
+        };
+        let width = 9_u32;
+        let height = 7_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.11 * (x + y) as f32;
+                pixels[y * width as usize + x] = [value, 0.9 - value, 0.4 + value * 0.5, 1.0];
+            }
+        }
+        pixels[12] = [0.0, 1.0, 0.0, 1.0];
+        pixels[20] = [0.0, 0.0, 0.0, 0.0];
+        pixels[33] = [2.5, -0.5, 1.25, 0.5];
+        let grades = [
+            mondrian_effects::LinearColorKeyGrade::new(
+                [0.0, 1.0, 0.0],
+                mondrian_effects::MatchColours::Rgb,
+                0.1,
+                0.2,
+                mondrian_effects::KeyOperation::KeyColours,
+            )
+            .expect("rgb key grade"),
+            mondrian_effects::LinearColorKeyGrade::new(
+                [0.3, 0.4, 0.6],
+                mondrian_effects::MatchColours::Chroma,
+                0.05,
+                0.1,
+                mondrian_effects::KeyOperation::KeepColours,
+            )
+            .expect("chroma key grade"),
+            mondrian_effects::LinearColorKeyGrade::new(
+                [0.2, 0.8, 0.2],
+                mondrian_effects::MatchColours::Green,
+                0.15,
+                0.0,
+                mondrian_effects::KeyOperation::KeyColours,
+            )
+            .expect("green key grade"),
+        ];
+        for grade in grades {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::linear_color_key_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.linear-color-key-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_linear_color_key(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded linear colour key");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "linear colour key pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn gpu_split_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
