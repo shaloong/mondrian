@@ -55,6 +55,7 @@ pub(crate) struct EffectSpatialGpu {
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
     linear_color_key: wgpu::RenderPipeline,
+    color_offset: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
@@ -516,6 +517,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let color_offset = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.color_offset"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_color_offset"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let split = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.split"),
             layout: Some(&layout),
@@ -560,6 +591,7 @@ impl EffectSpatialGpu {
             bulge,
             split,
             linear_color_key,
+            color_offset,
             convolution,
             find_edges,
             bindings,
@@ -629,6 +661,41 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.linear_color_key,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+
+    /// Records the colour offset stage.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_color_offset(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.color_offset,
             &input_view,
             &output_view,
             &uniform,
@@ -737,6 +804,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
             EffectGpuSpatialPass::Split { .. } => Ok(1),
             EffectGpuSpatialPass::LinearColorKey { .. } => Ok(1),
+            EffectGpuSpatialPass::ColorOffset { .. } => Ok(1),
         }
     }
 
@@ -906,6 +974,20 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_linear_color_key(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::ColorOffset { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_color_offset(
                     device,
                     encoder,
                     params,
@@ -1866,6 +1948,52 @@ fn linear_key_coverage(rgb: vec3<f32>) -> f32 {
 }
 
 /// Linear colour key: moves coverage only, leaving the authored colour untouched.
+/// Resolves one source column for the colour offset, matching the CPU index rules.
+fn color_offset_index(value: f32, extent: f32, overflow: f32) -> i32 {
+    let limit = max(extent - 1.0, 0.0);
+    if (overflow < 1.5) {
+        let floored = floor(value);
+        let wrapped = floored - floor(floored / extent) * extent;
+        return i32(clamp(wrapped, 0.0, limit));
+    }
+    if (overflow < 2.5) {
+        return i32(floor(clamp(value, 0.0, limit) + 0.5));
+    }
+    let period = max(2.0 * limit, 1.0);
+    let floored = floor(value);
+    let folded = floored - floor(floored / period) * period;
+    if (folded <= limit) {
+        return i32(clamp(folded, 0.0, limit));
+    }
+    return i32(clamp(period - folded, 0.0, limit));
+}
+
+/// Reads one channel at a fractional column with bilinear interpolation.
+fn color_offset_channel(column: f32, row: i32, channel: i32) -> f32 {
+    let width = uniforms.size.x;
+    let overflow = uniforms.params.w;
+    let left = floor(column);
+    let fraction = column - left;
+    let low = load_clamped(vec2<i32>(color_offset_index(left, width, overflow), row))[channel];
+    let high = load_clamped(vec2<i32>(color_offset_index(left + 1.0, width, overflow), row))[channel];
+    return mix(low, high, fraction);
+}
+
+@fragment
+fn fs_color_offset(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let original = load_clamped(pixel);
+    if (original.a <= 0.0) {
+        return original;
+    }
+    let column = f32(pixel.x);
+    let shifted = vec3<f32>(
+        color_offset_channel(column - uniforms.params.x, pixel.y, 0),
+        color_offset_channel(column - uniforms.params.y, pixel.y, 1),
+        color_offset_channel(column - uniforms.params.z, pixel.y, 2),
+    );
+    return vec4<f32>(shifted, original.a);
+}
 @fragment
 fn fs_linear_color_key(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(max(position.xy, vec2<f32>(0.0))));
@@ -2801,6 +2929,81 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     difference <= 1.0e-4,
                     "pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                 );
+            }
+        }
+    }
+    #[test]
+    fn gpu_color_offset_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU colour offset parity test: no GPU adapter available");
+            return;
+        };
+        let width = 11_u32;
+        let height = 5_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.09 * (x as f32) + 0.03 * (y as f32);
+                pixels[y * width as usize + x] = [value, 1.0 - value, 0.2 + value * 0.5, 1.0];
+            }
+        }
+        pixels[16] = [0.0, 0.0, 0.0, 0.0];
+        pixels[39] = [2.5, -0.75, 1.25, 0.5];
+        let grades = [
+            mondrian_effects::ColorOffsetGrade::new(
+                [2.0, 0.0, -1.0],
+                mondrian_effects::ColorOffsetOverflow::Clamp,
+            )
+            .expect("clamp grade"),
+            mondrian_effects::ColorOffsetGrade::new(
+                [0.5, -1.25, 3.0],
+                mondrian_effects::ColorOffsetOverflow::Wrap,
+            )
+            .expect("wrap grade"),
+            mondrian_effects::ColorOffsetGrade::new(
+                [-2.0, 1.0, 0.5],
+                mondrian_effects::ColorOffsetOverflow::Mirror,
+            )
+            .expect("mirror grade"),
+        ];
+        for grade in grades {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::color_offset_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.color-offset-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_color_offset(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("colour offset pass should record");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
             }
         }
     }
