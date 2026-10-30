@@ -9,10 +9,32 @@ use std::time::{Duration, Instant};
 
 use crate::black_white::BlackAndWhiteGrade;
 use crate::box_blur::{box_blur_frame_f32, BoxBlurDirection};
+use crate::bulge::bulge_frame_f32;
+use crate::bulge::BulgeGrade;
 use crate::channel_mixer::ChannelMixerGrade;
+use crate::convolution::convolution_frame_f32;
+use crate::convolution::ConvolutionGrade;
 use crate::drop_shadow::DropShadowGrade;
 use crate::hue_saturation::HueSaturationGrade;
+use crate::lens_flare::lens_flare_frame_f32;
+use crate::lens_flare::{LensFlareGrade, LensFlareType};
+use crate::mirror::mirror_frame_f32;
+use crate::mirror::MirrorGrade;
+use crate::noise::noise_frame_f32;
+use crate::noise::{NoiseGrade, NoiseType};
+use crate::offset::offset_frame_f32;
+use crate::offset::OffsetGrade;
+use crate::polar_coordinates::polar_coordinates_frame_f32;
+use crate::polar_coordinates::{PolarConversion, PolarCoordinatesGrade, PolarInterpolation};
+use crate::radial_blur::radial_blur_frame_f32;
+use crate::radial_blur::{RadialBlurGrade, RadialBlurMode};
 use crate::shift_channels::{ChannelSource, ShiftChannelsGrade};
+use crate::spherize::spherize_frame_f32;
+use crate::spherize::SpherizeGrade;
+use crate::split::split_frame_f32;
+use crate::split::SplitGrade;
+use crate::twirl::twirl_frame_f32;
+use crate::twirl::TwirlGrade;
 use crate::{HueBand, InvertChannels};
 use mondrian_core::Color;
 
@@ -175,5 +197,101 @@ fn report_kernel_throughput() {
         for pixel in buffer.iter_mut() {
             *pixel = channels.apply(*pixel);
         }
+    });
+
+    // Resampling kernels read a source snapshot, so they are the ones whose cost
+    // scales with taps and with cache behaviour instead of with the pixel count alone.
+    let twirl = TwirlGrade::new(160.0, 0.45, [640.0, 360.0]).expect("valid twirl");
+    let mut buffer = source.clone();
+    time("remap: twirl 160 deg / 45% radius", || {
+        buffer.copy_from_slice(&source);
+        twirl_frame_f32(&mut buffer, WIDTH, HEIGHT, twirl)
+    });
+
+    let spherize = SpherizeGrade::new(220.0, [640.0, 360.0]).expect("valid spherize");
+    let mut buffer = source.clone();
+    time("remap: spherize r=220", || {
+        buffer.copy_from_slice(&source);
+        spherize_frame_f32(&mut buffer, WIDTH, HEIGHT, spherize)
+    });
+
+    let bulge = BulgeGrade::new([240.0, 180.0], [640.0, 360.0], 1.0, 0.0, true, false)
+        .expect("valid bulge");
+    let mut buffer = source.clone();
+    time("remap: bulge 240x180 antialiased", || {
+        buffer.copy_from_slice(&source);
+        bulge_frame_f32(&mut buffer, WIDTH, HEIGHT, bulge)
+    });
+
+    let spin = RadialBlurGrade::new(400.0, [640.0, 360.0], RadialBlurMode::Spin, true, 7)
+        .expect("valid radial blur");
+    let mut buffer = source.clone();
+    time("remap: radial blur spin amount=400", || {
+        buffer.copy_from_slice(&source);
+        radial_blur_frame_f32(&mut buffer, WIDTH, HEIGHT, spin)
+    });
+
+    let zoom = RadialBlurGrade::new(400.0, [640.0, 360.0], RadialBlurMode::Zoom, true, 7)
+        .expect("valid radial blur");
+    let mut buffer = source.clone();
+    time("remap: radial blur zoom amount=400", || {
+        buffer.copy_from_slice(&source);
+        radial_blur_frame_f32(&mut buffer, WIDTH, HEIGHT, zoom)
+    });
+
+    let mirror = MirrorGrade::new(37.5, [640.0, 360.0]).expect("valid mirror");
+    let mut buffer = source.clone();
+    time("remap: mirror 37.5 deg", || {
+        buffer.copy_from_slice(&source);
+        mirror_frame_f32(&mut buffer, WIDTH, HEIGHT, mirror)
+    });
+
+    let offset = OffsetGrade::new([13.5, -7.25], 0.0).expect("valid offset");
+    let mut buffer = source.clone();
+    time("remap: offset 13.5,-7.25 px", || {
+        buffer.copy_from_slice(&source);
+        offset_frame_f32(&mut buffer, WIDTH, HEIGHT, offset)
+    });
+
+    let polar =
+        PolarCoordinatesGrade::new(PolarConversion::RectToPolar, PolarInterpolation::Bilinear);
+    let mut buffer = source.clone();
+    time("remap: polar rect to polar (bilinear)", || {
+        buffer.copy_from_slice(&source);
+        polar_coordinates_frame_f32(&mut buffer, WIDTH, HEIGHT, polar)
+    });
+
+    let split = SplitGrade::new([100.0, 100.0], [1100.0, 620.0], 24.0).expect("valid split");
+    let mut buffer = source.clone();
+    time("remap: split 24 px", || {
+        buffer.copy_from_slice(&source);
+        split_frame_f32(&mut buffer, WIDTH, HEIGHT, split)
+    });
+
+    let flare = LensFlareGrade::new(150.0, 0.0, [640.0, 360.0], LensFlareType::Zoom50To300)
+        .expect("valid lens flare");
+    let mut buffer = source.clone();
+    time("shade: lens flare zoom 50-300", || {
+        buffer.copy_from_slice(&source);
+        lens_flare_frame_f32(&mut buffer, WIDTH, HEIGHT, flare)
+    });
+
+    let convolution = ConvolutionGrade::new(
+        [0.0, -1.0, 0.0, -1.0, 5.0, -1.0, 0.0, -1.0, 0.0],
+        false,
+        0.0,
+    )
+    .expect("valid convolution");
+    let mut buffer = source.clone();
+    time("neighbour: convolution sharpen 3x3", || {
+        buffer.copy_from_slice(&source);
+        convolution_frame_f32(&mut buffer, WIDTH, HEIGHT, convolution)
+    });
+
+    let noise = NoiseGrade::new(0.5, NoiseType::Rgb, false).expect("valid noise");
+    let mut buffer = source.clone();
+    time("point: noise rgb amount=50%", || {
+        buffer.copy_from_slice(&source);
+        noise_frame_f32(&mut buffer, WIDTH, HEIGHT, noise)
     });
 }
