@@ -51,6 +51,7 @@ pub(crate) struct EffectSpatialGpu {
     spherize: wgpu::RenderPipeline,
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
+    lens_flare: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
@@ -422,6 +423,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let lens_flare = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.lens-flare"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_lens_flare"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -432,10 +463,46 @@ impl EffectSpatialGpu {
             spherize,
             mirror,
             polar_coordinates,
+            lens_flare,
             convolution,
             find_edges,
             bindings,
         }
+    }
+
+    /// Records the lens flare stage.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_lens_flare(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.lens_flare,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
     }
 
     /// Number of texture passes one spatial pass expands into.
@@ -465,6 +532,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Convolution { .. }
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
+            EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
         }
     }
 
@@ -610,6 +678,20 @@ impl EffectSpatialGpu {
                     device,
                     encoder,
                     grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::LensFlare { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_lens_flare(
+                    device,
+                    encoder,
+                    params,
+                    extra,
                     source,
                     destination,
                     width,
@@ -1454,6 +1536,145 @@ fn sample_nearest_premultiplied(x: f32, y: f32) -> vec4<f32> {
     return premultiply(load_clamped(vec2<i32>(rounded)));
 }
 
+/// Ghost position along the light-centre axis for one lens preset.
+fn flare_ghost_position(index: i32, kind: i32) -> f32 {
+    if (kind == 2) {
+        let positions = array<f32, 3>(0.55, 1.15, 1.70);
+        return positions[index];
+    }
+    if (kind == 3) {
+        let positions = array<f32, 2>(0.80, 1.60);
+        return positions[index];
+    }
+    let positions = array<f32, 5>(0.45, 0.95, 1.40, 1.85, 2.35);
+    return positions[index];
+}
+
+/// Ghost radius, as a fraction of the smaller frame dimension.
+fn flare_ghost_radius(index: i32, kind: i32) -> f32 {
+    if (kind == 2) {
+        let radii = array<f32, 3>(0.045, 0.024, 0.080);
+        return radii[index];
+    }
+    if (kind == 3) {
+        let radii = array<f32, 2>(0.120, 0.180);
+        return radii[index];
+    }
+    let radii = array<f32, 5>(0.030, 0.016, 0.055, 0.022, 0.070);
+    return radii[index];
+}
+
+/// Ghost tint for one lens preset.
+fn flare_ghost_tint(index: i32, kind: i32) -> vec3<f32> {
+    if (kind == 2) {
+        let tints = array<vec3<f32>, 3>(
+            vec3<f32>(1.00, 0.75, 0.35),
+            vec3<f32>(1.00, 0.60, 0.25),
+            vec3<f32>(0.95, 0.55, 0.30),
+        );
+        return tints[index];
+    }
+    if (kind == 3) {
+        let tints = array<vec3<f32>, 2>(
+            vec3<f32>(0.85, 0.85, 1.00),
+            vec3<f32>(0.70, 0.80, 1.00),
+        );
+        return tints[index];
+    }
+    let tints = array<vec3<f32>, 5>(
+        vec3<f32>(0.55, 0.70, 1.00),
+        vec3<f32>(0.70, 0.85, 1.00),
+        vec3<f32>(0.45, 0.75, 0.95),
+        vec3<f32>(0.80, 0.90, 1.00),
+        vec3<f32>(0.35, 0.55, 0.90),
+    );
+    return tints[index];
+}
+
+/// Number of ghosts one lens preset draws.
+fn flare_ghost_count(kind: i32) -> i32 {
+    if (kind == 2) {
+        return 3;
+    }
+    if (kind == 3) {
+        return 2;
+    }
+    return 5;
+}
+
+/// Light emitted by the flare at one pixel, in linear light.
+fn flare_emission(coordinate: vec2<f32>) -> vec3<f32> {
+    let dims = uniforms.size.xy;
+    if (dims.x <= 0.0 || dims.y <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let scale = min(dims.x, dims.y);
+    let frame_centre = dims * 0.5;
+    let light = uniforms.params.xy;
+    let kind = i32(round(uniforms.extra.x));
+
+    var core_radius = 0.045;
+    var core_tint = vec3<f32>(0.95, 0.97, 1.00);
+    var streak_length = 0.35;
+    var streak_thickness = 0.012;
+    if (kind == 2) {
+        core_radius = 0.060;
+        core_tint = vec3<f32>(1.00, 0.92, 0.78);
+        streak_length = 0.25;
+        streak_thickness = 0.008;
+    } else if (kind == 3) {
+        core_radius = 0.035;
+        core_tint = vec3<f32>(1.00, 0.96, 0.90);
+        streak_length = 0.55;
+        streak_thickness = 0.010;
+    }
+
+    var emission = vec3<f32>(0.0);
+
+    let core = exp(-0.5 * pow(length(coordinate - light) / max(core_radius * scale, 1.0e-6), 2.0));
+    emission += core_tint * core;
+
+    let across = abs(coordinate.y - light.y) / max(streak_thickness * scale, 1.0e-6);
+    let along = abs(coordinate.x - light.x) / max(streak_length * dims.x, 1.0e-6);
+    if (across < 4.0 && along < 1.0) {
+        let streak = exp(-0.5 * across * across) * pow(1.0 - along, 2.0);
+        emission += core_tint * streak * 0.85;
+    }
+
+    let axis = light - frame_centre;
+    let count = flare_ghost_count(kind);
+    for (var index = 0; index < 5; index = index + 1) {
+        if (index >= count) {
+            break;
+        }
+        let position = flare_ghost_position(index, kind);
+        let ghost_centre = frame_centre + axis * (position - 1.0);
+        let radius = flare_ghost_radius(index, kind) * scale;
+        let separation = length(coordinate - ghost_centre);
+        if (separation >= radius) {
+            continue;
+        }
+        let normalized = separation / max(radius, 1.0e-6);
+        let disc = 1.0 - smoothstep(0.6, 1.0, normalized);
+        emission += flare_ghost_tint(index, kind) * disc * 0.35;
+    }
+
+    return emission;
+}
+
+/// Lens flare: adds camera flare light over the source frame.
+@fragment
+fn fs_lens_flare(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let sample = load_clamped(vec2<i32>(position.xy));
+    let coverage = clamp(sample.a, 0.0, 1.0);
+    if (coverage <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    // Light is added in the premultiplied domain, so transparent pixels never
+    // glow and coverage is never invented; the texture carries straight alpha.
+    let emission = flare_emission(position.xy) * uniforms.params.z * (1.0 - uniforms.params.w);
+    return vec4<f32>(sample.rgb + emission / coverage, coverage);
+}
 @fragment
 fn fs_polar(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(position.xy);
@@ -2200,6 +2421,85 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         }
     }
     #[test]
+    fn gpu_lens_flare_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU lens flare parity test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 13_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.04 * (x + y) as f32;
+                pixels[y * width as usize + x] = [value, 0.35 - value * 0.2, value * 1.4, 1.0];
+            }
+        }
+        pixels[42] = [0.0, 0.0, 0.0, 0.0];
+        pixels[88] = [2.5, -0.75, 1.25, 0.5];
+        for (brightness, blend, centre, lens) in [
+            (
+                180.0_f32,
+                0.25_f32,
+                [6.5_f32, 5.0],
+                mondrian_effects::LensFlareType::Prime35,
+            ),
+            (
+                90.0,
+                0.0,
+                [12.0, 9.5],
+                mondrian_effects::LensFlareType::Zoom50To300,
+            ),
+            (
+                300.0,
+                0.6,
+                [2.0, 1.0],
+                mondrian_effects::LensFlareType::Prime105,
+            ),
+        ] {
+            let grade = mondrian_effects::LensFlareGrade::new(brightness, blend, centre, lens)
+                .expect("lens flare grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::lens_flare_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.lens-flare-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_lens_flare(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded lens flare");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "{lens:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
     fn gpu_polar_coordinates_match_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
             eprintln!("skipping GPU polar coordinates parity test: no GPU adapter available");
