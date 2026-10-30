@@ -256,7 +256,9 @@ pub(crate) fn apply_radial_blur_f32_controlled<E>(
     let seed = grade.seed();
     let half_span = grade.spin_span_radians() as f64 * 0.5;
     let log_span = (grade.zoom_span_scale() as f64).ln() * 0.5;
-
+    let step_sin = (tap_step * half_span).sin();
+    let step_cos = (tap_step * half_span).cos();
+    let zoom_step = (tap_step * log_span).exp();
     checkpoint()?;
     let rows = frame.len() / width;
     crate::parallel::for_each_row_band(frame, width, 0..rows, |row_start, band| {
@@ -267,23 +269,27 @@ pub(crate) fn apply_radial_blur_f32_controlled<E>(
                 let dy = row as f64 - centre[1];
                 let jitter = radial_blur_jitter(seed, column, row) as f64;
                 let mut sum = [0.0_f64; 4];
-                for tap in 0..taps {
-                    let base = (tap as f64 + 0.5) * tap_step - 1.0;
-                    let position = (base + jitter * tap_step).clamp(-1.0, 1.0);
+                // The tap positions are an arithmetic sequence, so the spin angle and
+                // the zoom scale are geometric sequences. Walking them by a constant
+                // multiplier turns one sin/cos pair and one exp per tap into two
+                // multiply-adds, which is what makes a 128 tap rotation affordable.
+                let first_position = jitter * tap_step + 0.5 * tap_step - 1.0;
+                let mut sin = (first_position * half_span).sin();
+                let mut cos = (first_position * half_span).cos();
+                let mut scale = (first_position * log_span).exp();
+                for _ in 0..taps {
                     let (sample_x, sample_y) = match mode {
-                        RadialBlurMode::Spin => {
-                            let angle = position * half_span;
-                            let (sin, cos) = angle.sin_cos();
-                            (
-                                centre[0] + dx * cos - dy * sin,
-                                centre[1] + dx * sin + dy * cos,
-                            )
-                        }
-                        RadialBlurMode::Zoom => {
-                            let scale = (position * log_span).exp();
-                            (centre[0] + dx * scale, centre[1] + dy * scale)
-                        }
+                        RadialBlurMode::Spin => (
+                            centre[0] + dx * cos - dy * sin,
+                            centre[1] + dx * sin + dy * cos,
+                        ),
+                        RadialBlurMode::Zoom => (centre[0] + dx * scale, centre[1] + dy * scale),
                     };
+                    let next_sin = sin * step_cos + cos * step_sin;
+                    let next_cos = cos * step_cos - sin * step_sin;
+                    sin = next_sin;
+                    cos = next_cos;
+                    scale *= zoom_step;
                     let sample =
                         sample_bilinear(&source, width, height, sample_x as f32, sample_y as f32);
                     sum[0] += sample[0] as f64;
