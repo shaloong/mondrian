@@ -80,6 +80,7 @@ pub use processor_residency::{
 pub mod bevel;
 pub mod brush_strokes;
 pub mod kaleidoscope;
+pub mod lens_distortion;
 pub mod lens_flare;
 pub mod linear_color_key;
 pub mod mirror;
@@ -230,6 +231,11 @@ pub use invert::{invert_rgba_f32, InvertChannels};
 pub use kaleidoscope::{
     kaleidoscope_frame_f32, KaleidoscopeError, KaleidoscopeGrade, KALEIDOSCOPE_MAX_MIRRORING,
     KALEIDOSCOPE_MAX_SIZE, KALEIDOSCOPE_MIN_MIRRORING, KALEIDOSCOPE_MIN_SIZE,
+};
+pub use lens_distortion::{
+    lens_distortion_frame_f32, LensDistortionDirection, LensDistortionError, LensDistortionGrade,
+    LensDistortionResize, LENS_DISTORTION_DIRECTION_COUNT, LENS_DISTORTION_MAX_CENTRE_PIXELS,
+    LENS_DISTORTION_MAX_FOV_DEGREES, LENS_DISTORTION_MIN_FOV_DEGREES, LENS_DISTORTION_RESIZE_COUNT,
 };
 pub use lens_flare::{
     lens_flare_frame_f32, LensFlareError, LensFlareGrade, LensFlareType,

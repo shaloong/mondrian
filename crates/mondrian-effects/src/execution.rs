@@ -2332,6 +2332,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::RadialBlur { .. } => "radial_blur",
         EffectRenderOp::Mirror { .. } => "mirror",
         EffectRenderOp::PolarCoordinates { .. } => "polar_coordinates",
+        EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",
         EffectRenderOp::Split { .. } => "split",

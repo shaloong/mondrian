@@ -2814,6 +2814,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::RadialBlur { .. } => "radial_blur",
         crate::EffectRenderOp::Mirror { .. } => "mirror",
         crate::EffectRenderOp::PolarCoordinates { .. } => "polar_coordinates",
+        crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",
         crate::EffectRenderOp::Split { .. } => "split",

@@ -254,6 +254,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::LensDistortion { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "lens_distortion",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::LensFlare { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "lens_flare",
@@ -811,6 +817,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
         EffectRenderOp::BoxBlur { .. } => 1,
         EffectRenderOp::UnsharpMask { .. } => 1,
+        EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
         EffectRenderOp::Vibrance { .. } => 0,
@@ -1108,6 +1115,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             *grade,
             checkpoint,
         ),
+        EffectRenderOp::LensDistortion { grade } => {
+            crate::lens_distortion::apply_lens_distortion_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *grade,
+                checkpoint,
+            )
+        }
         EffectRenderOp::LensFlare { grade } => crate::lens_flare::apply_lens_flare_f32_controlled(
             working,
             region.width as usize,

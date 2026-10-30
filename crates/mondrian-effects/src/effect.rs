@@ -921,6 +921,10 @@ pub enum EffectRenderOp {
     PolarCoordinates {
         grade: crate::PolarCoordinatesGrade,
     },
+    /// Lens distortion: removes (or adds) the projection of a camera lens.
+    LensDistortion {
+        grade: crate::LensDistortionGrade,
+    },
     /// Lens flare: adds the flare of a camera lens over the source frame.
     LensFlare {
         grade: crate::LensFlareGrade,
@@ -1153,6 +1157,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::PolarCoordinates { grade } => {
                 formatter.debug_struct("PolarCoordinates").field("grade", grade).finish()
+            }
+            Self::LensDistortion { grade } => {
+                formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
             Self::LensFlare { grade } => {
                 formatter.debug_struct("LensFlare").field("grade", grade).finish()
@@ -1748,6 +1755,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::LensDistortion { grade } => {
+                58u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensFlare { grade } => {
                 52u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -1944,6 +1957,7 @@ impl EffectRenderOp {
             EffectRenderOp::Mirror { .. } => 3,
             EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::PolarCoordinates { .. } => 3,
+            EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
             EffectRenderOp::Split { .. } => 3,
@@ -2496,7 +2510,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 56] {
+fn builtin_effect_types() -> [EffectType; 57] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2548,6 +2562,7 @@ fn builtin_effect_types() -> [EffectType; 56] {
         EffectType::Noise,
         EffectType::Mirror,
         EffectType::PolarCoordinates,
+        EffectType::LensDistortion,
         EffectType::LensFlare,
         EffectType::Bulge,
         EffectType::Split,
@@ -4873,6 +4888,136 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::LensDistortion => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fov",
+                "镜头畸变",
+                "视场 (FOV)",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(180.0),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "镜头畸变",
+                "视图中心 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "镜头畸变",
+                "视图中心 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "镜头畸变",
+                "反转镜头扭曲",
+                "off",
+                vec![
+                    ParameterEnumOption::new(
+                        "off",
+                        "关闭",
+                        "mondrian.effect.lens_distortion.invert.off",
+                    ),
+                    ParameterEnumOption::new(
+                        "on",
+                        "开启",
+                        "mondrian.effect.lens_distortion.invert.on",
+                    ),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "fov_direction",
+                "镜头畸变",
+                "FOV 方向",
+                "diagonal",
+                vec![
+                    ParameterEnumOption::new(
+                        "horizontal",
+                        "水平",
+                        "mondrian.effect.lens_distortion.direction.horizontal",
+                    ),
+                    ParameterEnumOption::new(
+                        "vertical",
+                        "垂直",
+                        "mondrian.effect.lens_distortion.direction.vertical",
+                    ),
+                    ParameterEnumOption::new(
+                        "diagonal",
+                        "对角线",
+                        "mondrian.effect.lens_distortion.direction.diagonal",
+                    ),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "best_pixels",
+                "镜头畸变",
+                "最佳像素",
+                "off",
+                vec![
+                    ParameterEnumOption::new(
+                        "off",
+                        "关闭",
+                        "mondrian.effect.lens_distortion.best_pixels.off",
+                    ),
+                    ParameterEnumOption::new(
+                        "on",
+                        "开启",
+                        "mondrian.effect.lens_distortion.best_pixels.on",
+                    ),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "resize",
+                "镜头畸变",
+                "调整大小",
+                "none",
+                vec![
+                    ParameterEnumOption::new(
+                        "none",
+                        "不变",
+                        "mondrian.effect.lens_distortion.resize.none",
+                    ),
+                    ParameterEnumOption::new(
+                        "expand",
+                        "扩大",
+                        "mondrian.effect.lens_distortion.resize.expand",
+                    ),
+                    ParameterEnumOption::new(
+                        "contract",
+                        "收缩",
+                        "mondrian.effect.lens_distortion.resize.contract",
+                    ),
+                    ParameterEnumOption::new(
+                        "auto",
+                        "自动",
+                        "mondrian.effect.lens_distortion.resize.auto",
+                    ),
+                ],
+            );
+        }
         EffectType::LensFlare => {
             define_builtin_property(
                 &mut properties,
@@ -5633,6 +5778,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Percent
         }
         (EffectType::DirectionalBlur, "direction") => ParameterUnit::Degrees,
+        (EffectType::LensDistortion, "fov") => ParameterUnit::Degrees,
+        (EffectType::LensDistortion, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Mirror, "angle") => ParameterUnit::Degrees,
         (EffectType::Mirror, "centre_x") => ParameterUnit::Pixels,
         (EffectType::Mirror, "centre_y") => ParameterUnit::Pixels,
@@ -5886,6 +6033,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Bulge => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::LensDistortion => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -7644,6 +7796,103 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::LensDistortion => {
+            let fov_id = builtin_parameter_id(effect_type, "fov");
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            let direction_id = builtin_parameter_id(effect_type, "fov_direction");
+            let best_pixels_id = builtin_parameter_id(effect_type, "best_pixels");
+            let resize_id = builtin_parameter_id(effect_type, "resize");
+            Some(Arc::new(move |effect, context, graph| {
+                let toggle = |parameter_id: &ParameterId, name: &str, fallback: bool| {
+                    let Some(value) = effect.evaluate_parameter(parameter_id, context.time) else {
+                        return Ok(fallback);
+                    };
+                    match value {
+                        PropertyValue::Enum(key) => match key.as_str() {
+                            "on" => Ok(true),
+                            "off" => Ok(false),
+                            _ => Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!(
+                                    "lens distortion {name} {key} is not a declared option"
+                                ),
+                            }),
+                        },
+                        _ => Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("lens distortion {name} must be an enum option"),
+                        }),
+                    }
+                };
+                let invert = toggle(&invert_id, "invert", false)?;
+                let best_pixels = toggle(&best_pixels_id, "best pixels", false)?;
+                let direction = match effect.evaluate_parameter(&direction_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::LensDistortionDirection::from_key(&key).ok_or_else(|| {
+                            EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!(
+                                    "lens distortion direction {key} is not a declared option"
+                                ),
+                            }
+                        })?
+                    }
+                    None => crate::LensDistortionDirection::Diagonal,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "lens distortion direction must be an enum option".to_string(),
+                        })
+                    }
+                };
+                let resize = match effect.evaluate_parameter(&resize_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::LensDistortionResize::from_key(&key)
+                        .ok_or_else(|| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!(
+                                "lens distortion resize {key} is not a declared option"
+                            ),
+                        }
+                    })?,
+                    None => crate::LensDistortionResize::None,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "lens distortion resize must be an enum option".to_string(),
+                        })
+                    }
+                };
+                let grade = crate::LensDistortionGrade::new(
+                    effect.evaluate_f32_parameter(&fov_id, context.time, 0.0),
+                    invert,
+                    direction,
+                    [
+                        effect.evaluate_f32_parameter(&centre_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&centre_y_id, context.time, 128.0),
+                    ],
+                    best_pixels,
+                    resize,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::LensDistortion { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensFlare => {
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
             let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
@@ -8310,6 +8559,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Noise => "噪点",
         EffectType::Mirror => "镜像",
         EffectType::PolarCoordinates => "极坐标",
+        EffectType::LensDistortion => "镜头畸变",
         EffectType::LensFlare => "镜头光晕",
         EffectType::Bulge => "凸出",
         EffectType::Split => "分离",
@@ -9602,6 +9852,7 @@ mod tests {
             EffectType::Noise,
             EffectType::Mirror,
             EffectType::PolarCoordinates,
+            EffectType::LensDistortion,
             EffectType::LensFlare,
             EffectType::Bulge,
             EffectType::Split,
@@ -14307,6 +14558,122 @@ mod tests {
         assert!(grade.pinned());
     }
 
+    fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::LensDistortion { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::LensDistortion { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_lens_distortion(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::LensDistortion)
+            .expect("lens distortion node should be instantiable");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LensDistortion.property_path(parameter),
+                value,
+            })
+            .expect("authored value should be accepted");
+        effect
+    }
+
+    #[test]
+    fn lens_distortion_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::LensDistortion)
+            .expect("lens distortion node should be instantiable");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("default graph should build");
+        assert!(
+            lens_distortion_op(&graph).is_none(),
+            "a zero field of view adds no node"
+        );
+    }
+
+    #[test]
+    fn lens_distortion_authored_state_reaches_the_operation() {
+        let mut effect = author_lens_distortion("fov", PropertyValue::Float(82.5));
+        for (parameter, value) in [
+            ("centre_x", PropertyValue::Float(10.0)),
+            ("centre_y", PropertyValue::Float(20.0)),
+            ("invert", PropertyValue::Enum("on".to_string())),
+            ("fov_direction", PropertyValue::Enum("vertical".to_string())),
+            ("best_pixels", PropertyValue::Enum("on".to_string())),
+            ("resize", PropertyValue::Enum("expand".to_string())),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::LensDistortion.property_path(parameter),
+                    value,
+                })
+                .expect("authored value should be accepted");
+        }
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored graph should build");
+        let grade = lens_distortion_op(&graph).expect("lens distortion op should be present");
+        assert!((grade.field_of_view() - 82.5).abs() <= 1.0e-6);
+        assert_eq!(grade.centre(), [10.0, 20.0]);
+        assert!(grade.inverts());
+        assert_eq!(grade.direction(), crate::LensDistortionDirection::Vertical);
+        assert!(grade.uses_best_pixels());
+        assert_eq!(grade.resize(), crate::LensDistortionResize::Expand);
+    }
+
+    #[test]
+    fn lens_distortion_zero_field_of_view_compiles_to_identity() {
+        let effect = author_lens_distortion("fov", PropertyValue::Float(0.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("zero field of view graph should build");
+        assert!(
+            lens_distortion_op(&graph).is_none(),
+            "a zero field of view adds no node"
+        );
+    }
+
+    #[test]
+    fn lens_distortion_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::LensDistortion)
+            .expect("lens distortion node should be instantiable");
+        let _error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LensDistortion.property_path("fov"),
+                value: PropertyValue::Float(181.0),
+            })
+            .expect_err("a field of view past the declared window must be refused");
+        let mut effect = instantiate_effect_node(EffectType::LensDistortion)
+            .expect("lens distortion node should be instantiable");
+        let _error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LensDistortion.property_path("centre_x"),
+                value: PropertyValue::Float(f32::NAN),
+            })
+            .expect_err("a non-finite centre must be refused by the value contract");
+    }
+
+    #[test]
+    fn lens_distortion_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = author_lens_distortion("fov", PropertyValue::Float(64.0));
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LensDistortion.property_path("resize"),
+                value: PropertyValue::Enum("contract".to_string()),
+            })
+            .expect("resize mode should be accepted");
+        let encoded = serde_json::to_string(&effect).expect("effect should serialize");
+        let decoded: EffectNode =
+            serde_json::from_str(&encoded).expect("effect should deserialize");
+        let graph = build_effect_render_graph(&[decoded], tt(0), TEST_WORKING_SPACE)
+            .expect("restored lens distortion should compile");
+        let grade = lens_distortion_op(&graph).expect("lens distortion node should exist");
+        assert!((grade.field_of_view() - 64.0).abs() <= 1.0e-6);
+        assert_eq!(grade.resize(), crate::LensDistortionResize::Contract);
+    }
     fn lens_flare_op(graph: &EffectRenderGraph) -> Option<crate::LensFlareGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {

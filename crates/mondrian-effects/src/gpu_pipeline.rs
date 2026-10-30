@@ -115,6 +115,10 @@ pub enum EffectGpuSpatialPass {
         /// The authored key controls.
         grade: crate::LinearColorKeyGrade,
     },
+    LensDistortion {
+        /// Resolved authoring state for this stage.
+        grade: crate::LensDistortionGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -141,6 +145,7 @@ impl EffectGpuSpatialPass {
             Self::Convolution { .. } => "convolution",
             Self::Mirror { .. } => "mirror",
             Self::PolarCoordinates { .. } => "polar_coordinates",
+            Self::LensDistortion { .. } => "lens_distortion",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -179,6 +184,7 @@ impl EffectGpuSpatialPass {
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             // A flare reads only the pixel it writes, so it needs no neighbour.
+            Self::LensDistortion { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -210,6 +216,7 @@ impl EffectGpuSpatialPass {
             | Self::Spherize { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
+            Self::LensDistortion { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -479,6 +486,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Mirror { grade } => Some(EffectGpuSpatialPass::Mirror { grade: *grade }),
         EffectRenderOp::PolarCoordinates { grade } => {
             Some(EffectGpuSpatialPass::PolarCoordinates { grade: *grade })
+        }
+        EffectRenderOp::LensDistortion { grade } => {
+            Some(EffectGpuSpatialPass::LensDistortion { grade: *grade })
         }
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
