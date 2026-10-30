@@ -2817,6 +2817,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",
         crate::EffectRenderOp::Split { .. } => "split",
+        crate::EffectRenderOp::LinearColorKey { .. } => "linear_color_key",
         crate::EffectRenderOp::Convolution { .. } => "convolution",
         crate::EffectRenderOp::Offset { .. } => "offset",
         crate::EffectRenderOp::Twirl { .. } => "twirl",

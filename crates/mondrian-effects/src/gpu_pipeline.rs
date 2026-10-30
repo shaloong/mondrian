@@ -111,6 +111,10 @@ pub enum EffectGpuSpatialPass {
         /// The authored split controls.
         grade: crate::SplitGrade,
     },
+    LinearColorKey {
+        /// The authored key controls.
+        grade: crate::LinearColorKeyGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -136,6 +140,7 @@ impl EffectGpuSpatialPass {
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
+            Self::LinearColorKey { .. } => "linear_color_key",
         }
     }
 
@@ -172,6 +177,7 @@ impl EffectGpuSpatialPass {
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
+            Self::LinearColorKey { .. } => 0,
         }
     }
 
@@ -201,6 +207,7 @@ impl EffectGpuSpatialPass {
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
+            Self::LinearColorKey { .. } => 0,
         }
     }
 }
@@ -470,6 +477,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }
         EffectRenderOp::Split { grade } => Some(EffectGpuSpatialPass::Split { grade: *grade }),
+        EffectRenderOp::LinearColorKey { grade } => {
+            Some(EffectGpuSpatialPass::LinearColorKey { grade: *grade })
+        }
         _ => None,
     }
 }

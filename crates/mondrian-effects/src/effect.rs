@@ -933,6 +933,10 @@ pub enum EffectRenderOp {
     Split {
         grade: crate::SplitGrade,
     },
+    /// Linear colour key: keys a colour out with a tolerance and softness ramp.
+    LinearColorKey {
+        grade: crate::LinearColorKeyGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1145,6 +1149,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Bulge { grade } => formatter.debug_struct("Bulge").field("grade", grade).finish(),
             Self::Split { grade } => formatter.debug_struct("Split").field("grade", grade).finish(),
+            Self::LinearColorKey { grade } => {
+                formatter.debug_struct("LinearColorKey").field("grade", grade).finish()
+            }
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
             }
@@ -1699,6 +1706,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::LinearColorKey { grade } => {
+                55u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::Bulge { grade } => {
                 53u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -1904,6 +1917,7 @@ impl EffectRenderOp {
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
             EffectRenderOp::Split { .. } => 3,
+            EffectRenderOp::LinearColorKey { .. } => 2,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
@@ -2450,7 +2464,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 53] {
+fn builtin_effect_types() -> [EffectType; 54] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2505,6 +2519,7 @@ fn builtin_effect_types() -> [EffectType; 53] {
         EffectType::LensFlare,
         EffectType::Bulge,
         EffectType::Split,
+        EffectType::LinearColorKey,
     ]
 }
 
@@ -4540,6 +4555,91 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::LinearColorKey => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "key_colour",
+                "线性颜色键",
+                "主色",
+                PropertyValue::Color(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "match_colours",
+                "线性颜色键",
+                "匹配颜色",
+                "rgb",
+                vec![
+                    ParameterEnumOption::new(
+                        "rgb",
+                        "RGB",
+                        "mondrian.effect.linear_color_key.match.rgb",
+                    ),
+                    ParameterEnumOption::new(
+                        "green",
+                        "绿色",
+                        "mondrian.effect.linear_color_key.match.green",
+                    ),
+                    ParameterEnumOption::new(
+                        "blue",
+                        "蓝色",
+                        "mondrian.effect.linear_color_key.match.blue",
+                    ),
+                    ParameterEnumOption::new(
+                        "chroma",
+                        "色度",
+                        "mondrian.effect.linear_color_key.match.chroma",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tolerance",
+                "线性颜色键",
+                "匹配容差",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "softness",
+                "线性颜色键",
+                "匹配柔和度",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "operation",
+                "线性颜色键",
+                "主要操作",
+                "key_colours",
+                vec![
+                    ParameterEnumOption::new(
+                        "key_colours",
+                        "去除颜色",
+                        "mondrian.effect.linear_color_key.operation.key",
+                    ),
+                    ParameterEnumOption::new(
+                        "keep_colours",
+                        "保留颜色",
+                        "mondrian.effect.linear_color_key.operation.keep",
+                    ),
+                ],
+            );
+        }
         EffectType::Bulge => {
             define_builtin_property(
                 &mut properties,
@@ -5398,6 +5498,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Split, "point_a_x" | "point_a_y" | "point_b_x" | "point_b_y" | "split") => {
             ParameterUnit::Pixels
         }
+        (EffectType::LinearColorKey, "tolerance" | "softness") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "amount") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "radius") => ParameterUnit::Pixels,
         (EffectType::HueSaturation, "hue") => ParameterUnit::Degrees,
@@ -5625,6 +5726,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::Split => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::LinearColorKey => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::Bulge => EffectExecutionContract {
@@ -7171,6 +7276,76 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::LinearColorKey => {
+            let key_id = builtin_parameter_id(effect_type, "key_colour");
+            let match_id = builtin_parameter_id(effect_type, "match_colours");
+            let tolerance_id = builtin_parameter_id(effect_type, "tolerance");
+            let softness_id = builtin_parameter_id(effect_type, "softness");
+            let operation_id = builtin_parameter_id(effect_type, "operation");
+            Some(Arc::new(move |effect, context, graph| {
+                let key = match effect.evaluate_parameter(&key_id, context.time) {
+                    Some(PropertyValue::Color(colour)) => [colour.r, colour.g, colour.b],
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "linear colour key key colour must be a colour".to_string(),
+                        })
+                    }
+                    None => [0.0, 1.0, 0.0],
+                };
+                let match_colours = match effect.evaluate_parameter(&match_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::MatchColours::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!(
+                                "linear colour key match {key} is not a declared option"
+                            ),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "linear colour key match must be an option".to_string(),
+                        })
+                    }
+                    None => crate::MatchColours::Rgb,
+                };
+                let operation = match effect.evaluate_parameter(&operation_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::KeyOperation::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!(
+                                "linear colour key operation {key} is not a declared option"
+                            ),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "linear colour key operation must be an option".to_string(),
+                        })
+                    }
+                    None => crate::KeyOperation::KeyColours,
+                };
+                let grade = crate::LinearColorKeyGrade::new(
+                    key,
+                    match_colours,
+                    effect.evaluate_f32_parameter(&tolerance_id, context.time, 0.0) / 100.0,
+                    effect.evaluate_f32_parameter(&softness_id, context.time, 0.0) / 100.0,
+                    operation,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                graph.append_unary(EffectRenderOp::LinearColorKey { grade });
+                Ok(())
+            }))
+        }
         EffectType::Bulge => {
             let radius_x_id = builtin_parameter_id(effect_type, "radius_x");
             let radius_y_id = builtin_parameter_id(effect_type, "radius_y");
@@ -7888,6 +8063,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::LensFlare => "镜头光晕",
         EffectType::Bulge => "凸出",
         EffectType::Split => "分离",
+        EffectType::LinearColorKey => "线性颜色键",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -9177,6 +9353,7 @@ mod tests {
             EffectType::LensFlare,
             EffectType::Bulge,
             EffectType::Split,
+            EffectType::LinearColorKey,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -13317,6 +13494,128 @@ mod tests {
             .expect("builds restored mirror graph");
         let grade = mirror_op(&graph).expect("mirror op");
         assert_eq!(grade.angle_degrees(), -12.0);
+    }
+
+    fn linear_color_key_op(graph: &EffectRenderGraph) -> Option<crate::LinearColorKeyGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::LinearColorKey { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::LinearColorKey { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_linear_color_key(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::LinearColorKey)
+            .expect("linear colour key effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::LinearColorKey.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("linear colour key parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn linear_color_key_defaults_reach_the_operation() {
+        let effect = instantiate_effect_node(EffectType::LinearColorKey)
+            .expect("linear colour key effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("default linear colour key should compile");
+        let grade = linear_color_key_op(&graph).expect("a key node should always exist");
+        assert_eq!(grade.key(), [0.0, 1.0, 0.0]);
+        assert_eq!(grade.match_colours(), crate::MatchColours::Rgb);
+        assert_eq!(grade.operation(), crate::KeyOperation::KeyColours);
+        assert_eq!(grade.tolerance(), 0.0);
+        assert_eq!(grade.softness(), 0.0);
+    }
+
+    #[test]
+    fn linear_color_key_authored_state_reaches_the_operation() {
+        let effect = author_linear_color_key(&[
+            (
+                "key_colour",
+                PropertyValue::Color(Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }),
+            ),
+            ("match_colours", PropertyValue::Enum("chroma".to_string())),
+            ("tolerance", PropertyValue::Float(35.0)),
+            ("softness", PropertyValue::Float(15.0)),
+            ("operation", PropertyValue::Enum("keep_colours".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored linear colour key should compile");
+        let grade = linear_color_key_op(&graph).expect("a key node should always exist");
+        assert_eq!(grade.key(), [0.2, 0.4, 0.6]);
+        assert_eq!(grade.match_colours(), crate::MatchColours::Chroma);
+        assert_eq!(grade.operation(), crate::KeyOperation::KeepColours);
+        assert_eq!(grade.tolerance(), 0.35);
+        assert_eq!(grade.softness(), 0.15);
+    }
+
+    #[test]
+    fn linear_color_key_zero_tolerance_only_keys_exact_colours() {
+        let effect = author_linear_color_key(&[
+            (
+                "key_colour",
+                PropertyValue::Color(Color { r: 0.25, g: 0.5, b: 0.75, a: 1.0 }),
+            ),
+            ("match_colours", PropertyValue::Enum("rgb".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a zero tolerance key should compile");
+        let grade = linear_color_key_op(&graph).expect("a key node should always exist");
+        assert_eq!(grade.coverage([0.25, 0.5, 0.75]), 0.0);
+        assert_eq!(grade.coverage([0.2505, 0.5, 0.75]), 1.0);
+    }
+
+    #[test]
+    fn linear_color_key_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::LinearColorKey)
+            .expect("linear colour key effect should instantiate");
+        let _error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LinearColorKey.property_path("tolerance"),
+                value: PropertyValue::Float(101.0),
+            })
+            .expect_err("a tolerance above 100 percent must be rejected");
+        let _error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LinearColorKey.property_path("match_colours"),
+                value: PropertyValue::Enum("lab".to_string()),
+            })
+            .expect_err("an undeclared match mode must be rejected by the schema");
+    }
+
+    #[test]
+    fn linear_color_key_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_linear_color_key(&[
+            (
+                "key_colour",
+                PropertyValue::Color(Color { r: 0.1, g: 0.85, b: 0.3, a: 1.0 }),
+            ),
+            ("match_colours", PropertyValue::Enum("green".to_string())),
+            ("tolerance", PropertyValue::Float(20.0)),
+            ("operation", PropertyValue::Enum("keep_colours".to_string())),
+        ]);
+        let encoded =
+            serde_json::to_string(&effect).expect("linear colour key effect should serialize");
+        let restored: EffectNode =
+            serde_json::from_str(&encoded).expect("linear colour key effect should parse");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("restored linear colour key should compile");
+        let grade = linear_color_key_op(&graph).expect("a key node should always exist");
+        assert_eq!(grade.key(), [0.1, 0.85, 0.3]);
+        assert_eq!(grade.match_colours(), crate::MatchColours::Green);
+        assert_eq!(grade.operation(), crate::KeyOperation::KeepColours);
+        assert_eq!(grade.tolerance(), 0.2);
     }
 
     fn split_op(graph: &EffectRenderGraph) -> Option<crate::SplitGrade> {

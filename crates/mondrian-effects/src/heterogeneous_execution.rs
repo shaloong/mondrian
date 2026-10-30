@@ -2748,6 +2748,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::LensFlare { .. } => 53,
         EffectRenderOp::Bulge { .. } => 54,
         EffectRenderOp::Split { .. } => 55,
+        EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
         EffectRenderOp::Twirl { .. } => 48,
@@ -4805,6 +4806,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::LensFlare { .. }
             | crate::EffectRenderOp::Bulge { .. }
             | crate::EffectRenderOp::Split { .. }
+            | crate::EffectRenderOp::LinearColorKey { .. }
             | crate::EffectRenderOp::Convolution { .. }
             | crate::EffectRenderOp::Offset { .. }
             | crate::EffectRenderOp::Twirl { .. }

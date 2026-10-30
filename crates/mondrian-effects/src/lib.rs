@@ -79,6 +79,7 @@ pub mod bevel;
 pub mod brush_strokes;
 pub mod kaleidoscope;
 pub mod lens_flare;
+pub mod linear_color_key;
 pub mod mirror;
 pub mod mosaic;
 pub mod motion_tile;
@@ -223,6 +224,10 @@ pub use kaleidoscope::{
 pub use lens_flare::{
     lens_flare_frame_f32, LensFlareError, LensFlareGrade, LensFlareType,
     LENS_FLARE_MAX_BRIGHTNESS_PERCENT,
+};
+pub use linear_color_key::{
+    linear_color_key_frame_f32, KeyOperation, LinearColorKeyError, LinearColorKeyGrade,
+    MatchColours, LINEAR_COLOR_KEY_MAX_PERCENT,
 };
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,
