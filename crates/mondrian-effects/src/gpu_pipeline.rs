@@ -119,6 +119,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
     },
+    ColorOffset {
+        /// Authored channel phases and overflow mode.
+        grade: crate::ColorOffsetGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -141,6 +145,7 @@ impl EffectGpuSpatialPass {
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
             Self::LinearColorKey { .. } => "linear_color_key",
+            Self::ColorOffset { .. } => "color_offset",
         }
     }
 
@@ -178,6 +183,7 @@ impl EffectGpuSpatialPass {
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
             Self::LinearColorKey { .. } => 0,
+            Self::ColorOffset { grade } => grade.halo_pixels(),
         }
     }
 
@@ -208,6 +214,7 @@ impl EffectGpuSpatialPass {
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
             Self::LinearColorKey { .. } => 0,
+            Self::ColorOffset { grade } => grade.halo_pixels(),
         }
     }
 }
@@ -479,6 +486,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Split { grade } => Some(EffectGpuSpatialPass::Split { grade: *grade }),
         EffectRenderOp::LinearColorKey { grade } => {
             Some(EffectGpuSpatialPass::LinearColorKey { grade: *grade })
+        }
+        EffectRenderOp::ColorOffset { grade } => {
+            Some(EffectGpuSpatialPass::ColorOffset { grade: *grade })
         }
         _ => None,
     }

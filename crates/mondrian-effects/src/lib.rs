@@ -23,6 +23,7 @@ pub mod channel_mixer;
 pub mod chroma_key;
 pub mod color_curves;
 pub mod color_emboss;
+pub mod color_offset;
 pub mod convolution;
 pub mod coverage;
 pub mod directional_blur;
@@ -126,6 +127,10 @@ pub use brush_strokes::{
 pub use bulge::{
     bulge_frame_f32, BulgeError, BulgeGrade, BULGE_MAX_HEIGHT, BULGE_MAX_RADIUS_PIXELS,
     BULGE_MAX_TAPER_PIXELS, BULGE_MIN_HEIGHT, BULGE_MIN_RADIUS_PIXELS, BULGE_MIN_TAPER_PIXELS,
+};
+pub use color_offset::{
+    color_offset_frame_f32, ColorOffsetError, ColorOffsetGrade, ColorOffsetOverflow,
+    COLOR_OFFSET_MAX_PHASE_PIXELS, COLOR_OFFSET_OVERFLOW_COUNT,
 };
 pub use convolution::{
     convolution_frame_f32, ConvolutionError, ConvolutionGrade, CONVOLUTION_HALO_PIXELS,

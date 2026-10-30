@@ -942,6 +942,11 @@ pub enum EffectRenderOp {
     Extract {
         grade: crate::ExtractGrade,
     },
+    /// ColourOffset: shifts the red, green and blue channels along the row by
+    /// their own authored phase, resolving outside samples with an overflow mode.
+    ColorOffset {
+        grade: crate::ColorOffsetGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1159,6 +1164,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Extract { grade } => {
                 formatter.debug_struct("Extract").field("grade", grade).finish()
+            }
+            Self::ColorOffset { grade } => {
+                formatter.debug_struct("ColorOffset").field("grade", grade).finish()
             }
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
@@ -1714,6 +1722,13 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::ColorOffset { grade } => {
+                57u8.hash(state);
+                for phase in grade.phases() {
+                    phase.to_bits().hash(state);
+                }
+                grade.overflow().as_u32().hash(state);
+            }
             EffectRenderOp::Extract { grade } => {
                 56u8.hash(state);
                 let (params, color, extra) = grade.gpu_controls();
@@ -1934,6 +1949,7 @@ impl EffectRenderOp {
             EffectRenderOp::Split { .. } => 3,
             EffectRenderOp::LinearColorKey { .. } => 2,
             EffectRenderOp::Extract { .. } => 1,
+            EffectRenderOp::ColorOffset { .. } => 2,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
@@ -2480,7 +2496,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 55] {
+fn builtin_effect_types() -> [EffectType; 56] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2537,6 +2553,7 @@ fn builtin_effect_types() -> [EffectType; 55] {
         EffectType::Split,
         EffectType::LinearColorKey,
         EffectType::Extract,
+        EffectType::ColorOffset,
     ]
 }
 
@@ -4572,6 +4589,50 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::ColorOffset => {
+            for (parameter, caption) in [
+                ("red_phase", "红色相位"),
+                ("green_phase", "绿色相位"),
+                ("blue_phase", "蓝色相位"),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "颜色偏移",
+                    caption,
+                    PropertyValue::Float(0.0),
+                    Some(-(crate::COLOR_OFFSET_MAX_PHASE_PIXELS as f64)),
+                    Some(crate::COLOR_OFFSET_MAX_PHASE_PIXELS as f64),
+                    Some(1.0),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "overflow",
+                "颜色偏移",
+                "溢出",
+                "clamp",
+                vec![
+                    ParameterEnumOption::new(
+                        "wrap",
+                        "环绕",
+                        "mondrian.effect.color_offset.overflow.wrap",
+                    ),
+                    ParameterEnumOption::new(
+                        "clamp",
+                        "截取",
+                        "mondrian.effect.color_offset.overflow.clamp",
+                    ),
+                    ParameterEnumOption::new(
+                        "mirror",
+                        "镜像",
+                        "mondrian.effect.color_offset.overflow.mirror",
+                    ),
+                ],
+            );
+        }
         EffectType::Extract => {
             define_builtin_enum_property(
                 &mut properties,
@@ -5578,6 +5639,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Split, "point_a_x" | "point_a_y" | "point_b_x" | "point_b_y" | "split") => {
             ParameterUnit::Pixels
         }
+        (EffectType::ColorOffset, "red_phase" | "green_phase" | "blue_phase") => {
+            ParameterUnit::Pixels
+        }
         (EffectType::LinearColorKey, "tolerance" | "softness") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "amount") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "radius") => ParameterUnit::Pixels,
@@ -5814,6 +5878,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::Extract => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::ColorOffset => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::Bulge => EffectExecutionContract {
@@ -7414,6 +7483,49 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ColorOffset => {
+            let red_id = builtin_parameter_id(effect_type, "red_phase");
+            let green_id = builtin_parameter_id(effect_type, "green_phase");
+            let blue_id = builtin_parameter_id(effect_type, "blue_phase");
+            let overflow_id = builtin_parameter_id(effect_type, "overflow");
+            Some(Arc::new(move |effect, context, graph| {
+                let overflow = match effect.evaluate_parameter(&overflow_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::ColorOffsetOverflow::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!(
+                                "colour offset overflow {key} is not a declared option"
+                            ),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "colour offset overflow must be an option".to_string(),
+                        })
+                    }
+                    None => crate::ColorOffsetOverflow::Clamp,
+                };
+                let grade = crate::ColorOffsetGrade::new(
+                    [
+                        effect.evaluate_f32_parameter(&red_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&green_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&blue_id, context.time, 0.0),
+                    ],
+                    overflow,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ColorOffset { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LinearColorKey => {
             let key_id = builtin_parameter_id(effect_type, "key_colour");
             let match_id = builtin_parameter_id(effect_type, "match_colours");
@@ -8203,6 +8315,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Split => "分离",
         EffectType::LinearColorKey => "线性颜色键",
         EffectType::Extract => "提取",
+        EffectType::ColorOffset => "颜色偏移",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -9494,6 +9607,7 @@ mod tests {
             EffectType::Split,
             EffectType::LinearColorKey,
             EffectType::Extract,
+            EffectType::ColorOffset,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -13636,6 +13750,106 @@ mod tests {
         assert_eq!(grade.angle_degrees(), -12.0);
     }
 
+    fn color_offset_op(graph: &EffectRenderGraph) -> Option<crate::ColorOffsetGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ColorOffset { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ColorOffset { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_color_offset(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ColorOffset)
+            .expect("colour offset effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ColorOffset.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("colour offset parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn color_offset_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::ColorOffset)
+            .expect("colour offset effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("default colour offset should compile");
+        assert!(color_offset_op(&graph).is_none());
+        assert_eq!(graph.nodes.len(), 1);
+    }
+
+    #[test]
+    fn color_offset_authored_state_reaches_the_operation() {
+        let effect = author_color_offset(&[
+            ("red_phase", PropertyValue::Float(3.0)),
+            ("green_phase", PropertyValue::Float(-1.5)),
+            ("blue_phase", PropertyValue::Float(0.25)),
+            ("overflow", PropertyValue::Enum("mirror".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored colour offset should compile");
+        let grade = color_offset_op(&graph).expect("a colour offset node should exist");
+        assert_eq!(grade.phases(), [3.0, -1.5, 0.25]);
+        assert_eq!(grade.overflow(), crate::ColorOffsetOverflow::Mirror);
+    }
+
+    #[test]
+    fn color_offset_needs_every_phase_at_zero_to_stay_identity() {
+        let effect = author_color_offset(&[("blue_phase", PropertyValue::Float(2.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored colour offset should compile");
+        let grade = color_offset_op(&graph).expect("a colour offset node should exist");
+        assert_eq!(grade.phases(), [0.0, 0.0, 2.0]);
+        assert_eq!(grade.overflow(), crate::ColorOffsetOverflow::Clamp);
+    }
+
+    #[test]
+    fn color_offset_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::ColorOffset)
+            .expect("colour offset effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ColorOffset.property_path("red_phase"),
+                value: PropertyValue::Float(1_000_001.0),
+            })
+            .expect_err("a phase past the declared range should be rejected");
+        let _ = error;
+        let mut effect = instantiate_effect_node(EffectType::ColorOffset)
+            .expect("colour offset effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ColorOffset.property_path("overflow"),
+                value: PropertyValue::Enum("reflect".to_string()),
+            })
+            .expect_err("an undeclared overflow option should be rejected");
+        let _ = error;
+    }
+
+    #[test]
+    fn color_offset_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_color_offset(&[
+            ("red_phase", PropertyValue::Float(-2.0)),
+            ("green_phase", PropertyValue::Float(1.25)),
+            ("blue_phase", PropertyValue::Float(0.5)),
+            ("overflow", PropertyValue::Enum("wrap".to_string())),
+        ]);
+        let encoded = serde_json::to_string(&effect).expect("colour offset should serialize");
+        let restored: EffectNode =
+            serde_json::from_str(&encoded).expect("colour offset should parse");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("restored colour offset should compile");
+        let grade = color_offset_op(&graph).expect("a colour offset node should exist");
+        assert_eq!(grade.phases(), [-2.0, 1.25, 0.5]);
+        assert_eq!(grade.overflow(), crate::ColorOffsetOverflow::Wrap);
+    }
     fn extract_op(graph: &EffectRenderGraph) -> Option<crate::ExtractGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Extract { grade }, .. }
