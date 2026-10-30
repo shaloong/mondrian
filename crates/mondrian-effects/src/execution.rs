@@ -2336,6 +2336,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Bulge { .. } => "bulge",
         EffectRenderOp::Split { .. } => "split",
         EffectRenderOp::LinearColorKey { .. } => "linear_color_key",
+        EffectRenderOp::Extract { .. } => "extract",
         EffectRenderOp::Convolution { .. } => "convolution",
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",

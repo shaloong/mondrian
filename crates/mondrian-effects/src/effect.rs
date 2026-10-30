@@ -937,6 +937,11 @@ pub enum EffectRenderOp {
     LinearColorKey {
         grade: crate::LinearColorKeyGrade,
     },
+    /// Extract: turns an authored channel into a matte using a black point,
+    /// a white point and a softness around each of them.
+    Extract {
+        grade: crate::ExtractGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1151,6 +1156,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Split { grade } => formatter.debug_struct("Split").field("grade", grade).finish(),
             Self::LinearColorKey { grade } => {
                 formatter.debug_struct("LinearColorKey").field("grade", grade).finish()
+            }
+            Self::Extract { grade } => {
+                formatter.debug_struct("Extract").field("grade", grade).finish()
             }
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
@@ -1706,6 +1714,13 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Extract { grade } => {
+                56u8.hash(state);
+                let (params, color, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                color.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LinearColorKey { grade } => {
                 55u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -1918,6 +1933,7 @@ impl EffectRenderOp {
             EffectRenderOp::Bulge { .. } => 4,
             EffectRenderOp::Split { .. } => 3,
             EffectRenderOp::LinearColorKey { .. } => 2,
+            EffectRenderOp::Extract { .. } => 1,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
@@ -2464,7 +2480,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 54] {
+fn builtin_effect_types() -> [EffectType; 55] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2520,6 +2536,7 @@ fn builtin_effect_types() -> [EffectType; 54] {
         EffectType::Bulge,
         EffectType::Split,
         EffectType::LinearColorKey,
+        EffectType::Extract,
     ]
 }
 
@@ -4555,6 +4572,69 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::Extract => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "channel",
+                "提取",
+                "通道",
+                "luma",
+                vec![
+                    ParameterEnumOption::new(
+                        "luma",
+                        "亮度",
+                        "mondrian.effect.extract.channel.luma",
+                    ),
+                    ParameterEnumOption::new("red", "红色", "mondrian.effect.extract.channel.red"),
+                    ParameterEnumOption::new(
+                        "green",
+                        "绿色",
+                        "mondrian.effect.extract.channel.green",
+                    ),
+                    ParameterEnumOption::new(
+                        "blue",
+                        "蓝色",
+                        "mondrian.effect.extract.channel.blue",
+                    ),
+                    ParameterEnumOption::new(
+                        "alpha",
+                        "Alpha",
+                        "mondrian.effect.extract.channel.alpha",
+                    ),
+                ],
+            );
+            for (parameter, caption, default) in [
+                ("black_point", "黑场", 0.0_f64),
+                ("white_point", "白场", 255.0_f64),
+                ("black_softness", "黑色柔和度", 0.0_f64),
+                ("white_softness", "白色柔和度", 0.0_f64),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "提取",
+                    caption,
+                    PropertyValue::Float(default as f32),
+                    Some(0.0),
+                    Some(crate::EXTRACT_AUTHOR_MAX_LEVEL as f64),
+                    Some(1.0),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "提取",
+                "反转",
+                "off",
+                vec![
+                    ParameterEnumOption::new("off", "关", "mondrian.effect.extract.invert.off"),
+                    ParameterEnumOption::new("on", "开", "mondrian.effect.extract.invert.on"),
+                ],
+            );
+        }
         EffectType::LinearColorKey => {
             define_builtin_property(
                 &mut properties,
@@ -5729,6 +5809,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::LinearColorKey => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Extract => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -7276,6 +7360,60 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Extract => {
+            let channel_id = builtin_parameter_id(effect_type, "channel");
+            let black_id = builtin_parameter_id(effect_type, "black_point");
+            let white_id = builtin_parameter_id(effect_type, "white_point");
+            let black_softness_id = builtin_parameter_id(effect_type, "black_softness");
+            let white_softness_id = builtin_parameter_id(effect_type, "white_softness");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            Some(Arc::new(move |effect, context, graph| {
+                let channel = match effect.evaluate_parameter(&channel_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::ExtractChannel::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("extract channel {key} is not a declared option"),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "extract channel must be an option".to_string(),
+                        })
+                    }
+                    None => crate::ExtractChannel::Luma,
+                };
+                let invert = match effect.evaluate_parameter(&invert_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => key == "on",
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "extract invert must be an option".to_string(),
+                        })
+                    }
+                    None => false,
+                };
+                let level = crate::EXTRACT_AUTHOR_MAX_LEVEL;
+                let grade = crate::ExtractGrade::for_space(
+                    channel,
+                    effect.evaluate_f32_parameter(&black_id, context.time, 0.0) / level,
+                    effect.evaluate_f32_parameter(&white_id, context.time, level) / level,
+                    effect.evaluate_f32_parameter(&black_softness_id, context.time, 0.0) / level,
+                    effect.evaluate_f32_parameter(&white_softness_id, context.time, 0.0) / level,
+                    invert,
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                graph.append_unary(EffectRenderOp::Extract { grade });
+                Ok(())
+            }))
+        }
         EffectType::LinearColorKey => {
             let key_id = builtin_parameter_id(effect_type, "key_colour");
             let match_id = builtin_parameter_id(effect_type, "match_colours");
@@ -8064,6 +8202,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Bulge => "凸出",
         EffectType::Split => "分离",
         EffectType::LinearColorKey => "线性颜色键",
+        EffectType::Extract => "提取",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -9354,6 +9493,7 @@ mod tests {
             EffectType::Bulge,
             EffectType::Split,
             EffectType::LinearColorKey,
+            EffectType::Extract,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -13494,6 +13634,121 @@ mod tests {
             .expect("builds restored mirror graph");
         let grade = mirror_op(&graph).expect("mirror op");
         assert_eq!(grade.angle_degrees(), -12.0);
+    }
+
+    fn extract_op(graph: &EffectRenderGraph) -> Option<crate::ExtractGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Extract { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Extract { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_extract(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Extract)
+            .expect("extract effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Extract.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("extract parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn extract_defaults_reach_the_operation() {
+        let effect = instantiate_effect_node(EffectType::Extract)
+            .expect("extract effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("default extract should compile");
+        let grade = extract_op(&graph).expect("an extract node should exist");
+        assert_eq!(grade.channel(), crate::ExtractChannel::Luma);
+        assert_eq!(grade.black_point(), 0.0);
+        assert_eq!(grade.white_point(), 1.0);
+        assert_eq!(grade.black_softness(), 0.0);
+        assert_eq!(grade.white_softness(), 0.0);
+        assert!(!grade.inverted());
+    }
+
+    #[test]
+    fn extract_authored_state_reaches_the_operation() {
+        let effect = author_extract(&[
+            ("channel", PropertyValue::Enum("blue".to_string())),
+            ("black_point", PropertyValue::Float(51.0)),
+            ("white_point", PropertyValue::Float(204.0)),
+            ("black_softness", PropertyValue::Float(25.5)),
+            ("white_softness", PropertyValue::Float(51.0)),
+            ("invert", PropertyValue::Enum("on".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored extract should compile");
+        let grade = extract_op(&graph).expect("an extract node should exist");
+        assert_eq!(grade.channel(), crate::ExtractChannel::Blue);
+        assert!((grade.black_point() - 0.2).abs() <= 1.0e-6);
+        assert!((grade.white_point() - 0.8).abs() <= 1.0e-6);
+        assert!((grade.black_softness() - 0.1).abs() <= 1.0e-6);
+        assert!((grade.white_softness() - 0.2).abs() <= 1.0e-6);
+        assert!(grade.inverted());
+    }
+
+    #[test]
+    fn extract_reads_the_authored_channel_out_of_the_frame() {
+        let effect = author_extract(&[
+            ("channel", PropertyValue::Enum("green".to_string())),
+            ("white_point", PropertyValue::Float(128.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored extract should compile");
+        let grade = extract_op(&graph).expect("an extract node should exist");
+        assert_eq!(grade.apply([0.4, 0.25, 0.9, 0.6]), [1.0, 1.0, 1.0, 0.6]);
+        assert_eq!(grade.apply([0.4, 0.75, 0.9, 0.6]), [0.0, 0.0, 0.0, 0.6]);
+    }
+
+    #[test]
+    fn extract_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::Extract)
+            .expect("extract effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Extract.property_path("white_point"),
+                value: PropertyValue::Float(300.0),
+            })
+            .expect_err("a white point above 255 should be rejected");
+        let _ = error;
+        // A black point at the white point is rejected when the graph is built.
+        let effect = author_extract(&[
+            ("black_point", PropertyValue::Float(255.0)),
+            ("white_point", PropertyValue::Float(255.0)),
+        ]);
+        build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a degenerate range should not compile");
+    }
+
+    #[test]
+    fn extract_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_extract(&[
+            ("channel", PropertyValue::Enum("alpha".to_string())),
+            ("black_point", PropertyValue::Float(38.25)),
+            ("white_point", PropertyValue::Float(216.75)),
+            ("white_softness", PropertyValue::Float(12.75)),
+            ("invert", PropertyValue::Enum("on".to_string())),
+        ]);
+        let encoded = serde_json::to_string(&effect).expect("extract effect should serialize");
+        let restored: EffectNode =
+            serde_json::from_str(&encoded).expect("extract effect should parse");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("restored extract should compile");
+        let grade = extract_op(&graph).expect("an extract node should exist");
+        assert_eq!(grade.channel(), crate::ExtractChannel::Alpha);
+        assert!((grade.black_point() - 0.15).abs() <= 1.0e-6);
+        assert!((grade.white_point() - 0.85).abs() <= 1.0e-6);
+        assert!((grade.white_softness() - 0.05).abs() <= 1.0e-6);
+        assert!(grade.inverted());
     }
 
     fn linear_color_key_op(graph: &EffectRenderGraph) -> Option<crate::LinearColorKeyGrade> {

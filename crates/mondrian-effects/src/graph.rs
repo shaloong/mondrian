@@ -1748,6 +1748,10 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        EffectRenderOp::Extract { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_float
+        },
         EffectRenderOp::LinearColorKey { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float

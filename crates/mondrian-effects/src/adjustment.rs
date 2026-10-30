@@ -224,6 +224,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::Extract { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "extract",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LinearColorKey { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "linear_color_key",
@@ -809,6 +815,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::LensFlare { .. } => 0,
         EffectRenderOp::Bulge { .. } => 0,
         EffectRenderOp::Split { .. } => 0,
+        EffectRenderOp::Extract { .. } => 0,
         EffectRenderOp::LinearColorKey { .. } => 0,
         EffectRenderOp::Convolution { .. } => 0,
         EffectRenderOp::Offset { .. } => 0,
@@ -1055,6 +1062,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 checkpoint,
             )
         }
+        EffectRenderOp::Extract { grade } => crate::extract::apply_extract_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            *grade,
+            checkpoint,
+        ),
         EffectRenderOp::LinearColorKey { grade } => {
             crate::linear_color_key::apply_linear_color_key_f32_controlled(
                 working,

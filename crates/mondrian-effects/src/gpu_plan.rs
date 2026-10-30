@@ -120,6 +120,10 @@ pub enum EffectGpuPointOp {
     Noise {
         grade: crate::NoiseGrade,
     },
+    /// Extract: one authored channel mapped through a black and a white point.
+    Extract {
+        grade: crate::ExtractGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -820,6 +824,7 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::Posterize { levels: grade.levels() as f32 })
         }
         EffectRenderOp::Noise { grade } => Ok(EffectGpuPointOp::Noise { grade: *grade }),
+        EffectRenderOp::Extract { grade } => Ok(EffectGpuPointOp::Extract { grade: *grade }),
         EffectRenderOp::Threshold { grade } => Ok(EffectGpuPointOp::Threshold {
             level: grade.level(),
             luminance_coefficients: grade.luminance_coefficients(),
@@ -906,6 +911,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Bulge { .. } => "bulge",
         EffectRenderOp::Split { .. } => "split",
         EffectRenderOp::LinearColorKey { .. } => "linear_color_key",
+        EffectRenderOp::Extract { .. } => "extract",
         EffectRenderOp::Convolution { .. } => "convolution",
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",

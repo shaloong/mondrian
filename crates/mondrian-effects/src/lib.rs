@@ -47,6 +47,7 @@ pub mod execution_planning;
 mod execution_session;
 pub mod extension_contract;
 pub mod extension_sdk;
+pub mod extract;
 pub mod gamut_mapping;
 pub mod gpu_pipeline;
 pub mod gpu_plan;
@@ -179,6 +180,10 @@ pub use extension_contract::{
     EffectExtensionRuntimeStatus, CURRENT_EFFECT_EXTENSION_API_VERSION,
 };
 pub use extension_sdk::{EffectExtensionDefinitionBuilder, EffectGraphDsl};
+pub use extract::{
+    extract_frame_f32, ExtractChannel, ExtractError, ExtractGrade, EXTRACT_AUTHOR_MAX_LEVEL,
+    EXTRACT_CHANNEL_COUNT,
+};
 pub use gamut_mapping::{GamutCompressionGrade, GamutMappingError, HighlightRecoveryGrade};
 pub use gpu_pipeline::{
     lower_effect_graph_to_gpu_pipeline, spatial_pass_for, CompiledEffectGpuPipeline,
