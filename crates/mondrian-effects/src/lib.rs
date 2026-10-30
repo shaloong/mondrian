@@ -18,6 +18,7 @@ pub use float_frame::{
 };
 pub mod black_white;
 pub mod box_blur;
+pub mod bulge;
 pub mod channel_mixer;
 pub mod chroma_key;
 pub mod color_curves;
@@ -118,6 +119,10 @@ pub use brush_strokes::{
     brush_strokes_frame_f32, BrushStrokesError, BrushStrokesGrade, BRUSH_STROKES_MAX_DENSITY,
     BRUSH_STROKES_MAX_LENGTH, BRUSH_STROKES_MAX_RANDOMNESS, BRUSH_STROKES_MAX_SIZE,
     BRUSH_STROKES_SURFACE_COUNT,
+};
+pub use bulge::{
+    bulge_frame_f32, BulgeError, BulgeGrade, BULGE_MAX_HEIGHT, BULGE_MAX_RADIUS_PIXELS,
+    BULGE_MAX_TAPER_PIXELS, BULGE_MIN_HEIGHT, BULGE_MIN_RADIUS_PIXELS, BULGE_MIN_TAPER_PIXELS,
 };
 pub use convolution::{
     convolution_frame_f32, ConvolutionError, ConvolutionGrade, CONVOLUTION_HALO_PIXELS,

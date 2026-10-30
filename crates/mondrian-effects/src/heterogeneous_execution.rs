@@ -2746,6 +2746,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Mirror { .. } => 51,
         EffectRenderOp::PolarCoordinates { .. } => 52,
         EffectRenderOp::LensFlare { .. } => 53,
+        EffectRenderOp::Bulge { .. } => 54,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
         EffectRenderOp::Twirl { .. } => 48,
@@ -4801,6 +4802,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Mirror { .. }
             | crate::EffectRenderOp::PolarCoordinates { .. }
             | crate::EffectRenderOp::LensFlare { .. }
+            | crate::EffectRenderOp::Bulge { .. }
             | crate::EffectRenderOp::Convolution { .. }
             | crate::EffectRenderOp::Offset { .. }
             | crate::EffectRenderOp::Twirl { .. }

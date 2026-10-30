@@ -925,6 +925,10 @@ pub enum EffectRenderOp {
     LensFlare {
         grade: crate::LensFlareGrade,
     },
+    /// Bulge: magnifies an elliptical region of the frame.
+    Bulge {
+        grade: crate::BulgeGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1135,6 +1139,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::LensFlare { grade } => {
                 formatter.debug_struct("LensFlare").field("grade", grade).finish()
             }
+            Self::Bulge { grade } => formatter.debug_struct("Bulge").field("grade", grade).finish(),
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
             }
@@ -1683,6 +1688,12 @@ impl EffectRenderOp {
                 grade.absolute_values().hash(state);
                 grade.blend_with_original().to_bits().hash(state);
             }
+            EffectRenderOp::Bulge { grade } => {
+                53u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensFlare { grade } => {
                 52u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -1880,6 +1891,7 @@ impl EffectRenderOp {
             EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::PolarCoordinates { .. } => 3,
             EffectRenderOp::LensFlare { .. } => 4,
+            EffectRenderOp::Bulge { .. } => 4,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
@@ -2426,7 +2438,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 51] {
+fn builtin_effect_types() -> [EffectType; 52] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2479,6 +2491,7 @@ fn builtin_effect_types() -> [EffectType; 51] {
         EffectType::Mirror,
         EffectType::PolarCoordinates,
         EffectType::LensFlare,
+        EffectType::Bulge,
     ]
 }
 
@@ -4457,6 +4470,98 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Bulge => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius_x",
+                "凸出",
+                "水平半径",
+                PropertyValue::Float(50.0),
+                Some(crate::BULGE_MIN_RADIUS_PIXELS as f64),
+                Some(crate::BULGE_MAX_RADIUS_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius_y",
+                "凸出",
+                "垂直半径",
+                PropertyValue::Float(50.0),
+                Some(crate::BULGE_MIN_RADIUS_PIXELS as f64),
+                Some(crate::BULGE_MAX_RADIUS_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "凸出",
+                "中心 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "凸出",
+                "中心 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "height",
+                "凸出",
+                "凸出高度",
+                PropertyValue::Float(1.0),
+                Some(crate::BULGE_MIN_HEIGHT as f64),
+                Some(crate::BULGE_MAX_HEIGHT as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "taper_radius",
+                "凸出",
+                "锥形半径",
+                PropertyValue::Float(0.0),
+                Some(crate::BULGE_MIN_TAPER_PIXELS as f64),
+                Some(crate::BULGE_MAX_TAPER_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "antialias",
+                "凸出",
+                "消除锯齿",
+                "off",
+                vec![
+                    ParameterEnumOption::new("off", "关闭", "mondrian.effect.bulge.antialias.off"),
+                    ParameterEnumOption::new("on", "开启", "mondrian.effect.bulge.antialias.on"),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "pinned",
+                "凸出",
+                "固定",
+                "off",
+                vec![
+                    ParameterEnumOption::new("off", "关闭", "mondrian.effect.bulge.pinned.off"),
+                    ParameterEnumOption::new("on", "开启", "mondrian.effect.bulge.pinned.on"),
+                ],
+            );
+        }
         EffectType::LensFlare => {
             define_builtin_property(
                 &mut properties,
@@ -5440,6 +5545,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::RadialBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Bulge => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -6954,6 +7064,54 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Bulge => {
+            let radius_x_id = builtin_parameter_id(effect_type, "radius_x");
+            let radius_y_id = builtin_parameter_id(effect_type, "radius_y");
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let height_id = builtin_parameter_id(effect_type, "height");
+            let taper_id = builtin_parameter_id(effect_type, "taper_radius");
+            let antialias_id = builtin_parameter_id(effect_type, "antialias");
+            let pinned_id = builtin_parameter_id(effect_type, "pinned");
+            Some(Arc::new(move |effect, context, graph| {
+                let toggle = |parameter_id: &ParameterId, name: &str| {
+                    let Some(value) = effect.evaluate_parameter(parameter_id, context.time) else {
+                        return Ok(false);
+                    };
+                    match value {
+                        PropertyValue::Enum(key) => Ok(key == "on"),
+                        _ => Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key().to_string(),
+                            effect_id: effect.id,
+                            reason: format!("bulge {name} must be a declared option"),
+                        }),
+                    }
+                };
+                let grade = crate::BulgeGrade::new(
+                    [
+                        effect.evaluate_f32_parameter(&radius_x_id, context.time, 50.0),
+                        effect.evaluate_f32_parameter(&radius_y_id, context.time, 50.0),
+                    ],
+                    [
+                        effect.evaluate_f32_parameter(&centre_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&centre_y_id, context.time, 128.0),
+                    ],
+                    effect.evaluate_f32_parameter(&height_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&taper_id, context.time, 0.0),
+                    toggle(&antialias_id, "antialias")?,
+                    toggle(&pinned_id, "pinned")?,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key().to_string(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Bulge { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensFlare => {
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
             let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
@@ -7621,6 +7779,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Mirror => "镜像",
         EffectType::PolarCoordinates => "极坐标",
         EffectType::LensFlare => "镜头光晕",
+        EffectType::Bulge => "凸出",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -8908,6 +9067,7 @@ mod tests {
             EffectType::Mirror,
             EffectType::PolarCoordinates,
             EffectType::LensFlare,
+            EffectType::Bulge,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -13048,6 +13208,118 @@ mod tests {
             .expect("builds restored mirror graph");
         let grade = mirror_op(&graph).expect("mirror op");
         assert_eq!(grade.angle_degrees(), -12.0);
+    }
+
+    fn bulge_op(graph: &EffectRenderGraph) -> Option<crate::BulgeGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Bulge { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Bulge { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_bulge(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Bulge).expect("bulge effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Bulge.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("bulge parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn bulge_defaults_reach_the_operation() {
+        let effect =
+            instantiate_effect_node(EffectType::Bulge).expect("bulge effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("default bulge should compile");
+        let grade = bulge_op(&graph).expect("bulge node should exist");
+        assert_eq!(grade.radius(), [50.0, 50.0]);
+        assert_eq!(grade.centre(), [128.0, 128.0]);
+        assert_eq!(grade.height(), 1.0);
+        assert_eq!(grade.taper_radius(), 0.0);
+        assert!(!grade.antialias());
+        assert!(!grade.pinned());
+    }
+
+    #[test]
+    fn bulge_authored_state_reaches_the_operation() {
+        let effect = author_bulge(&[
+            ("radius_x", PropertyValue::Float(20.0)),
+            ("radius_y", PropertyValue::Float(30.0)),
+            ("centre_x", PropertyValue::Float(10.0)),
+            ("centre_y", PropertyValue::Float(12.0)),
+            ("height", PropertyValue::Float(-1.5)),
+            ("taper_radius", PropertyValue::Float(4.0)),
+            ("antialias", PropertyValue::Enum("on".to_string())),
+            ("pinned", PropertyValue::Enum("on".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored bulge should compile");
+        let grade = bulge_op(&graph).expect("bulge node should exist");
+        assert_eq!(grade.radius(), [20.0, 30.0]);
+        assert_eq!(grade.centre(), [10.0, 12.0]);
+        assert_eq!(grade.height(), -1.5);
+        assert_eq!(grade.taper_radius(), 4.0);
+        assert!(grade.antialias());
+        assert!(grade.pinned());
+    }
+
+    #[test]
+    fn bulge_zero_height_compiles_to_identity() {
+        let effect = author_bulge(&[("height", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("flat bulge should compile");
+        assert!(bulge_op(&graph).is_none(), "a flat bulge adds no node");
+        assert_eq!(graph.nodes.len(), 1, "only the source node remains");
+    }
+
+    #[test]
+    fn bulge_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Bulge).expect("bulge effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Bulge.property_path("height"),
+                value: PropertyValue::Float(5.0),
+            })
+            .expect_err("a height above four must be rejected");
+        let _ = error;
+
+        let mut radius =
+            instantiate_effect_node(EffectType::Bulge).expect("bulge effect should instantiate");
+        let error = radius
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Bulge.property_path("radius_x"),
+                value: PropertyValue::Float(8_001.0),
+            })
+            .expect_err("a radius above eight thousand must be rejected");
+        let _ = error;
+    }
+
+    #[test]
+    fn bulge_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_bulge(&[
+            ("radius_x", PropertyValue::Float(64.0)),
+            ("height", PropertyValue::Float(2.0)),
+            ("pinned", PropertyValue::Enum("on".to_string())),
+        ]);
+        let encoded = serde_json::to_string(&effect).expect("effect should serialize");
+        let decoded: EffectNode =
+            serde_json::from_str(&encoded).expect("effect should deserialize");
+        let graph = build_effect_render_graph(&[decoded], tt(0), TEST_WORKING_SPACE)
+            .expect("restored bulge should compile");
+        let grade = bulge_op(&graph).expect("bulge node should exist");
+        assert_eq!(grade.radius(), [64.0, 50.0]);
+        assert_eq!(grade.height(), 2.0);
+        assert!(grade.pinned());
     }
 
     fn lens_flare_op(graph: &EffectRenderGraph) -> Option<crate::LensFlareGrade> {
