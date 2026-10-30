@@ -51,6 +51,7 @@ pub(crate) struct EffectSpatialGpu {
     spherize: wgpu::RenderPipeline,
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
+    lens_distortion: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
@@ -427,6 +428,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let lens_distortion = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.lens-distortion"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_lens_distortion"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let lens_flare = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.lens-flare"),
             layout: Some(&layout),
@@ -587,6 +618,7 @@ impl EffectSpatialGpu {
             spherize,
             mirror,
             polar_coordinates,
+            lens_distortion,
             lens_flare,
             bulge,
             split,
@@ -737,6 +769,40 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Records the lens distortion pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_lens_distortion(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniforms = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.lens_distortion,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
 
     /// Records the lens flare stage.
     #[allow(clippy::too_many_arguments)]
@@ -800,6 +866,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Convolution { .. }
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
+            EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
             EffectGpuSpatialPass::Split { .. } => Ok(1),
@@ -1002,6 +1069,20 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_split(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::LensDistortion { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_lens_distortion(
                     device,
                     encoder,
                     params,
@@ -2175,6 +2256,82 @@ fn flare_emission(coordinate: vec2<f32>) -> vec3<f32> {
 }
 
 /// Lens flare: adds camera flare light over the source frame.
+fn lens_half_extent(direction: u32) -> f32 {
+    if (direction == 1u) {
+        return uniforms.size.x * 0.5;
+    }
+    if (direction == 2u) {
+        return uniforms.size.y * 0.5;
+    }
+    return length(uniforms.size.xy) * 0.5;
+}
+
+fn lens_map_radius(radius: f32, focal: f32, invert: bool) -> f32 {
+    if (invert) {
+        return focal * tan(radius / focal);
+    }
+    return focal * atan(radius / focal);
+}
+
+fn lens_resize_scale(focal: f32, direction: u32, resize: u32, invert: bool) -> f32 {
+    if (resize == 1u) {
+        return 1.0;
+    }
+    let corner = length(uniforms.size.xy * 0.5);
+    let mapped = lens_map_radius(corner, focal, invert);
+    if (mapped <= 1.0e-9) {
+        return 1.0;
+    }
+    let gain = corner / mapped;
+    if (resize == 2u) {
+        return gain;
+    }
+    if (resize == 3u) {
+        return mapped / corner;
+    }
+    return max(gain, 1.0);
+}
+
+fn lens_sample_position(column: f32, row: f32, focal: f32, scale: f32, invert: bool) -> vec2<f32> {
+    let centre = uniforms.params.xy;
+    let delta = vec2<f32>(column, row) - centre;
+    let radius = length(delta);
+    if (radius <= 1.0e-9) {
+        return centre;
+    }
+    let mapped = lens_map_radius(radius, focal, invert) * scale;
+    return centre + delta * (mapped / radius);
+}
+
+@fragment
+fn fs_lens_distortion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let original = load_clamped(pixel);
+    let field_of_view = uniforms.params.z;
+    if (field_of_view <= 1.0e-6) {
+        return original;
+    }
+    let direction = u32(uniforms.extra.x + 0.5);
+    let resize = u32(uniforms.extra.y + 0.5);
+    let invert = uniforms.params.w > 0.5;
+    let half_extent = lens_half_extent(direction);
+    let half_angle = field_of_view * 3.141592653589793 / 360.0;
+    let focal = half_extent / tan(half_angle);
+    let scale = lens_resize_scale(focal, direction, resize, invert);
+    let base = position.xy - vec2<f32>(0.5);
+    let taps: i32 = select(1, 2, uniforms.extra.z > 0.5);
+    let step = 1.0 / f32(taps);
+    var accumulated = vec4<f32>(0.0);
+    for (var sub_y = 0; sub_y < taps; sub_y = sub_y + 1) {
+        for (var sub_x = 0; sub_x < taps; sub_x = sub_x + 1) {
+            let offset = (vec2<f32>(f32(sub_x) + 0.5, f32(sub_y) + 0.5)) * step - vec2<f32>(0.5);
+            let destination = base + offset;
+            let source = lens_sample_position(destination.x, destination.y, focal, scale, invert);
+            accumulated += sample_bilinear_premultiplied(source.x, source.y);
+        }
+    }
+    return unpremultiply(accumulated / f32(taps * taps));
+}
 @fragment
 fn fs_lens_flare(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let sample = load_clamped(vec2<i32>(position.xy));
@@ -3152,6 +3309,99 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "split {point_a:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_lens_distortion_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU lens distortion parity test: no GPU adapter available");
+            return;
+        };
+        let width = 13_u32;
+        let height = 11_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.04 * (x + y) as f32;
+                pixels[y * width as usize + x] = [value, 0.45 - value * 0.5, value * 1.3, 1.0];
+            }
+        }
+        pixels[40] = [0.0, 0.0, 0.0, 0.0];
+        pixels[70] = [2.5, -0.75, 1.25, 0.5];
+        for (fov, invert, direction, centre, best_pixels, resize) in [
+            (
+                90.0_f32,
+                false,
+                mondrian_effects::LensDistortionDirection::Diagonal,
+                [6.0_f32, 5.0],
+                false,
+                mondrian_effects::LensDistortionResize::None,
+            ),
+            (
+                140.0,
+                true,
+                mondrian_effects::LensDistortionDirection::Horizontal,
+                [5.5, 4.5],
+                true,
+                mondrian_effects::LensDistortionResize::Expand,
+            ),
+            (
+                35.0,
+                false,
+                mondrian_effects::LensDistortionDirection::Vertical,
+                [3.25, 7.5],
+                false,
+                mondrian_effects::LensDistortionResize::Contract,
+            ),
+        ] {
+            let grade = mondrian_effects::LensDistortionGrade::new(
+                fov,
+                invert,
+                direction,
+                centre,
+                best_pixels,
+                resize,
+            )
+            .expect("lens distortion grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::lens_distortion_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.lens-distortion-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_lens_distortion(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded lens distortion");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "lens distortion {fov} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
