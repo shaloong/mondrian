@@ -224,6 +224,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::Split { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "split",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Bulge { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "bulge",
@@ -796,6 +802,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::PolarCoordinates { .. } => 0,
         EffectRenderOp::LensFlare { .. } => 0,
         EffectRenderOp::Bulge { .. } => 0,
+        EffectRenderOp::Split { .. } => 0,
         EffectRenderOp::Convolution { .. } => 0,
         EffectRenderOp::Offset { .. } => 0,
         EffectRenderOp::Twirl { .. } => 0,
@@ -1041,6 +1048,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 checkpoint,
             )
         }
+        EffectRenderOp::Split { grade } => crate::split::apply_split_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            *grade,
+            checkpoint,
+        ),
         EffectRenderOp::Bulge { grade } => crate::bulge::apply_bulge_f32_controlled(
             working,
             region.width as usize,

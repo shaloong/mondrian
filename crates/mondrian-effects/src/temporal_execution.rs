@@ -2816,6 +2816,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::PolarCoordinates { .. } => "polar_coordinates",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",
+        crate::EffectRenderOp::Split { .. } => "split",
         crate::EffectRenderOp::Convolution { .. } => "convolution",
         crate::EffectRenderOp::Offset { .. } => "offset",
         crate::EffectRenderOp::Twirl { .. } => "twirl",

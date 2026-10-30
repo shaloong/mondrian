@@ -107,6 +107,10 @@ pub enum EffectGpuSpatialPass {
         /// The authored bulge controls.
         grade: crate::BulgeGrade,
     },
+    Split {
+        /// The authored split controls.
+        grade: crate::SplitGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -131,6 +135,7 @@ impl EffectGpuSpatialPass {
             Self::PolarCoordinates { .. } => "polar_coordinates",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
+            Self::Split { .. } => "split",
         }
     }
 
@@ -166,6 +171,7 @@ impl EffectGpuSpatialPass {
             // A flare reads only the pixel it writes, so it needs no neighbour.
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
+            Self::Split { .. } => u32::MAX,
         }
     }
 
@@ -194,6 +200,7 @@ impl EffectGpuSpatialPass {
             | Self::PolarCoordinates { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
+            Self::Split { .. } => u32::MAX,
         }
     }
 }
@@ -462,6 +469,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }
+        EffectRenderOp::Split { grade } => Some(EffectGpuSpatialPass::Split { grade: *grade }),
         _ => None,
     }
 }

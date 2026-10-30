@@ -929,6 +929,10 @@ pub enum EffectRenderOp {
     Bulge {
         grade: crate::BulgeGrade,
     },
+    /// Split: slides the two halves of the frame apart along an authored line.
+    Split {
+        grade: crate::SplitGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1140,6 +1144,7 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("LensFlare").field("grade", grade).finish()
             }
             Self::Bulge { grade } => formatter.debug_struct("Bulge").field("grade", grade).finish(),
+            Self::Split { grade } => formatter.debug_struct("Split").field("grade", grade).finish(),
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
             }
@@ -1688,6 +1693,12 @@ impl EffectRenderOp {
                 grade.absolute_values().hash(state);
                 grade.blend_with_original().to_bits().hash(state);
             }
+            EffectRenderOp::Split { grade } => {
+                54u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::Bulge { grade } => {
                 53u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -1892,6 +1903,7 @@ impl EffectRenderOp {
             EffectRenderOp::PolarCoordinates { .. } => 3,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
+            EffectRenderOp::Split { .. } => 3,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
@@ -2438,7 +2450,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 52] {
+fn builtin_effect_types() -> [EffectType; 53] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2492,6 +2504,7 @@ fn builtin_effect_types() -> [EffectType; 52] {
         EffectType::PolarCoordinates,
         EffectType::LensFlare,
         EffectType::Bulge,
+        EffectType::Split,
     ]
 }
 
@@ -4470,6 +4483,63 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Split => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "point_a_x",
+                "分离",
+                "分离线起点 X",
+                PropertyValue::Float(64.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "point_a_y",
+                "分离",
+                "分离线起点 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "point_b_x",
+                "分离",
+                "分离线终点 X",
+                PropertyValue::Float(192.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "point_b_y",
+                "分离",
+                "分离线终点 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "split",
+                "分离",
+                "分离量",
+                PropertyValue::Float(0.0),
+                Some(crate::SPLIT_MIN_PIXELS as f64),
+                Some(crate::SPLIT_MAX_PIXELS as f64),
+                Some(0.1),
+            );
+        }
         EffectType::Bulge => {
             define_builtin_property(
                 &mut properties,
@@ -5325,6 +5395,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Mirror, "angle") => ParameterUnit::Degrees,
         (EffectType::Mirror, "centre_x") => ParameterUnit::Pixels,
         (EffectType::Mirror, "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Split, "point_a_x" | "point_a_y" | "point_b_x" | "point_b_y" | "split") => {
+            ParameterUnit::Pixels
+        }
         (EffectType::UnsharpMask, "amount") => ParameterUnit::Percent,
         (EffectType::UnsharpMask, "radius") => ParameterUnit::Pixels,
         (EffectType::HueSaturation, "hue") => ParameterUnit::Degrees,
@@ -5545,6 +5618,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::RadialBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Split => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -7064,6 +7142,35 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Split => {
+            let point_a_x_id = builtin_parameter_id(effect_type, "point_a_x");
+            let point_a_y_id = builtin_parameter_id(effect_type, "point_a_y");
+            let point_b_x_id = builtin_parameter_id(effect_type, "point_b_x");
+            let point_b_y_id = builtin_parameter_id(effect_type, "point_b_y");
+            let split_id = builtin_parameter_id(effect_type, "split");
+            Some(Arc::new(move |effect, context, graph| {
+                let point_a = [
+                    effect.evaluate_f32_parameter(&point_a_x_id, context.time, 64.0),
+                    effect.evaluate_f32_parameter(&point_a_y_id, context.time, 128.0),
+                ];
+                let point_b = [
+                    effect.evaluate_f32_parameter(&point_b_x_id, context.time, 192.0),
+                    effect.evaluate_f32_parameter(&point_b_y_id, context.time, 128.0),
+                ];
+                let split = effect.evaluate_f32_parameter(&split_id, context.time, 0.0);
+                let grade = crate::SplitGrade::new(point_a, point_b, split).map_err(|error| {
+                    EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: error.to_string(),
+                    }
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Split { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Bulge => {
             let radius_x_id = builtin_parameter_id(effect_type, "radius_x");
             let radius_y_id = builtin_parameter_id(effect_type, "radius_y");
@@ -7780,6 +7887,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::PolarCoordinates => "极坐标",
         EffectType::LensFlare => "镜头光晕",
         EffectType::Bulge => "凸出",
+        EffectType::Split => "分离",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -9068,6 +9176,7 @@ mod tests {
             EffectType::PolarCoordinates,
             EffectType::LensFlare,
             EffectType::Bulge,
+            EffectType::Split,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -13208,6 +13317,114 @@ mod tests {
             .expect("builds restored mirror graph");
         let grade = mirror_op(&graph).expect("mirror op");
         assert_eq!(grade.angle_degrees(), -12.0);
+    }
+
+    fn split_op(graph: &EffectRenderGraph) -> Option<crate::SplitGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Split { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Split { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_split(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Split).expect("split effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Split.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("split parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn split_defaults_compile_to_identity() {
+        let effect =
+            instantiate_effect_node(EffectType::Split).expect("split effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("default split should compile");
+        assert!(
+            split_op(&graph).is_none(),
+            "a zero split amount adds no node"
+        );
+    }
+
+    #[test]
+    fn split_authored_state_reaches_the_operation() {
+        let effect = author_split(&[
+            ("point_a_x", PropertyValue::Float(2.5)),
+            ("point_a_y", PropertyValue::Float(3.5)),
+            ("point_b_x", PropertyValue::Float(11.0)),
+            ("point_b_y", PropertyValue::Float(7.25)),
+            ("split", PropertyValue::Float(12.5)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored split should compile");
+        let grade = split_op(&graph).expect("split node should exist");
+        assert_eq!(grade.point_a(), [2.5, 3.5]);
+        assert_eq!(grade.point_b(), [11.0, 7.25]);
+        assert_eq!(grade.split_pixels(), 12.5);
+    }
+
+    #[test]
+    fn split_degenerate_line_compiles_to_identity() {
+        let effect = author_split(&[
+            ("point_a_x", PropertyValue::Float(5.0)),
+            ("point_a_y", PropertyValue::Float(5.0)),
+            ("point_b_x", PropertyValue::Float(5.0)),
+            ("point_b_y", PropertyValue::Float(5.0)),
+            ("split", PropertyValue::Float(30.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("degenerate split should compile");
+        assert!(
+            split_op(&graph).is_none(),
+            "a degenerate line has no direction to split along"
+        );
+    }
+
+    #[test]
+    fn split_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Split).expect("split effect should instantiate");
+        let _error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Split.property_path("split"),
+                value: PropertyValue::Float(251.0),
+            })
+            .expect_err("a split above 250 px must be rejected");
+        // The author surface declares no coordinate range, so an absurd point is
+        // rejected by the builder instead of by the property schema.
+        let far = author_split(&[(
+            "point_a_x",
+            PropertyValue::Float(crate::SPLIT_MAX_COORDINATE * 2.0),
+        )]);
+        let _error = build_effect_render_graph(&[far], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a point beyond the declared coordinate range must fail to build");
+    }
+
+    #[test]
+    fn split_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_split(&[
+            ("point_a_x", PropertyValue::Float(1.25)),
+            ("point_b_y", PropertyValue::Float(9.75)),
+            ("split", PropertyValue::Float(7.5)),
+        ]);
+        let encoded = serde_json::to_string(&effect).expect("split effect should serialize");
+        let restored: EffectNode =
+            serde_json::from_str(&encoded).expect("split effect should parse");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("restored split should compile");
+        let grade = split_op(&graph).expect("split node should exist");
+        assert_eq!(grade.point_a(), [1.25, 128.0]);
+        assert_eq!(grade.point_b(), [192.0, 9.75]);
+        assert_eq!(grade.split_pixels(), 7.5);
     }
 
     fn bulge_op(graph: &EffectRenderGraph) -> Option<crate::BulgeGrade> {
