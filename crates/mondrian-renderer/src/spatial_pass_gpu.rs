@@ -53,6 +53,7 @@ pub(crate) struct EffectSpatialGpu {
     polar_coordinates: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
+    split: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
@@ -484,6 +485,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let split = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.split"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_split"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -496,6 +527,7 @@ impl EffectSpatialGpu {
             polar_coordinates,
             lens_flare,
             bulge,
+            split,
             convolution,
             find_edges,
             bindings,
@@ -530,6 +562,41 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.bulge,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+
+    /// Records the split stage.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_split(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.split,
             &input_view,
             &output_view,
             &uniform,
@@ -601,6 +668,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
+            EffectGpuSpatialPass::Split { .. } => Ok(1),
         }
     }
 
@@ -756,6 +824,20 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_bulge(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Split { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_split(
                     device,
                     encoder,
                     params,
@@ -1655,6 +1737,24 @@ fn bulge_sample_position(coordinate: vec2<f32>) -> vec2<f32> {
     let rim = min(radius.x, radius.y);
     let magnification = max(bulge_magnification(distance, height, taper, rim), 1.0e-6);
     return centre + delta / magnification;
+}
+
+/// Split: samples one side of the authored line and slides it along the normal.
+@fragment
+fn fs_split(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = position.xy - vec2<f32>(0.5);
+    let line = vec2<f32>(
+        uniforms.params.z - uniforms.params.x,
+        uniforms.params.w - uniforms.params.y,
+    );
+    let line_length = max(length(line), 1.0e-6);
+    let normal = vec2<f32>(-line.y / line_length, line.x / line_length);
+    let offset = pixel - vec2<f32>(uniforms.params.x, uniforms.params.y);
+    let signed = dot(offset, normal);
+    let half = uniforms.extra.x * 0.5;
+    let shift = select(-half, half, signed >= 0.0);
+    let sampled = pixel - normal * shift;
+    return unpremultiply(sample_bilinear_premultiplied(sampled.x, sampled.y));
 }
 
 /// Bulge: magnifies an elliptical region of the frame.
@@ -2567,6 +2667,71 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             }
         }
     }
+    #[test]
+    fn gpu_split_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU split parity test: no GPU adapter available");
+            return;
+        };
+        let width = 14_u32;
+        let height = 12_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.03 * (x + 2 * y) as f32;
+                pixels[y * width as usize + x] = [value, 0.35 + value * 0.5, 0.7 - value, 1.0];
+            }
+        }
+        pixels[19] = [0.0, 0.0, 0.0, 0.0];
+        pixels[92] = [2.5, -0.75, 1.25, 0.5];
+        for (point_a, point_b, split) in [
+            ([0.0_f32, 0.0], [13.0_f32, 0.0], 6.0_f32),
+            ([0.0, 6.0], [0.0, 11.0], 2.5),
+            ([0.3, 0.0], [13.3, 11.0], 3.5),
+        ] {
+            let grade =
+                mondrian_effects::SplitGrade::new(point_a, point_b, split).expect("split grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::split_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.split-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_split(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded split");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "split {point_a:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn gpu_bulge_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
