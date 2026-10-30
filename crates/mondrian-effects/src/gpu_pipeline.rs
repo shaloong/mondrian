@@ -102,6 +102,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored conversion parameters.
         grade: crate::PolarCoordinatesGrade,
     },
+    /// Camera lens flare added over the source frame.
+    LensFlare {
+        /// Authored flare parameters.
+        grade: crate::LensFlareGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -120,6 +125,7 @@ impl EffectGpuSpatialPass {
             Self::Convolution { .. } => "convolution",
             Self::Mirror { .. } => "mirror",
             Self::PolarCoordinates { .. } => "polar_coordinates",
+            Self::LensFlare { .. } => "lens_flare",
         }
     }
 
@@ -152,6 +158,8 @@ impl EffectGpuSpatialPass {
             | Self::Spherize { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
+            // A flare reads only the pixel it writes, so it needs no neighbour.
+            Self::LensFlare { .. } => 0,
         }
     }
 
@@ -178,6 +186,7 @@ impl EffectGpuSpatialPass {
             | Self::Spherize { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
+            Self::LensFlare { .. } => 0,
         }
     }
 }
@@ -442,6 +451,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Mirror { grade } => Some(EffectGpuSpatialPass::Mirror { grade: *grade }),
         EffectRenderOp::PolarCoordinates { grade } => {
             Some(EffectGpuSpatialPass::PolarCoordinates { grade: *grade })
+        }
+        EffectRenderOp::LensFlare { grade } => {
+            Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }
         _ => None,
     }

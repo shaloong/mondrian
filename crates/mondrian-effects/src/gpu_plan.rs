@@ -902,6 +902,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::RadialBlur { .. } => "radial_blur",
         EffectRenderOp::Mirror { .. } => "mirror",
         EffectRenderOp::PolarCoordinates { .. } => "polar_coordinates",
+        EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Convolution { .. } => "convolution",
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",

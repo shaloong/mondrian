@@ -76,6 +76,7 @@ pub use processor_residency::{
 pub mod bevel;
 pub mod brush_strokes;
 pub mod kaleidoscope;
+pub mod lens_flare;
 pub mod mirror;
 pub mod mosaic;
 pub mod motion_tile;
@@ -212,6 +213,10 @@ pub use invert::{invert_rgba_f32, InvertChannels};
 pub use kaleidoscope::{
     kaleidoscope_frame_f32, KaleidoscopeError, KaleidoscopeGrade, KALEIDOSCOPE_MAX_MIRRORING,
     KALEIDOSCOPE_MAX_SIZE, KALEIDOSCOPE_MIN_MIRRORING, KALEIDOSCOPE_MIN_SIZE,
+};
+pub use lens_flare::{
+    lens_flare_frame_f32, LensFlareError, LensFlareGrade, LensFlareType,
+    LENS_FLARE_MAX_BRIGHTNESS_PERCENT,
 };
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,

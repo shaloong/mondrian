@@ -921,6 +921,10 @@ pub enum EffectRenderOp {
     PolarCoordinates {
         grade: crate::PolarCoordinatesGrade,
     },
+    /// Lens flare: adds the flare of a camera lens over the source frame.
+    LensFlare {
+        grade: crate::LensFlareGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1127,6 +1131,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::PolarCoordinates { grade } => {
                 formatter.debug_struct("PolarCoordinates").field("grade", grade).finish()
+            }
+            Self::LensFlare { grade } => {
+                formatter.debug_struct("LensFlare").field("grade", grade).finish()
             }
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
@@ -1676,6 +1683,12 @@ impl EffectRenderOp {
                 grade.absolute_values().hash(state);
                 grade.blend_with_original().to_bits().hash(state);
             }
+            EffectRenderOp::LensFlare { grade } => {
+                52u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::PolarCoordinates { grade } => {
                 51u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -1866,6 +1879,7 @@ impl EffectRenderOp {
             EffectRenderOp::Mirror { .. } => 3,
             EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::PolarCoordinates { .. } => 3,
+            EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
@@ -2412,7 +2426,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 50] {
+fn builtin_effect_types() -> [EffectType; 51] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2464,6 +2478,7 @@ fn builtin_effect_types() -> [EffectType; 50] {
         EffectType::Noise,
         EffectType::Mirror,
         EffectType::PolarCoordinates,
+        EffectType::LensFlare,
     ]
 }
 
@@ -4442,6 +4457,77 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::LensFlare => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "镜头光晕",
+                "中心 X",
+                PropertyValue::Float(102.4),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "镜头光晕",
+                "中心 Y",
+                PropertyValue::Float(102.4),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "brightness",
+                "镜头光晕",
+                "光晕亮度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(f64::from(crate::LENS_FLARE_MAX_BRIGHTNESS_PERCENT)),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "镜头光晕",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "lens_type",
+                "镜头光晕",
+                "镜头类型",
+                "zoom_50_300",
+                vec![
+                    ParameterEnumOption::new(
+                        "zoom_50_300",
+                        "50-300mm 变焦",
+                        "mondrian.effect.lens_flare.lens_type.zoom_50_300",
+                    ),
+                    ParameterEnumOption::new(
+                        "prime_35",
+                        "35mm 定焦",
+                        "mondrian.effect.lens_flare.lens_type.prime_35",
+                    ),
+                    ParameterEnumOption::new(
+                        "prime_105",
+                        "105mm 定焦",
+                        "mondrian.effect.lens_flare.lens_type.prime_105",
+                    ),
+                ],
+            );
+        }
         EffectType::PolarCoordinates => {
             define_builtin_enum_property(
                 &mut properties,
@@ -5354,6 +5440,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::RadialBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::LensFlare => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -6863,6 +6954,49 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::LensFlare => {
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let brightness_id = builtin_parameter_id(effect_type, "brightness");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            let lens_id = builtin_parameter_id(effect_type, "lens_type");
+            Some(Arc::new(move |effect, context, graph| {
+                let lens = match effect.evaluate_parameter(&lens_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::LensFlareType::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("lens flare type {key} is not a declared option"),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "lens flare type must be an enum option".to_string(),
+                        })
+                    }
+                    None => crate::LensFlareType::Zoom50To300,
+                };
+                let grade = crate::LensFlareGrade::new(
+                    effect.evaluate_f32_parameter(&brightness_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&blend_id, context.time, 0.0) / 100.0,
+                    [
+                        effect.evaluate_f32_parameter(&centre_x_id, context.time, 102.4),
+                        effect.evaluate_f32_parameter(&centre_y_id, context.time, 102.4),
+                    ],
+                    lens,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::LensFlare { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::PolarCoordinates => {
             let conversion_id = builtin_parameter_id(effect_type, "conversion");
             let interpolation_id = builtin_parameter_id(effect_type, "interpolation");
@@ -7486,6 +7620,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Noise => "噪点",
         EffectType::Mirror => "镜像",
         EffectType::PolarCoordinates => "极坐标",
+        EffectType::LensFlare => "镜头光晕",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::External(_) => "外部效果",
@@ -8772,6 +8907,7 @@ mod tests {
             EffectType::Noise,
             EffectType::Mirror,
             EffectType::PolarCoordinates,
+            EffectType::LensFlare,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -12912,6 +13048,127 @@ mod tests {
             .expect("builds restored mirror graph");
         let grade = mirror_op(&graph).expect("mirror op");
         assert_eq!(grade.angle_degrees(), -12.0);
+    }
+
+    fn lens_flare_op(graph: &EffectRenderGraph) -> Option<crate::LensFlareGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::LensFlare { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::LensFlare { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_lens_flare(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::LensFlare)
+            .expect("lens flare effect should instantiate");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LensFlare.property_path(parameter),
+                value,
+            })
+            .expect("lens flare parameter should be assignable");
+        effect
+    }
+
+    #[test]
+    fn lens_flare_defaults_reach_the_operation() {
+        let effect = instantiate_effect_node(EffectType::LensFlare)
+            .expect("lens flare effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("default lens flare should compile");
+        let grade = lens_flare_op(&graph).expect("lens flare node should exist");
+        assert_eq!(grade.brightness(), 1.0);
+        assert_eq!(grade.blend_with_original(), 0.0);
+        assert_eq!(grade.centre(), [102.4, 102.4]);
+        assert_eq!(grade.lens(), crate::LensFlareType::Zoom50To300);
+    }
+
+    #[test]
+    fn lens_flare_authored_state_reaches_the_operation() {
+        let mut effect = author_lens_flare("brightness", PropertyValue::Float(250.0));
+        effect = {
+            let mutation = PropertyMutation::SetStaticValue {
+                path: EffectType::LensFlare.property_path("blend_with_original"),
+                value: PropertyValue::Float(25.0),
+            };
+            let mut node = effect;
+            node.apply_property_mutation(mutation).expect("blend assignable");
+            node
+        };
+        for (parameter, value) in [
+            ("centre_x", PropertyValue::Float(10.0)),
+            ("centre_y", PropertyValue::Float(20.0)),
+            ("lens_type", PropertyValue::Enum("prime_105".to_string())),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::LensFlare.property_path(parameter),
+                    value,
+                })
+                .expect("parameter assignable");
+        }
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("authored lens flare should compile");
+        let grade = lens_flare_op(&graph).expect("lens flare node should exist");
+        assert!((grade.brightness() - 2.5).abs() <= 1.0e-6);
+        assert!((grade.blend_with_original() - 0.25).abs() <= 1.0e-6);
+        assert_eq!(grade.centre(), [10.0, 20.0]);
+        assert_eq!(grade.lens(), crate::LensFlareType::Prime105);
+    }
+
+    #[test]
+    fn lens_flare_zero_brightness_compiles_to_identity() {
+        let effect = author_lens_flare("brightness", PropertyValue::Float(0.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("dark flare should compile");
+        assert!(lens_flare_op(&graph).is_none(), "a dark flare adds no node");
+        assert_eq!(graph.nodes.len(), 1, "only the source node remains");
+    }
+
+    #[test]
+    fn lens_flare_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::LensFlare)
+            .expect("lens flare effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LensFlare.property_path("brightness"),
+                value: PropertyValue::Float(301.0),
+            })
+            .expect_err("brightness above 300 percent must be rejected");
+        let _ = error;
+
+        let mut blending = instantiate_effect_node(EffectType::LensFlare)
+            .expect("lens flare effect should instantiate");
+        let error = blending
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LensFlare.property_path("blend_with_original"),
+                value: PropertyValue::Float(101.0),
+            })
+            .expect_err("blend above 100 percent must be rejected");
+        let _ = error;
+    }
+
+    #[test]
+    fn lens_flare_authored_state_survives_project_serialization_round_trip() {
+        let mut effect = author_lens_flare("brightness", PropertyValue::Float(175.0));
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LensFlare.property_path("lens_type"),
+                value: PropertyValue::Enum("prime_35".to_string()),
+            })
+            .expect("lens type assignable");
+        let encoded = serde_json::to_string(&effect).expect("effect should serialize");
+        let decoded: EffectNode =
+            serde_json::from_str(&encoded).expect("effect should deserialize");
+        let graph = build_effect_render_graph(&[decoded], tt(0), TEST_WORKING_SPACE)
+            .expect("restored lens flare should compile");
+        let grade = lens_flare_op(&graph).expect("lens flare node should exist");
+        assert!((grade.brightness() - 1.75).abs() <= 1.0e-6);
+        assert_eq!(grade.lens(), crate::LensFlareType::Prime35);
     }
 
     fn polar_coordinates_op(graph: &EffectRenderGraph) -> Option<crate::PolarCoordinatesGrade> {
