@@ -52,6 +52,7 @@ pub(crate) struct EffectSpatialGpu {
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
+    bulge: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
 }
@@ -453,6 +454,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let bulge = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.bulge"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_bulge"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -464,10 +495,46 @@ impl EffectSpatialGpu {
             mirror,
             polar_coordinates,
             lens_flare,
+            bulge,
             convolution,
             find_edges,
             bindings,
         }
+    }
+
+    /// Records the bulge magnification stage.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_bulge(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.bulge,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
     }
 
     /// Records the lens flare stage.
@@ -533,6 +600,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
+            EffectGpuSpatialPass::Bulge { .. } => Ok(1),
         }
     }
 
@@ -678,6 +746,20 @@ impl EffectSpatialGpu {
                     device,
                     encoder,
                     grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Bulge { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_bulge(
+                    device,
+                    encoder,
+                    params,
+                    extra,
                     source,
                     destination,
                     width,
@@ -1534,6 +1616,71 @@ fn sample_nearest_premultiplied(x: f32, y: f32) -> vec4<f32> {
     let limit = uniforms.size.xy - vec2<f32>(1.0);
     let rounded = clamp(vec2<f32>(floor(x + 0.5), floor(y + 0.5)), vec2<f32>(0.0), limit);
     return premultiply(load_clamped(vec2<i32>(rounded)));
+}
+
+/// Ellipse-normalised magnification for one bulge sample.
+fn bulge_magnification(distance: f32, height: f32, taper: f32, rim_pixels: f32) -> f32 {
+    let factor = exp2(height);
+    if (distance <= 1.0) {
+        let falloff = 1.0 - distance * distance;
+        return 1.0 + (factor - 1.0) * falloff * falloff;
+    }
+    if (taper <= 1.0e-6 || rim_pixels <= 1.0e-6) {
+        return 1.0;
+    }
+    let beyond = (distance - 1.0) * rim_pixels;
+    if (beyond >= taper) {
+        return 1.0;
+    }
+    let falloff = 1.0 - beyond / taper;
+    return 1.0 + (factor - 1.0) * falloff * falloff;
+}
+
+/// Maps one destination coordinate back into the source frame.
+fn bulge_sample_position(coordinate: vec2<f32>) -> vec2<f32> {
+    let centre = uniforms.params.xy;
+    let radius = vec2<f32>(max(uniforms.params.z, 1.0e-6), max(uniforms.params.w, 1.0e-6));
+    let height = uniforms.extra.x;
+    let taper = uniforms.extra.y;
+    let pinned = uniforms.extra.w > 0.5;
+    let delta = coordinate - centre;
+    let normalized = delta / radius;
+    let distance = length(normalized);
+    if (distance <= 1.0e-6) {
+        return coordinate;
+    }
+    if (pinned && distance > 1.0) {
+        return centre + normalized / distance * radius;
+    }
+    let rim = min(radius.x, radius.y);
+    let magnification = max(bulge_magnification(distance, height, taper, rim), 1.0e-6);
+    return centre + delta / magnification;
+}
+
+/// Bulge: magnifies an elliptical region of the frame.
+@fragment
+fn fs_bulge(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = position.xy - vec2<f32>(0.5);
+    let antialias = uniforms.extra.z > 0.5;
+    let offsets = array<vec2<f32>, 4>(
+        vec2<f32>(-0.25, -0.25),
+        vec2<f32>(0.25, -0.25),
+        vec2<f32>(-0.25, 0.25),
+        vec2<f32>(0.25, 0.25),
+    );
+    var accumulated = vec4<f32>(0.0);
+    var taps = 1.0;
+    if (antialias) {
+        taps = 4.0;
+        for (var index = 0; index < 4; index = index + 1) {
+            let sampled = bulge_sample_position(pixel + offsets[index]);
+            accumulated += sample_bilinear_premultiplied(sampled.x, sampled.y);
+        }
+    } else {
+        let sampled = bulge_sample_position(pixel);
+        accumulated = sample_bilinear_premultiplied(sampled.x, sampled.y);
+    }
+    return unpremultiply(accumulated / taps);
 }
 
 /// Ghost position along the light-centre axis for one lens preset.
@@ -2421,6 +2568,85 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         }
     }
     #[test]
+    fn gpu_bulge_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU bulge parity test: no GPU adapter available");
+            return;
+        };
+        let width = 13_u32;
+        let height = 11_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.05 * (x + y) as f32;
+                pixels[y * width as usize + x] = [value, 0.4 - value * 0.3, value * 1.2, 1.0];
+            }
+        }
+        pixels[17] = [0.0, 0.0, 0.0, 0.0];
+        pixels[63] = [2.5, -0.75, 1.25, 0.5];
+        for (radius, centre, height_value, taper, antialias, pinned) in [
+            (
+                [3.5_f32, 3.0],
+                [6.0_f32, 5.0],
+                1.0_f32,
+                0.0_f32,
+                false,
+                false,
+            ),
+            ([5.0, 2.0], [3.0, 7.0], -1.5, 2.0, true, false),
+            ([4.0, 4.0], [10.0, 9.0], 2.0, 0.0, false, true),
+        ] {
+            let grade = mondrian_effects::BulgeGrade::new(
+                radius,
+                centre,
+                height_value,
+                taper,
+                antialias,
+                pinned,
+            )
+            .expect("bulge grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::bulge_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.bulge-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_bulge(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded bulge");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "bulge {radius:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn gpu_lens_flare_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
             eprintln!("skipping GPU lens flare parity test: no GPU adapter available");
@@ -2500,6 +2726,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         }
     }
 
+    #[test]
     fn gpu_polar_coordinates_match_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
             eprintln!("skipping GPU polar coordinates parity test: no GPU adapter available");
