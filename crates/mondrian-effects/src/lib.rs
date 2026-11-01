@@ -31,6 +31,7 @@ pub mod coverage;
 pub mod deband;
 pub mod directional_blur;
 pub mod drop_shadow;
+pub mod echo;
 pub mod effect;
 pub mod emboss;
 pub mod find_edges;
@@ -406,6 +407,12 @@ pub use directional_blur::{
 pub use drop_shadow::{
     DropShadowError, DropShadowGrade, DROP_SHADOW_AUTHOR_MAX_DISTANCE_PIXELS,
     DROP_SHADOW_AUTHOR_MAX_OPACITY, DROP_SHADOW_AUTHOR_MAX_SOFTNESS_PIXELS,
+};
+pub use echo::{
+    echo_offset, EchoError, EchoGrade, EchoOperator, EchoTap, ECHO_AUTHOR_MAX_COUNT,
+    ECHO_DEFAULT_COUNT, ECHO_DEFAULT_DECAY_PERCENT, ECHO_DEFAULT_STARTING_INTENSITY,
+    ECHO_DEFAULT_TIME_SECONDS, ECHO_MAX_DECAY_PERCENT, ECHO_MAX_TAPS, ECHO_MAX_TIME_SECONDS,
+    ECHO_OPERATOR_COUNT, ECHO_TIMESCALE,
 };
 pub use emboss::{
     EmbossError, EmbossGrade, EMBOSS_HALO_PIXELS, EMBOSS_MAX_CONTRAST_PERCENT, EMBOSS_MAX_RELIEF,

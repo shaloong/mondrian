@@ -2700,7 +2700,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 70] {
+fn builtin_effect_types() -> [EffectType; 71] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2772,6 +2772,7 @@ fn builtin_effect_types() -> [EffectType; 70] {
         EffectType::Glow,
         EffectType::FractalNoise,
         EffectType::Keylight,
+        EffectType::Echo,
     ]
 }
 
@@ -7431,6 +7432,72 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::Echo => {
+            for (parameter, name, value, minimum, maximum, step) in [
+                (
+                    "echo_time",
+                    "残影时间",
+                    crate::ECHO_DEFAULT_TIME_SECONDS,
+                    -f64::from(crate::ECHO_MAX_TIME_SECONDS),
+                    f64::from(crate::ECHO_MAX_TIME_SECONDS),
+                    0.0001,
+                ),
+                (
+                    "echo_count",
+                    "数量",
+                    crate::ECHO_DEFAULT_COUNT as f32,
+                    0.0,
+                    f64::from(crate::ECHO_MAX_TAPS),
+                    1.0,
+                ),
+                (
+                    "starting_intensity",
+                    "起始强度",
+                    crate::ECHO_DEFAULT_STARTING_INTENSITY,
+                    0.0,
+                    1.0,
+                    0.01,
+                ),
+                (
+                    "decay",
+                    "衰减",
+                    crate::ECHO_DEFAULT_DECAY_PERCENT,
+                    0.0,
+                    f64::from(crate::ECHO_MAX_DECAY_PERCENT),
+                    0.1,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "残影",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "operator",
+                "残影",
+                "运算符",
+                crate::EchoOperator::Add.as_key(),
+                crate::EchoOperator::ALL
+                    .into_iter()
+                    .map(|operator| {
+                        ParameterEnumOption::new(
+                            operator.as_key(),
+                            operator.label(),
+                            format!("mondrian.effect.echo.operator.{}", operator.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -7773,7 +7840,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
     } else if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
         if matches!(
             effect_type,
-            EffectType::Qualifier | EffectType::LumaKey | EffectType::ChromaKey
+            EffectType::Qualifier | EffectType::LumaKey | EffectType::ChromaKey | EffectType::Echo
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -7974,6 +8041,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::Keylight => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Echo => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            temporal_input: EffectTemporalInputExtent::UNBOUNDED,
+            topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
         EffectType::ColorOffset => EffectExecutionContract {
@@ -11608,6 +11681,77 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Echo => {
+            let echo_time_id = builtin_parameter_id(effect_type, "echo_time");
+            let echo_count_id = builtin_parameter_id(effect_type, "echo_count");
+            let starting_intensity_id = builtin_parameter_id(effect_type, "starting_intensity");
+            let decay_id = builtin_parameter_id(effect_type, "decay");
+            let operator_id = builtin_parameter_id(effect_type, "operator");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let operator = match effect.evaluate_parameter(&operator_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::EchoOperator::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("echo operator {key} is not a declared option"))
+                        })?,
+                    Some(_) => return Err(invalid("echo operator must be an enum".to_owned())),
+                    None => crate::EchoOperator::Add,
+                };
+                let authored_count = effect.evaluate_f32_parameter(
+                    &echo_count_id,
+                    context.time,
+                    crate::ECHO_DEFAULT_COUNT as f32,
+                );
+                let count = if authored_count.is_finite() && authored_count > 0.0 {
+                    authored_count.round() as u32
+                } else {
+                    0
+                };
+                let grade = crate::EchoGrade::new(
+                    effect.evaluate_f32_parameter(
+                        &echo_time_id,
+                        context.time,
+                        crate::ECHO_DEFAULT_TIME_SECONDS,
+                    ),
+                    count,
+                    effect.evaluate_f32_parameter(
+                        &starting_intensity_id,
+                        context.time,
+                        crate::ECHO_DEFAULT_STARTING_INTENSITY,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &decay_id,
+                        context.time,
+                        crate::ECHO_DEFAULT_DECAY_PERCENT,
+                    ),
+                    operator,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                let taps = grade.taps();
+                if taps.is_empty() {
+                    return Ok(());
+                }
+                let source = graph.current_output();
+                let mut accumulated = source;
+                for tap in taps {
+                    let sampled = graph.add_unary_from(
+                        source,
+                        EffectRenderOp::TemporalFrameBlend {
+                            sample_offset: tap.offset(),
+                            mix: 1.0,
+                        },
+                    );
+                    accumulated =
+                        graph.add_blend(accumulated, sampled, operator.blend_mode(), tap.weight());
+                }
+                graph.set_current_output(accumulated);
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -11684,6 +11828,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Glow => "发光",
         EffectType::FractalNoise => "分形噪波",
         EffectType::Keylight => "专业抠像",
+        EffectType::Echo => "残影",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -12988,6 +13133,7 @@ mod tests {
             EffectType::Glow,
             EffectType::FractalNoise,
             EffectType::Keylight,
+            EffectType::Echo,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -19310,6 +19456,165 @@ mod tests {
         assert_eq!(grade.screen_gain(), 1.4);
         assert_eq!(grade.edge_feather(), 6.0);
         assert_eq!(grade.display(), crate::KeylightDisplay::Background);
+    }
+
+    fn echo_sample_offsets(graph: &EffectRenderGraph) -> Vec<f64> {
+        graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::TemporalFrameBlend { sample_offset, .. },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::TemporalFrameBlend { sample_offset, .. },
+                    ..
+                } => Some(sample_offset.to_f64()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn echo_blend_steps(graph: &EffectRenderGraph) -> Vec<(mondrian_core::BlendMode, f32)> {
+        graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                EffectGraphNodeKind::Blend { blend_mode, opacity, .. } => {
+                    Some((*blend_mode, *opacity))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn author_echo(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Echo).expect("the echo effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Echo.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the echo parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn echo_defaults_compile_to_one_past_sample() {
+        let effect =
+            instantiate_effect_node(EffectType::Echo).expect("the echo effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default echo should compile");
+        let offsets = echo_sample_offsets(&graph);
+        assert_eq!(offsets.len(), 1, "{offsets:?}");
+        let expected = f64::from(crate::ECHO_DEFAULT_TIME_SECONDS);
+        assert!((offsets[0] - expected).abs() < 1e-6, "{}", offsets[0]);
+        assert!(offsets[0] < 0.0, "the default echo samples the past");
+        assert_eq!(
+            echo_blend_steps(&graph),
+            vec![(mondrian_core::BlendMode::LinearDodge, 1.0)]
+        );
+    }
+
+    #[test]
+    fn echo_authored_trail_reaches_the_graph() {
+        let effect = author_echo(&[
+            ("echo_time", PropertyValue::Float(-0.04)),
+            ("echo_count", PropertyValue::Float(3.0)),
+            ("starting_intensity", PropertyValue::Float(0.8)),
+            ("decay", PropertyValue::Float(50.0)),
+            ("operator", PropertyValue::Enum("screen".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored echo should compile");
+        let offsets = echo_sample_offsets(&graph);
+        assert_eq!(offsets.len(), 3, "{offsets:?}");
+        for (index, offset) in offsets.iter().enumerate() {
+            let expected = -0.04 * (index as f64 + 1.0);
+            assert!((offset - expected).abs() < 1e-9, "{offset} vs {expected}");
+        }
+        let steps = echo_blend_steps(&graph);
+        assert_eq!(steps.len(), 3);
+        assert!(steps.iter().all(|(mode, _)| *mode == mondrian_core::BlendMode::Screen));
+        assert!((steps[0].1 - 0.8).abs() < 1e-7, "{}", steps[0].1);
+        assert!((steps[1].1 - 0.4).abs() < 1e-7, "{}", steps[1].1);
+        assert!((steps[2].1 - 0.2).abs() < 1e-7, "{}", steps[2].1);
+    }
+
+    #[test]
+    fn echo_zero_time_compiles_to_no_sample() {
+        let effect = author_echo(&[
+            ("echo_time", PropertyValue::Float(0.0)),
+            ("echo_count", PropertyValue::Float(4.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a still echo should compile");
+        assert!(echo_sample_offsets(&graph).is_empty());
+        assert!(echo_blend_steps(&graph).is_empty());
+    }
+
+    #[test]
+    fn echo_authoring_ranges_fail_closed() {
+        for (parameter, value, expected) in [
+            ("echo_count", PropertyValue::Float(33.0), "outside [0, 32]"),
+            (
+                "echo_time",
+                PropertyValue::Float(30_001.0),
+                "outside [-30000, 30000]",
+            ),
+            (
+                "starting_intensity",
+                PropertyValue::Float(1.5),
+                "outside [0, 1]",
+            ),
+            ("decay", PropertyValue::Float(101.0), "outside [0, 100]"),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::Echo)
+                .expect("the echo effect should instantiate");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Echo.property_path(parameter),
+                    value,
+                })
+                .expect_err("an out-of-range echo value must be rejected");
+            let rendered = format!("{error:?}");
+            assert!(rendered.contains(expected), "{parameter}: {rendered}");
+        }
+        let mut effect =
+            instantiate_effect_node(EffectType::Echo).expect("the echo effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Echo.property_path("operator"),
+                value: PropertyValue::Enum("ghost".to_string()),
+            })
+            .expect_err("an undeclared operator key must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("unknown enum key `ghost`"), "{rendered}");
+    }
+
+    #[test]
+    fn echo_authored_state_round_trips_through_serialization() {
+        let effect = author_echo(&[
+            ("echo_time", PropertyValue::Float(-0.5)),
+            ("echo_count", PropertyValue::Float(2.0)),
+            ("starting_intensity", PropertyValue::Float(0.6)),
+            ("decay", PropertyValue::Float(25.0)),
+            ("operator", PropertyValue::Enum("multiply".to_string())),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the restored echo should compile");
+        assert_eq!(echo_sample_offsets(&graph).len(), 2);
+        assert_eq!(
+            echo_blend_steps(&graph)[0].0,
+            mondrian_core::BlendMode::Multiply
+        );
     }
 
     fn ramp_op(graph: &EffectRenderGraph) -> Option<crate::RampGrade> {
