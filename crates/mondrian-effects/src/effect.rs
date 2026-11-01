@@ -961,6 +961,10 @@ pub enum EffectRenderOp {
     FractalNoise {
         grade: crate::FractalNoiseGrade,
     },
+    /// Keylight: pulls a matte from a screen colour and despills the spill.
+    Keylight {
+        grade: crate::KeylightGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1231,6 +1235,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Glow { grade } => formatter.debug_struct("Glow").field("grade", grade).finish(),
             Self::FractalNoise { grade } => {
                 formatter.debug_struct("FractalNoise").field("grade", grade).finish()
+            }
+            Self::Keylight { grade } => {
+                formatter.debug_struct("Keylight").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1921,6 +1928,10 @@ impl EffectRenderOp {
                 70u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::Keylight { grade } => {
+                71u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2133,6 +2144,7 @@ impl EffectRenderOp {
             EffectRenderOp::Ramp { .. } => 1,
             EffectRenderOp::Glow { .. } => 4,
             EffectRenderOp::FractalNoise { .. } => 5,
+            EffectRenderOp::Keylight { .. } => 5,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2688,7 +2700,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 69] {
+fn builtin_effect_types() -> [EffectType; 70] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2759,6 +2771,7 @@ fn builtin_effect_types() -> [EffectType; 69] {
         EffectType::Ramp,
         EffectType::Glow,
         EffectType::FractalNoise,
+        EffectType::Keylight,
     ]
 }
 
@@ -7262,6 +7275,162 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Keylight => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "screen_color",
+                "抠像",
+                "屏幕色",
+                PropertyValue::Color(Color {
+                    r: crate::KEYLIGHT_DEFAULT_SCREEN_COLOR[0],
+                    g: crate::KEYLIGHT_DEFAULT_SCREEN_COLOR[1],
+                    b: crate::KEYLIGHT_DEFAULT_SCREEN_COLOR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            for (parameter, name, value, minimum, maximum, step) in [
+                (
+                    "screen_gain",
+                    "屏幕增益",
+                    crate::KEYLIGHT_DEFAULT_SCREEN_GAIN,
+                    0.0,
+                    crate::KEYLIGHT_AUTHOR_MAX_SCREEN_GAIN as f64,
+                    0.01,
+                ),
+                (
+                    "screen_balance",
+                    "屏幕平衡",
+                    crate::KEYLIGHT_DEFAULT_SCREEN_BALANCE,
+                    0.0,
+                    1.0,
+                    0.01,
+                ),
+                (
+                    "despill",
+                    "去溢色",
+                    crate::KEYLIGHT_DEFAULT_DESPILL,
+                    0.0,
+                    crate::KEYLIGHT_AUTHOR_MAX_DESPILL as f64,
+                    0.01,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "抠像",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "despill_bias",
+                "抠像",
+                "去溢色偏差",
+                PropertyValue::Color(Color {
+                    r: crate::KEYLIGHT_DEFAULT_DESPILL_BIAS[0],
+                    g: crate::KEYLIGHT_DEFAULT_DESPILL_BIAS[1],
+                    b: crate::KEYLIGHT_DEFAULT_DESPILL_BIAS[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            for (parameter, name, value, minimum, maximum, step) in [
+                (
+                    "inner_matte",
+                    "内部遮罩",
+                    crate::KEYLIGHT_DEFAULT_INNER_MATTE,
+                    0.0,
+                    crate::KEYLIGHT_AUTHOR_MAX_MATTE_PERCENT as f64,
+                    0.1,
+                ),
+                (
+                    "outer_matte",
+                    "外部遮罩",
+                    crate::KEYLIGHT_DEFAULT_OUTER_MATTE,
+                    0.0,
+                    crate::KEYLIGHT_AUTHOR_MAX_MATTE_PERCENT as f64,
+                    0.1,
+                ),
+                (
+                    "preblur",
+                    "预模糊",
+                    crate::KEYLIGHT_DEFAULT_PREBLUR_PIXELS,
+                    0.0,
+                    crate::KEYLIGHT_AUTHOR_MAX_PREBLUR_PIXELS as f64,
+                    0.1,
+                ),
+                (
+                    "edge_shrink",
+                    "边缘收缩",
+                    crate::KEYLIGHT_DEFAULT_EDGE_SHRINK_PIXELS,
+                    0.0,
+                    crate::KEYLIGHT_AUTHOR_MAX_EDGE_SHRINK_PIXELS as f64,
+                    1.0,
+                ),
+                (
+                    "edge_feather",
+                    "边缘羽化",
+                    crate::KEYLIGHT_DEFAULT_EDGE_FEATHER_PIXELS,
+                    0.0,
+                    crate::KEYLIGHT_AUTHOR_MAX_EDGE_FEATHER_PIXELS as f64,
+                    0.1,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "抠像",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "display",
+                "抠像",
+                "显示",
+                crate::KeylightDisplay::Final.key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "final",
+                        "最终",
+                        "mondrian.effect.keylight.display.final",
+                    ),
+                    ParameterEnumOption::new(
+                        "matte",
+                        "遮罩",
+                        "mondrian.effect.keylight.display.matte",
+                    ),
+                    ParameterEnumOption::new(
+                        "foreground",
+                        "前景",
+                        "mondrian.effect.keylight.display.foreground",
+                    ),
+                    ParameterEnumOption::new(
+                        "background",
+                        "背景",
+                        "mondrian.effect.keylight.display.background",
+                    ),
+                ],
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -7574,6 +7743,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::FractalNoise, "rotation" | "sub_rotation" | "evolution") => {
             ParameterUnit::Degrees
         }
+        (EffectType::Keylight, "preblur" | "edge_shrink" | "edge_feather") => ParameterUnit::Pixels,
+        (EffectType::Keylight, "inner_matte" | "outer_matte") => ParameterUnit::Percent,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -7796,6 +7967,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::FractalNoise => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Keylight => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -11336,6 +11512,102 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Keylight => {
+            let screen_color_id = builtin_parameter_id(effect_type, "screen_color");
+            let screen_gain_id = builtin_parameter_id(effect_type, "screen_gain");
+            let screen_balance_id = builtin_parameter_id(effect_type, "screen_balance");
+            let despill_id = builtin_parameter_id(effect_type, "despill");
+            let despill_bias_id = builtin_parameter_id(effect_type, "despill_bias");
+            let inner_matte_id = builtin_parameter_id(effect_type, "inner_matte");
+            let outer_matte_id = builtin_parameter_id(effect_type, "outer_matte");
+            let preblur_id = builtin_parameter_id(effect_type, "preblur");
+            let edge_shrink_id = builtin_parameter_id(effect_type, "edge_shrink");
+            let edge_feather_id = builtin_parameter_id(effect_type, "edge_feather");
+            let display_id = builtin_parameter_id(effect_type, "display");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let colour = |parameter_id: &ParameterId,
+                              name: &str,
+                              fallback: [f32; 3]|
+                 -> Result<[f32; 3], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Color(colour)) => Ok([colour.r, colour.g, colour.b]),
+                        Some(_) => Err(invalid(format!("keylight {name} must be a colour"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let display = match effect.evaluate_parameter(&display_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::KeylightDisplay::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("keylight display {key} is not a declared option"))
+                        })?,
+                    Some(_) => return Err(invalid("keylight display must be an enum".to_owned())),
+                    None => crate::KeylightDisplay::Final,
+                };
+                let grade = crate::KeylightGrade::new(
+                    colour(
+                        &screen_color_id,
+                        "screen colour",
+                        crate::KEYLIGHT_DEFAULT_SCREEN_COLOR,
+                    )?,
+                    effect.evaluate_f32_parameter(
+                        &screen_gain_id,
+                        context.time,
+                        crate::KEYLIGHT_DEFAULT_SCREEN_GAIN,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &screen_balance_id,
+                        context.time,
+                        crate::KEYLIGHT_DEFAULT_SCREEN_BALANCE,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &despill_id,
+                        context.time,
+                        crate::KEYLIGHT_DEFAULT_DESPILL,
+                    ),
+                    colour(
+                        &despill_bias_id,
+                        "despill bias",
+                        crate::KEYLIGHT_DEFAULT_DESPILL_BIAS,
+                    )?,
+                    effect.evaluate_f32_parameter(
+                        &inner_matte_id,
+                        context.time,
+                        crate::KEYLIGHT_DEFAULT_INNER_MATTE,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &outer_matte_id,
+                        context.time,
+                        crate::KEYLIGHT_DEFAULT_OUTER_MATTE,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &preblur_id,
+                        context.time,
+                        crate::KEYLIGHT_DEFAULT_PREBLUR_PIXELS,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &edge_shrink_id,
+                        context.time,
+                        crate::KEYLIGHT_DEFAULT_EDGE_SHRINK_PIXELS,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &edge_feather_id,
+                        context.time,
+                        crate::KEYLIGHT_DEFAULT_EDGE_FEATHER_PIXELS,
+                    ),
+                    display,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Keylight { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -11411,6 +11683,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Ramp => "渐变",
         EffectType::Glow => "发光",
         EffectType::FractalNoise => "分形噪波",
+        EffectType::Keylight => "专业抠像",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -12714,6 +12987,7 @@ mod tests {
             EffectType::Ramp,
             EffectType::Glow,
             EffectType::FractalNoise,
+            EffectType::Keylight,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -18871,6 +19145,171 @@ mod tests {
         assert_eq!(grade.overflow(), crate::FractalOverflow::Wrap);
         assert_eq!(grade.complexity(), 3);
         assert_eq!(grade.blend_mode(), mondrian_core::BlendMode::Multiply);
+    }
+
+    fn keylight_op(graph: &EffectRenderGraph) -> Option<crate::KeylightGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Keylight { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Keylight { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_keylight(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Keylight)
+            .expect("the keylight effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Keylight.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the keylight parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn keylight_defaults_compile_to_the_documented_operation() {
+        let effect = instantiate_effect_node(EffectType::Keylight)
+            .expect("the keylight effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default keylight should compile");
+        let grade = keylight_op(&graph).expect("the default grade emits a node");
+        assert_eq!(grade.screen_color(), [0.0, 1.0, 0.0]);
+        assert_eq!(grade.screen_gain(), 1.0);
+        assert_eq!(grade.screen_balance(), 0.5);
+        assert_eq!(grade.despill(), 1.0);
+        assert_eq!(grade.despill_bias(), [0.5, 0.5, 0.5]);
+        assert_eq!(grade.inner_matte(), 0.0);
+        assert_eq!(grade.outer_matte(), 100.0);
+        assert_eq!(grade.preblur(), 0.0);
+        assert_eq!(grade.edge_shrink(), 0.0);
+        assert_eq!(grade.edge_feather(), 0.0);
+        assert_eq!(grade.display(), crate::KeylightDisplay::Final);
+        assert_eq!(grade.key_channel(), 1);
+    }
+
+    #[test]
+    fn keylight_defaults_compile_to_a_non_identity_operation() {
+        // A live key with the default gain is a real operation, so the default
+        // grade must not be elided by the builder.
+        let effect = instantiate_effect_node(EffectType::Keylight)
+            .expect("the keylight effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default keylight should compile");
+        let grade = keylight_op(&graph).expect("the default grade emits a node");
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn keylight_authored_configuration_reaches_the_operation() {
+        let effect = author_keylight(&[
+            (
+                "screen_color",
+                PropertyValue::Color(Color { r: 0.0, g: 0.2, b: 0.9, a: 1.0 }),
+            ),
+            ("screen_gain", PropertyValue::Float(2.5)),
+            ("screen_balance", PropertyValue::Float(0.25)),
+            ("despill", PropertyValue::Float(1.5)),
+            (
+                "despill_bias",
+                PropertyValue::Color(Color { r: 0.1, g: 0.75, b: 0.3, a: 1.0 }),
+            ),
+            ("inner_matte", PropertyValue::Float(20.0)),
+            ("outer_matte", PropertyValue::Float(80.0)),
+            ("preblur", PropertyValue::Float(3.0)),
+            ("edge_shrink", PropertyValue::Float(2.0)),
+            ("edge_feather", PropertyValue::Float(4.0)),
+            ("display", PropertyValue::Enum("matte".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = keylight_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.screen_color(), [0.0, 0.2, 0.9]);
+        assert_eq!(grade.key_channel(), 2);
+        assert_eq!(grade.screen_gain(), 2.5);
+        assert_eq!(grade.screen_balance(), 0.25);
+        assert_eq!(grade.despill(), 1.5);
+        assert_eq!(grade.despill_bias(), [0.1, 0.75, 0.3]);
+        assert_eq!(grade.inner_matte(), 20.0);
+        assert_eq!(grade.outer_matte(), 80.0);
+        assert_eq!(grade.preblur(), 3.0);
+        assert_eq!(grade.edge_shrink(), 2.0);
+        assert_eq!(grade.shrink_radius(), 2);
+        assert_eq!(grade.edge_feather(), 4.0);
+        assert_eq!(grade.display(), crate::KeylightDisplay::Matte);
+    }
+
+    #[test]
+    fn keylight_disabled_key_compiles_to_no_node() {
+        // A zero gain keys nothing out, and the remaining defaults change
+        // nothing else, so the builder elides the operation.
+        let effect = author_keylight(&[
+            ("screen_gain", PropertyValue::Float(0.0)),
+            ("despill", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity grade should compile");
+        assert!(keylight_op(&graph).is_none());
+    }
+
+    #[test]
+    fn keylight_undeclared_keys_fail_closed() {
+        assert_eq!(crate::KeylightDisplay::from_key("mystery"), None);
+        assert_eq!(crate::KeylightDisplay::from_menu(5), None);
+        assert_eq!(
+            crate::KeylightDisplay::from_key("background"),
+            Some(crate::KeylightDisplay::Background)
+        );
+        let mut effect = instantiate_effect_node(EffectType::Keylight)
+            .expect("the keylight effect should instantiate");
+        // The enum contract rejects the key before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Keylight.property_path("display"),
+                value: PropertyValue::Enum("mystery".to_string()),
+            })
+            .expect_err("an undeclared display key must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("unknown enum key `mystery`"),
+            "{rendered}"
+        );
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Keylight.property_path("screen_gain"),
+                value: PropertyValue::Float(11.0),
+            })
+            .expect_err("an out-of-range screen gain must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 10]"), "{rendered}");
+    }
+
+    #[test]
+    fn keylight_authored_state_round_trips_through_serialization() {
+        let effect = author_keylight(&[
+            (
+                "screen_color",
+                PropertyValue::Color(Color { r: 0.1, g: 0.2, b: 0.9, a: 1.0 }),
+            ),
+            ("screen_gain", PropertyValue::Float(1.4)),
+            ("edge_feather", PropertyValue::Float(6.0)),
+            ("display", PropertyValue::Enum("background".to_string())),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the restored keylight should compile");
+        let grade = keylight_op(&graph).expect("the restored grade emits a node");
+        assert_eq!(grade.screen_color(), [0.1, 0.2, 0.9]);
+        assert_eq!(grade.key_channel(), 2);
+        assert_eq!(grade.screen_gain(), 1.4);
+        assert_eq!(grade.edge_feather(), 6.0);
+        assert_eq!(grade.display(), crate::KeylightDisplay::Background);
     }
 
     fn ramp_op(graph: &EffectRenderGraph) -> Option<crate::RampGrade> {

@@ -933,6 +933,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Deband { .. } => "deband",
         EffectRenderOp::Glow { .. } => "glow",
         EffectRenderOp::FractalNoise { .. } => "fractal_noise",
+        EffectRenderOp::Keylight { .. } => "keylight",
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",

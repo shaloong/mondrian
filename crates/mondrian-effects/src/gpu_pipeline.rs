@@ -155,6 +155,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored fractal shape, noise interpolation, domain, and compositing.
         grade: crate::FractalNoiseGrade,
     },
+    Keylight {
+        /// Authored screen colour, matte remap, despill, and matte morphology.
+        grade: crate::KeylightGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -191,6 +195,7 @@ impl EffectGpuSpatialPass {
             Self::Deband { .. } => "deband",
             Self::Glow { .. } => "glow",
             Self::FractalNoise { .. } => "fractal_noise",
+            Self::Keylight { .. } => "keylight",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -239,6 +244,7 @@ impl EffectGpuSpatialPass {
             Self::Deband { .. } => u32::MAX,
             Self::Glow { .. } => u32::MAX,
             Self::FractalNoise { .. } => u32::MAX,
+            Self::Keylight { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -280,6 +286,7 @@ impl EffectGpuSpatialPass {
             Self::Deband { .. } => u32::MAX,
             Self::Glow { .. } => u32::MAX,
             Self::FractalNoise { .. } => u32::MAX,
+            Self::Keylight { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -571,6 +578,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Glow { grade } => Some(EffectGpuSpatialPass::Glow { grade: *grade }),
         EffectRenderOp::FractalNoise { grade } => {
             Some(EffectGpuSpatialPass::FractalNoise { grade: *grade })
+        }
+        EffectRenderOp::Keylight { grade } => {
+            Some(EffectGpuSpatialPass::Keylight { grade: *grade })
         }
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
