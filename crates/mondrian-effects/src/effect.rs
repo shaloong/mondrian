@@ -941,6 +941,10 @@ pub enum EffectRenderOp {
     CornerPin {
         grade: crate::CornerPinGrade,
     },
+    /// Turbulent displace: warps the frame with a fractal value-noise field.
+    TurbulentDisplace {
+        grade: crate::TurbulentDisplaceGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1200,6 +1204,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::CornerPin { grade } => {
                 formatter.debug_struct("CornerPin").field("grade", grade).finish()
+            }
+            Self::TurbulentDisplace { grade } => {
+                formatter.debug_struct("TurbulentDisplace").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1861,6 +1868,13 @@ impl EffectRenderOp {
                 65u8.hash(state);
                 grade.corners().map(|corner| corner.map(f32::to_bits)).hash(state);
             }
+            EffectRenderOp::TurbulentDisplace { grade } => {
+                66u8.hash(state);
+                let (params, extra, aces) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+                aces.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2068,6 +2082,7 @@ impl EffectRenderOp {
             EffectRenderOp::WaveWarp { .. } => 3,
             EffectRenderOp::Transform { .. } => 4,
             EffectRenderOp::CornerPin { .. } => 4,
+            EffectRenderOp::TurbulentDisplace { .. } => 5,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2623,7 +2638,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 64] {
+fn builtin_effect_types() -> [EffectType; 65] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2689,6 +2704,7 @@ fn builtin_effect_types() -> [EffectType; 64] {
         EffectType::Levels,
         EffectType::Transform,
         EffectType::CornerPin,
+        EffectType::TurbulentDisplace,
     ]
 }
 
@@ -5740,6 +5756,248 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.001),
             );
         }
+        EffectType::TurbulentDisplace => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "displacement",
+                "湍流置换",
+                "置换",
+                crate::DisplacementType::Turbulent.as_key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "turbulent",
+                        "湍流",
+                        "mondrian.effect.turbulent_displace.displacement.turbulent",
+                    ),
+                    ParameterEnumOption::new(
+                        "bulge",
+                        "凸出",
+                        "mondrian.effect.turbulent_displace.displacement.bulge",
+                    ),
+                    ParameterEnumOption::new(
+                        "twist",
+                        "扭转",
+                        "mondrian.effect.turbulent_displace.displacement.twist",
+                    ),
+                    ParameterEnumOption::new(
+                        "turbulent_smoother",
+                        "湍流较平滑",
+                        "mondrian.effect.turbulent_displace.displacement.turbulent_smoother",
+                    ),
+                    ParameterEnumOption::new(
+                        "bulge_smoother",
+                        "凸出较平滑",
+                        "mondrian.effect.turbulent_displace.displacement.bulge_smoother",
+                    ),
+                    ParameterEnumOption::new(
+                        "twist_smoother",
+                        "扭转较平滑",
+                        "mondrian.effect.turbulent_displace.displacement.twist_smoother",
+                    ),
+                    ParameterEnumOption::new(
+                        "vertical",
+                        "垂直置换",
+                        "mondrian.effect.turbulent_displace.displacement.vertical",
+                    ),
+                    ParameterEnumOption::new(
+                        "horizontal",
+                        "水平置换",
+                        "mondrian.effect.turbulent_displace.displacement.horizontal",
+                    ),
+                    ParameterEnumOption::new(
+                        "cross",
+                        "交叉置换",
+                        "mondrian.effect.turbulent_displace.displacement.cross",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "amount",
+                "湍流置换",
+                "数量",
+                PropertyValue::Float(50.0),
+                Some(crate::TURBULENT_MIN_AMOUNT as f64),
+                Some(crate::TURBULENT_MAX_AMOUNT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "size",
+                "湍流置换",
+                "大小",
+                PropertyValue::Float(100.0),
+                Some(crate::TURBULENT_MIN_SIZE as f64),
+                Some(crate::TURBULENT_MAX_SIZE as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "offset_x",
+                "湍流置换",
+                "偏移 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "offset_y",
+                "湍流置换",
+                "偏移 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "complexity",
+                "湍流置换",
+                "复杂度",
+                PropertyValue::Int(1),
+                Some(crate::TURBULENT_MIN_COMPLEXITY as f64),
+                Some(crate::TURBULENT_MAX_COMPLEXITY as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "evolution",
+                "湍流置换",
+                "演化",
+                PropertyValue::Float(0.0),
+                None,
+                None,
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle_evolution",
+                "湍流置换",
+                "循环演化",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle",
+                "湍流置换",
+                "循环",
+                PropertyValue::Int(1),
+                Some(crate::TURBULENT_MIN_CYCLE as f64),
+                Some(crate::TURBULENT_MAX_CYCLE as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "random_seed",
+                "湍流置换",
+                "随机种子",
+                PropertyValue::Int(0),
+                Some(0.0),
+                Some(crate::TURBULENT_MAX_RANDOM_SEED as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "pin",
+                "湍流置换",
+                "固定",
+                crate::DisplacePin::None.as_key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "none",
+                        "无",
+                        "mondrian.effect.turbulent_displace.pin.none",
+                    ),
+                    ParameterEnumOption::new(
+                        "all_edges",
+                        "所有边缘",
+                        "mondrian.effect.turbulent_displace.pin.all_edges",
+                    ),
+                    ParameterEnumOption::new(
+                        "center",
+                        "中心",
+                        "mondrian.effect.turbulent_displace.pin.center",
+                    ),
+                    ParameterEnumOption::new(
+                        "left_edge",
+                        "左侧边缘",
+                        "mondrian.effect.turbulent_displace.pin.left_edge",
+                    ),
+                    ParameterEnumOption::new(
+                        "top_edge",
+                        "顶部边缘",
+                        "mondrian.effect.turbulent_displace.pin.top_edge",
+                    ),
+                    ParameterEnumOption::new(
+                        "right_edge",
+                        "右侧边缘",
+                        "mondrian.effect.turbulent_displace.pin.right_edge",
+                    ),
+                    ParameterEnumOption::new(
+                        "bottom_edge",
+                        "底部边缘",
+                        "mondrian.effect.turbulent_displace.pin.bottom_edge",
+                    ),
+                    ParameterEnumOption::new(
+                        "horizontal_edges",
+                        "水平边缘",
+                        "mondrian.effect.turbulent_displace.pin.horizontal_edges",
+                    ),
+                    ParameterEnumOption::new(
+                        "vertical_edges",
+                        "垂直边缘",
+                        "mondrian.effect.turbulent_displace.pin.vertical_edges",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "resize_layer",
+                "湍流置换",
+                "调整图层大小",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "antialias",
+                "湍流置换",
+                "抗锯齿",
+                crate::DisplaceAntialias::Low.as_key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "low",
+                        "低",
+                        "mondrian.effect.turbulent_displace.antialias.low",
+                    ),
+                    ParameterEnumOption::new(
+                        "high",
+                        "高",
+                        "mondrian.effect.turbulent_displace.antialias.high",
+                    ),
+                ],
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -6719,6 +6977,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         | (EffectType::CornerPin, "bottom_left_y")
         | (EffectType::CornerPin, "bottom_right_x")
         | (EffectType::CornerPin, "bottom_right_y") => ParameterUnit::Normalized,
+        (EffectType::TurbulentDisplace, "amount")
+        | (EffectType::TurbulentDisplace, "size")
+        | (EffectType::TurbulentDisplace, "offset_x")
+        | (EffectType::TurbulentDisplace, "offset_y") => ParameterUnit::Pixels,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -6917,6 +7179,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::CornerPin => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::TurbulentDisplace => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -9192,6 +9459,186 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::TurbulentDisplace => {
+            let displacement_id = builtin_parameter_id(effect_type, "displacement");
+            let amount_id = builtin_parameter_id(effect_type, "amount");
+            let size_id = builtin_parameter_id(effect_type, "size");
+            let offset_x_id = builtin_parameter_id(effect_type, "offset_x");
+            let offset_y_id = builtin_parameter_id(effect_type, "offset_y");
+            let complexity_id = builtin_parameter_id(effect_type, "complexity");
+            let evolution_id = builtin_parameter_id(effect_type, "evolution");
+            let cycle_evolution_id = builtin_parameter_id(effect_type, "cycle_evolution");
+            let cycle_id = builtin_parameter_id(effect_type, "cycle");
+            let random_seed_id = builtin_parameter_id(effect_type, "random_seed");
+            let pin_id = builtin_parameter_id(effect_type, "pin");
+            let resize_layer_id = builtin_parameter_id(effect_type, "resize_layer");
+            let antialias_id = builtin_parameter_id(effect_type, "antialias");
+            Some(Arc::new(move |effect, context, graph| {
+                let displacement = match effect.evaluate_parameter(&displacement_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        match crate::DisplacementType::from_key(&key) {
+                                Some(displacement) => displacement,
+                                None => {
+                                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                                        effect_key: effect.effect_type.key(),
+                                        effect_id: effect.id,
+                                        reason: format!(
+                                            "turbulent displace displacement {key} is not a declared option"
+                                        ),
+                                    })
+                                }
+                            }
+                    }
+                    None => crate::DisplacementType::Turbulent,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace displacement must be an enum".to_string(),
+                        })
+                    }
+                };
+                let pin = match effect.evaluate_parameter(&pin_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match crate::DisplacePin::from_key(&key) {
+                        Some(pin) => pin,
+                        None => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!(
+                                    "turbulent displace pin {key} is not a declared option"
+                                ),
+                            })
+                        }
+                    },
+                    None => crate::DisplacePin::None,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace pin must be an enum".to_string(),
+                        })
+                    }
+                };
+                let antialias = match effect.evaluate_parameter(&antialias_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        match crate::DisplaceAntialias::from_key(&key) {
+                            Some(antialias) => antialias,
+                            None => {
+                                return Err(EffectGraphBuildError::InvalidAuthorState {
+                                    effect_key: effect.effect_type.key(),
+                                    effect_id: effect.id,
+                                    reason: format!(
+                                    "turbulent displace antialias {key} is not a declared option"
+                                ),
+                                })
+                            }
+                        }
+                    }
+                    None => crate::DisplaceAntialias::Low,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace antialias must be an enum".to_string(),
+                        })
+                    }
+                };
+                let complexity = match effect.evaluate_parameter(&complexity_id, context.time) {
+                    Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace complexity must be a non-negative integer"
+                                .to_string(),
+                        }
+                    })?,
+                    None => crate::TURBULENT_MIN_COMPLEXITY,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace complexity must be an integer".to_string(),
+                        })
+                    }
+                };
+                let cycle = match effect.evaluate_parameter(&cycle_id, context.time) {
+                    Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace cycle must be a non-negative integer"
+                                .to_string(),
+                        }
+                    })?,
+                    None => crate::TURBULENT_MIN_CYCLE,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace cycle must be an integer".to_string(),
+                        })
+                    }
+                };
+                let random_seed = match effect.evaluate_parameter(&random_seed_id, context.time) {
+                    Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace random seed must be a non-negative integer"
+                                .to_string(),
+                        }
+                    })?,
+                    None => 0,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "turbulent displace random seed must be an integer".to_string(),
+                        })
+                    }
+                };
+                let cycle_evolution =
+                    match effect.evaluate_parameter(&cycle_evolution_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => value,
+                        None => false,
+                        Some(_) => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "turbulent displace cycle evolution must be a boolean"
+                                    .to_string(),
+                            })
+                        }
+                    };
+                let grade = crate::TurbulentDisplaceGrade::new(
+                    displacement,
+                    effect.evaluate_f32_parameter(&amount_id, context.time, 50.0),
+                    effect.evaluate_f32_parameter(&size_id, context.time, 100.0),
+                    [
+                        effect.evaluate_f32_parameter(&offset_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&offset_y_id, context.time, 128.0),
+                    ],
+                    complexity,
+                    effect.evaluate_f32_parameter(&evolution_id, context.time, 0.0),
+                    cycle_evolution,
+                    cycle,
+                    random_seed,
+                    pin,
+                    effect.evaluate_f32_parameter(&resize_layer_id, context.time, 0.0),
+                    antialias,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::TurbulentDisplace { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensDistortion => {
             let fov_id = builtin_parameter_id(effect_type, "fov");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -9971,6 +10418,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Levels => "色阶",
         EffectType::Transform => "变换",
         EffectType::CornerPin => "边角定位",
+        EffectType::TurbulentDisplace => "湍流置换",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -11269,6 +11717,7 @@ mod tests {
             EffectType::Levels,
             EffectType::Transform,
             EffectType::CornerPin,
+            EffectType::TurbulentDisplace,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -16841,6 +17290,136 @@ mod tests {
         let json = serde_json::to_string(&effect).expect("the node serialises");
         let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
         assert_eq!(restored, effect);
+    }
+
+    fn turbulent_displace_op(graph: &EffectRenderGraph) -> Option<crate::TurbulentDisplaceGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::TurbulentDisplace { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::TurbulentDisplace { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_turbulent_displace(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::TurbulentDisplace)
+            .expect("the turbulent displace effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::TurbulentDisplace.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the turbulent displace parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn turbulent_displace_defaults_compile_to_the_documented_operation() {
+        // The default grade is not the identity: `amount` defaults to 50 px, so
+        // the node must appear and carry exactly the documented defaults.
+        let effect = instantiate_effect_node(EffectType::TurbulentDisplace)
+            .expect("the turbulent displace effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default turbulent displace should compile");
+        let grade = turbulent_displace_op(&graph).expect("the default grade emits a node");
+        assert_eq!(grade.displacement(), crate::DisplacementType::Turbulent);
+        assert_eq!(grade.amount(), 50.0);
+        assert_eq!(grade.size(), 100.0);
+        assert_eq!(grade.offset(), [128.0, 128.0]);
+        assert_eq!(grade.complexity(), 1);
+        assert_eq!(grade.evolution(), 0.0);
+        assert!(!grade.cycle_evolution());
+        assert_eq!(grade.cycle(), 1);
+        assert_eq!(grade.random_seed(), 0);
+        assert_eq!(grade.pin(), crate::DisplacePin::None);
+        assert_eq!(grade.resize_layer(), 0.0);
+        assert_eq!(grade.antialias(), crate::DisplaceAntialias::Low);
+    }
+
+    #[test]
+    fn turbulent_displace_authored_configuration_reaches_the_operation() {
+        let effect = author_turbulent_displace(&[
+            ("displacement", PropertyValue::Enum("bulge".to_string())),
+            ("amount", PropertyValue::Float(120.0)),
+            ("size", PropertyValue::Float(40.0)),
+            ("offset_x", PropertyValue::Float(10.0)),
+            ("offset_y", PropertyValue::Float(20.0)),
+            ("complexity", PropertyValue::Int(3)),
+            ("evolution", PropertyValue::Float(0.25)),
+            ("cycle_evolution", PropertyValue::Bool(true)),
+            ("cycle", PropertyValue::Int(4)),
+            ("random_seed", PropertyValue::Int(77)),
+            ("pin", PropertyValue::Enum("all_edges".to_string())),
+            ("resize_layer", PropertyValue::Float(0.5)),
+            ("antialias", PropertyValue::Enum("high".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = turbulent_displace_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.displacement(), crate::DisplacementType::Bulge);
+        assert!((grade.amount() - 120.0).abs() <= 1e-6);
+        assert!((grade.size() - 40.0).abs() <= 1e-6);
+        assert_eq!(grade.offset(), [10.0, 20.0]);
+        assert_eq!(grade.complexity(), 3);
+        assert!((grade.evolution() - 0.25).abs() <= 1e-6);
+        assert!(grade.cycle_evolution());
+        assert_eq!(grade.cycle(), 4);
+        assert_eq!(grade.random_seed(), 77);
+        assert_eq!(grade.pin(), crate::DisplacePin::AllEdges);
+        assert!((grade.resize_layer() - 0.5).abs() <= 1e-6);
+        assert_eq!(grade.antialias(), crate::DisplaceAntialias::High);
+    }
+
+    #[test]
+    fn turbulent_displace_zero_amount_compiles_to_no_node() {
+        let effect = author_turbulent_displace(&[
+            ("amount", PropertyValue::Float(0.0)),
+            ("size", PropertyValue::Float(12.0)),
+            ("complexity", PropertyValue::Int(4)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a zero amount should compile");
+        assert!(turbulent_displace_op(&graph).is_none());
+    }
+
+    #[test]
+    fn turbulent_displace_out_of_range_amount_is_rejected() {
+        let mut effect = instantiate_effect_node(EffectType::TurbulentDisplace)
+            .expect("the turbulent displace effect should instantiate");
+        // The property contract rejects the value before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::TurbulentDisplace.property_path("amount"),
+                value: PropertyValue::Float(10_001.0),
+            })
+            .expect_err("an out-of-range amount must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [-10000, 10000]"), "{rendered}");
+    }
+
+    #[test]
+    fn turbulent_displace_undeclared_displacement_key_is_rejected() {
+        let mut effect = instantiate_effect_node(EffectType::TurbulentDisplace)
+            .expect("the turbulent displace effect should instantiate");
+        // The enum contract rejects the key before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::TurbulentDisplace.property_path("displacement"),
+                value: PropertyValue::Enum("mystery".to_string()),
+            })
+            .expect_err("an undeclared displacement key must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("unknown enum key `mystery`"),
+            "{rendered}"
+        );
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {

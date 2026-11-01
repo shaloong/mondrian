@@ -89,6 +89,8 @@ pub enum EffectType {
     Transform,
     /// Corner pin: pins the frame onto an arbitrary quadrilateral.
     CornerPin,
+    /// Turbulent displace: warps the frame with a fractal value-noise field.
+    TurbulentDisplace,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -163,6 +165,7 @@ impl EffectType {
             Self::Levels => "builtin.levels".to_string(),
             Self::Transform => "builtin.transform".to_string(),
             Self::CornerPin => "builtin.corner_pin".to_string(),
+            Self::TurbulentDisplace => "builtin.turbulent_displace".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -233,6 +236,7 @@ impl EffectType {
             "builtin.levels" => Self::Levels,
             "builtin.transform" => Self::Transform,
             "builtin.corner_pin" => Self::CornerPin,
+            "builtin.turbulent_displace" => Self::TurbulentDisplace,
             other => Self::External(other.to_string()),
         }
     }
@@ -303,6 +307,7 @@ impl EffectType {
             Self::Levels => "色阶",
             Self::Transform => "变换",
             Self::CornerPin => "边角定位",
+            Self::TurbulentDisplace => "湍流置换",
             Self::External(name) => name,
         }
     }
@@ -371,6 +376,7 @@ impl EffectType {
             Self::Levels => vec!["颜色", "调色"],
             Self::Transform => vec!["变换"],
             Self::CornerPin => vec!["变换"],
+            Self::TurbulentDisplace => vec!["变形"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -441,6 +447,7 @@ impl EffectType {
             Self::Levels => "levels".to_string(),
             Self::Transform => "transform".to_string(),
             Self::CornerPin => "corner_pin".to_string(),
+            Self::TurbulentDisplace => "turbulent_displace".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -760,6 +767,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Levels => Ok(()),
             Self::Transform => Ok(()),
             Self::CornerPin => Ok(()),
+            Self::TurbulentDisplace => Ok(()),
         }
     }
 }

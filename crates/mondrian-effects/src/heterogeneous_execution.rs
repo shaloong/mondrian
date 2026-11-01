@@ -2758,6 +2758,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Levels { .. } => 64,
         EffectRenderOp::Transform { .. } => 65,
         EffectRenderOp::CornerPin { .. } => 66,
+        EffectRenderOp::TurbulentDisplace { .. } => 67,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4826,6 +4827,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Levels { .. }
             | crate::EffectRenderOp::Transform { .. }
             | crate::EffectRenderOp::CornerPin { .. }
+            | crate::EffectRenderOp::TurbulentDisplace { .. }
             | crate::EffectRenderOp::ColorOffset { .. }
             | crate::EffectRenderOp::Convolution { .. }
             | crate::EffectRenderOp::Offset { .. }

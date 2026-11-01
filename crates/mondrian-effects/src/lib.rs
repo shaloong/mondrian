@@ -106,6 +106,7 @@ pub mod temporal_execution;
 #[cfg(test)]
 mod throughput;
 pub mod tracking;
+pub mod turbulent_displace;
 pub mod unsharp_mask;
 
 pub use adjustment::{
@@ -343,6 +344,14 @@ pub use transform::{
     TRANSFORM_MIN_SCALE_PERCENT, TRANSFORM_MIN_SKEW_DEGREES, TRANSFORM_SAMPLING_COUNT,
 };
 pub use tritone::{tritone_frame_f32, TritoneError, TritoneGrade};
+pub use turbulent_displace::{
+    turbulent_displace_frame_f32, DisplaceAntialias, DisplacePin, DisplacementType,
+    TurbulentDisplaceError, TurbulentDisplaceGrade, TURBULENT_ANTIALIAS_COUNT,
+    TURBULENT_MAX_AMOUNT, TURBULENT_MAX_COMPLEXITY, TURBULENT_MAX_CYCLE,
+    TURBULENT_MAX_OFFSET_PIXELS, TURBULENT_MAX_RANDOM_SEED, TURBULENT_MAX_SIZE,
+    TURBULENT_MIN_AMOUNT, TURBULENT_MIN_COMPLEXITY, TURBULENT_MIN_CYCLE, TURBULENT_MIN_SIZE,
+    TURBULENT_PIN_COUNT, TURBULENT_TYPE_COUNT,
+};
 pub use twirl::{
     twirl_frame_f32, TwirlError, TwirlGrade, TWIRL_MAX_ANGLE_DEGREES, TWIRL_MAX_RADIUS_PERCENT,
     TWIRL_MIN_RADIUS_PERCENT,

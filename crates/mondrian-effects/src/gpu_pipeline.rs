@@ -139,6 +139,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored destination quad in normalized frame coordinates.
         grade: crate::CornerPinGrade,
     },
+    TurbulentDisplace {
+        /// Authored fractal-noise displacement parameters.
+        grade: crate::TurbulentDisplaceGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -171,6 +175,7 @@ impl EffectGpuSpatialPass {
             Self::WaveWarp { .. } => "wave_warp",
             Self::Transform { .. } => "transform",
             Self::CornerPin { .. } => "corner_pin",
+            Self::TurbulentDisplace { .. } => "turbulent_displace",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -215,6 +220,7 @@ impl EffectGpuSpatialPass {
             Self::WaveWarp { .. } => u32::MAX,
             Self::Transform { .. } => u32::MAX,
             Self::CornerPin { .. } => u32::MAX,
+            Self::TurbulentDisplace { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -252,6 +258,7 @@ impl EffectGpuSpatialPass {
             Self::WaveWarp { .. } => u32::MAX,
             Self::Transform { .. } => u32::MAX,
             Self::CornerPin { .. } => u32::MAX,
+            Self::TurbulentDisplace { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -535,6 +542,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::CornerPin { grade } => {
             Some(EffectGpuSpatialPass::CornerPin { grade: *grade })
+        }
+        EffectRenderOp::TurbulentDisplace { grade } => {
+            Some(EffectGpuSpatialPass::TurbulentDisplace { grade: *grade })
         }
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
