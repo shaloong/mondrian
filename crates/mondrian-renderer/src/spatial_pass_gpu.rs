@@ -71,6 +71,10 @@ pub(crate) struct EffectSpatialGpu {
     keylight_key: wgpu::RenderPipeline,
     keylight_erode: wgpu::RenderPipeline,
     keylight_composite: wgpu::RenderPipeline,
+    matte_refine_cleanup: wgpu::RenderPipeline,
+    matte_refine_smooth: wgpu::RenderPipeline,
+    matte_refine_feather: wgpu::RenderPipeline,
+    matte_refine_composite: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -1030,6 +1034,129 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Matte refine cleans the edge colour, smooths and shifts the carried
+        // matte, feathers it, and composites the cleaned source against it.
+        let matte_refine_cleanup = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.matte-refine-cleanup"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_matte_refine_cleanup"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let matte_refine_smooth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.matte-refine-smooth"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_matte_refine_smooth"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let matte_refine_feather = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.matte-refine-feather"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_matte_refine_feather"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let matte_refine_composite =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mondrian.effect-spatial.matte-refine-composite"),
+                layout: Some(&composite_layout),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: Some("fs_matte_refine_composite"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         // Fractal noise needs twenty-six scalars, so the shared uniform struct is
         // too small: the stage gets its own shader module, bind group layout, and
         // uniform payload instead of a sixth `extra` vector.
@@ -1129,6 +1256,10 @@ impl EffectSpatialGpu {
             keylight_key,
             keylight_erode,
             keylight_composite,
+            matte_refine_cleanup,
+            matte_refine_smooth,
+            matte_refine_feather,
+            matte_refine_composite,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -1640,6 +1771,10 @@ impl EffectSpatialGpu {
                 + u32::from(grade.edge_shrink() > 0.0) * 2
                 + u32::from(grade.edge_feather() > 0.0) * 2
                 + 1),
+            // Matte refine cleans the source, smooths and shifts the matte,
+            // feathers it, and composites. Every stage is optional and the two
+            // views fold into the composite, so the count follows the grade.
+            EffectGpuSpatialPass::MatteRefine { grade } => Ok(grade.pass_count()),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1994,6 +2129,10 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Keylight { grade } => {
                 return self
                     .record_keylight(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::MatteRefine { grade } => {
+                return self
+                    .record_matte_refine(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -2957,6 +3096,234 @@ impl EffectSpatialGpu {
         Ok(scratch[0].clone())
     }
 
+    /// Records the matte refine stages and returns the merged frame.
+    ///
+    /// `scratch[0]` receives the merged frame, `scratch[1]` the optionally
+    /// cleaned source, and `scratch[2]`/`scratch[3]` ping-pong the matte. Every
+    /// matte stage is two passes, so the matte always lands back on
+    /// `scratch[2]`; when no stage runs the composite reads the frame alpha.
+    fn record_matte_refine(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::MatteRefineGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if scratch.len() < 4 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "matte_refine_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // The cleanup replaces the colour fringe of the soft pixels and keeps
+        // the alpha, so every later matte pass can still read the frame alpha.
+        if grade.cleans_edge_color() {
+            let uniform = SpatialPassUniform {
+                size,
+                params: grade.cleanup_gpu_controls(),
+                extra: [0.0; 4],
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            let output_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_pass(
+                device,
+                encoder,
+                &self.matte_refine_cleanup,
+                &source_view,
+                &output_view,
+                &uniform,
+            );
+        }
+        let colour_view = if grade.cleans_edge_color() {
+            scratch[1].create_view(&wgpu::TextureViewDescriptor::default())
+        } else {
+            source_view.clone()
+        };
+
+        let mut matte = None;
+        let mut written = 3_usize;
+        let iterations = grade.blur_iterations();
+        let no_extra = [0.0_f32; 4];
+        if grade.smooths() && grade.extend_smooth() {
+            for _ in 0..iterations {
+                for axis in 0..2_u32 {
+                    self.record_matte_pass(
+                        device,
+                        encoder,
+                        &self.matte_refine_smooth,
+                        source,
+                        scratch,
+                        &mut matte,
+                        &mut written,
+                        size,
+                        grade.smooth_gpu_controls(axis as f32, false),
+                        no_extra,
+                        no_extra,
+                        MatteReadFlag::Params,
+                    );
+                }
+            }
+        }
+        if grade.grows() {
+            for axis in 0..2_u32 {
+                self.record_matte_pass(
+                    device,
+                    encoder,
+                    &self.keylight_erode,
+                    source,
+                    scratch,
+                    &mut matte,
+                    &mut written,
+                    size,
+                    grade.morphology_gpu_controls(grade.grow_radius(), axis as f32, true, false),
+                    no_extra,
+                    no_extra,
+                    MatteReadFlag::Params,
+                );
+            }
+        }
+        if grade.shrinks() {
+            for axis in 0..2_u32 {
+                self.record_matte_pass(
+                    device,
+                    encoder,
+                    &self.keylight_erode,
+                    source,
+                    scratch,
+                    &mut matte,
+                    &mut written,
+                    size,
+                    grade.morphology_gpu_controls(grade.shrink_radius(), axis as f32, false, false),
+                    no_extra,
+                    no_extra,
+                    MatteReadFlag::Params,
+                );
+            }
+        }
+        if grade.smooths() && !grade.extend_smooth() {
+            for _ in 0..iterations {
+                for axis in 0..2_u32 {
+                    self.record_matte_pass(
+                        device,
+                        encoder,
+                        &self.matte_refine_smooth,
+                        source,
+                        scratch,
+                        &mut matte,
+                        &mut written,
+                        size,
+                        grade.smooth_gpu_controls(axis as f32, false),
+                        no_extra,
+                        no_extra,
+                        MatteReadFlag::Params,
+                    );
+                }
+            }
+        }
+        if grade.feathers() {
+            let box_kernel = BoxKernel::new(grade.feather());
+            for _ in 0..iterations {
+                for axis in 0..2_u32 {
+                    let (params, extra, extra1) = grade.feather_gpu_controls(
+                        axis as f32,
+                        box_kernel.whole_radius,
+                        box_kernel.fraction,
+                        box_kernel.normalization(),
+                        false,
+                    );
+                    self.record_matte_pass(
+                        device,
+                        encoder,
+                        &self.matte_refine_feather,
+                        source,
+                        scratch,
+                        &mut matte,
+                        &mut written,
+                        size,
+                        params,
+                        extra,
+                        extra1,
+                        MatteReadFlag::Extra1,
+                    );
+                }
+            }
+        }
+
+        let read_frame = matte.is_none();
+        let (params, extra1) = grade.composite_gpu_controls(read_frame);
+        let composite = SpatialPassUniform {
+            size,
+            params,
+            extra: no_extra,
+            aces: [0.0; 4],
+            extra1,
+        };
+        let auxiliary_view = match matte {
+            Some(index) => scratch[index].create_view(&wgpu::TextureViewDescriptor::default()),
+            None => source_view.clone(),
+        };
+        let destination_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.matte_refine_composite,
+            &colour_view,
+            &auxiliary_view,
+            &destination_view,
+            &composite,
+        );
+        Ok(scratch[0].clone())
+    }
+
+    /// Records one matte filter pass and advances the matte ping-pong.
+    ///
+    /// The first matte pass binds the frame and asks the shader for the frame
+    /// alpha; every later pass binds `scratch[2]` and reads the matte channel.
+    #[allow(clippy::too_many_arguments)]
+    fn record_matte_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        matte: &mut Option<usize>,
+        written: &mut usize,
+        size: [f32; 4],
+        mut params: [f32; 4],
+        extra: [f32; 4],
+        mut extra1: [f32; 4],
+        flag: MatteReadFlag,
+    ) {
+        let read_frame = f32::from(u8::from(matte.is_none()));
+        match flag {
+            MatteReadFlag::Params => params[3] = read_frame,
+            MatteReadFlag::Extra1 => extra1[0] = read_frame,
+        }
+        let input_view = match *matte {
+            Some(index) => scratch[index].create_view(&wgpu::TextureViewDescriptor::default()),
+            None => source.create_view(&wgpu::TextureViewDescriptor::default()),
+        };
+        let output_view = scratch[*written].create_view(&wgpu::TextureViewDescriptor::default());
+        let uniform = SpatialPassUniform { size, params, extra, aces: [0.0; 4], extra1 };
+        self.record_pass(
+            device,
+            encoder,
+            pipeline,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        *matte = Some(*written);
+        *written = if *written == 3 { 2 } else { 3 };
+    }
+
     /// Records one composite pass over the original frame and an auxiliary layer.
     #[allow(clippy::too_many_arguments)]
     fn record_composite_pass(
@@ -3047,6 +3414,15 @@ struct SpatialPassUniform {
     // The second spare cell, added for effects that need more than twelve
     // scalars (glow's colour pair).
     extra1: [f32; 4],
+}
+
+/// The uniform cell that carries a matte pass's "read the frame alpha" flag.
+#[derive(Clone, Copy)]
+enum MatteReadFlag {
+    /// `params.w`, used by the smooth and morphology passes.
+    Params,
+    /// `extra1.x`, used by the feather pass.
+    Extra1,
 }
 
 /// The dedicated uniform payload of the fractal noise generator.
@@ -3252,14 +3628,83 @@ fn fs_keylight_key(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
     return vec4<f32>(matte, matte, matte, 1.0);
 }
 
-// The erode is the separable minimum of the matte over `2r + 1` taps, so the
-// shrink pulls light coverage in from the foreground edge.
+// The matte filters read either the frame alpha (the first matte pass, before a
+// matte texture exists) or the matte channel every later pass writes.
+fn matte_alpha_at(p: vec2<i32>, read_frame: bool) -> f32 {
+    let sample = load_clamped(p);
+    return select(sample.x, sample.a, read_frame);
+}
+
+// The same alpha gradient the CPU `matte_edge_strength` computes: the clamped
+// four-neighbourhood difference drives how far the smooth radius shrinks.
+fn matte_edge_strength(pixel: vec2<i32>, read_frame: bool) -> f32 {
+    let left = matte_alpha_at(pixel + vec2<i32>(-1, 0), read_frame);
+    let right = matte_alpha_at(pixel + vec2<i32>(1, 0), read_frame);
+    let up = matte_alpha_at(pixel + vec2<i32>(0, -1), read_frame);
+    let down = matte_alpha_at(pixel + vec2<i32>(0, 1), read_frame);
+    let horizontal = 0.5 * (right - left);
+    let vertical = 0.5 * (down - up);
+    return clamp(2.0 * (abs(horizontal) + abs(vertical)), 0.0, 1.0);
+}
+
+// The edge colour cleanup samples eight taps at the authored radius and mixes
+// the straight colour of the tap with the largest alpha into the soft pixel.
+// `params` carries `[radius, clean_amount / 100, 0, 0]`; opaque and transparent
+// pixels are returned untouched, exactly like `clean_edge_colours`.
 @fragment
-fn fs_keylight_erode(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_matte_refine_cleanup(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
-    let axis = uniforms.params.y;
+    let source = load_clamped(pixel);
+    if (source.a <= 0.0 || source.a >= 1.0) {
+        return source;
+    }
     let radius = i32(round(uniforms.params.x));
-    var matte = 1.0;
+    let amount = uniforms.params.y;
+    var taps = array<vec2<i32>, 8>(
+        vec2<i32>(-1, 0),
+        vec2<i32>(1, 0),
+        vec2<i32>(0, -1),
+        vec2<i32>(0, 1),
+        vec2<i32>(-1, -1),
+        vec2<i32>(1, -1),
+        vec2<i32>(-1, 1),
+        vec2<i32>(1, 1),
+    );
+    var best_alpha = -1.0;
+    var best = source.rgb;
+    for (var index = 0; index < 8; index = index + 1) {
+        let tap = load_clamped(pixel + taps[index] * radius);
+        if (tap.a > best_alpha) {
+            best_alpha = tap.a;
+            best = tap.rgb;
+        }
+    }
+    if (best_alpha <= 0.0) {
+        return source;
+    }
+    let cleaned = source.rgb + (best - source.rgb) * amount;
+    return vec4<f32>(cleaned, source.a);
+}
+
+// The smooth pass averages the matte over a per-pixel radius. `params` carries
+// `[max_radius, axis, edge_detail, read_frame_alpha]`, and the radius shrinks to
+// `max * (1 - edge_detail * strength)` where the alpha gradient is strong. The
+// per-pixel radius is why this cannot reuse `fs_box_blur`.
+@fragment
+fn fs_matte_refine_smooth(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let max_radius = uniforms.params.x;
+    let axis = uniforms.params.y;
+    let edge_detail = clamp(uniforms.params.z, 0.0, 1.0);
+    let read_frame = uniforms.params.w > 0.5;
+    let strength = matte_edge_strength(pixel, read_frame);
+    let radius = i32(clamp(
+        round(max_radius * (1.0 - edge_detail * strength)),
+        0.0,
+        max_radius,
+    ));
+    var sum = 0.0;
+    var count = 0.0;
     for (var offset = -radius; offset <= radius; offset = offset + 1) {
         var sample_at = pixel;
         if (axis < 0.5) {
@@ -3267,7 +3712,74 @@ fn fs_keylight_erode(@builtin(position) position: vec4<f32>) -> @location(0) vec
         } else {
             sample_at.y = sample_at.y + offset;
         }
-        matte = min(matte, load_clamped(sample_at).x);
+        sum = sum + matte_alpha_at(sample_at, read_frame);
+        count = count + 1.0;
+    }
+    let value = sum / count;
+    return vec4<f32>(value, value, value, 1.0);
+}
+
+// The feather is the same separable box kernel as `fs_box_blur`, but it reads
+// the matte alpha (frame alpha on the first matte pass) and writes the matte
+// back into every channel. `params` carries `[0, axis, whole, fraction]`,
+// `extra` `[normalization, 1, 0, 0]`, and `extra1.x` the read-frame flag.
+@fragment
+fn fs_matte_refine_feather(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let axis = uniforms.params.y;
+    let whole = i32(uniforms.params.z);
+    let fraction = uniforms.params.w;
+    let read_frame = uniforms.extra1.x > 0.5;
+    var sum = 0.0;
+    for (var offset = -whole; offset <= whole; offset = offset + 1) {
+        var sample_at = pixel;
+        if (axis < 0.5) {
+            sample_at.x = sample_at.x + offset;
+        } else {
+            sample_at.y = sample_at.y + offset;
+        }
+        sum = sum + matte_alpha_at(sample_at, read_frame);
+    }
+    if (fraction > 0.0) {
+        var outer_a = pixel;
+        var outer_b = pixel;
+        if (axis < 0.5) {
+            outer_a.x = outer_a.x + whole + 1;
+            outer_b.x = outer_b.x - whole - 1;
+        } else {
+            outer_a.y = outer_a.y + whole + 1;
+            outer_b.y = outer_b.y - whole - 1;
+        }
+        sum = sum
+            + fraction
+                * (matte_alpha_at(outer_a, read_frame) + matte_alpha_at(outer_b, read_frame));
+    }
+    let value = sum / max(uniforms.extra.x, 1.0);
+    return vec4<f32>(value, value, value, 1.0);
+}
+
+// The morphology pass is the separable minimum (keylight's shrink) or maximum
+// (matte refine's grow) of the matte over `2r + 1` taps. `params` carries
+// `[radius, axis, mode, read_frame_alpha]`; `mode` 0 is the min filter keylight
+// records, 1 is the max filter matte refine uses to grow the matte. Keylight
+// passes 0 in both spare cells, so its behaviour is unchanged.
+@fragment
+fn fs_keylight_erode(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let axis = uniforms.params.y;
+    let radius = i32(round(uniforms.params.x));
+    let dilate = uniforms.params.z > 0.5;
+    let read_frame = uniforms.params.w > 0.5;
+    var matte = select(1.0, 0.0, dilate);
+    for (var offset = -radius; offset <= radius; offset = offset + 1) {
+        var sample_at = pixel;
+        if (axis < 0.5) {
+            sample_at.x = sample_at.x + offset;
+        } else {
+            sample_at.y = sample_at.y + offset;
+        }
+        let value = matte_alpha_at(sample_at, read_frame);
+        matte = select(min(matte, value), max(matte, value), dilate);
     }
     return vec4<f32>(matte, matte, matte, 1.0);
 }
@@ -4757,6 +5269,51 @@ fn fs_keylight_composite(@builtin(position) position: vec4<f32>) -> @location(0)
     }
     return vec4<f32>(colour, alpha);
 }
+
+// The matte refine composite writes the (optionally cleaned) source colour with
+// the refined matte as alpha. `params` carries
+// `[view_map, view_edge_region, contrast, read_frame_alpha]`; the map view wins
+// over the edge-region view, exactly like `MatteRefineGrade::composite`.
+fn matte_alpha_from(texture: texture_2d<f32>, p: vec2<i32>, read_frame: bool) -> f32 {
+    let sample = load_clamped_from(texture, p);
+    return select(sample.x, sample.a, read_frame);
+}
+
+fn matte_edge_strength_from(texture: texture_2d<f32>, pixel: vec2<i32>, read_frame: bool) -> f32 {
+    let left = matte_alpha_from(texture, pixel + vec2<i32>(-1, 0), read_frame);
+    let right = matte_alpha_from(texture, pixel + vec2<i32>(1, 0), read_frame);
+    let up = matte_alpha_from(texture, pixel + vec2<i32>(0, -1), read_frame);
+    let down = matte_alpha_from(texture, pixel + vec2<i32>(0, 1), read_frame);
+    let horizontal = 0.5 * (right - left);
+    let vertical = 0.5 * (down - up);
+    return clamp(2.0 * (abs(horizontal) + abs(vertical)), 0.0, 1.0);
+}
+
+@fragment
+fn fs_matte_refine_composite(
+    @builtin(position) position: vec4<f32>,
+) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped_from(original_texture, pixel);
+    let read_frame = uniforms.params.w > 0.5;
+    let matte = matte_alpha_from(auxiliary_texture, pixel, read_frame);
+    let view_map = uniforms.params.x > 0.5;
+    let view_edge_region = uniforms.params.y > 0.5;
+    let contrast = uniforms.params.z;
+    var alpha = matte;
+    if (contrast > 0.0) {
+        let factor = 1.0 + contrast / 50.0;
+        alpha = clamp((alpha - 0.5) * factor + 0.5, 0.0, 1.0);
+    }
+    if (view_map) {
+        return vec4<f32>(alpha, alpha, alpha, 1.0);
+    }
+    if (view_edge_region) {
+        let strength = matte_edge_strength_from(auxiliary_texture, pixel, read_frame);
+        return vec4<f32>(source.rgb, strength);
+    }
+    return vec4<f32>(source.rgb, alpha);
+}
 "#;
 
 // The fractal noise generator needs twenty-six scalars, more than the shared
@@ -5821,6 +6378,29 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::KeylightDisplay::Final,
         )
         .expect("valid keylight grade");
+        // Grow, smooth, and composite: five passes, which keeps the stage inside
+        // the six scratch textures the chain leaves free beside its source.
+        let matte_refine = mondrian_effects::MatteRefineGrade::new(
+            1.0,   // edge detail
+            10.0,  // other edge radius
+            0.0,   // view edge region
+            6.0,   // smooth
+            0.0,   // feather
+            0.0,   // contrast
+            4.0,   // shift edge
+            false, // better quality
+            false, // clean edge colour
+            100.0, // clean amount
+            true,  // extend smooth
+            0.0,   // expand radius
+            0.0,   // view map
+            1.0,   // tremor reduction
+            50.0,  // tremor amount
+            0.0,   // more motion blur
+            8.0,   // per frame samples
+            180.0, // shutter angle degrees
+        )
+        .expect("valid matte refine grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -5840,6 +6420,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Glow { grade: glow },
             mondrian_effects::EffectGpuSpatialPass::FractalNoise { grade: fractal_noise },
             mondrian_effects::EffectGpuSpatialPass::Keylight { grade: keylight },
+            mondrian_effects::EffectGpuSpatialPass::MatteRefine { grade: matte_refine },
         ];
 
         let mut cpu = pixels.clone();
@@ -5923,6 +6504,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             &keylight,
+        ));
+        assert!(mondrian_effects::matte_refine_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &matte_refine,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -7275,6 +7862,162 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "keylight case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matte_refine_test_grade(
+        edge_detail: f32,
+        other_edge_radius: f32,
+        view_edge_region: f32,
+        smooth: f32,
+        feather: f32,
+        contrast: f32,
+        shift_edge: f32,
+        better_quality: bool,
+        clean_edge_color: bool,
+        clean_amount: f32,
+        extend_smooth: bool,
+        expand_radius: f32,
+        view_map: f32,
+    ) -> mondrian_effects::MatteRefineGrade {
+        mondrian_effects::MatteRefineGrade::new(
+            edge_detail,
+            other_edge_radius,
+            view_edge_region,
+            smooth,
+            feather,
+            contrast,
+            shift_edge,
+            better_quality,
+            clean_edge_color,
+            clean_amount,
+            extend_smooth,
+            expand_radius,
+            view_map,
+            1.0,
+            50.0,
+            0.0,
+            8.0,
+            180.0,
+        )
+        .expect("valid matte refine grade")
+    }
+
+    #[test]
+    fn gpu_matte_refine_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU matte refine parity test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 13_u32;
+        let centre_x = 8.0_f32;
+        let centre_y = 6.0_f32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 0.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let dx = x as f32 - centre_x;
+                let dy = y as f32 - centre_y;
+                let distance = (dx * dx + dy * dy).sqrt();
+                let pixel = if distance <= 4.0 {
+                    [0.3, 0.6, 0.9, 1.0]
+                } else if distance <= 6.0 {
+                    // A dark fringe on the soft edge, which the cleanup pass
+                    // replaces with the interior colour.
+                    let alpha = (6.0 - distance) / 2.0;
+                    [0.05, 0.08, 0.12, alpha]
+                } else {
+                    [0.0, 0.0, 0.0, 0.0]
+                };
+                pixels[y * width as usize + x] = pixel;
+            }
+        }
+        // A transparent hole inside the disc, so grow and shrink have a hole to
+        // close and reopen.
+        pixels[(6 * width + 7) as usize] = [0.0, 0.0, 0.0, 0.0];
+        let cases = [
+            (
+                "defaults",
+                matte_refine_test_grade(
+                    1.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false, 100.0, false, 0.0, 0.0,
+                ),
+            ),
+            (
+                "feather",
+                matte_refine_test_grade(
+                    1.0, 10.0, 0.0, 0.0, 12.0, 0.0, 0.0, false, false, 100.0, false, 0.0, 0.0,
+                ),
+            ),
+            (
+                "shift-smooth",
+                matte_refine_test_grade(
+                    0.5, 10.0, 0.0, 6.0, 0.0, 0.0, -4.0, false, false, 100.0, false, 0.0, 0.0,
+                ),
+            ),
+            (
+                "expand-contrast",
+                matte_refine_test_grade(
+                    1.0, 10.0, 0.0, 0.0, 0.0, 60.0, 0.0, false, false, 100.0, false, 8.0, 0.0,
+                ),
+            ),
+            (
+                "grow-shrink",
+                matte_refine_test_grade(
+                    1.0, 10.0, 0.0, 0.0, 0.0, 0.0, -4.0, false, false, 100.0, false, 8.0, 0.0,
+                ),
+            ),
+            (
+                "cleanup",
+                matte_refine_test_grade(
+                    1.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, true, 100.0, false, 0.0, 0.0,
+                ),
+            ),
+            (
+                "view-map",
+                matte_refine_test_grade(
+                    1.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false, 100.0, false, 0.0, 1.0,
+                ),
+            ),
+        ];
+        for (index, (label, grade)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::matte_refine_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let pool = scratch(&context, width, height, 8);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.matte-refine-encoder"),
+                });
+            let pass = mondrian_effects::EffectGpuSpatialPass::MatteRefine { grade: *grade };
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool,
+                    width,
+                    height,
+                )
+                .expect("recorded matte refine");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "matte refine case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
