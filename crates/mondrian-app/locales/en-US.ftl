@@ -1662,3 +1662,779 @@ audio-rack-native-controlled-parameter = Controlled by plugin
 audio-rack-adopt-displayed-value = Adopt displayed value
 audio-rack-query-native-parameter = Read current value
 native-parameter-query-unavailable = Current plugin value is unavailable
+
+## Flip 翻转
+effect-flip = Flip
+parameter-group-flip = Flip
+effect-category-transform-and-size = Transform and Size
+parameter-mondrian-effect-builtin-flip-axis-label = Axis
+parameter-mondrian-effect-flip-axis-horizontal = Horizontal
+parameter-mondrian-effect-flip-axis-vertical = Vertical
+parameter-mondrian-effect-flip-axis-both = Both
+parameter-mondrian-effect-builtin-flip-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-flip-centre-x-label = Center X
+parameter-mondrian-effect-builtin-flip-centre-y-label = Center Y
+
+## Ripple 波纹
+effect-ripple = Ripple
+parameter-group-ripple = Ripple
+effect-category-distort = Distort
+parameter-mondrian-effect-builtin-ripple-centre-x-label = Ripple Center X
+parameter-mondrian-effect-builtin-ripple-centre-y-label = Ripple Center Y
+parameter-mondrian-effect-builtin-ripple-phase-label = Ripple Phase
+parameter-mondrian-effect-builtin-ripple-radius-label = Radius
+parameter-mondrian-effect-builtin-ripple-wave-height-label = Wave Height
+parameter-mondrian-effect-builtin-ripple-wave-speed-label = Wave Speed
+parameter-mondrian-effect-builtin-ripple-wave-type-label = Wave Type
+parameter-mondrian-effect-ripple-wave-type-asymmetric = Asymmetric
+parameter-mondrian-effect-ripple-wave-type-symmetric = Symmetric
+parameter-mondrian-effect-builtin-ripple-wave-width-label = Wave Width
+
+## Wave Warp 波形变形
+effect-wave-warp = Wave Warp
+parameter-group-wave-warp = Wave Warp
+parameter-mondrian-effect-builtin-wave-warp-direction-label = Direction
+parameter-mondrian-effect-builtin-wave-warp-phase-label = Phase
+parameter-mondrian-effect-builtin-wave-warp-pin-label = Pin
+parameter-mondrian-effect-wave-warp-pin-none = None
+parameter-mondrian-effect-wave-warp-pin-all-edges = All Edges
+parameter-mondrian-effect-wave-warp-pin-center = Center
+parameter-mondrian-effect-wave-warp-pin-left-edge = Left Edge
+parameter-mondrian-effect-wave-warp-pin-top-edge = Top Edge
+parameter-mondrian-effect-wave-warp-pin-right-edge = Right Edge
+parameter-mondrian-effect-wave-warp-pin-bottom-edge = Bottom Edge
+parameter-mondrian-effect-wave-warp-pin-horizontal-edges = Horizontal Edges
+parameter-mondrian-effect-wave-warp-pin-vertical-edges = Vertical Edges
+parameter-mondrian-effect-builtin-wave-warp-quality-label = Antialiasing (Best Quality)
+parameter-mondrian-effect-wave-warp-quality-low = Low
+parameter-mondrian-effect-wave-warp-quality-normal = Normal
+parameter-mondrian-effect-wave-warp-quality-high = High
+parameter-mondrian-effect-builtin-wave-warp-wave-height-label = Wave Height
+parameter-mondrian-effect-builtin-wave-warp-wave-speed-label = Wave Speed
+parameter-mondrian-effect-builtin-wave-warp-wave-type-label = Wave Type
+parameter-mondrian-effect-wave-warp-wave-type-sine = Sine
+parameter-mondrian-effect-wave-warp-wave-type-square = Square
+parameter-mondrian-effect-wave-warp-wave-type-triangle = Triangle
+parameter-mondrian-effect-wave-warp-wave-type-sawtooth = Sawtooth
+parameter-mondrian-effect-wave-warp-wave-type-circle = Circle
+parameter-mondrian-effect-wave-warp-wave-type-semicircle = Semicircle
+parameter-mondrian-effect-wave-warp-wave-type-non-circle = Non-Circle
+parameter-mondrian-effect-wave-warp-wave-type-noise = Noise
+parameter-mondrian-effect-wave-warp-wave-type-smooth-noise = Smooth Noise
+parameter-mondrian-effect-builtin-wave-warp-wave-width-label = Wave Width
+
+## Transform 变换
+effect-transform = Transform
+parameter-group-transform = Transform
+parameter-mondrian-effect-builtin-transform-anchor-x-label = Anchor Point X
+parameter-mondrian-effect-builtin-transform-anchor-y-label = Anchor Point Y
+parameter-mondrian-effect-builtin-transform-opacity-label = Opacity
+parameter-mondrian-effect-builtin-transform-position-x-label = Position X
+parameter-mondrian-effect-builtin-transform-position-y-label = Position Y
+parameter-mondrian-effect-builtin-transform-rotation-label = Rotation
+parameter-mondrian-effect-builtin-transform-sampling-label = Sampling
+parameter-mondrian-effect-transform-sampling-low = Low
+parameter-mondrian-effect-transform-sampling-normal = Normal
+parameter-mondrian-effect-transform-sampling-high = High
+parameter-mondrian-effect-builtin-transform-scale-height-label = Scale Height
+parameter-mondrian-effect-builtin-transform-scale-width-label = Scale Width
+parameter-mondrian-effect-builtin-transform-shutter-angle-label = Shutter Angle (Reserved: motion blur needs per-frame velocity)
+parameter-mondrian-effect-builtin-transform-skew-label = Skew
+parameter-mondrian-effect-builtin-transform-skew-axis-label = Skew Axis
+parameter-mondrian-effect-builtin-transform-uniform-scale-label = Uniform Scale
+parameter-mondrian-effect-builtin-transform-use-composition-shutter-label = Use Composition Shutter Angle (Reserved: motion blur needs per-frame velocity)
+parameter-mondrian-effect-transform-use-composition-shutter-off = Off
+parameter-mondrian-effect-transform-use-composition-shutter-on = On
+
+## Corner Pin 边角定位
+effect-corner-pin = Corner Pin
+parameter-group-corner-pin = Corner Pin
+parameter-mondrian-effect-builtin-corner-pin-bottom-left-x-label = Bottom Left X
+parameter-mondrian-effect-builtin-corner-pin-bottom-left-y-label = Bottom Left Y
+parameter-mondrian-effect-builtin-corner-pin-bottom-right-x-label = Bottom Right X
+parameter-mondrian-effect-builtin-corner-pin-bottom-right-y-label = Bottom Right Y
+parameter-mondrian-effect-builtin-corner-pin-top-left-x-label = Top Left X
+parameter-mondrian-effect-builtin-corner-pin-top-left-y-label = Top Left Y
+parameter-mondrian-effect-builtin-corner-pin-top-right-x-label = Top Right X
+parameter-mondrian-effect-builtin-corner-pin-top-right-y-label = Top Right Y
+
+## Turbulent Displace 湍流置换
+effect-turbulent-displace = Turbulent Displace
+parameter-group-turbulent-displace = Turbulent Displace
+parameter-mondrian-effect-builtin-turbulent-displace-amount-label = Amount
+parameter-mondrian-effect-builtin-turbulent-displace-antialias-label = Antialiasing
+parameter-mondrian-effect-turbulent-displace-antialias-low = Low
+parameter-mondrian-effect-turbulent-displace-antialias-high = High
+parameter-mondrian-effect-builtin-turbulent-displace-complexity-label = Complexity
+parameter-mondrian-effect-builtin-turbulent-displace-cycle-label = Cycle
+parameter-mondrian-effect-builtin-turbulent-displace-cycle-evolution-label = Cycle Evolution
+parameter-mondrian-effect-builtin-turbulent-displace-displacement-label = Displacement
+parameter-mondrian-effect-turbulent-displace-displacement-turbulent = Turbulent
+parameter-mondrian-effect-turbulent-displace-displacement-bulge = Bulge
+parameter-mondrian-effect-turbulent-displace-displacement-twist = Twist
+parameter-mondrian-effect-turbulent-displace-displacement-turbulent-smoother = Turbulent Smoother
+parameter-mondrian-effect-turbulent-displace-displacement-bulge-smoother = Bulge Smoother
+parameter-mondrian-effect-turbulent-displace-displacement-twist-smoother = Twist Smoother
+parameter-mondrian-effect-turbulent-displace-displacement-vertical = Vertical Displacement
+parameter-mondrian-effect-turbulent-displace-displacement-horizontal = Horizontal Displacement
+parameter-mondrian-effect-turbulent-displace-displacement-cross = Cross Displacement
+parameter-mondrian-effect-builtin-turbulent-displace-evolution-label = Evolution
+parameter-mondrian-effect-builtin-turbulent-displace-offset-x-label = Offset X
+parameter-mondrian-effect-builtin-turbulent-displace-offset-y-label = Offset Y
+parameter-mondrian-effect-builtin-turbulent-displace-pin-label = Pin
+parameter-mondrian-effect-turbulent-displace-pin-none = None
+parameter-mondrian-effect-turbulent-displace-pin-all-edges = All Edges
+parameter-mondrian-effect-turbulent-displace-pin-center = Center
+parameter-mondrian-effect-turbulent-displace-pin-left-edge = Left Edge
+parameter-mondrian-effect-turbulent-displace-pin-top-edge = Top Edge
+parameter-mondrian-effect-turbulent-displace-pin-right-edge = Right Edge
+parameter-mondrian-effect-turbulent-displace-pin-bottom-edge = Bottom Edge
+parameter-mondrian-effect-turbulent-displace-pin-horizontal-edges = Horizontal Edges
+parameter-mondrian-effect-turbulent-displace-pin-vertical-edges = Vertical Edges
+parameter-mondrian-effect-builtin-turbulent-displace-random-seed-label = Random Seed
+parameter-mondrian-effect-builtin-turbulent-displace-resize-layer-label = Resize Layer
+parameter-mondrian-effect-builtin-turbulent-displace-size-label = Size
+
+## Deband 去色带
+effect-deband = Deband
+parameter-group-deband = Deband
+effect-category-restore = Restore
+parameter-mondrian-effect-builtin-deband-edge-threshold-label = Edge Threshold
+parameter-mondrian-effect-builtin-deband-post-optimization-label = Color Dithering
+parameter-mondrian-effect-builtin-deband-radius-label = Radius
+
+## Ramp 渐变
+effect-ramp = Ramp
+parameter-group-ramp = Ramp
+parameter-mondrian-effect-builtin-ramp-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-ramp-end-label = End of Ramp
+parameter-mondrian-effect-builtin-ramp-end-color-label = End Color
+parameter-mondrian-effect-builtin-ramp-scatter-label = Ramp Scatter
+parameter-mondrian-effect-builtin-ramp-shape-label = Ramp Shape
+parameter-mondrian-effect-ramp-shape-linear = Linear
+parameter-mondrian-effect-ramp-shape-radial = Radial
+parameter-mondrian-effect-builtin-ramp-start-label = Start of Ramp
+parameter-mondrian-effect-builtin-ramp-start-color-label = Start Color
+
+## Brightness & Contrast 亮度对比度
+effect-brightness-contrast = Brightness & Contrast
+parameter-group-brightness-contrast = Brightness & Contrast
+parameter-mondrian-effect-builtin-brightness-contrast-brightness-label = Brightness
+parameter-mondrian-effect-builtin-brightness-contrast-contrast-label = Contrast
+parameter-mondrian-effect-builtin-brightness-contrast-legacy-label = Use Legacy (Supports HDR)
+parameter-mondrian-effect-brightness-contrast-legacy-off = Off
+parameter-mondrian-effect-brightness-contrast-legacy-on = On
+
+## Levels 色阶
+effect-levels = Levels
+parameter-group-levels = Levels
+parameter-mondrian-effect-builtin-levels-channel-label = Channel
+parameter-mondrian-effect-levels-channel-rgb = RGB
+parameter-mondrian-effect-levels-channel-red = Red
+parameter-mondrian-effect-levels-channel-green = Green
+parameter-mondrian-effect-levels-channel-blue = Blue
+parameter-mondrian-effect-levels-channel-alpha = Alpha
+parameter-mondrian-effect-builtin-levels-clip-output-black-label = Clip to Output Black
+parameter-mondrian-effect-levels-clip-output-black-off = Off
+parameter-mondrian-effect-levels-clip-output-black-clamp-output = Clamp Output
+parameter-mondrian-effect-levels-clip-output-black-clamp-display = Clamp to Display
+parameter-mondrian-effect-builtin-levels-clip-output-white-label = Clip to Output White
+parameter-mondrian-effect-levels-clip-output-white-off = Off
+parameter-mondrian-effect-levels-clip-output-white-clamp-output = Clamp Output
+parameter-mondrian-effect-levels-clip-output-white-clamp-display = Clamp to Display
+parameter-mondrian-effect-builtin-levels-gamma-label = Gamma
+parameter-mondrian-effect-builtin-levels-input-black-label = Input Black
+parameter-mondrian-effect-builtin-levels-input-white-label = Input White
+parameter-mondrian-effect-builtin-levels-output-black-label = Output Black
+parameter-mondrian-effect-builtin-levels-output-white-label = Output White
+
+## Glow 发光
+effect-glow = Glow
+parameter-group-glow = Glow
+effect-category-light = Light
+parameter-mondrian-effect-builtin-glow-color-a-label = Color A
+parameter-mondrian-effect-builtin-glow-color-b-label = Color B
+parameter-mondrian-effect-builtin-glow-color-loops-label = Color Loops
+parameter-mondrian-effect-builtin-glow-color-phase-label = Color Phase
+parameter-mondrian-effect-builtin-glow-colors-label = Glow Colors
+parameter-mondrian-effect-builtin-glow-composite-original-label = Composite Original
+parameter-mondrian-effect-builtin-glow-dimensions-label = Glow Dimensions
+parameter-mondrian-effect-builtin-glow-midpoint-label = A/B Midpoint
+parameter-mondrian-effect-builtin-glow-operation-label = Glow Operation
+parameter-mondrian-effect-builtin-glow-radius-label = Radius
+parameter-mondrian-effect-builtin-glow-strength-label = Strength
+parameter-mondrian-effect-builtin-glow-threshold-label = Threshold
+
+## Fractal Noise 分形噪波
+effect-fractal-noise = Fractal Noise
+parameter-group-fractal-noise = Fractal Noise
+parameter-mondrian-effect-builtin-fractal-noise-blend-mode-label = Blend Mode
+parameter-mondrian-effect-fractal-noise-blend-mode-normal = Normal
+parameter-mondrian-effect-fractal-noise-blend-mode-dissolve = Dissolve
+parameter-mondrian-effect-fractal-noise-blend-mode-darken = Darken
+parameter-mondrian-effect-fractal-noise-blend-mode-multiply = Multiply
+parameter-mondrian-effect-fractal-noise-blend-mode-color-burn = Color Burn
+parameter-mondrian-effect-fractal-noise-blend-mode-linear-burn = Linear Burn
+parameter-mondrian-effect-fractal-noise-blend-mode-darker-color = Darker Color
+parameter-mondrian-effect-fractal-noise-blend-mode-lighten = Lighten
+parameter-mondrian-effect-fractal-noise-blend-mode-screen = Screen
+parameter-mondrian-effect-fractal-noise-blend-mode-color-dodge = Color Dodge
+parameter-mondrian-effect-fractal-noise-blend-mode-linear-dodge = Linear Dodge (Add)
+parameter-mondrian-effect-fractal-noise-blend-mode-lighter-color = Lighter Color
+parameter-mondrian-effect-fractal-noise-blend-mode-overlay = Overlay
+parameter-mondrian-effect-fractal-noise-blend-mode-soft-light = Soft Light
+parameter-mondrian-effect-fractal-noise-blend-mode-hard-light = Hard Light
+parameter-mondrian-effect-fractal-noise-blend-mode-vivid-light = Vivid Light
+parameter-mondrian-effect-fractal-noise-blend-mode-linear-light = Linear Light
+parameter-mondrian-effect-fractal-noise-blend-mode-pin-light = Pin Light
+parameter-mondrian-effect-fractal-noise-blend-mode-hard-mix = Hard Mix
+parameter-mondrian-effect-fractal-noise-blend-mode-difference = Difference
+parameter-mondrian-effect-fractal-noise-blend-mode-exclusion = Exclusion
+parameter-mondrian-effect-fractal-noise-blend-mode-subtract = Subtract
+parameter-mondrian-effect-fractal-noise-blend-mode-divide = Divide
+parameter-mondrian-effect-fractal-noise-blend-mode-hue = Hue
+parameter-mondrian-effect-fractal-noise-blend-mode-saturation = Saturation
+parameter-mondrian-effect-fractal-noise-blend-mode-color = Color
+parameter-mondrian-effect-fractal-noise-blend-mode-luminosity = Luminosity
+parameter-mondrian-effect-builtin-fractal-noise-brightness-label = Brightness
+parameter-mondrian-effect-builtin-fractal-noise-centre-auxiliary-label = Auxiliary Center
+parameter-mondrian-effect-builtin-fractal-noise-complexity-label = Complexity
+parameter-mondrian-effect-builtin-fractal-noise-contrast-label = Contrast
+parameter-mondrian-effect-builtin-fractal-noise-cycle-label = Cycle
+parameter-mondrian-effect-builtin-fractal-noise-cycle-evolution-label = Cycle Evolution
+parameter-mondrian-effect-builtin-fractal-noise-evolution-label = Evolution
+parameter-mondrian-effect-builtin-fractal-noise-fractal-type-label = Fractal Type
+parameter-mondrian-effect-fractal-noise-fractal-type-basic = Basic
+parameter-mondrian-effect-fractal-noise-fractal-type-turbulent-smooth = Turbulent Smooth
+parameter-mondrian-effect-fractal-noise-fractal-type-turbulent-sharp = Turbulent Sharp
+parameter-mondrian-effect-fractal-noise-fractal-type-turbulent-basic = Turbulent Basic
+parameter-mondrian-effect-fractal-noise-fractal-type-max = Max
+parameter-mondrian-effect-fractal-noise-fractal-type-swirly = Swirly
+parameter-mondrian-effect-fractal-noise-fractal-type-rock = Rock
+parameter-mondrian-effect-fractal-noise-fractal-type-threads = Threads
+parameter-mondrian-effect-fractal-noise-fractal-type-multiply = Multiply
+parameter-mondrian-effect-builtin-fractal-noise-invert-label = Invert
+parameter-mondrian-effect-builtin-fractal-noise-noise-type-label = Noise Type
+parameter-mondrian-effect-fractal-noise-noise-type-soft-linear = Soft Linear
+parameter-mondrian-effect-fractal-noise-noise-type-linear = Linear
+parameter-mondrian-effect-fractal-noise-noise-type-spline = Spline
+parameter-mondrian-effect-builtin-fractal-noise-offset-turbulence-label = Turbulence Offset
+parameter-mondrian-effect-builtin-fractal-noise-opacity-label = Opacity
+parameter-mondrian-effect-builtin-fractal-noise-overflow-label = Overflow
+parameter-mondrian-effect-fractal-noise-overflow-clip = Clip
+parameter-mondrian-effect-fractal-noise-overflow-soft-clamp = Soft Clamp
+parameter-mondrian-effect-fractal-noise-overflow-wrap = Wrap
+parameter-mondrian-effect-builtin-fractal-noise-perspective-offset-label = Perspective Offset
+parameter-mondrian-effect-builtin-fractal-noise-random-seed-label = Random Seed
+parameter-mondrian-effect-builtin-fractal-noise-rotation-label = Rotation
+parameter-mondrian-effect-builtin-fractal-noise-scale-label = Scale
+parameter-mondrian-effect-builtin-fractal-noise-scale-height-label = Scale Height
+parameter-mondrian-effect-builtin-fractal-noise-scale-width-label = Scale Width
+parameter-mondrian-effect-builtin-fractal-noise-sub-influence-label = Sub Influence
+parameter-mondrian-effect-builtin-fractal-noise-sub-offset-label = Sub Offset
+parameter-mondrian-effect-builtin-fractal-noise-sub-rotation-label = Sub Rotation
+parameter-mondrian-effect-builtin-fractal-noise-sub-scale-label = Sub Scale
+parameter-mondrian-effect-builtin-fractal-noise-uniform-scale-label = Uniform Scaling
+
+## Keylight 专业抠像
+effect-keylight = Keylight
+parameter-mondrian-effect-builtin-keylight-despill-label = Despill
+parameter-mondrian-effect-builtin-keylight-despill-bias-label = Despill Bias
+parameter-mondrian-effect-builtin-keylight-display-label = Display
+parameter-mondrian-effect-keylight-display-final = Final
+parameter-mondrian-effect-keylight-display-matte = Matte
+parameter-mondrian-effect-keylight-display-foreground = Foreground
+parameter-mondrian-effect-keylight-display-background = Background
+parameter-mondrian-effect-builtin-keylight-edge-feather-label = Edge Feather
+parameter-mondrian-effect-builtin-keylight-edge-shrink-label = Edge Shrink
+parameter-mondrian-effect-builtin-keylight-inner-matte-label = Inner Matte
+parameter-mondrian-effect-builtin-keylight-outer-matte-label = Outer Matte
+parameter-mondrian-effect-builtin-keylight-preblur-label = Pre-blur
+parameter-mondrian-effect-builtin-keylight-screen-balance-label = Screen Balance
+parameter-mondrian-effect-builtin-keylight-screen-color-label = Screen Color
+parameter-mondrian-effect-builtin-keylight-screen-gain-label = Screen Gain
+
+## Echo 残影
+effect-echo = Echo
+parameter-group-echo = Echo
+effect-category-time = Time
+parameter-mondrian-effect-builtin-echo-decay-label = Decay
+parameter-mondrian-effect-builtin-echo-echo-count-label = Number of Echoes
+parameter-mondrian-effect-builtin-echo-echo-time-label = Echo Time
+parameter-mondrian-effect-builtin-echo-operator-label = Operator
+parameter-mondrian-effect-echo-operator-add = Add
+parameter-mondrian-effect-echo-operator-screen = Screen
+parameter-mondrian-effect-echo-operator-multiply = Multiply
+parameter-mondrian-effect-echo-operator-overlay = Overlay
+parameter-mondrian-effect-echo-operator-darken = Darken
+parameter-mondrian-effect-echo-operator-lighten = Lighten
+parameter-mondrian-effect-echo-operator-normal = Normal
+parameter-mondrian-effect-builtin-echo-starting-intensity-label = Starting Intensity
+
+## Kaleidoscope 万花筒
+effect-kaleidoscope = Kaleidoscope
+parameter-group-kaleidoscope = Kaleidoscope
+parameter-mondrian-effect-builtin-kaleidoscope-center-x-label = Center X
+parameter-mondrian-effect-builtin-kaleidoscope-center-y-label = Center Y
+parameter-mondrian-effect-builtin-kaleidoscope-floating-center-label = Floating Center
+parameter-mondrian-effect-builtin-kaleidoscope-mirroring-label = Mirroring
+parameter-mondrian-effect-builtin-kaleidoscope-rotation-label = Rotation
+parameter-mondrian-effect-builtin-kaleidoscope-size-label = Size
+
+## Tritone 三色调
+effect-tritone = Tritone
+parameter-group-tritone = Tritone
+effect-category-color-grading = Color & Grading
+parameter-mondrian-effect-builtin-tritone-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-tritone-highlights-label = Highlights
+parameter-mondrian-effect-builtin-tritone-midtones-label = Midtones
+parameter-mondrian-effect-builtin-tritone-shadows-label = Shadows
+
+## Offset 偏移
+effect-offset = Offset
+parameter-group-offset = Offset
+parameter-mondrian-effect-builtin-offset-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-offset-shift-x-label = Shift X
+parameter-mondrian-effect-builtin-offset-shift-y-label = Shift Y
+
+## Bulge 凸出
+effect-bulge = Bulge
+parameter-group-bulge = Bulge
+parameter-mondrian-effect-builtin-bulge-antialias-label = Anti-aliasing
+parameter-mondrian-effect-bulge-antialias-off = Off
+parameter-mondrian-effect-bulge-antialias-on = On
+parameter-mondrian-effect-builtin-bulge-centre-x-label = Center X
+parameter-mondrian-effect-builtin-bulge-centre-y-label = Center Y
+parameter-mondrian-effect-builtin-bulge-height-label = Bulge Height
+parameter-mondrian-effect-builtin-bulge-pinned-label = Pinned
+parameter-mondrian-effect-bulge-pinned-off = Off
+parameter-mondrian-effect-bulge-pinned-on = On
+parameter-mondrian-effect-builtin-bulge-radius-x-label = Horizontal Radius
+parameter-mondrian-effect-builtin-bulge-radius-y-label = Vertical Radius
+parameter-mondrian-effect-builtin-bulge-taper-radius-label = Taper Radius
+
+## Split 分离
+effect-split = Split
+parameter-group-split = Split
+parameter-mondrian-effect-builtin-split-point-a-x-label = Point A X
+parameter-mondrian-effect-builtin-split-point-a-y-label = Point A Y
+parameter-mondrian-effect-builtin-split-point-b-x-label = Point B X
+parameter-mondrian-effect-builtin-split-point-b-y-label = Point B Y
+parameter-mondrian-effect-builtin-split-split-label = Split Amount
+
+## Motion Tile 动态拼贴
+effect-motion-tile = Motion Tile
+parameter-group-motion-tile = Tile
+parameter-group-output = Output
+parameter-mondrian-effect-builtin-motion-tile-center-x-label = Tile Center X
+parameter-mondrian-effect-builtin-motion-tile-center-y-label = Tile Center Y
+parameter-mondrian-effect-builtin-motion-tile-horizontal-phase-label = Horizontal Phase
+parameter-mondrian-effect-builtin-motion-tile-mirror-edges-label = Mirror Edges
+parameter-mondrian-effect-builtin-motion-tile-output-height-label = Output Height
+parameter-mondrian-effect-builtin-motion-tile-output-width-label = Output Width
+parameter-mondrian-effect-builtin-motion-tile-phase-label = Phase
+parameter-mondrian-effect-builtin-motion-tile-tile-height-label = Tile Height
+parameter-mondrian-effect-builtin-motion-tile-tile-width-label = Tile Width
+
+## Convolution Kernel 卷积核
+effect-convolution = Convolution Kernel
+parameter-group-convolution = Convolution Kernel
+parameter-mondrian-effect-builtin-convolution-absolute-values-label = Absolute Values
+parameter-mondrian-effect-builtin-convolution-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-convolution-cell-1-label = 1 - L1
+parameter-mondrian-effect-builtin-convolution-cell-2-label = 2 - L1
+parameter-mondrian-effect-builtin-convolution-cell-3-label = 3 - L1
+parameter-mondrian-effect-builtin-convolution-cell-4-label = 1 - L2
+parameter-mondrian-effect-builtin-convolution-cell-5-label = 2 - L2
+parameter-mondrian-effect-builtin-convolution-cell-6-label = 3 - L2
+parameter-mondrian-effect-builtin-convolution-cell-7-label = 1 - L3
+parameter-mondrian-effect-builtin-convolution-cell-8-label = 2 - L3
+parameter-mondrian-effect-builtin-convolution-cell-9-label = 3 - L3
+
+## Invert 反转
+effect-invert = Invert
+parameter-group-invert = Invert
+effect-category-channel = Channel
+parameter-mondrian-effect-builtin-invert-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-invert-channels-label = Channel
+parameter-builtin-invert-channels-rgb = RGB
+parameter-builtin-invert-channels-red = Red
+parameter-builtin-invert-channels-green = Green
+parameter-builtin-invert-channels-blue = Blue
+parameter-builtin-invert-channels-alpha = Alpha
+parameter-builtin-invert-channels-red-green = Red Green
+parameter-builtin-invert-channels-red-blue = Red Blue
+parameter-builtin-invert-channels-green-blue = Green Blue
+parameter-builtin-invert-channels-red-green-alpha = Red Green Alpha
+parameter-builtin-invert-channels-red-blue-alpha = Red Blue Alpha
+parameter-builtin-invert-channels-green-blue-alpha = Green Blue Alpha
+parameter-builtin-invert-channels-red-green-blue-alpha = RGB + Alpha
+parameter-builtin-invert-channels-hls = HLS
+parameter-builtin-invert-channels-hue = Hue
+parameter-builtin-invert-channels-lightness = Lightness
+parameter-builtin-invert-channels-saturation = Saturation
+
+## Noise 噪点
+effect-noise = Noise
+parameter-group-noise = Noise
+effect-category-film-look = Film Look
+parameter-mondrian-effect-builtin-noise-amount-label = Amount of Noise
+parameter-mondrian-effect-builtin-noise-clip-label = Clip Result Values
+parameter-mondrian-effect-builtin-noise-noise-type-label = Noise Type
+parameter-mondrian-effect-noise-type-rgb = RGB Noise
+parameter-mondrian-effect-noise-type-hls = HLS Noise
+
+## Radial Blur 径向模糊
+effect-radial-blur = Radial Blur
+parameter-group-radial-blur = Radial Blur
+parameter-mondrian-effect-builtin-radial-blur-amount-label = Amount
+parameter-mondrian-effect-builtin-radial-blur-antialiasing-label = Anti-aliasing (Best Quality)
+parameter-builtin-radial-blur-antialiasing-fast = Fast
+parameter-builtin-radial-blur-antialiasing-best = Best Quality
+parameter-mondrian-effect-builtin-radial-blur-centre-x-label = Center X
+parameter-mondrian-effect-builtin-radial-blur-centre-y-label = Center Y
+parameter-mondrian-effect-builtin-radial-blur-mode-label = Blur Method
+parameter-builtin-radial-blur-mode-spin = Spin
+parameter-builtin-radial-blur-mode-zoom = Zoom
+parameter-mondrian-effect-builtin-radial-blur-seed-label = Random Seed
+
+## Drop Shadow 投影
+effect-drop-shadow = Drop Shadow
+parameter-group-drop-shadow = Drop Shadow
+effect-category-glow = Light Effects
+parameter-mondrian-effect-builtin-drop-shadow-color-label = Shadow Color
+parameter-mondrian-effect-builtin-drop-shadow-direction-label = Direction
+parameter-mondrian-effect-builtin-drop-shadow-distance-label = Distance
+parameter-mondrian-effect-builtin-drop-shadow-opacity-label = Opacity
+parameter-mondrian-effect-builtin-drop-shadow-shadow-only-label = Shadow Only
+parameter-mondrian-effect-builtin-drop-shadow-softness-label = Softness
+
+## Extract 提取
+effect-extract = Extract
+parameter-group-extract = Extract
+parameter-mondrian-effect-builtin-extract-black-point-label = Black Point
+parameter-mondrian-effect-builtin-extract-black-softness-label = Black Softness
+parameter-mondrian-effect-builtin-extract-channel-label = Channel
+parameter-mondrian-effect-extract-channel-luma = Luminance
+parameter-mondrian-effect-extract-channel-red = Red
+parameter-mondrian-effect-extract-channel-green = Green
+parameter-mondrian-effect-extract-channel-blue = Blue
+parameter-mondrian-effect-extract-channel-alpha = Alpha
+parameter-mondrian-effect-builtin-extract-invert-label = Invert
+parameter-mondrian-effect-extract-invert-off = Off
+parameter-mondrian-effect-extract-invert-on = On
+parameter-mondrian-effect-builtin-extract-white-point-label = White Point
+parameter-mondrian-effect-builtin-extract-white-softness-label = White Softness
+
+## Scatter 散射
+effect-scatter = Scatter
+parameter-group-scatter = Scatter
+parameter-mondrian-effect-builtin-scatter-amount-label = Scatter Amount
+parameter-mondrian-effect-builtin-scatter-copies-label = Copies
+parameter-mondrian-effect-builtin-scatter-randomness-label = Scatter Randomness
+
+## Bevel and Emboss 斜面与浮雕
+effect-bevel = Bevel and Emboss
+parameter-group-bevel = Bevel and Emboss
+effect-category-edge = Edge Effects
+parameter-mondrian-effect-builtin-bevel-angle-label = Light Angle
+parameter-mondrian-effect-builtin-bevel-intensity-label = Light Intensity
+parameter-mondrian-effect-builtin-bevel-light-color-label = Light Color
+parameter-mondrian-effect-builtin-bevel-thickness-label = Edge Thickness
+
+## Directional Blur 方向模糊
+effect-directional-blur = Directional Blur
+parameter-group-directional-blur = Directional Blur
+parameter-mondrian-effect-builtin-directional-blur-direction-label = Direction
+parameter-mondrian-effect-builtin-directional-blur-length-label = Blur Length
+
+## Box Blur 方框模糊
+effect-box-blur = Box Blur
+parameter-group-box-blur = Box Blur
+parameter-mondrian-effect-builtin-box-blur-direction-label = Blur Direction
+parameter-builtin-box-blur-direction-horizontal-and-vertical = Horizontal and Vertical
+parameter-builtin-box-blur-direction-horizontal = Horizontal
+parameter-builtin-box-blur-direction-vertical = Vertical
+parameter-mondrian-effect-builtin-box-blur-iterations-label = Iterations
+parameter-mondrian-effect-builtin-box-blur-radius-label = Blur Radius
+parameter-mondrian-effect-builtin-box-blur-repeat-edge-pixels-label = Repeat Edge Pixels
+
+## Twirl 旋转扭曲
+effect-twirl = Twirl
+parameter-group-twirl = Twirl
+parameter-mondrian-effect-builtin-twirl-angle-label = Angle
+parameter-mondrian-effect-builtin-twirl-centre-x-label = Center X
+parameter-mondrian-effect-builtin-twirl-centre-y-label = Center Y
+parameter-mondrian-effect-builtin-twirl-radius-label = Twirl Radius
+
+## Polar Coordinates 极坐标
+effect-polar-coordinates = Polar Coordinates
+parameter-group-polar-coordinates = Polar Coordinates
+parameter-mondrian-effect-builtin-polar-coordinates-conversion-label = Conversion Type
+parameter-mondrian-effect-polar-coordinates-conversion-rect-to-polar = Rect to Polar
+parameter-mondrian-effect-polar-coordinates-conversion-polar-to-rect = Polar to Rect
+parameter-mondrian-effect-builtin-polar-coordinates-interpolation-label = Interpolation
+parameter-mondrian-effect-polar-coordinates-interpolation-nearest = Nearest
+parameter-mondrian-effect-polar-coordinates-interpolation-bilinear = Bilinear
+
+## Find Edges 查找边缘
+effect-find-edges = Find Edges
+parameter-group-find-edges = Find Edges
+parameter-mondrian-effect-builtin-find-edges-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-find-edges-invert-label = Invert
+
+## Emboss 浮雕
+effect-emboss = Emboss
+parameter-group-emboss = Emboss
+parameter-mondrian-effect-builtin-emboss-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-emboss-contrast-label = Contrast
+parameter-mondrian-effect-builtin-emboss-direction-label = Direction
+parameter-mondrian-effect-builtin-emboss-relief-label = Relief
+
+## Spherize 球面化
+effect-spherize = Spherize
+parameter-group-spherize = Spherize
+parameter-mondrian-effect-builtin-spherize-centre-x-label = Center X
+parameter-mondrian-effect-builtin-spherize-centre-y-label = Center Y
+parameter-mondrian-effect-builtin-spherize-radius-label = Radius
+
+## Brush Strokes 画笔描边
+effect-brush-strokes = Brush Strokes
+parameter-group-brush-strokes = Brush Strokes
+parameter-mondrian-effect-builtin-brush-strokes-angle-label = Stroke Direction
+parameter-mondrian-effect-builtin-brush-strokes-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-brush-strokes-density-label = Brush Density
+parameter-mondrian-effect-builtin-brush-strokes-length-label = Brush Length
+parameter-mondrian-effect-builtin-brush-strokes-randomness-label = Randomness
+parameter-mondrian-effect-builtin-brush-strokes-size-label = Brush Size
+parameter-mondrian-effect-builtin-brush-strokes-surface-label = Brush Surface
+
+## Linear Color Key 线性颜色键
+effect-linear-color-key = Linear Color Key
+parameter-group-linear-color-key = Linear Color Key
+parameter-mondrian-effect-builtin-linear-color-key-key-colour-label = Key Color
+parameter-mondrian-effect-builtin-linear-color-key-match-colours-label = Match Colors
+parameter-mondrian-effect-linear-color-key-match-rgb = RGB
+parameter-mondrian-effect-linear-color-key-match-green = Green
+parameter-mondrian-effect-linear-color-key-match-blue = Blue
+parameter-mondrian-effect-linear-color-key-match-chroma = Chroma
+parameter-mondrian-effect-builtin-linear-color-key-operation-label = Key Operation
+parameter-mondrian-effect-linear-color-key-operation-key = Key Colors
+parameter-mondrian-effect-linear-color-key-operation-keep = Keep Colors
+parameter-mondrian-effect-builtin-linear-color-key-softness-label = Matching Softness
+parameter-mondrian-effect-builtin-linear-color-key-tolerance-label = Matching Tolerance
+
+## Vibrance 自然饱和度
+effect-vibrance = Vibrance
+parameter-group-vibrance = Vibrance
+parameter-mondrian-effect-builtin-vibrance-saturation-label = Saturation
+parameter-mondrian-effect-builtin-vibrance-vibrance-label = Vibrance
+
+## Color Emboss 色彩浮雕
+effect-color-emboss = Color Emboss
+parameter-group-color-emboss = Color Emboss
+parameter-mondrian-effect-builtin-color-emboss-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-color-emboss-contrast-label = Contrast
+parameter-mondrian-effect-builtin-color-emboss-direction-label = Direction
+parameter-mondrian-effect-builtin-color-emboss-relief-label = Relief
+
+## Hue/Saturation 色相饱和度
+effect-hue-saturation = Hue/Saturation
+parameter-group-hue-saturation = Hue/Saturation
+parameter-mondrian-effect-builtin-hue-saturation-band-label = Channel Control
+parameter-builtin-hue-saturation-band-master = Master
+parameter-builtin-hue-saturation-band-reds = Reds
+parameter-builtin-hue-saturation-band-yellows = Yellows
+parameter-builtin-hue-saturation-band-greens = Greens
+parameter-builtin-hue-saturation-band-cyans = Cyans
+parameter-builtin-hue-saturation-band-blues = Blues
+parameter-builtin-hue-saturation-band-magentas = Magentas
+parameter-mondrian-effect-builtin-hue-saturation-colorize-label = Colorize
+parameter-mondrian-effect-builtin-hue-saturation-hue-label = Hue
+parameter-mondrian-effect-builtin-hue-saturation-lightness-label = Lightness
+parameter-mondrian-effect-builtin-hue-saturation-saturation-label = Saturation
+parameter-mondrian-effect-builtin-hue-saturation-tint-hue-label = Tint Hue
+parameter-mondrian-effect-builtin-hue-saturation-tint-lightness-label = Tint Lightness
+parameter-mondrian-effect-builtin-hue-saturation-tint-saturation-label = Tint Saturation
+
+## Tint 色调
+effect-tint = Tint
+parameter-group-tint = Tint
+parameter-mondrian-effect-builtin-tint-amount-label = Amount to Tint
+parameter-mondrian-effect-builtin-tint-map-black-label = Map Black To
+parameter-mondrian-effect-builtin-tint-map-white-label = Map White To
+
+## Posterize 色调分离
+effect-posterize = Posterize
+parameter-group-posterize = Posterize
+parameter-mondrian-effect-builtin-posterize-levels-label = Levels
+
+## Shift Channels 转换通道
+effect-shift-channels = Shift Channels
+parameter-group-shift-channels = Shift Channels
+parameter-mondrian-effect-builtin-shift-channels-alpha-label = Take Alpha From
+parameter-builtin-shift-channels-alpha-red = Red
+parameter-builtin-shift-channels-alpha-green = Green
+parameter-builtin-shift-channels-alpha-blue = Blue
+parameter-builtin-shift-channels-alpha-alpha = Alpha
+parameter-builtin-shift-channels-alpha-luminance = Luminance
+parameter-builtin-shift-channels-alpha-hue = Hue
+parameter-builtin-shift-channels-alpha-saturation = Saturation
+parameter-builtin-shift-channels-alpha-lightness = Lightness
+parameter-builtin-shift-channels-alpha-maximum = Maximum
+parameter-builtin-shift-channels-alpha-minimum = Minimum
+parameter-mondrian-effect-builtin-shift-channels-blue-label = Take Blue From
+parameter-builtin-shift-channels-blue-red = Red
+parameter-builtin-shift-channels-blue-green = Green
+parameter-builtin-shift-channels-blue-blue = Blue
+parameter-builtin-shift-channels-blue-alpha = Alpha
+parameter-builtin-shift-channels-blue-luminance = Luminance
+parameter-builtin-shift-channels-blue-hue = Hue
+parameter-builtin-shift-channels-blue-saturation = Saturation
+parameter-builtin-shift-channels-blue-lightness = Lightness
+parameter-builtin-shift-channels-blue-maximum = Maximum
+parameter-builtin-shift-channels-blue-minimum = Minimum
+parameter-mondrian-effect-builtin-shift-channels-green-label = Take Green From
+parameter-builtin-shift-channels-green-red = Red
+parameter-builtin-shift-channels-green-green = Green
+parameter-builtin-shift-channels-green-blue = Blue
+parameter-builtin-shift-channels-green-alpha = Alpha
+parameter-builtin-shift-channels-green-luminance = Luminance
+parameter-builtin-shift-channels-green-hue = Hue
+parameter-builtin-shift-channels-green-saturation = Saturation
+parameter-builtin-shift-channels-green-lightness = Lightness
+parameter-builtin-shift-channels-green-maximum = Maximum
+parameter-builtin-shift-channels-green-minimum = Minimum
+parameter-mondrian-effect-builtin-shift-channels-red-label = Take Red From
+parameter-builtin-shift-channels-red-red = Red
+parameter-builtin-shift-channels-red-green = Green
+parameter-builtin-shift-channels-red-blue = Blue
+parameter-builtin-shift-channels-red-alpha = Alpha
+parameter-builtin-shift-channels-red-luminance = Luminance
+parameter-builtin-shift-channels-red-hue = Hue
+parameter-builtin-shift-channels-red-saturation = Saturation
+parameter-builtin-shift-channels-red-lightness = Lightness
+parameter-builtin-shift-channels-red-maximum = Maximum
+parameter-builtin-shift-channels-red-minimum = Minimum
+
+## Channel Mixer 通道混合器
+effect-channel-mixer = Channel Mixer
+parameter-group-channel-mixer = Channel Mixer
+parameter-mondrian-effect-builtin-channel-mixer-blue-blue-label = Blue - Blue
+parameter-mondrian-effect-builtin-channel-mixer-blue-constant-label = Blue - Constant
+parameter-mondrian-effect-builtin-channel-mixer-blue-green-label = Blue - Green
+parameter-mondrian-effect-builtin-channel-mixer-blue-red-label = Blue - Red
+parameter-mondrian-effect-builtin-channel-mixer-green-blue-label = Green - Blue
+parameter-mondrian-effect-builtin-channel-mixer-green-constant-label = Green - Constant
+parameter-mondrian-effect-builtin-channel-mixer-green-green-label = Green - Green
+parameter-mondrian-effect-builtin-channel-mixer-green-red-label = Green - Red
+parameter-mondrian-effect-builtin-channel-mixer-monochrome-label = Monochrome
+parameter-mondrian-effect-builtin-channel-mixer-red-blue-label = Red - Blue
+parameter-mondrian-effect-builtin-channel-mixer-red-constant-label = Red - Constant
+parameter-mondrian-effect-builtin-channel-mixer-red-green-label = Red - Green
+parameter-mondrian-effect-builtin-channel-mixer-red-red-label = Red - Red
+
+## Unsharp Mask 钝化蒙版
+effect-unsharp-mask = Unsharp Mask
+parameter-group-unsharp-mask = Unsharp Mask
+parameter-mondrian-effect-builtin-unsharp-mask-amount-label = Amount
+parameter-mondrian-effect-builtin-unsharp-mask-radius-label = Radius
+parameter-mondrian-effect-builtin-unsharp-mask-threshold-label = Threshold
+
+## Mirror 镜像
+effect-mirror = Mirror
+parameter-group-mirror = Mirror
+parameter-mondrian-effect-builtin-mirror-angle-label = Reflection Angle
+parameter-mondrian-effect-builtin-mirror-centre-x-label = Reflection Center X
+parameter-mondrian-effect-builtin-mirror-centre-y-label = Reflection Center Y
+
+## Lens Flare 镜头光晕
+effect-lens-flare = Lens Flare
+parameter-group-lens-flare = Lens Flare
+parameter-mondrian-effect-builtin-lens-flare-blend-with-original-label = Blend With Original
+parameter-mondrian-effect-builtin-lens-flare-brightness-label = Flare Brightness
+parameter-mondrian-effect-builtin-lens-flare-centre-x-label = Flare Center X
+parameter-mondrian-effect-builtin-lens-flare-centre-y-label = Flare Center Y
+parameter-mondrian-effect-builtin-lens-flare-lens-type-label = Lens Type
+parameter-mondrian-effect-lens-flare-lens-type-zoom-50-300 = 50-300mm Zoom
+parameter-mondrian-effect-lens-flare-lens-type-prime-35 = 35mm Prime
+parameter-mondrian-effect-lens-flare-lens-type-prime-105 = 105mm Prime
+
+## Lens Distortion 镜头畸变
+effect-lens-distortion = Lens Distortion
+parameter-group-lens-distortion = Lens Distortion
+parameter-mondrian-effect-builtin-lens-distortion-best-pixels-label = Best Pixels
+parameter-mondrian-effect-lens-distortion-best-pixels-off = Off
+parameter-mondrian-effect-lens-distortion-best-pixels-on = On
+parameter-mondrian-effect-builtin-lens-distortion-centre-x-label = View Center X
+parameter-mondrian-effect-builtin-lens-distortion-centre-y-label = View Center Y
+parameter-mondrian-effect-builtin-lens-distortion-fov-label = Field of View (FOV)
+parameter-mondrian-effect-builtin-lens-distortion-fov-direction-label = FOV Direction
+parameter-mondrian-effect-lens-distortion-direction-horizontal = Horizontal
+parameter-mondrian-effect-lens-distortion-direction-vertical = Vertical
+parameter-mondrian-effect-lens-distortion-direction-diagonal = Diagonal
+parameter-mondrian-effect-builtin-lens-distortion-invert-label = Invert Lens Distortion
+parameter-mondrian-effect-lens-distortion-invert-off = Off
+parameter-mondrian-effect-lens-distortion-invert-on = On
+parameter-mondrian-effect-builtin-lens-distortion-resize-label = Resize
+parameter-mondrian-effect-lens-distortion-resize-none = None
+parameter-mondrian-effect-lens-distortion-resize-expand = Expand
+parameter-mondrian-effect-lens-distortion-resize-contract = Contract
+parameter-mondrian-effect-lens-distortion-resize-auto = Auto
+
+## Threshold 阈值
+effect-threshold = Threshold
+parameter-group-threshold = Threshold
+parameter-mondrian-effect-builtin-threshold-level-label = Level
+
+## Color Offset 颜色偏移
+effect-color-offset = Color Offset
+parameter-group-color-offset = Color Offset
+parameter-mondrian-effect-builtin-color-offset-blue-phase-label = Blue Phase
+parameter-mondrian-effect-builtin-color-offset-green-phase-label = Green Phase
+parameter-mondrian-effect-builtin-color-offset-overflow-label = Overflow
+parameter-mondrian-effect-color-offset-overflow-wrap = Wrap
+parameter-mondrian-effect-color-offset-overflow-clamp = Clamp
+parameter-mondrian-effect-color-offset-overflow-mirror = Mirror
+parameter-mondrian-effect-builtin-color-offset-red-phase-label = Red Phase
+
+## Mosaic 马赛克
+effect-mosaic = Mosaic
+parameter-group-mosaic = Mosaic
+parameter-mondrian-effect-builtin-mosaic-horizontal-label = Horizontal Blocks
+parameter-mondrian-effect-builtin-mosaic-sharp-colors-label = Sharp Colors
+parameter-mondrian-effect-builtin-mosaic-vertical-label = Vertical Blocks
+
+## Black & White 黑白
+effect-black-and-white = Black & White
+parameter-group-black-and-white = Black & White
+parameter-mondrian-effect-builtin-black-and-white-blue-label = Blues
+parameter-mondrian-effect-builtin-black-and-white-cyan-label = Cyans
+parameter-mondrian-effect-builtin-black-and-white-green-label = Greens
+parameter-mondrian-effect-builtin-black-and-white-magenta-label = Magentas
+parameter-mondrian-effect-builtin-black-and-white-red-label = Reds
+parameter-mondrian-effect-builtin-black-and-white-tint-amount-label = Tint Amount
+parameter-mondrian-effect-builtin-black-and-white-tint-color-label = Tint Color
+parameter-mondrian-effect-builtin-black-and-white-yellow-label = Yellows
+
+## Refine Matte 遮罩精修
+effect-matte-refine = Refine Matte
+parameter-group-matte-refine = Refine Matte
+parameter-mondrian-effect-builtin-matte-refine-better-quality-label = Better Quality
+parameter-mondrian-effect-builtin-matte-refine-clean-amount-label = Clean Amount
+parameter-mondrian-effect-builtin-matte-refine-clean-edge-color-label = Clean Edge Color
+parameter-mondrian-effect-builtin-matte-refine-contrast-label = Contrast
+parameter-mondrian-effect-builtin-matte-refine-edge-detail-label = Calculate Edge Detail
+parameter-mondrian-effect-builtin-matte-refine-expand-radius-label = Expand Radius
+parameter-mondrian-effect-builtin-matte-refine-extend-smooth-label = Extend Smooth
+parameter-mondrian-effect-builtin-matte-refine-feather-label = Feather
+parameter-mondrian-effect-builtin-matte-refine-more-motion-blur-label = More Motion Blur
+parameter-mondrian-effect-builtin-matte-refine-other-edge-radius-label = Other Edge Radius
+parameter-mondrian-effect-builtin-matte-refine-per-frame-samples-label = Samples Per Frame
+parameter-mondrian-effect-builtin-matte-refine-shift-edge-label = Shift Edge
+parameter-mondrian-effect-builtin-matte-refine-shutter-angle-degrees-label = Shutter Angle
+parameter-mondrian-effect-builtin-matte-refine-smooth-label = Smooth
+parameter-mondrian-effect-builtin-matte-refine-tremor-amount-label = Reduce Tremor
+parameter-mondrian-effect-builtin-matte-refine-tremor-reduction-label = Tremor Reduction
+parameter-mondrian-effect-builtin-matte-refine-view-edge-region-label = View Edge Region
+parameter-mondrian-effect-builtin-matte-refine-view-map-label = View Map

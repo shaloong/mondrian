@@ -1594,3 +1594,779 @@ audio-rack-native-controlled-parameter = 由插件控制
 audio-rack-adopt-displayed-value = 采用显示值
 audio-rack-query-native-parameter = 读取当前值
 native-parameter-query-unavailable = 当前插件值暂不可用
+
+## Flip 翻转
+effect-flip = 翻转
+parameter-group-flip = 翻转
+effect-category-transform-and-size = 变换与尺寸
+parameter-mondrian-effect-builtin-flip-axis-label = 轴向
+parameter-mondrian-effect-flip-axis-horizontal = 水平
+parameter-mondrian-effect-flip-axis-vertical = 垂直
+parameter-mondrian-effect-flip-axis-both = 两者
+parameter-mondrian-effect-builtin-flip-blend-with-original-label = 混合
+parameter-mondrian-effect-builtin-flip-centre-x-label = 中心 X
+parameter-mondrian-effect-builtin-flip-centre-y-label = 中心 Y
+
+## Ripple 波纹
+effect-ripple = 波纹
+parameter-group-ripple = 波纹
+effect-category-distort = 变形
+parameter-mondrian-effect-builtin-ripple-centre-x-label = 波纹中心 X
+parameter-mondrian-effect-builtin-ripple-centre-y-label = 波纹中心 Y
+parameter-mondrian-effect-builtin-ripple-phase-label = 波纹相
+parameter-mondrian-effect-builtin-ripple-radius-label = 半径
+parameter-mondrian-effect-builtin-ripple-wave-height-label = 波形高度
+parameter-mondrian-effect-builtin-ripple-wave-speed-label = 波形速度
+parameter-mondrian-effect-builtin-ripple-wave-type-label = 转换类型
+parameter-mondrian-effect-ripple-wave-type-asymmetric = 非对称
+parameter-mondrian-effect-ripple-wave-type-symmetric = 对称
+parameter-mondrian-effect-builtin-ripple-wave-width-label = 波形宽度
+
+## Wave Warp 波形变形
+effect-wave-warp = 波形变形
+parameter-group-wave-warp = 波形变形
+parameter-mondrian-effect-builtin-wave-warp-direction-label = 方向
+parameter-mondrian-effect-builtin-wave-warp-phase-label = 相位
+parameter-mondrian-effect-builtin-wave-warp-pin-label = 固定
+parameter-mondrian-effect-wave-warp-pin-none = 无
+parameter-mondrian-effect-wave-warp-pin-all-edges = 所有边缘
+parameter-mondrian-effect-wave-warp-pin-center = 中心
+parameter-mondrian-effect-wave-warp-pin-left-edge = 左边缘
+parameter-mondrian-effect-wave-warp-pin-top-edge = 上边缘
+parameter-mondrian-effect-wave-warp-pin-right-edge = 右边缘
+parameter-mondrian-effect-wave-warp-pin-bottom-edge = 下边缘
+parameter-mondrian-effect-wave-warp-pin-horizontal-edges = 水平边缘
+parameter-mondrian-effect-wave-warp-pin-vertical-edges = 垂直边缘
+parameter-mondrian-effect-builtin-wave-warp-quality-label = 消除锯齿（最佳品质）
+parameter-mondrian-effect-wave-warp-quality-low = 低
+parameter-mondrian-effect-wave-warp-quality-normal = 标准
+parameter-mondrian-effect-wave-warp-quality-high = 高
+parameter-mondrian-effect-builtin-wave-warp-wave-height-label = 波形高度
+parameter-mondrian-effect-builtin-wave-warp-wave-speed-label = 波形速度
+parameter-mondrian-effect-builtin-wave-warp-wave-type-label = 波浪类型
+parameter-mondrian-effect-wave-warp-wave-type-sine = 正弦
+parameter-mondrian-effect-wave-warp-wave-type-square = 方形
+parameter-mondrian-effect-wave-warp-wave-type-triangle = 三角形
+parameter-mondrian-effect-wave-warp-wave-type-sawtooth = 锯齿波
+parameter-mondrian-effect-wave-warp-wave-type-circle = 圆形
+parameter-mondrian-effect-wave-warp-wave-type-semicircle = 半圆形
+parameter-mondrian-effect-wave-warp-wave-type-non-circle = 非圆形
+parameter-mondrian-effect-wave-warp-wave-type-noise = 噪声
+parameter-mondrian-effect-wave-warp-wave-type-smooth-noise = 平滑噪声
+parameter-mondrian-effect-builtin-wave-warp-wave-width-label = 波形宽度
+
+## Transform 变换
+effect-transform = 变换
+parameter-group-transform = 变换
+parameter-mondrian-effect-builtin-transform-anchor-x-label = 定位点 X
+parameter-mondrian-effect-builtin-transform-anchor-y-label = 定位点 Y
+parameter-mondrian-effect-builtin-transform-opacity-label = 不透明度
+parameter-mondrian-effect-builtin-transform-position-x-label = 位置 X
+parameter-mondrian-effect-builtin-transform-position-y-label = 位置 Y
+parameter-mondrian-effect-builtin-transform-rotation-label = 旋转
+parameter-mondrian-effect-builtin-transform-sampling-label = 采样
+parameter-mondrian-effect-transform-sampling-low = 低
+parameter-mondrian-effect-transform-sampling-normal = 标准
+parameter-mondrian-effect-transform-sampling-high = 高
+parameter-mondrian-effect-builtin-transform-scale-height-label = 高度缩放
+parameter-mondrian-effect-builtin-transform-scale-width-label = 宽度缩放
+parameter-mondrian-effect-builtin-transform-shutter-angle-label = 快门角度（暂保留：运动模糊需要逐帧速度）
+parameter-mondrian-effect-builtin-transform-skew-label = 倾斜
+parameter-mondrian-effect-builtin-transform-skew-axis-label = 倾斜轴
+parameter-mondrian-effect-builtin-transform-uniform-scale-label = 统一缩放
+parameter-mondrian-effect-builtin-transform-use-composition-shutter-label = 使用合成快门角度（暂保留：运动模糊需要逐帧速度）
+parameter-mondrian-effect-transform-use-composition-shutter-off = 关闭
+parameter-mondrian-effect-transform-use-composition-shutter-on = 开启
+
+## Corner Pin 边角定位
+effect-corner-pin = 边角定位
+parameter-group-corner-pin = 边角定位
+parameter-mondrian-effect-builtin-corner-pin-bottom-left-x-label = 左下 X
+parameter-mondrian-effect-builtin-corner-pin-bottom-left-y-label = 左下 Y
+parameter-mondrian-effect-builtin-corner-pin-bottom-right-x-label = 右下 X
+parameter-mondrian-effect-builtin-corner-pin-bottom-right-y-label = 右下 Y
+parameter-mondrian-effect-builtin-corner-pin-top-left-x-label = 左上 X
+parameter-mondrian-effect-builtin-corner-pin-top-left-y-label = 左上 Y
+parameter-mondrian-effect-builtin-corner-pin-top-right-x-label = 右上 X
+parameter-mondrian-effect-builtin-corner-pin-top-right-y-label = 右上 Y
+
+## Turbulent Displace 湍流置换
+effect-turbulent-displace = 湍流置换
+parameter-group-turbulent-displace = 湍流置换
+parameter-mondrian-effect-builtin-turbulent-displace-amount-label = 数量
+parameter-mondrian-effect-builtin-turbulent-displace-antialias-label = 抗锯齿
+parameter-mondrian-effect-turbulent-displace-antialias-low = 低
+parameter-mondrian-effect-turbulent-displace-antialias-high = 高
+parameter-mondrian-effect-builtin-turbulent-displace-complexity-label = 复杂度
+parameter-mondrian-effect-builtin-turbulent-displace-cycle-label = 循环
+parameter-mondrian-effect-builtin-turbulent-displace-cycle-evolution-label = 循环演化
+parameter-mondrian-effect-builtin-turbulent-displace-displacement-label = 置换
+parameter-mondrian-effect-turbulent-displace-displacement-turbulent = 湍流
+parameter-mondrian-effect-turbulent-displace-displacement-bulge = 凸出
+parameter-mondrian-effect-turbulent-displace-displacement-twist = 扭转
+parameter-mondrian-effect-turbulent-displace-displacement-turbulent-smoother = 湍流较平滑
+parameter-mondrian-effect-turbulent-displace-displacement-bulge-smoother = 凸出较平滑
+parameter-mondrian-effect-turbulent-displace-displacement-twist-smoother = 扭转较平滑
+parameter-mondrian-effect-turbulent-displace-displacement-vertical = 垂直置换
+parameter-mondrian-effect-turbulent-displace-displacement-horizontal = 水平置换
+parameter-mondrian-effect-turbulent-displace-displacement-cross = 交叉置换
+parameter-mondrian-effect-builtin-turbulent-displace-evolution-label = 演化
+parameter-mondrian-effect-builtin-turbulent-displace-offset-x-label = 偏移 X
+parameter-mondrian-effect-builtin-turbulent-displace-offset-y-label = 偏移 Y
+parameter-mondrian-effect-builtin-turbulent-displace-pin-label = 固定
+parameter-mondrian-effect-turbulent-displace-pin-none = 无
+parameter-mondrian-effect-turbulent-displace-pin-all-edges = 所有边缘
+parameter-mondrian-effect-turbulent-displace-pin-center = 中心
+parameter-mondrian-effect-turbulent-displace-pin-left-edge = 左侧边缘
+parameter-mondrian-effect-turbulent-displace-pin-top-edge = 顶部边缘
+parameter-mondrian-effect-turbulent-displace-pin-right-edge = 右侧边缘
+parameter-mondrian-effect-turbulent-displace-pin-bottom-edge = 底部边缘
+parameter-mondrian-effect-turbulent-displace-pin-horizontal-edges = 水平边缘
+parameter-mondrian-effect-turbulent-displace-pin-vertical-edges = 垂直边缘
+parameter-mondrian-effect-builtin-turbulent-displace-random-seed-label = 随机种子
+parameter-mondrian-effect-builtin-turbulent-displace-resize-layer-label = 调整图层大小
+parameter-mondrian-effect-builtin-turbulent-displace-size-label = 大小
+
+## Deband 去色带
+effect-deband = 去色带
+parameter-group-deband = 去色带
+effect-category-restore = 修复
+parameter-mondrian-effect-builtin-deband-edge-threshold-label = 边缘阈值
+parameter-mondrian-effect-builtin-deband-post-optimization-label = 色彩抖动
+parameter-mondrian-effect-builtin-deband-radius-label = 半径
+
+## Ramp 渐变
+effect-ramp = 渐变
+parameter-group-ramp = 渐变
+parameter-mondrian-effect-builtin-ramp-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-ramp-end-label = 渐变终点
+parameter-mondrian-effect-builtin-ramp-end-color-label = 结束颜色
+parameter-mondrian-effect-builtin-ramp-scatter-label = 渐变散射
+parameter-mondrian-effect-builtin-ramp-shape-label = 渐变形状
+parameter-mondrian-effect-ramp-shape-linear = 线性
+parameter-mondrian-effect-ramp-shape-radial = 径向
+parameter-mondrian-effect-builtin-ramp-start-label = 渐变起点
+parameter-mondrian-effect-builtin-ramp-start-color-label = 起始颜色
+
+## Brightness & Contrast 亮度对比度
+effect-brightness-contrast = 亮度对比度
+parameter-group-brightness-contrast = 亮度对比度
+parameter-mondrian-effect-builtin-brightness-contrast-brightness-label = 亮度
+parameter-mondrian-effect-builtin-brightness-contrast-contrast-label = 对比度
+parameter-mondrian-effect-builtin-brightness-contrast-legacy-label = 使用旧版（支持 HDR）
+parameter-mondrian-effect-brightness-contrast-legacy-off = 关闭
+parameter-mondrian-effect-brightness-contrast-legacy-on = 开启
+
+## Levels 色阶
+effect-levels = 色阶
+parameter-group-levels = 色阶
+parameter-mondrian-effect-builtin-levels-channel-label = 通道
+parameter-mondrian-effect-levels-channel-rgb = RGB
+parameter-mondrian-effect-levels-channel-red = 红色
+parameter-mondrian-effect-levels-channel-green = 绿色
+parameter-mondrian-effect-levels-channel-blue = 蓝色
+parameter-mondrian-effect-levels-channel-alpha = Alpha
+parameter-mondrian-effect-builtin-levels-clip-output-black-label = 剪切以输出黑色
+parameter-mondrian-effect-levels-clip-output-black-off = 关闭
+parameter-mondrian-effect-levels-clip-output-black-clamp-output = 限制到输出范围
+parameter-mondrian-effect-levels-clip-output-black-clamp-display = 限制到显示范围
+parameter-mondrian-effect-builtin-levels-clip-output-white-label = 剪切以输出白色
+parameter-mondrian-effect-levels-clip-output-white-off = 关闭
+parameter-mondrian-effect-levels-clip-output-white-clamp-output = 限制到输出范围
+parameter-mondrian-effect-levels-clip-output-white-clamp-display = 限制到显示范围
+parameter-mondrian-effect-builtin-levels-gamma-label = 灰度系数
+parameter-mondrian-effect-builtin-levels-input-black-label = 输入黑色
+parameter-mondrian-effect-builtin-levels-input-white-label = 输入白色
+parameter-mondrian-effect-builtin-levels-output-black-label = 输出黑色
+parameter-mondrian-effect-builtin-levels-output-white-label = 输出白色
+
+## Glow 发光
+effect-glow = 发光
+parameter-group-glow = 发光
+effect-category-light = 光
+parameter-mondrian-effect-builtin-glow-color-a-label = 颜色 A
+parameter-mondrian-effect-builtin-glow-color-b-label = 颜色 B
+parameter-mondrian-effect-builtin-glow-color-loops-label = 颜色循环
+parameter-mondrian-effect-builtin-glow-color-phase-label = 色彩相位
+parameter-mondrian-effect-builtin-glow-colors-label = 发光颜色
+parameter-mondrian-effect-builtin-glow-composite-original-label = 合成原始项目
+parameter-mondrian-effect-builtin-glow-dimensions-label = 发光维度
+parameter-mondrian-effect-builtin-glow-midpoint-label = A/B 中点
+parameter-mondrian-effect-builtin-glow-operation-label = 发光操作
+parameter-mondrian-effect-builtin-glow-radius-label = 半径
+parameter-mondrian-effect-builtin-glow-strength-label = 强度
+parameter-mondrian-effect-builtin-glow-threshold-label = 阈值
+
+## Fractal Noise 分形噪波
+effect-fractal-noise = 分形噪波
+parameter-group-fractal-noise = 分形噪波
+parameter-mondrian-effect-builtin-fractal-noise-blend-mode-label = 混合模式
+parameter-mondrian-effect-fractal-noise-blend-mode-normal = 正常
+parameter-mondrian-effect-fractal-noise-blend-mode-dissolve = 溶解
+parameter-mondrian-effect-fractal-noise-blend-mode-darken = 变暗
+parameter-mondrian-effect-fractal-noise-blend-mode-multiply = 正片叠底
+parameter-mondrian-effect-fractal-noise-blend-mode-color-burn = 颜色加深
+parameter-mondrian-effect-fractal-noise-blend-mode-linear-burn = 线性加深
+parameter-mondrian-effect-fractal-noise-blend-mode-darker-color = 深色
+parameter-mondrian-effect-fractal-noise-blend-mode-lighten = 变亮
+parameter-mondrian-effect-fractal-noise-blend-mode-screen = 滤色
+parameter-mondrian-effect-fractal-noise-blend-mode-color-dodge = 颜色减淡
+parameter-mondrian-effect-fractal-noise-blend-mode-linear-dodge = 线性减淡(添加)
+parameter-mondrian-effect-fractal-noise-blend-mode-lighter-color = 浅色
+parameter-mondrian-effect-fractal-noise-blend-mode-overlay = 叠加
+parameter-mondrian-effect-fractal-noise-blend-mode-soft-light = 柔光
+parameter-mondrian-effect-fractal-noise-blend-mode-hard-light = 强光
+parameter-mondrian-effect-fractal-noise-blend-mode-vivid-light = 亮光
+parameter-mondrian-effect-fractal-noise-blend-mode-linear-light = 线性光
+parameter-mondrian-effect-fractal-noise-blend-mode-pin-light = 点光
+parameter-mondrian-effect-fractal-noise-blend-mode-hard-mix = 强混合
+parameter-mondrian-effect-fractal-noise-blend-mode-difference = 差值
+parameter-mondrian-effect-fractal-noise-blend-mode-exclusion = 排除
+parameter-mondrian-effect-fractal-noise-blend-mode-subtract = 相减
+parameter-mondrian-effect-fractal-noise-blend-mode-divide = 相除
+parameter-mondrian-effect-fractal-noise-blend-mode-hue = 色相
+parameter-mondrian-effect-fractal-noise-blend-mode-saturation = 饱和度
+parameter-mondrian-effect-fractal-noise-blend-mode-color = 颜色
+parameter-mondrian-effect-fractal-noise-blend-mode-luminosity = 发光度
+parameter-mondrian-effect-builtin-fractal-noise-brightness-label = 亮度
+parameter-mondrian-effect-builtin-fractal-noise-centre-auxiliary-label = 中心辅助
+parameter-mondrian-effect-builtin-fractal-noise-complexity-label = 复杂度
+parameter-mondrian-effect-builtin-fractal-noise-contrast-label = 对比度
+parameter-mondrian-effect-builtin-fractal-noise-cycle-label = 循环
+parameter-mondrian-effect-builtin-fractal-noise-cycle-evolution-label = 循环演化
+parameter-mondrian-effect-builtin-fractal-noise-evolution-label = 演化
+parameter-mondrian-effect-builtin-fractal-noise-fractal-type-label = 分形类型
+parameter-mondrian-effect-fractal-noise-fractal-type-basic = 基本
+parameter-mondrian-effect-fractal-noise-fractal-type-turbulent-smooth = 湍流较平滑
+parameter-mondrian-effect-fractal-noise-fractal-type-turbulent-sharp = 湍流锐利
+parameter-mondrian-effect-fractal-noise-fractal-type-turbulent-basic = 湍流基本
+parameter-mondrian-effect-fractal-noise-fractal-type-max = 最大值
+parameter-mondrian-effect-fractal-noise-fractal-type-swirly = 旋转
+parameter-mondrian-effect-fractal-noise-fractal-type-rock = 岩石
+parameter-mondrian-effect-fractal-noise-fractal-type-threads = 线条
+parameter-mondrian-effect-fractal-noise-fractal-type-multiply = 相乘
+parameter-mondrian-effect-builtin-fractal-noise-invert-label = 反转
+parameter-mondrian-effect-builtin-fractal-noise-noise-type-label = 噪波类型
+parameter-mondrian-effect-fractal-noise-noise-type-soft-linear = 较平滑
+parameter-mondrian-effect-fractal-noise-noise-type-linear = 线性
+parameter-mondrian-effect-fractal-noise-noise-type-spline = 样条
+parameter-mondrian-effect-builtin-fractal-noise-offset-turbulence-label = 湍流偏移
+parameter-mondrian-effect-builtin-fractal-noise-opacity-label = 不透明度
+parameter-mondrian-effect-builtin-fractal-noise-overflow-label = 溢出
+parameter-mondrian-effect-fractal-noise-overflow-clip = 裁剪
+parameter-mondrian-effect-fractal-noise-overflow-soft-clamp = 柔和限幅
+parameter-mondrian-effect-fractal-noise-overflow-wrap = 环绕
+parameter-mondrian-effect-builtin-fractal-noise-perspective-offset-label = 透视偏移
+parameter-mondrian-effect-builtin-fractal-noise-random-seed-label = 随机种子
+parameter-mondrian-effect-builtin-fractal-noise-rotation-label = 旋转
+parameter-mondrian-effect-builtin-fractal-noise-scale-label = 缩放
+parameter-mondrian-effect-builtin-fractal-noise-scale-height-label = 缩放高度
+parameter-mondrian-effect-builtin-fractal-noise-scale-width-label = 缩放宽度
+parameter-mondrian-effect-builtin-fractal-noise-sub-influence-label = 次级影响
+parameter-mondrian-effect-builtin-fractal-noise-sub-offset-label = 次级偏移
+parameter-mondrian-effect-builtin-fractal-noise-sub-rotation-label = 次级旋转
+parameter-mondrian-effect-builtin-fractal-noise-sub-scale-label = 次级缩放
+parameter-mondrian-effect-builtin-fractal-noise-uniform-scale-label = 等比缩放
+
+## Keylight 专业抠像
+effect-keylight = 专业抠像
+parameter-mondrian-effect-builtin-keylight-despill-label = 去溢色
+parameter-mondrian-effect-builtin-keylight-despill-bias-label = 去溢色偏差
+parameter-mondrian-effect-builtin-keylight-display-label = 显示
+parameter-mondrian-effect-keylight-display-final = 最终
+parameter-mondrian-effect-keylight-display-matte = 遮罩
+parameter-mondrian-effect-keylight-display-foreground = 前景
+parameter-mondrian-effect-keylight-display-background = 背景
+parameter-mondrian-effect-builtin-keylight-edge-feather-label = 边缘羽化
+parameter-mondrian-effect-builtin-keylight-edge-shrink-label = 边缘收缩
+parameter-mondrian-effect-builtin-keylight-inner-matte-label = 内部遮罩
+parameter-mondrian-effect-builtin-keylight-outer-matte-label = 外部遮罩
+parameter-mondrian-effect-builtin-keylight-preblur-label = 预模糊
+parameter-mondrian-effect-builtin-keylight-screen-balance-label = 屏幕平衡
+parameter-mondrian-effect-builtin-keylight-screen-color-label = 屏幕色
+parameter-mondrian-effect-builtin-keylight-screen-gain-label = 屏幕增益
+
+## Echo 残影
+effect-echo = 残影
+parameter-group-echo = 残影
+effect-category-time = 时间
+parameter-mondrian-effect-builtin-echo-decay-label = 衰减
+parameter-mondrian-effect-builtin-echo-echo-count-label = 数量
+parameter-mondrian-effect-builtin-echo-echo-time-label = 残影时间
+parameter-mondrian-effect-builtin-echo-operator-label = 运算符
+parameter-mondrian-effect-echo-operator-add = 相加
+parameter-mondrian-effect-echo-operator-screen = 滤色
+parameter-mondrian-effect-echo-operator-multiply = 正片叠底
+parameter-mondrian-effect-echo-operator-overlay = 叠加
+parameter-mondrian-effect-echo-operator-darken = 变暗
+parameter-mondrian-effect-echo-operator-lighten = 变亮
+parameter-mondrian-effect-echo-operator-normal = 正常
+parameter-mondrian-effect-builtin-echo-starting-intensity-label = 起始强度
+
+## Kaleidoscope 万花筒
+effect-kaleidoscope = 万花筒
+parameter-group-kaleidoscope = 万花筒
+parameter-mondrian-effect-builtin-kaleidoscope-center-x-label = 中心 X
+parameter-mondrian-effect-builtin-kaleidoscope-center-y-label = 中心 Y
+parameter-mondrian-effect-builtin-kaleidoscope-floating-center-label = 浮动中心
+parameter-mondrian-effect-builtin-kaleidoscope-mirroring-label = 镜像
+parameter-mondrian-effect-builtin-kaleidoscope-rotation-label = 旋转
+parameter-mondrian-effect-builtin-kaleidoscope-size-label = 尺寸
+
+## Tritone 三色调
+effect-tritone = 三色调
+parameter-group-tritone = 三色调
+effect-category-color-grading = 颜色/调色
+parameter-mondrian-effect-builtin-tritone-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-tritone-highlights-label = 高光
+parameter-mondrian-effect-builtin-tritone-midtones-label = 中间调
+parameter-mondrian-effect-builtin-tritone-shadows-label = 阴影
+
+## Offset 偏移
+effect-offset = 偏移
+parameter-group-offset = 偏移
+parameter-mondrian-effect-builtin-offset-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-offset-shift-x-label = 水平偏移
+parameter-mondrian-effect-builtin-offset-shift-y-label = 垂直偏移
+
+## Bulge 凸出
+effect-bulge = 凸出
+parameter-group-bulge = 凸出
+parameter-mondrian-effect-builtin-bulge-antialias-label = 消除锯齿
+parameter-mondrian-effect-bulge-antialias-off = 关闭
+parameter-mondrian-effect-bulge-antialias-on = 开启
+parameter-mondrian-effect-builtin-bulge-centre-x-label = 中心 X
+parameter-mondrian-effect-builtin-bulge-centre-y-label = 中心 Y
+parameter-mondrian-effect-builtin-bulge-height-label = 凸出高度
+parameter-mondrian-effect-builtin-bulge-pinned-label = 固定
+parameter-mondrian-effect-bulge-pinned-off = 关闭
+parameter-mondrian-effect-bulge-pinned-on = 开启
+parameter-mondrian-effect-builtin-bulge-radius-x-label = 水平半径
+parameter-mondrian-effect-builtin-bulge-radius-y-label = 垂直半径
+parameter-mondrian-effect-builtin-bulge-taper-radius-label = 锥形半径
+
+## Split 分离
+effect-split = 分离
+parameter-group-split = 分离
+parameter-mondrian-effect-builtin-split-point-a-x-label = 分离线起点 X
+parameter-mondrian-effect-builtin-split-point-a-y-label = 分离线起点 Y
+parameter-mondrian-effect-builtin-split-point-b-x-label = 分离线终点 X
+parameter-mondrian-effect-builtin-split-point-b-y-label = 分离线终点 Y
+parameter-mondrian-effect-builtin-split-split-label = 分离量
+
+## Motion Tile 动态拼贴
+effect-motion-tile = 动态拼贴
+parameter-group-motion-tile = 拼贴
+parameter-group-output = 输出
+parameter-mondrian-effect-builtin-motion-tile-center-x-label = 拼贴中心 X
+parameter-mondrian-effect-builtin-motion-tile-center-y-label = 拼贴中心 Y
+parameter-mondrian-effect-builtin-motion-tile-horizontal-phase-label = 水平位移
+parameter-mondrian-effect-builtin-motion-tile-mirror-edges-label = 镜像边缘
+parameter-mondrian-effect-builtin-motion-tile-output-height-label = 输出高度
+parameter-mondrian-effect-builtin-motion-tile-output-width-label = 输出宽度
+parameter-mondrian-effect-builtin-motion-tile-phase-label = 相位
+parameter-mondrian-effect-builtin-motion-tile-tile-height-label = 拼贴高度
+parameter-mondrian-effect-builtin-motion-tile-tile-width-label = 拼贴宽度
+
+## Convolution Kernel 卷积核
+effect-convolution = 卷积核
+parameter-group-convolution = 卷积核
+parameter-mondrian-effect-builtin-convolution-absolute-values-label = 绝对值
+parameter-mondrian-effect-builtin-convolution-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-convolution-cell-1-label = 1 - L1
+parameter-mondrian-effect-builtin-convolution-cell-2-label = 2 - L1
+parameter-mondrian-effect-builtin-convolution-cell-3-label = 3 - L1
+parameter-mondrian-effect-builtin-convolution-cell-4-label = 1 - L2
+parameter-mondrian-effect-builtin-convolution-cell-5-label = 2 - L2
+parameter-mondrian-effect-builtin-convolution-cell-6-label = 3 - L2
+parameter-mondrian-effect-builtin-convolution-cell-7-label = 1 - L3
+parameter-mondrian-effect-builtin-convolution-cell-8-label = 2 - L3
+parameter-mondrian-effect-builtin-convolution-cell-9-label = 3 - L3
+
+## Invert 反转
+effect-invert = 反转
+parameter-group-invert = 反转
+effect-category-channel = 通道
+parameter-mondrian-effect-builtin-invert-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-invert-channels-label = 通道
+parameter-builtin-invert-channels-rgb = RGB
+parameter-builtin-invert-channels-red = 红色
+parameter-builtin-invert-channels-green = 绿色
+parameter-builtin-invert-channels-blue = 蓝色
+parameter-builtin-invert-channels-alpha = Alpha
+parameter-builtin-invert-channels-red-green = 红绿
+parameter-builtin-invert-channels-red-blue = 红蓝
+parameter-builtin-invert-channels-green-blue = 绿蓝
+parameter-builtin-invert-channels-red-green-alpha = 红绿 Alpha
+parameter-builtin-invert-channels-red-blue-alpha = 红蓝 Alpha
+parameter-builtin-invert-channels-green-blue-alpha = 绿蓝 Alpha
+parameter-builtin-invert-channels-red-green-blue-alpha = RGB + Alpha
+parameter-builtin-invert-channels-hls = HLS
+parameter-builtin-invert-channels-hue = 色相
+parameter-builtin-invert-channels-lightness = 亮度
+parameter-builtin-invert-channels-saturation = 饱和度
+
+## Noise 噪点
+effect-noise = 噪点
+parameter-group-noise = 噪点
+effect-category-film-look = 胶片质感
+parameter-mondrian-effect-builtin-noise-amount-label = 杂色数量
+parameter-mondrian-effect-builtin-noise-clip-label = 剪切
+parameter-mondrian-effect-builtin-noise-noise-type-label = 杂色类型
+parameter-mondrian-effect-noise-type-rgb = RGB 噪波
+parameter-mondrian-effect-noise-type-hls = 亮度噪波
+
+## Radial Blur 径向模糊
+effect-radial-blur = 径向模糊
+parameter-group-radial-blur = 径向模糊
+parameter-mondrian-effect-builtin-radial-blur-amount-label = 数量
+parameter-mondrian-effect-builtin-radial-blur-antialiasing-label = 消除锯齿（最佳品质）
+parameter-builtin-radial-blur-antialiasing-fast = 快速
+parameter-builtin-radial-blur-antialiasing-best = 最佳品质
+parameter-mondrian-effect-builtin-radial-blur-centre-x-label = 中心位置 X
+parameter-mondrian-effect-builtin-radial-blur-centre-y-label = 中心位置 Y
+parameter-mondrian-effect-builtin-radial-blur-mode-label = 类型
+parameter-builtin-radial-blur-mode-spin = 旋转
+parameter-builtin-radial-blur-mode-zoom = 推拉
+parameter-mondrian-effect-builtin-radial-blur-seed-label = 随机植入
+
+## Drop Shadow 投影
+effect-drop-shadow = 投影
+parameter-group-drop-shadow = 投影
+effect-category-glow = 光效
+parameter-mondrian-effect-builtin-drop-shadow-color-label = 阴影颜色
+parameter-mondrian-effect-builtin-drop-shadow-direction-label = 方向
+parameter-mondrian-effect-builtin-drop-shadow-distance-label = 距离
+parameter-mondrian-effect-builtin-drop-shadow-opacity-label = 不透明度
+parameter-mondrian-effect-builtin-drop-shadow-shadow-only-label = 仅阴影
+parameter-mondrian-effect-builtin-drop-shadow-softness-label = 柔和度
+
+## Extract 提取
+effect-extract = 提取
+parameter-group-extract = 提取
+parameter-mondrian-effect-builtin-extract-black-point-label = 黑场
+parameter-mondrian-effect-builtin-extract-black-softness-label = 黑色柔和度
+parameter-mondrian-effect-builtin-extract-channel-label = 通道
+parameter-mondrian-effect-extract-channel-luma = 亮度
+parameter-mondrian-effect-extract-channel-red = 红色
+parameter-mondrian-effect-extract-channel-green = 绿色
+parameter-mondrian-effect-extract-channel-blue = 蓝色
+parameter-mondrian-effect-extract-channel-alpha = Alpha
+parameter-mondrian-effect-builtin-extract-invert-label = 反转
+parameter-mondrian-effect-extract-invert-off = 关
+parameter-mondrian-effect-extract-invert-on = 开
+parameter-mondrian-effect-builtin-extract-white-point-label = 白场
+parameter-mondrian-effect-builtin-extract-white-softness-label = 白色柔和度
+
+## Scatter 散射
+effect-scatter = 散射
+parameter-group-scatter = 散射
+parameter-mondrian-effect-builtin-scatter-amount-label = 散射数量
+parameter-mondrian-effect-builtin-scatter-copies-label = 副本
+parameter-mondrian-effect-builtin-scatter-randomness-label = 散射随机性
+
+## Bevel and Emboss 斜面与浮雕
+effect-bevel = 斜面与浮雕
+parameter-group-bevel = 斜面与浮雕
+effect-category-edge = 边缘效果
+parameter-mondrian-effect-builtin-bevel-angle-label = 灯光角度
+parameter-mondrian-effect-builtin-bevel-intensity-label = 灯光强度
+parameter-mondrian-effect-builtin-bevel-light-color-label = 灯光颜色
+parameter-mondrian-effect-builtin-bevel-thickness-label = 边缘厚度
+
+## Directional Blur 方向模糊
+effect-directional-blur = 方向模糊
+parameter-group-directional-blur = 方向模糊
+parameter-mondrian-effect-builtin-directional-blur-direction-label = 方向
+parameter-mondrian-effect-builtin-directional-blur-length-label = 模糊长度
+
+## Box Blur 方框模糊
+effect-box-blur = 方框模糊
+parameter-group-box-blur = 方框模糊
+parameter-mondrian-effect-builtin-box-blur-direction-label = 模糊方向
+parameter-builtin-box-blur-direction-horizontal-and-vertical = 水平和垂直
+parameter-builtin-box-blur-direction-horizontal = 水平
+parameter-builtin-box-blur-direction-vertical = 垂直
+parameter-mondrian-effect-builtin-box-blur-iterations-label = 迭代
+parameter-mondrian-effect-builtin-box-blur-radius-label = 模糊半径
+parameter-mondrian-effect-builtin-box-blur-repeat-edge-pixels-label = 重复边缘像素
+
+## Twirl 旋转扭曲
+effect-twirl = 旋转扭曲
+parameter-group-twirl = 旋转扭曲
+parameter-mondrian-effect-builtin-twirl-angle-label = 角度
+parameter-mondrian-effect-builtin-twirl-centre-x-label = 中心 X
+parameter-mondrian-effect-builtin-twirl-centre-y-label = 中心 Y
+parameter-mondrian-effect-builtin-twirl-radius-label = 旋转扭曲半径
+
+## Polar Coordinates 极坐标
+effect-polar-coordinates = 极坐标
+parameter-group-polar-coordinates = 极坐标
+parameter-mondrian-effect-builtin-polar-coordinates-conversion-label = 转换类型
+parameter-mondrian-effect-polar-coordinates-conversion-rect-to-polar = 直角坐标转极坐标
+parameter-mondrian-effect-polar-coordinates-conversion-polar-to-rect = 极坐标转直角坐标
+parameter-mondrian-effect-builtin-polar-coordinates-interpolation-label = 插值
+parameter-mondrian-effect-polar-coordinates-interpolation-nearest = 最近像素
+parameter-mondrian-effect-polar-coordinates-interpolation-bilinear = 双线性
+
+## Find Edges 查找边缘
+effect-find-edges = 查找边缘
+parameter-group-find-edges = 查找边缘
+parameter-mondrian-effect-builtin-find-edges-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-find-edges-invert-label = 反转
+
+## Emboss 浮雕
+effect-emboss = 浮雕
+parameter-group-emboss = 浮雕
+parameter-mondrian-effect-builtin-emboss-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-emboss-contrast-label = 对比度
+parameter-mondrian-effect-builtin-emboss-direction-label = 方向
+parameter-mondrian-effect-builtin-emboss-relief-label = 凸出
+
+## Spherize 球面化
+effect-spherize = 球面化
+parameter-group-spherize = 球面化
+parameter-mondrian-effect-builtin-spherize-centre-x-label = 中心 X
+parameter-mondrian-effect-builtin-spherize-centre-y-label = 中心 Y
+parameter-mondrian-effect-builtin-spherize-radius-label = 半径
+
+## Brush Strokes 画笔描边
+effect-brush-strokes = 画笔描边
+parameter-group-brush-strokes = 画笔描边
+parameter-mondrian-effect-builtin-brush-strokes-angle-label = 描边方向
+parameter-mondrian-effect-builtin-brush-strokes-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-brush-strokes-density-label = 画笔密度
+parameter-mondrian-effect-builtin-brush-strokes-length-label = 画笔长度
+parameter-mondrian-effect-builtin-brush-strokes-randomness-label = 随机性
+parameter-mondrian-effect-builtin-brush-strokes-size-label = 画笔大小
+parameter-mondrian-effect-builtin-brush-strokes-surface-label = 画笔表面
+
+## Linear Color Key 线性颜色键
+effect-linear-color-key = 线性颜色键
+parameter-group-linear-color-key = 线性颜色键
+parameter-mondrian-effect-builtin-linear-color-key-key-colour-label = 主色
+parameter-mondrian-effect-builtin-linear-color-key-match-colours-label = 匹配颜色
+parameter-mondrian-effect-linear-color-key-match-rgb = RGB
+parameter-mondrian-effect-linear-color-key-match-green = 绿色
+parameter-mondrian-effect-linear-color-key-match-blue = 蓝色
+parameter-mondrian-effect-linear-color-key-match-chroma = 色度
+parameter-mondrian-effect-builtin-linear-color-key-operation-label = 主要操作
+parameter-mondrian-effect-linear-color-key-operation-key = 去除颜色
+parameter-mondrian-effect-linear-color-key-operation-keep = 保留颜色
+parameter-mondrian-effect-builtin-linear-color-key-softness-label = 匹配柔和度
+parameter-mondrian-effect-builtin-linear-color-key-tolerance-label = 匹配容差
+
+## Vibrance 自然饱和度
+effect-vibrance = 自然饱和度
+parameter-group-vibrance = 自然饱和度
+parameter-mondrian-effect-builtin-vibrance-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-vibrance-vibrance-label = 自然饱和度
+
+## Color Emboss 色彩浮雕
+effect-color-emboss = 色彩浮雕
+parameter-group-color-emboss = 色彩浮雕
+parameter-mondrian-effect-builtin-color-emboss-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-color-emboss-contrast-label = 对比度
+parameter-mondrian-effect-builtin-color-emboss-direction-label = 方向
+parameter-mondrian-effect-builtin-color-emboss-relief-label = 幅度
+
+## Hue/Saturation 色相饱和度
+effect-hue-saturation = 色相饱和度
+parameter-group-hue-saturation = 色相饱和度
+parameter-mondrian-effect-builtin-hue-saturation-band-label = 通道控制
+parameter-builtin-hue-saturation-band-master = 主色
+parameter-builtin-hue-saturation-band-reds = 红色
+parameter-builtin-hue-saturation-band-yellows = 黄色
+parameter-builtin-hue-saturation-band-greens = 绿色
+parameter-builtin-hue-saturation-band-cyans = 青色
+parameter-builtin-hue-saturation-band-blues = 蓝色
+parameter-builtin-hue-saturation-band-magentas = 洋红
+parameter-mondrian-effect-builtin-hue-saturation-colorize-label = 彩色化
+parameter-mondrian-effect-builtin-hue-saturation-hue-label = 色相
+parameter-mondrian-effect-builtin-hue-saturation-lightness-label = 亮度
+parameter-mondrian-effect-builtin-hue-saturation-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-hue-saturation-tint-hue-label = 着色色相
+parameter-mondrian-effect-builtin-hue-saturation-tint-lightness-label = 着色亮度
+parameter-mondrian-effect-builtin-hue-saturation-tint-saturation-label = 着色饱和度
+
+## Tint 色调
+effect-tint = 色调
+parameter-group-tint = 色调
+parameter-mondrian-effect-builtin-tint-amount-label = 着色数量
+parameter-mondrian-effect-builtin-tint-map-black-label = 将黑色映射到
+parameter-mondrian-effect-builtin-tint-map-white-label = 将白色映射到
+
+## Posterize 色调分离
+effect-posterize = 色调分离
+parameter-group-posterize = 色调分离
+parameter-mondrian-effect-builtin-posterize-levels-label = 级别
+
+## Shift Channels 转换通道
+effect-shift-channels = 转换通道
+parameter-group-shift-channels = 转换通道
+parameter-mondrian-effect-builtin-shift-channels-alpha-label = Alpha 取自
+parameter-builtin-shift-channels-alpha-red = 红色
+parameter-builtin-shift-channels-alpha-green = 绿色
+parameter-builtin-shift-channels-alpha-blue = 蓝色
+parameter-builtin-shift-channels-alpha-alpha = Alpha
+parameter-builtin-shift-channels-alpha-luminance = 亮度
+parameter-builtin-shift-channels-alpha-hue = 色相
+parameter-builtin-shift-channels-alpha-saturation = 饱和度
+parameter-builtin-shift-channels-alpha-lightness = 明度
+parameter-builtin-shift-channels-alpha-maximum = 最大值
+parameter-builtin-shift-channels-alpha-minimum = 最小值
+parameter-mondrian-effect-builtin-shift-channels-blue-label = 蓝色取自
+parameter-builtin-shift-channels-blue-red = 红色
+parameter-builtin-shift-channels-blue-green = 绿色
+parameter-builtin-shift-channels-blue-blue = 蓝色
+parameter-builtin-shift-channels-blue-alpha = Alpha
+parameter-builtin-shift-channels-blue-luminance = 亮度
+parameter-builtin-shift-channels-blue-hue = 色相
+parameter-builtin-shift-channels-blue-saturation = 饱和度
+parameter-builtin-shift-channels-blue-lightness = 明度
+parameter-builtin-shift-channels-blue-maximum = 最大值
+parameter-builtin-shift-channels-blue-minimum = 最小值
+parameter-mondrian-effect-builtin-shift-channels-green-label = 绿色取自
+parameter-builtin-shift-channels-green-red = 红色
+parameter-builtin-shift-channels-green-green = 绿色
+parameter-builtin-shift-channels-green-blue = 蓝色
+parameter-builtin-shift-channels-green-alpha = Alpha
+parameter-builtin-shift-channels-green-luminance = 亮度
+parameter-builtin-shift-channels-green-hue = 色相
+parameter-builtin-shift-channels-green-saturation = 饱和度
+parameter-builtin-shift-channels-green-lightness = 明度
+parameter-builtin-shift-channels-green-maximum = 最大值
+parameter-builtin-shift-channels-green-minimum = 最小值
+parameter-mondrian-effect-builtin-shift-channels-red-label = 红色取自
+parameter-builtin-shift-channels-red-red = 红色
+parameter-builtin-shift-channels-red-green = 绿色
+parameter-builtin-shift-channels-red-blue = 蓝色
+parameter-builtin-shift-channels-red-alpha = Alpha
+parameter-builtin-shift-channels-red-luminance = 亮度
+parameter-builtin-shift-channels-red-hue = 色相
+parameter-builtin-shift-channels-red-saturation = 饱和度
+parameter-builtin-shift-channels-red-lightness = 明度
+parameter-builtin-shift-channels-red-maximum = 最大值
+parameter-builtin-shift-channels-red-minimum = 最小值
+
+## Channel Mixer 通道混合器
+effect-channel-mixer = 通道混合器
+parameter-group-channel-mixer = 通道混合器
+parameter-mondrian-effect-builtin-channel-mixer-blue-blue-label = 蓝 - 蓝
+parameter-mondrian-effect-builtin-channel-mixer-blue-constant-label = 蓝 - 常量
+parameter-mondrian-effect-builtin-channel-mixer-blue-green-label = 蓝 - 绿
+parameter-mondrian-effect-builtin-channel-mixer-blue-red-label = 蓝 - 红
+parameter-mondrian-effect-builtin-channel-mixer-green-blue-label = 绿 - 蓝
+parameter-mondrian-effect-builtin-channel-mixer-green-constant-label = 绿 - 常量
+parameter-mondrian-effect-builtin-channel-mixer-green-green-label = 绿 - 绿
+parameter-mondrian-effect-builtin-channel-mixer-green-red-label = 绿 - 红
+parameter-mondrian-effect-builtin-channel-mixer-monochrome-label = 单色
+parameter-mondrian-effect-builtin-channel-mixer-red-blue-label = 红 - 蓝
+parameter-mondrian-effect-builtin-channel-mixer-red-constant-label = 红 - 常量
+parameter-mondrian-effect-builtin-channel-mixer-red-green-label = 红 - 绿
+parameter-mondrian-effect-builtin-channel-mixer-red-red-label = 红 - 红
+
+## Unsharp Mask 钝化蒙版
+effect-unsharp-mask = 钝化蒙版
+parameter-group-unsharp-mask = 钝化蒙版
+parameter-mondrian-effect-builtin-unsharp-mask-amount-label = 数量
+parameter-mondrian-effect-builtin-unsharp-mask-radius-label = 半径
+parameter-mondrian-effect-builtin-unsharp-mask-threshold-label = 阈值
+
+## Mirror 镜像
+effect-mirror = 镜像
+parameter-group-mirror = 镜像
+parameter-mondrian-effect-builtin-mirror-angle-label = 反射角度
+parameter-mondrian-effect-builtin-mirror-centre-x-label = 反射中心 X
+parameter-mondrian-effect-builtin-mirror-centre-y-label = 反射中心 Y
+
+## Lens Flare 镜头光晕
+effect-lens-flare = 镜头光晕
+parameter-group-lens-flare = 镜头光晕
+parameter-mondrian-effect-builtin-lens-flare-blend-with-original-label = 与原始图像混合
+parameter-mondrian-effect-builtin-lens-flare-brightness-label = 光晕亮度
+parameter-mondrian-effect-builtin-lens-flare-centre-x-label = 中心 X
+parameter-mondrian-effect-builtin-lens-flare-centre-y-label = 中心 Y
+parameter-mondrian-effect-builtin-lens-flare-lens-type-label = 镜头类型
+parameter-mondrian-effect-lens-flare-lens-type-zoom-50-300 = 50-300mm 变焦
+parameter-mondrian-effect-lens-flare-lens-type-prime-35 = 35mm 定焦
+parameter-mondrian-effect-lens-flare-lens-type-prime-105 = 105mm 定焦
+
+## Lens Distortion 镜头畸变
+effect-lens-distortion = 镜头畸变
+parameter-group-lens-distortion = 镜头畸变
+parameter-mondrian-effect-builtin-lens-distortion-best-pixels-label = 最佳像素
+parameter-mondrian-effect-lens-distortion-best-pixels-off = 关闭
+parameter-mondrian-effect-lens-distortion-best-pixels-on = 开启
+parameter-mondrian-effect-builtin-lens-distortion-centre-x-label = 视图中心 X
+parameter-mondrian-effect-builtin-lens-distortion-centre-y-label = 视图中心 Y
+parameter-mondrian-effect-builtin-lens-distortion-fov-label = 视场 (FOV)
+parameter-mondrian-effect-builtin-lens-distortion-fov-direction-label = FOV 方向
+parameter-mondrian-effect-lens-distortion-direction-horizontal = 水平
+parameter-mondrian-effect-lens-distortion-direction-vertical = 垂直
+parameter-mondrian-effect-lens-distortion-direction-diagonal = 对角线
+parameter-mondrian-effect-builtin-lens-distortion-invert-label = 反转镜头扭曲
+parameter-mondrian-effect-lens-distortion-invert-off = 关闭
+parameter-mondrian-effect-lens-distortion-invert-on = 开启
+parameter-mondrian-effect-builtin-lens-distortion-resize-label = 调整大小
+parameter-mondrian-effect-lens-distortion-resize-none = 不变
+parameter-mondrian-effect-lens-distortion-resize-expand = 扩大
+parameter-mondrian-effect-lens-distortion-resize-contract = 收缩
+parameter-mondrian-effect-lens-distortion-resize-auto = 自动
+
+## Threshold 阈值
+effect-threshold = 阈值
+parameter-group-threshold = 阈值
+parameter-mondrian-effect-builtin-threshold-level-label = 阈值
+
+## Color Offset 颜色偏移
+effect-color-offset = 颜色偏移
+parameter-group-color-offset = 颜色偏移
+parameter-mondrian-effect-builtin-color-offset-blue-phase-label = 蓝色相位
+parameter-mondrian-effect-builtin-color-offset-green-phase-label = 绿色相位
+parameter-mondrian-effect-builtin-color-offset-overflow-label = 溢出
+parameter-mondrian-effect-color-offset-overflow-wrap = 环绕
+parameter-mondrian-effect-color-offset-overflow-clamp = 截取
+parameter-mondrian-effect-color-offset-overflow-mirror = 镜像
+parameter-mondrian-effect-builtin-color-offset-red-phase-label = 红色相位
+
+## Mosaic 马赛克
+effect-mosaic = 马赛克
+parameter-group-mosaic = 马赛克
+parameter-mondrian-effect-builtin-mosaic-horizontal-label = 水平块
+parameter-mondrian-effect-builtin-mosaic-sharp-colors-label = 使用颜色
+parameter-mondrian-effect-builtin-mosaic-vertical-label = 垂直块
+
+## Black & White 黑白
+effect-black-and-white = 黑白
+parameter-group-black-and-white = 黑白
+parameter-mondrian-effect-builtin-black-and-white-blue-label = 蓝色
+parameter-mondrian-effect-builtin-black-and-white-cyan-label = 青色
+parameter-mondrian-effect-builtin-black-and-white-green-label = 绿色
+parameter-mondrian-effect-builtin-black-and-white-magenta-label = 洋红
+parameter-mondrian-effect-builtin-black-and-white-red-label = 红色
+parameter-mondrian-effect-builtin-black-and-white-tint-amount-label = 着色量
+parameter-mondrian-effect-builtin-black-and-white-tint-color-label = 着色颜色
+parameter-mondrian-effect-builtin-black-and-white-yellow-label = 黄色
+
+## Refine Matte 遮罩精修
+effect-matte-refine = 遮罩精修
+parameter-group-matte-refine = 遮罩精修
+parameter-mondrian-effect-builtin-matte-refine-better-quality-label = 较高品质
+parameter-mondrian-effect-builtin-matte-refine-clean-amount-label = 清理量
+parameter-mondrian-effect-builtin-matte-refine-clean-edge-color-label = 净化边缘颜色
+parameter-mondrian-effect-builtin-matte-refine-contrast-label = 对比度
+parameter-mondrian-effect-builtin-matte-refine-edge-detail-label = 计算边缘细节
+parameter-mondrian-effect-builtin-matte-refine-expand-radius-label = 增大半径
+parameter-mondrian-effect-builtin-matte-refine-extend-smooth-label = 扩展平滑区域
+parameter-mondrian-effect-builtin-matte-refine-feather-label = 羽化
+parameter-mondrian-effect-builtin-matte-refine-more-motion-blur-label = 更多运动模糊
+parameter-mondrian-effect-builtin-matte-refine-other-edge-radius-label = 其他边缘半径
+parameter-mondrian-effect-builtin-matte-refine-per-frame-samples-label = 每帧样本
+parameter-mondrian-effect-builtin-matte-refine-shift-edge-label = 移动边缘
+parameter-mondrian-effect-builtin-matte-refine-shutter-angle-degrees-label = 快门角度
+parameter-mondrian-effect-builtin-matte-refine-smooth-label = 平滑
+parameter-mondrian-effect-builtin-matte-refine-tremor-amount-label = 减少震颤
+parameter-mondrian-effect-builtin-matte-refine-tremor-reduction-label = 震颤减少
+parameter-mondrian-effect-builtin-matte-refine-view-edge-region-label = 查看边缘区域
+parameter-mondrian-effect-builtin-matte-refine-view-map-label = 查看地图
