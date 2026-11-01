@@ -2816,6 +2816,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::PolarCoordinates { .. } => "polar_coordinates",
         crate::EffectRenderOp::Flip { .. } => "flip",
         crate::EffectRenderOp::Ripple { .. } => "ripple",
+        crate::EffectRenderOp::WaveWarp { .. } => "wave_warp",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",

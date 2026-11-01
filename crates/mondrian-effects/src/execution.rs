@@ -2334,6 +2334,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::PolarCoordinates { .. } => "polar_coordinates",
         EffectRenderOp::Flip { .. } => "flip",
         EffectRenderOp::Ripple { .. } => "ripple",
+        EffectRenderOp::WaveWarp { .. } => "wave_warp",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

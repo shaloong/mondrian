@@ -929,6 +929,10 @@ pub enum EffectRenderOp {
     Ripple {
         grade: crate::RippleGrade,
     },
+    /// Wave warp: bends the frame along one travelling regular wave.
+    WaveWarp {
+        grade: crate::WaveWarpGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1169,6 +1173,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Flip { grade } => formatter.debug_struct("Flip").field("grade", grade).finish(),
             Self::Ripple { grade } => {
                 formatter.debug_struct("Ripple").field("grade", grade).finish()
+            }
+            Self::WaveWarp { grade } => {
+                formatter.debug_struct("WaveWarp").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1779,6 +1786,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::WaveWarp { grade } => {
+                61u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -1983,6 +1996,7 @@ impl EffectRenderOp {
             EffectRenderOp::PolarCoordinates { .. } => 3,
             EffectRenderOp::Flip { .. } => 1,
             EffectRenderOp::Ripple { .. } => 2,
+            EffectRenderOp::WaveWarp { .. } => 3,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2536,7 +2550,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 59] {
+fn builtin_effect_types() -> [EffectType; 60] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2591,6 +2605,7 @@ fn builtin_effect_types() -> [EffectType; 59] {
         EffectType::LensDistortion,
         EffectType::Flip,
         EffectType::Ripple,
+        EffectType::WaveWarp,
         EffectType::LensFlare,
         EffectType::Bulge,
         EffectType::Split,
@@ -5071,6 +5086,190 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::WaveWarp => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "wave_type",
+                "波形变形",
+                "波浪类型",
+                crate::WaveType::Sine.as_key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "sine",
+                        "正弦",
+                        "mondrian.effect.wave_warp.wave_type.sine",
+                    ),
+                    ParameterEnumOption::new(
+                        "square",
+                        "方形",
+                        "mondrian.effect.wave_warp.wave_type.square",
+                    ),
+                    ParameterEnumOption::new(
+                        "triangle",
+                        "三角形",
+                        "mondrian.effect.wave_warp.wave_type.triangle",
+                    ),
+                    ParameterEnumOption::new(
+                        "sawtooth",
+                        "锯齿波",
+                        "mondrian.effect.wave_warp.wave_type.sawtooth",
+                    ),
+                    ParameterEnumOption::new(
+                        "circle",
+                        "圆形",
+                        "mondrian.effect.wave_warp.wave_type.circle",
+                    ),
+                    ParameterEnumOption::new(
+                        "semicircle",
+                        "半圆形",
+                        "mondrian.effect.wave_warp.wave_type.semicircle",
+                    ),
+                    ParameterEnumOption::new(
+                        "non_circle",
+                        "非圆形",
+                        "mondrian.effect.wave_warp.wave_type.non_circle",
+                    ),
+                    ParameterEnumOption::new(
+                        "noise",
+                        "噪声",
+                        "mondrian.effect.wave_warp.wave_type.noise",
+                    ),
+                    ParameterEnumOption::new(
+                        "smooth_noise",
+                        "平滑噪声",
+                        "mondrian.effect.wave_warp.wave_type.smooth_noise",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "wave_height",
+                "波形变形",
+                "波形高度",
+                PropertyValue::Float(10.0),
+                Some(crate::WAVE_WARP_MIN_HEIGHT as f64),
+                Some(crate::WAVE_WARP_MAX_HEIGHT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "wave_width",
+                "波形变形",
+                "波形宽度",
+                PropertyValue::Float(40.0),
+                Some(crate::WAVE_WARP_MIN_WIDTH as f64),
+                Some(crate::WAVE_WARP_MAX_WIDTH as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "波形变形",
+                "方向",
+                PropertyValue::Float(90.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "wave_speed",
+                "波形变形",
+                "波形速度",
+                PropertyValue::Float(1.0),
+                Some(-(crate::WAVE_WARP_MAX_SPEED as f64)),
+                Some(crate::WAVE_WARP_MAX_SPEED as f64),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "pin",
+                "波形变形",
+                "固定",
+                crate::WavePin::None.as_key(),
+                vec![
+                    ParameterEnumOption::new("none", "无", "mondrian.effect.wave_warp.pin.none"),
+                    ParameterEnumOption::new(
+                        "all_edges",
+                        "所有边缘",
+                        "mondrian.effect.wave_warp.pin.all_edges",
+                    ),
+                    ParameterEnumOption::new(
+                        "center",
+                        "中心",
+                        "mondrian.effect.wave_warp.pin.center",
+                    ),
+                    ParameterEnumOption::new(
+                        "left_edge",
+                        "左边缘",
+                        "mondrian.effect.wave_warp.pin.left_edge",
+                    ),
+                    ParameterEnumOption::new(
+                        "top_edge",
+                        "上边缘",
+                        "mondrian.effect.wave_warp.pin.top_edge",
+                    ),
+                    ParameterEnumOption::new(
+                        "right_edge",
+                        "右边缘",
+                        "mondrian.effect.wave_warp.pin.right_edge",
+                    ),
+                    ParameterEnumOption::new(
+                        "bottom_edge",
+                        "下边缘",
+                        "mondrian.effect.wave_warp.pin.bottom_edge",
+                    ),
+                    ParameterEnumOption::new(
+                        "horizontal_edges",
+                        "水平边缘",
+                        "mondrian.effect.wave_warp.pin.horizontal_edges",
+                    ),
+                    ParameterEnumOption::new(
+                        "vertical_edges",
+                        "垂直边缘",
+                        "mondrian.effect.wave_warp.pin.vertical_edges",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "phase",
+                "波形变形",
+                "相位",
+                PropertyValue::Float(0.0),
+                Some(-(crate::WAVE_WARP_MAX_PHASE_DEGREES as f64)),
+                Some(crate::WAVE_WARP_MAX_PHASE_DEGREES as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "quality",
+                "波形变形",
+                "消除锯齿（最佳品质）",
+                crate::WaveQuality::Low.as_key(),
+                vec![
+                    ParameterEnumOption::new("low", "低", "mondrian.effect.wave_warp.quality.low"),
+                    ParameterEnumOption::new(
+                        "normal",
+                        "标准",
+                        "mondrian.effect.wave_warp.quality.normal",
+                    ),
+                    ParameterEnumOption::new(
+                        "high",
+                        "高",
+                        "mondrian.effect.wave_warp.quality.high",
+                    ),
+                ],
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -5966,6 +6165,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Ripple, "radius") => ParameterUnit::Percent,
         (EffectType::Ripple, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Ripple, "wave_width" | "wave_height") => ParameterUnit::Pixels,
+        (EffectType::WaveWarp, "wave_width" | "wave_height") => ParameterUnit::Pixels,
+        (EffectType::WaveWarp, "direction" | "phase") => ParameterUnit::Degrees,
         (EffectType::LensDistortion, "fov") => ParameterUnit::Degrees,
         (EffectType::LensDistortion, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Mirror, "angle") => ParameterUnit::Degrees,
@@ -6231,6 +6432,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Ripple => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::WaveWarp => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -8108,6 +8314,115 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::WaveWarp => {
+            let wave_type_id = builtin_parameter_id(effect_type, "wave_type");
+            let wave_height_id = builtin_parameter_id(effect_type, "wave_height");
+            let wave_width_id = builtin_parameter_id(effect_type, "wave_width");
+            let direction_id = builtin_parameter_id(effect_type, "direction");
+            let wave_speed_id = builtin_parameter_id(effect_type, "wave_speed");
+            let pin_id = builtin_parameter_id(effect_type, "pin");
+            let phase_id = builtin_parameter_id(effect_type, "phase");
+            let quality_id = builtin_parameter_id(effect_type, "quality");
+            Some(Arc::new(move |effect, context, graph| {
+                let wave_type = match effect.evaluate_parameter(&wave_type_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match crate::WaveType::from_key(&key) {
+                        Some(wave_type) => wave_type,
+                        None => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key().to_string(),
+                                effect_id: effect.id,
+                                reason: format!(
+                                    "wave warp wave type {key} is not a declared option"
+                                ),
+                            })
+                        }
+                    },
+                    None => crate::WaveType::Sine,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key().to_string(),
+                            effect_id: effect.id,
+                            reason: "wave warp wave type must be an enum".to_string(),
+                        })
+                    }
+                };
+                let pin = match effect.evaluate_parameter(&pin_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match crate::WavePin::from_key(&key) {
+                        Some(pin) => pin,
+                        None => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key().to_string(),
+                                effect_id: effect.id,
+                                reason: format!("wave warp pin {key} is not a declared option"),
+                            })
+                        }
+                    },
+                    None => crate::WavePin::None,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key().to_string(),
+                            effect_id: effect.id,
+                            reason: "wave warp pin must be an enum".to_string(),
+                        })
+                    }
+                };
+                let quality = match effect.evaluate_parameter(&quality_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match crate::WaveQuality::from_key(&key) {
+                        Some(quality) => quality,
+                        None => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key().to_string(),
+                                effect_id: effect.id,
+                                reason: format!("wave warp quality {key} is not a declared option"),
+                            })
+                        }
+                    },
+                    None => crate::WaveQuality::Low,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key().to_string(),
+                            effect_id: effect.id,
+                            reason: "wave warp quality must be an enum".to_string(),
+                        })
+                    }
+                };
+                let wave_speed = crate::validate_wave_warp_speed(effect.evaluate_f32_parameter(
+                    &wave_speed_id,
+                    context.time,
+                    1.0,
+                ))
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key().to_string(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                // The wave speed is measured in turns per second, so the frame
+                // time is folded into the phase here instead of in the kernel.
+                let phase = crate::wave_warp_phase_turns(
+                    effect.evaluate_f32_parameter(&phase_id, context.time, 0.0),
+                    wave_speed,
+                    context.time.to_f64(),
+                );
+                let grade = crate::WaveWarpGrade::new(
+                    wave_type,
+                    effect.evaluate_f32_parameter(&wave_height_id, context.time, 10.0),
+                    effect.evaluate_f32_parameter(&wave_width_id, context.time, 40.0),
+                    effect.evaluate_f32_parameter(&direction_id, context.time, 90.0),
+                    phase as f32,
+                    pin,
+                    quality,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key().to_string(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::WaveWarp { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensDistortion => {
             let fov_id = builtin_parameter_id(effect_type, "fov");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -8873,6 +9188,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::PolarCoordinates => "极坐标",
         EffectType::Flip => "翻转",
         EffectType::Ripple => "波纹",
+        EffectType::WaveWarp => "波形变形",
         EffectType::LensDistortion => "镜头畸变",
         EffectType::LensFlare => "镜头光晕",
         EffectType::Bulge => "凸出",
@@ -10169,6 +10485,7 @@ mod tests {
             EffectType::LensDistortion,
             EffectType::Flip,
             EffectType::Ripple,
+            EffectType::WaveWarp,
             EffectType::LensFlare,
             EffectType::Bulge,
             EffectType::Split,
@@ -15097,6 +15414,125 @@ mod tests {
         let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
         assert_eq!(restored, effect);
     }
+
+    fn wave_warp_op(graph: &EffectRenderGraph) -> Option<crate::WaveWarpGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::WaveWarp { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::WaveWarp { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_wave_warp(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::WaveWarp)
+            .expect("the wave warp effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::WaveWarp.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the wave warp parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn wave_warp_defaults_reach_the_operation() {
+        let effect = instantiate_effect_node(EffectType::WaveWarp)
+            .expect("the wave warp effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default wave warp should compile");
+        let grade = wave_warp_op(&graph).expect("the non-zero default height emits a node");
+        assert_eq!(grade.wave_type(), crate::WaveType::Sine);
+        assert!((grade.wave_height() - 10.0).abs() <= 1e-6);
+        assert!((grade.wave_width() - 40.0).abs() <= 1e-6);
+        assert!((grade.direction_degrees() - 90.0).abs() <= 1e-6);
+        assert!(grade.phase_turns().abs() <= 1e-6);
+        assert_eq!(grade.pin(), crate::WavePin::None);
+        assert_eq!(grade.quality(), crate::WaveQuality::Low);
+    }
+
+    #[test]
+    fn wave_warp_authored_state_reaches_the_operation() {
+        let effect = author_wave_warp(&[
+            ("wave_type", PropertyValue::Enum("triangle".to_string())),
+            ("wave_height", PropertyValue::Float(12.5)),
+            ("wave_width", PropertyValue::Float(33.0)),
+            ("direction", PropertyValue::Float(30.0)),
+            ("wave_speed", PropertyValue::Float(0.0)),
+            ("phase", PropertyValue::Float(90.0)),
+            ("pin", PropertyValue::Enum("all_edges".to_string())),
+            ("quality", PropertyValue::Enum("high".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = wave_warp_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.wave_type(), crate::WaveType::Triangle);
+        assert!((grade.wave_height() - 12.5).abs() <= 1e-6);
+        assert!((grade.wave_width() - 33.0).abs() <= 1e-6);
+        assert!((grade.direction_degrees() - 30.0).abs() <= 1e-6);
+        assert!((grade.phase_turns() - 0.25).abs() <= 1e-6);
+        assert_eq!(grade.pin(), crate::WavePin::AllEdges);
+        assert_eq!(grade.quality(), crate::WaveQuality::High);
+    }
+
+    #[test]
+    fn wave_warp_speed_folds_the_frame_time_into_the_phase() {
+        let effect = author_wave_warp(&[
+            ("wave_speed", PropertyValue::Float(2.0)),
+            ("phase", PropertyValue::Float(0.0)),
+        ]);
+        // Two turns per second for 0.2 s advance the phase by 0.4 turns.
+        let graph = build_effect_render_graph(&[effect], tt(5), TEST_WORKING_SPACE)
+            .expect("the animated graph should build");
+        let grade = wave_warp_op(&graph).expect("the animated graph emits a node");
+        assert!((grade.phase_turns() - 0.4).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn wave_warp_zero_height_compiles_to_identity() {
+        let effect = author_wave_warp(&[("wave_height", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity graph should build");
+        assert!(wave_warp_op(&graph).is_none());
+    }
+
+    #[test]
+    fn wave_warp_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::WaveWarp)
+            .expect("the wave warp effect should instantiate");
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::WaveWarp.property_path("wave_height"),
+            value: PropertyValue::Float(32_001.0),
+        });
+        assert!(
+            outside.is_err(),
+            "the crest height is bounded by the schema"
+        );
+
+        let mut unknown = instantiate_effect_node(EffectType::WaveWarp)
+            .expect("the wave warp effect should instantiate");
+        let rejected = unknown.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::WaveWarp.property_path("pin"),
+            value: PropertyValue::Enum("diagonal".to_string()),
+        });
+        assert!(rejected.is_err(), "an undeclared pin is rejected");
+    }
+
+    #[test]
+    fn wave_warp_authored_state_survives_serialization_round_trip() {
+        let effect = author_wave_warp(&[
+            ("wave_type", PropertyValue::Enum("noise".to_string())),
+            ("wave_height", PropertyValue::Float(-7.5)),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+    }
+
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {

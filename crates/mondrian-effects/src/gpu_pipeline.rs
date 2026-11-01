@@ -127,6 +127,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored centre, radius, wave shape, and folded phase.
         grade: crate::RippleGrade,
     },
+    WaveWarp {
+        /// Authored wave shape, geometry, pin, quality, and folded phase.
+        grade: crate::WaveWarpGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -156,6 +160,7 @@ impl EffectGpuSpatialPass {
             Self::LensDistortion { .. } => "lens_distortion",
             Self::Flip { .. } => "flip",
             Self::Ripple { .. } => "ripple",
+            Self::WaveWarp { .. } => "wave_warp",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -197,6 +202,7 @@ impl EffectGpuSpatialPass {
             Self::LensDistortion { .. } => u32::MAX,
             Self::Flip { .. } => u32::MAX,
             Self::Ripple { .. } => u32::MAX,
+            Self::WaveWarp { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -231,6 +237,7 @@ impl EffectGpuSpatialPass {
             Self::LensDistortion { .. } => u32::MAX,
             Self::Flip { .. } => u32::MAX,
             Self::Ripple { .. } => u32::MAX,
+            Self::WaveWarp { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -506,6 +513,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::Flip { grade } => Some(EffectGpuSpatialPass::Flip { grade: *grade }),
         EffectRenderOp::Ripple { grade } => Some(EffectGpuSpatialPass::Ripple { grade: *grade }),
+        EffectRenderOp::WaveWarp { grade } => {
+            Some(EffectGpuSpatialPass::WaveWarp { grade: *grade })
+        }
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }

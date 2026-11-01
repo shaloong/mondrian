@@ -43,6 +43,7 @@ pub mod tint;
 pub mod tritone;
 pub mod twirl;
 pub mod vibrance;
+pub mod wave_warp;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
 pub mod execution_contract;
@@ -369,3 +370,10 @@ pub use ripple::{
     RIPPLE_MIN_RADIUS_PERCENT, RIPPLE_MIN_WAVE_WIDTH, RIPPLE_TYPE_COUNT,
 };
 pub use shift_channels::{ChannelSource, ShiftChannelsGrade};
+pub use wave_warp::{
+    validate_wave_speed as validate_wave_warp_speed, wave_warp_frame_f32, wave_warp_phase_turns,
+    WavePin, WaveQuality, WaveType, WaveWarpError, WaveWarpGrade, WAVE_WARP_CENTRE_PIN_FRACTION,
+    WAVE_WARP_MAX_HEIGHT, WAVE_WARP_MAX_PHASE_DEGREES, WAVE_WARP_MAX_SPEED, WAVE_WARP_MAX_WIDTH,
+    WAVE_WARP_MIN_HEIGHT, WAVE_WARP_MIN_WIDTH, WAVE_WARP_PIN_COUNT, WAVE_WARP_PIN_MARGIN,
+    WAVE_WARP_QUALITY_COUNT, WAVE_WARP_TYPE_COUNT,
+};
