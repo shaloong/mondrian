@@ -18,6 +18,7 @@ pub use float_frame::{
 };
 pub mod black_white;
 pub mod box_blur;
+pub mod brightness_contrast;
 pub mod bulge;
 pub mod channel_mixer;
 pub mod chroma_key;
@@ -112,6 +113,11 @@ pub use black_white::{
     BLACK_WHITE_STOP_KEYS, BLACK_WHITE_WEIGHT_MAX, BLACK_WHITE_WEIGHT_MIN,
 };
 pub use box_blur::{box_blur_frame_f32, BoxBlurDirection, BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS};
+pub use brightness_contrast::{
+    brightness_contrast_frame_f32, BrightnessContrastError, BrightnessContrastGrade,
+    BRIGHTNESS_CONTRAST_MAX_BRIGHTNESS, BRIGHTNESS_CONTRAST_MAX_CONTRAST,
+    BRIGHTNESS_CONTRAST_MIN_BRIGHTNESS, BRIGHTNESS_CONTRAST_MIN_CONTRAST,
+};
 pub use chroma_key::{ChromaKeyError, PreparedChromaKey};
 pub use color_curves::{
     ColorCurvesAuthoring, ColorCurvesMode, PreparedColorCurves, COLOR_CURVE_SAMPLE_COUNT,

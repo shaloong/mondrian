@@ -963,6 +963,11 @@ pub enum EffectRenderOp {
     ColorOffset {
         grade: crate::ColorOffsetGrade,
     },
+    /// Brightness and contrast: one gain and one offset in the working domain,
+    /// clamped into the display domain by the legacy toggle.
+    BrightnessContrast {
+        grade: crate::BrightnessContrastGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1193,6 +1198,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ColorOffset { grade } => {
                 formatter.debug_struct("ColorOffset").field("grade", grade).finish()
+            }
+            Self::BrightnessContrast { grade } => {
+                formatter.debug_struct("BrightnessContrast").field("grade", grade).finish()
             }
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
@@ -1792,6 +1800,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::BrightnessContrast { grade } => {
+                62u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2003,6 +2017,7 @@ impl EffectRenderOp {
             EffectRenderOp::Split { .. } => 3,
             EffectRenderOp::LinearColorKey { .. } => 2,
             EffectRenderOp::Extract { .. } => 1,
+            EffectRenderOp::BrightnessContrast { .. } => 1,
             EffectRenderOp::ColorOffset { .. } => 2,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
@@ -2550,7 +2565,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 60] {
+fn builtin_effect_types() -> [EffectType; 61] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2612,6 +2627,7 @@ fn builtin_effect_types() -> [EffectType; 60] {
         EffectType::LinearColorKey,
         EffectType::Extract,
         EffectType::ColorOffset,
+        EffectType::BrightnessContrast,
     ]
 }
 
@@ -4754,6 +4770,50 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::BrightnessContrast => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "brightness",
+                "亮度对比度",
+                "亮度",
+                PropertyValue::Float(0.0),
+                Some(crate::BRIGHTNESS_CONTRAST_MIN_BRIGHTNESS as f64),
+                Some(crate::BRIGHTNESS_CONTRAST_MAX_BRIGHTNESS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "contrast",
+                "亮度对比度",
+                "对比度",
+                PropertyValue::Float(0.0),
+                Some(crate::BRIGHTNESS_CONTRAST_MIN_CONTRAST as f64),
+                Some(crate::BRIGHTNESS_CONTRAST_MAX_CONTRAST as f64),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "legacy",
+                "亮度对比度",
+                "使用旧版（支持 HDR）",
+                "off",
+                vec![
+                    ParameterEnumOption::new(
+                        "off",
+                        "关闭",
+                        "mondrian.effect.brightness_contrast.legacy.off",
+                    ),
+                    ParameterEnumOption::new(
+                        "on",
+                        "开启",
+                        "mondrian.effect.brightness_contrast.legacy.on",
+                    ),
+                ],
+            );
+        }
         EffectType::LinearColorKey => {
             define_builtin_property(
                 &mut properties,
@@ -6416,6 +6476,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
+        EffectType::BrightnessContrast => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
         EffectType::ColorOffset => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
@@ -8039,6 +8103,50 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::BrightnessContrast => {
+            let brightness_id = builtin_parameter_id(effect_type, "brightness");
+            let contrast_id = builtin_parameter_id(effect_type, "contrast");
+            let legacy_id = builtin_parameter_id(effect_type, "legacy");
+            Some(Arc::new(move |effect, context, graph| {
+                let legacy = match effect.evaluate_parameter(&legacy_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match key.as_str() {
+                        "on" => true,
+                        "off" => false,
+                        other => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!(
+                                    "brightness contrast legacy {other} is not a declared option"
+                                ),
+                            })
+                        }
+                    },
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "brightness contrast legacy must be an option".to_string(),
+                        })
+                    }
+                    None => false,
+                };
+                let grade = crate::BrightnessContrastGrade::new(
+                    effect.evaluate_f32_parameter(&brightness_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&contrast_id, context.time, 0.0),
+                    legacy,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::BrightnessContrast { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorOffset => {
             let red_id = builtin_parameter_id(effect_type, "red_phase");
             let green_id = builtin_parameter_id(effect_type, "green_phase");
@@ -9198,6 +9306,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ColorOffset => "颜色偏移",
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
+        EffectType::BrightnessContrast => "亮度对比度",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -10492,6 +10601,7 @@ mod tests {
             EffectType::LinearColorKey,
             EffectType::Extract,
             EffectType::ColorOffset,
+            EffectType::BrightnessContrast,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -15527,6 +15637,116 @@ mod tests {
         let effect = author_wave_warp(&[
             ("wave_type", PropertyValue::Enum("noise".to_string())),
             ("wave_height", PropertyValue::Float(-7.5)),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+    }
+
+    fn brightness_contrast_op(graph: &EffectRenderGraph) -> Option<crate::BrightnessContrastGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::BrightnessContrast { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::BrightnessContrast { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_brightness_contrast(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::BrightnessContrast)
+            .expect("the brightness contrast effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BrightnessContrast.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the brightness contrast parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn brightness_contrast_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::BrightnessContrast)
+            .expect("the brightness contrast effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default brightness contrast should compile");
+        assert!(brightness_contrast_op(&graph).is_none());
+    }
+
+    #[test]
+    fn brightness_contrast_authored_state_reaches_the_operation() {
+        let effect = author_brightness_contrast(&[
+            ("brightness", PropertyValue::Float(60.0)),
+            ("contrast", PropertyValue::Float(50.0)),
+            ("legacy", PropertyValue::Enum("on".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = brightness_contrast_op(&graph).expect("the authored graph emits a node");
+        assert!((grade.brightness() - 60.0).abs() <= 1e-6);
+        assert!((grade.contrast() - 50.0).abs() <= 1e-6);
+        assert!(grade.legacy());
+        // Half contrast is 2/3 of the way from -1 toward 1, i.e. a gain of 4/3.
+        assert!((grade.gain() - 4.0 / 3.0).abs() <= 1e-6);
+        assert!((grade.bias() - 0.2).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn brightness_contrast_legacy_toggle_selects_the_clamping_path() {
+        let modern = author_brightness_contrast(&[("brightness", PropertyValue::Float(30.0))]);
+        let graph = build_effect_render_graph(&[modern], tt(0), TEST_WORKING_SPACE)
+            .expect("the modern graph should build");
+        let grade = brightness_contrast_op(&graph).expect("the modern graph emits a node");
+        assert!(!grade.legacy());
+        assert!((grade.gpu_controls().0[2]).abs() <= 1e-6);
+
+        let legacy = author_brightness_contrast(&[
+            ("brightness", PropertyValue::Float(30.0)),
+            ("legacy", PropertyValue::Enum("on".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[legacy], tt(0), TEST_WORKING_SPACE)
+            .expect("the legacy graph should build");
+        let grade = brightness_contrast_op(&graph).expect("the legacy graph emits a node");
+        assert!(grade.legacy());
+        assert!((grade.gpu_controls().0[2] - 1.0).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn brightness_contrast_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::BrightnessContrast)
+            .expect("the brightness contrast effect should instantiate");
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::BrightnessContrast.property_path("brightness"),
+            value: PropertyValue::Float(151.0),
+        });
+        assert!(outside.is_err(), "the brightness is bounded by the schema");
+
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::BrightnessContrast.property_path("contrast"),
+            value: PropertyValue::Float(-100.5),
+        });
+        assert!(outside.is_err(), "the contrast is bounded by the schema");
+
+        let unknown = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::BrightnessContrast.property_path("legacy"),
+            value: PropertyValue::Enum("sometimes".to_string()),
+        });
+        assert!(unknown.is_err(), "an undeclared legacy key is rejected");
+    }
+
+    #[test]
+    fn brightness_contrast_authored_state_survives_serialization_round_trip() {
+        let effect = author_brightness_contrast(&[
+            ("brightness", PropertyValue::Float(12.5)),
+            ("contrast", PropertyValue::Float(-25.0)),
+            ("legacy", PropertyValue::Enum("on".to_string())),
         ]);
         let json = serde_json::to_string(&effect).expect("the node serialises");
         let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");

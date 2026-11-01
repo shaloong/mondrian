@@ -2342,6 +2342,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::LinearColorKey { .. } => "linear_color_key",
         EffectRenderOp::ColorOffset { .. } => "color_offset",
         EffectRenderOp::Extract { .. } => "extract",
+        EffectRenderOp::BrightnessContrast { .. } => "brightness_contrast",
         EffectRenderOp::Convolution { .. } => "convolution",
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",

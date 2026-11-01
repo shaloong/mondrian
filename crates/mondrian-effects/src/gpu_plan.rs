@@ -124,6 +124,10 @@ pub enum EffectGpuPointOp {
     Extract {
         grade: crate::ExtractGrade,
     },
+    /// Brightness and contrast: one gain and one offset in the working domain.
+    BrightnessContrast {
+        grade: crate::BrightnessContrastGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -825,6 +829,9 @@ pub(crate) fn lower_point_op(
         }
         EffectRenderOp::Noise { grade } => Ok(EffectGpuPointOp::Noise { grade: *grade }),
         EffectRenderOp::Extract { grade } => Ok(EffectGpuPointOp::Extract { grade: *grade }),
+        EffectRenderOp::BrightnessContrast { grade } => {
+            Ok(EffectGpuPointOp::BrightnessContrast { grade: *grade })
+        }
         EffectRenderOp::Threshold { grade } => Ok(EffectGpuPointOp::Threshold {
             level: grade.level(),
             luminance_coefficients: grade.luminance_coefficients(),
@@ -917,6 +924,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::LinearColorKey { .. } => "linear_color_key",
         EffectRenderOp::ColorOffset { .. } => "color_offset",
         EffectRenderOp::Extract { .. } => "extract",
+        EffectRenderOp::BrightnessContrast { .. } => "brightness_contrast",
         EffectRenderOp::Convolution { .. } => "convolution",
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",
