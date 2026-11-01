@@ -2343,6 +2343,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ColorOffset { .. } => "color_offset",
         EffectRenderOp::Extract { .. } => "extract",
         EffectRenderOp::BrightnessContrast { .. } => "brightness_contrast",
+        EffectRenderOp::Levels { .. } => "levels",
         EffectRenderOp::Convolution { .. } => "convolution",
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",

@@ -83,6 +83,8 @@ pub enum EffectType {
     Emboss,
     /// Brightness and contrast: one gain and one offset in the working domain.
     BrightnessContrast,
+    /// Levels: per-channel input and output points around a gamma.
+    Levels,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -154,6 +156,7 @@ impl EffectType {
             Self::BrushStrokes => "builtin.brush_strokes".to_string(),
             Self::Posterize => "builtin.posterize".to_string(),
             Self::BrightnessContrast => "builtin.brightness_contrast".to_string(),
+            Self::Levels => "builtin.levels".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -221,6 +224,7 @@ impl EffectType {
             "builtin.brush_strokes" => Self::BrushStrokes,
             "builtin.posterize" => Self::Posterize,
             "builtin.brightness_contrast" => Self::BrightnessContrast,
+            "builtin.levels" => Self::Levels,
             other => Self::External(other.to_string()),
         }
     }
@@ -288,6 +292,7 @@ impl EffectType {
             Self::Spherize => "球面化",
             Self::Noise => "噪点",
             Self::BrightnessContrast => "亮度对比度",
+            Self::Levels => "色阶",
             Self::External(name) => name,
         }
     }
@@ -353,6 +358,7 @@ impl EffectType {
             Self::Spherize => vec!["变形"],
             Self::Noise => vec!["胶片质感"],
             Self::BrightnessContrast => vec!["颜色", "调色"],
+            Self::Levels => vec!["颜色", "调色"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -420,6 +426,7 @@ impl EffectType {
             Self::Spherize => "spherize".to_string(),
             Self::Noise => "noise".to_string(),
             Self::BrightnessContrast => "brightness_contrast".to_string(),
+            Self::Levels => "levels".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -736,6 +743,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Noise => Ok(()),
             Self::Spherize => Ok(()),
             Self::BrightnessContrast => Ok(()),
+            Self::Levels => Ok(()),
         }
     }
 }

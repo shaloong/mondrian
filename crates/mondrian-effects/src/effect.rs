@@ -968,6 +968,11 @@ pub enum EffectRenderOp {
     BrightnessContrast {
         grade: crate::BrightnessContrastGrade,
     },
+    /// Levels: per-channel input and output points around a gamma, with one
+    /// clipping mode for each end of the output range.
+    Levels {
+        grade: crate::LevelsGrade,
+    },
     /// Offset: translates the frame by an authored shift and wraps the pixels
     /// that leave one edge back onto the opposite edge.
     Offset {
@@ -1201,6 +1206,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::BrightnessContrast { grade } => {
                 formatter.debug_struct("BrightnessContrast").field("grade", grade).finish()
+            }
+            Self::Levels { grade } => {
+                formatter.debug_struct("Levels").field("grade", grade).finish()
             }
             Self::Offset { grade } => {
                 formatter.debug_struct("Offset").field("grade", grade).finish()
@@ -1806,6 +1814,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Levels { grade } => {
+                63u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2018,6 +2032,7 @@ impl EffectRenderOp {
             EffectRenderOp::LinearColorKey { .. } => 2,
             EffectRenderOp::Extract { .. } => 1,
             EffectRenderOp::BrightnessContrast { .. } => 1,
+            EffectRenderOp::Levels { .. } => 1,
             EffectRenderOp::ColorOffset { .. } => 2,
             EffectRenderOp::Offset { .. } => 2,
             EffectRenderOp::Twirl { .. } => 3,
@@ -2565,7 +2580,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 61] {
+fn builtin_effect_types() -> [EffectType; 62] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2628,6 +2643,7 @@ fn builtin_effect_types() -> [EffectType; 61] {
         EffectType::Extract,
         EffectType::ColorOffset,
         EffectType::BrightnessContrast,
+        EffectType::Levels,
     ]
 }
 
@@ -4814,6 +4830,90 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::Levels => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "channel",
+                "色阶",
+                "通道",
+                "rgb",
+                vec![
+                    ParameterEnumOption::new("rgb", "RGB", "mondrian.effect.levels.channel.rgb"),
+                    ParameterEnumOption::new("red", "红色", "mondrian.effect.levels.channel.red"),
+                    ParameterEnumOption::new(
+                        "green",
+                        "绿色",
+                        "mondrian.effect.levels.channel.green",
+                    ),
+                    ParameterEnumOption::new("blue", "蓝色", "mondrian.effect.levels.channel.blue"),
+                    ParameterEnumOption::new(
+                        "alpha",
+                        "Alpha",
+                        "mondrian.effect.levels.channel.alpha",
+                    ),
+                ],
+            );
+            for (parameter, name, value) in [
+                ("input_black", "输入黑色", 0.0),
+                ("input_white", "输入白色", 1.0),
+                ("output_black", "输出黑色", 0.0),
+                ("output_white", "输出白色", 1.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "色阶",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(crate::LEVELS_MIN_LEVEL as f64),
+                    Some(crate::LEVELS_MAX_LEVEL as f64),
+                    Some(0.01),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "gamma",
+                "色阶",
+                "灰度系数",
+                PropertyValue::Float(1.0),
+                Some(crate::LEVELS_MIN_GAMMA as f64),
+                Some(crate::LEVELS_MAX_GAMMA as f64),
+                Some(0.01),
+            );
+            for (parameter, name) in [
+                ("clip_output_black", "剪切以输出黑色"),
+                ("clip_output_white", "剪切以输出白色"),
+            ] {
+                define_builtin_enum_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "色阶",
+                    name,
+                    "off",
+                    vec![
+                        ParameterEnumOption::new(
+                            "off",
+                            "关闭",
+                            format!("mondrian.effect.levels.{parameter}.off"),
+                        ),
+                        ParameterEnumOption::new(
+                            "clamp_output",
+                            "限制到输出范围",
+                            format!("mondrian.effect.levels.{parameter}.clamp_output"),
+                        ),
+                        ParameterEnumOption::new(
+                            "clamp_display",
+                            "限制到显示范围",
+                            format!("mondrian.effect.levels.{parameter}.clamp_display"),
+                        ),
+                    ],
+                );
+            }
+        }
         EffectType::LinearColorKey => {
             define_builtin_property(
                 &mut properties,
@@ -6477,6 +6577,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::BrightnessContrast => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Levels => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -8147,6 +8251,91 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Levels => {
+            let channel_id = builtin_parameter_id(effect_type, "channel");
+            let input_black_id = builtin_parameter_id(effect_type, "input_black");
+            let input_white_id = builtin_parameter_id(effect_type, "input_white");
+            let gamma_id = builtin_parameter_id(effect_type, "gamma");
+            let output_black_id = builtin_parameter_id(effect_type, "output_black");
+            let output_white_id = builtin_parameter_id(effect_type, "output_white");
+            let clip_output_black_id = builtin_parameter_id(effect_type, "clip_output_black");
+            let clip_output_white_id = builtin_parameter_id(effect_type, "clip_output_white");
+            Some(Arc::new(move |effect, context, graph| {
+                let channel = match effect.evaluate_parameter(&channel_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::LevelsChannel::from_key(&key)
+                        .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("levels channel {key} is not a declared option"),
+                        })?,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "levels channel must be an option".to_string(),
+                        })
+                    }
+                    None => crate::LevelsChannel::Rgb,
+                };
+                let clip_output_black =
+                    match effect.evaluate_parameter(&clip_output_black_id, context.time) {
+                        Some(PropertyValue::Enum(key)) => crate::LevelsClip::from_key(&key)
+                            .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!(
+                                    "levels clip output black {key} is not a declared option"
+                                ),
+                            })?,
+                        Some(_) => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "levels clip output black must be an option".to_string(),
+                            })
+                        }
+                        None => crate::LevelsClip::Off,
+                    };
+                let clip_output_white =
+                    match effect.evaluate_parameter(&clip_output_white_id, context.time) {
+                        Some(PropertyValue::Enum(key)) => crate::LevelsClip::from_key(&key)
+                            .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!(
+                                    "levels clip output white {key} is not a declared option"
+                                ),
+                            })?,
+                        Some(_) => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "levels clip output white must be an option".to_string(),
+                            })
+                        }
+                        None => crate::LevelsClip::Off,
+                    };
+                let grade = crate::LevelsGrade::new(
+                    effect.evaluate_f32_parameter(&input_black_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&input_white_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&gamma_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&output_black_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&output_white_id, context.time, 1.0),
+                    channel,
+                    clip_output_black,
+                    clip_output_white,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Levels { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorOffset => {
             let red_id = builtin_parameter_id(effect_type, "red_phase");
             let green_id = builtin_parameter_id(effect_type, "green_phase");
@@ -9307,6 +9496,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ColorEmboss => "色彩浮雕",
         EffectType::Emboss => "浮雕",
         EffectType::BrightnessContrast => "亮度对比度",
+        EffectType::Levels => "色阶",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -10602,6 +10792,7 @@ mod tests {
             EffectType::Extract,
             EffectType::ColorOffset,
             EffectType::BrightnessContrast,
+            EffectType::Levels,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -15747,6 +15938,163 @@ mod tests {
             ("brightness", PropertyValue::Float(12.5)),
             ("contrast", PropertyValue::Float(-25.0)),
             ("legacy", PropertyValue::Enum("on".to_string())),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+    }
+
+    fn levels_op(graph: &EffectRenderGraph) -> Option<crate::LevelsGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Levels { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Levels { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_levels(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Levels)
+            .expect("the levels effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Levels.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the levels parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn levels_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::Levels)
+            .expect("the levels effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default levels should compile");
+        assert!(levels_op(&graph).is_none());
+    }
+
+    #[test]
+    fn levels_authored_state_reaches_the_operation() {
+        let effect = author_levels(&[
+            ("input_black", PropertyValue::Float(0.2)),
+            ("input_white", PropertyValue::Float(0.85)),
+            ("gamma", PropertyValue::Float(2.2)),
+            ("output_black", PropertyValue::Float(0.05)),
+            ("output_white", PropertyValue::Float(0.95)),
+            ("channel", PropertyValue::Enum("red".to_string())),
+            (
+                "clip_output_black",
+                PropertyValue::Enum("clamp_display".to_string()),
+            ),
+            (
+                "clip_output_white",
+                PropertyValue::Enum("clamp_output".to_string()),
+            ),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = levels_op(&graph).expect("the authored graph emits a node");
+        assert!((grade.input_black() - 0.2).abs() <= 1e-6);
+        assert!((grade.input_white() - 0.85).abs() <= 1e-6);
+        assert!((grade.gamma() - 2.2).abs() <= 1e-6);
+        assert!((grade.output_black() - 0.05).abs() <= 1e-6);
+        assert!((grade.output_white() - 0.95).abs() <= 1e-6);
+        assert_eq!(grade.channel(), crate::LevelsChannel::Red);
+        assert_eq!(grade.clip_output_black(), crate::LevelsClip::ClampDisplay);
+        assert_eq!(grade.clip_output_white(), crate::LevelsClip::ClampOutput);
+        assert_eq!(grade.gpu_controls().0, [0.2, 0.85, 2.2, 0.05]);
+        assert_eq!(grade.gpu_controls().1, [0.95, 2.0, 3.0, 2.0]);
+    }
+
+    #[test]
+    fn levels_channel_and_clip_menus_resolve_to_the_declared_keys() {
+        let effect = author_levels(&[
+            ("gamma", PropertyValue::Float(1.5)),
+            ("channel", PropertyValue::Enum("alpha".to_string())),
+            (
+                "clip_output_black",
+                PropertyValue::Enum("clamp_display".to_string()),
+            ),
+            (
+                "clip_output_white",
+                PropertyValue::Enum("clamp_display".to_string()),
+            ),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = levels_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.channel(), crate::LevelsChannel::Alpha);
+        assert_eq!(grade.clip_output_black(), crate::LevelsClip::ClampDisplay);
+        assert_eq!(grade.clip_output_white(), crate::LevelsClip::ClampDisplay);
+
+        let defaults = author_levels(&[("gamma", PropertyValue::Float(1.5))]);
+        let graph = build_effect_render_graph(&[defaults], tt(0), TEST_WORKING_SPACE)
+            .expect("the default menus should compile");
+        let grade = levels_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.channel(), crate::LevelsChannel::Rgb);
+        assert_eq!(grade.clip_output_black(), crate::LevelsClip::Off);
+        assert_eq!(grade.clip_output_white(), crate::LevelsClip::Off);
+    }
+
+    #[test]
+    fn levels_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::Levels)
+            .expect("the levels effect should instantiate");
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Levels.property_path("input_black"),
+            value: PropertyValue::Float(10_000.5),
+        });
+        assert!(outside.is_err(), "the input black is bounded by the schema");
+
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Levels.property_path("gamma"),
+            value: PropertyValue::Float(5.5),
+        });
+        assert!(outside.is_err(), "the gamma is bounded by the schema");
+
+        let unknown = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Levels.property_path("channel"),
+            value: PropertyValue::Enum("luma".to_string()),
+        });
+        assert!(unknown.is_err(), "an undeclared channel key is rejected");
+
+        let unknown = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Levels.property_path("clip_output_black"),
+            value: PropertyValue::Enum("clamp".to_string()),
+        });
+        assert!(unknown.is_err(), "an undeclared clipping key is rejected");
+
+        let zero_gamma = author_levels(&[("gamma", PropertyValue::Float(0.0))]);
+        let Err(error) = build_effect_render_graph(&[zero_gamma], tt(0), TEST_WORKING_SPACE) else {
+            panic!("a zero gamma is rejected by the graph builder");
+        };
+        assert!(
+            format!("{error}").contains("levels gamma"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn levels_authored_state_survives_serialization_round_trip() {
+        let effect = author_levels(&[
+            ("input_black", PropertyValue::Float(0.1)),
+            ("input_white", PropertyValue::Float(0.9)),
+            ("gamma", PropertyValue::Float(1.8)),
+            ("output_black", PropertyValue::Float(0.02)),
+            ("output_white", PropertyValue::Float(0.98)),
+            ("channel", PropertyValue::Enum("blue".to_string())),
+            (
+                "clip_output_black",
+                PropertyValue::Enum("clamp_output".to_string()),
+            ),
+            (
+                "clip_output_white",
+                PropertyValue::Enum("clamp_display".to_string()),
+            ),
         ]);
         let json = serde_json::to_string(&effect).expect("the node serialises");
         let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");

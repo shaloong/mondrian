@@ -242,6 +242,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Levels { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "levels",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LinearColorKey { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "linear_color_key",
@@ -858,6 +864,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::ColorOffset { .. } => 0,
         EffectRenderOp::Extract { .. } => 0,
         EffectRenderOp::BrightnessContrast { .. } => 0,
+        EffectRenderOp::Levels { .. } => 0,
         EffectRenderOp::LinearColorKey { .. } => 0,
         EffectRenderOp::Convolution { .. } => 0,
         EffectRenderOp::Offset { .. } => 0,
@@ -1124,6 +1131,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             crate::brightness_contrast::apply_brightness_contrast_f32_controlled(
                 working, grade, checkpoint,
             )?;
+            Ok(true)
+        }
+        EffectRenderOp::Levels { grade } => {
+            crate::levels::apply_levels_f32_controlled(working, grade, checkpoint)?;
             Ok(true)
         }
         EffectRenderOp::LinearColorKey { grade } => {

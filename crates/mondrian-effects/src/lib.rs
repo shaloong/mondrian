@@ -86,6 +86,7 @@ pub mod brush_strokes;
 pub mod kaleidoscope;
 pub mod lens_distortion;
 pub mod lens_flare;
+pub mod levels;
 pub mod linear_color_key;
 pub mod mirror;
 pub mod mosaic;
@@ -249,6 +250,10 @@ pub use lens_distortion::{
 pub use lens_flare::{
     lens_flare_frame_f32, LensFlareError, LensFlareGrade, LensFlareType,
     LENS_FLARE_MAX_BRIGHTNESS_PERCENT,
+};
+pub use levels::{
+    levels_frame_f32, LevelsChannel, LevelsClip, LevelsError, LevelsGrade, LEVELS_CHANNEL_COUNT,
+    LEVELS_CLIP_COUNT, LEVELS_MAX_GAMMA, LEVELS_MAX_LEVEL, LEVELS_MIN_GAMMA, LEVELS_MIN_LEVEL,
 };
 pub use linear_color_key::{
     linear_color_key_frame_f32, KeyOperation, LinearColorKeyError, LinearColorKeyGrade,
