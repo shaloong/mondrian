@@ -159,6 +159,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored screen colour, matte remap, despill, and matte morphology.
         grade: crate::KeylightGrade,
     },
+    MatteRefine {
+        /// Authored matte cleanup, smoothing, morphology, feather, and views.
+        grade: crate::MatteRefineGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -196,6 +200,7 @@ impl EffectGpuSpatialPass {
             Self::Glow { .. } => "glow",
             Self::FractalNoise { .. } => "fractal_noise",
             Self::Keylight { .. } => "keylight",
+            Self::MatteRefine { .. } => "matte_refine",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -245,6 +250,7 @@ impl EffectGpuSpatialPass {
             Self::Glow { .. } => u32::MAX,
             Self::FractalNoise { .. } => u32::MAX,
             Self::Keylight { .. } => u32::MAX,
+            Self::MatteRefine { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -287,6 +293,7 @@ impl EffectGpuSpatialPass {
             Self::Glow { .. } => u32::MAX,
             Self::FractalNoise { .. } => u32::MAX,
             Self::Keylight { .. } => u32::MAX,
+            Self::MatteRefine { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -581,6 +588,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::Keylight { grade } => {
             Some(EffectGpuSpatialPass::Keylight { grade: *grade })
+        }
+        EffectRenderOp::MatteRefine { grade } => {
+            Some(EffectGpuSpatialPass::MatteRefine { grade: *grade })
         }
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })

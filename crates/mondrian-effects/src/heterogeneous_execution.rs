@@ -2763,6 +2763,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Glow { .. } => 70,
         EffectRenderOp::FractalNoise { .. } => 71,
         EffectRenderOp::Keylight { .. } => 72,
+        EffectRenderOp::MatteRefine { .. } => 73,
         EffectRenderOp::Ramp { .. } => 69,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
@@ -4837,6 +4838,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Glow { .. }
             | crate::EffectRenderOp::FractalNoise { .. }
             | crate::EffectRenderOp::Keylight { .. }
+            | crate::EffectRenderOp::MatteRefine { .. }
             | crate::EffectRenderOp::Ramp { .. }
             | crate::EffectRenderOp::ColorOffset { .. }
             | crate::EffectRenderOp::Convolution { .. }

@@ -965,6 +965,10 @@ pub enum EffectRenderOp {
     Keylight {
         grade: crate::KeylightGrade,
     },
+    /// Matte refine: softens, shifts, feathers, and cleans the carried matte.
+    MatteRefine {
+        grade: crate::MatteRefineGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1238,6 +1242,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Keylight { grade } => {
                 formatter.debug_struct("Keylight").field("grade", grade).finish()
+            }
+            Self::MatteRefine { grade } => {
+                formatter.debug_struct("MatteRefine").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1932,6 +1939,10 @@ impl EffectRenderOp {
                 71u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::MatteRefine { grade } => {
+                72u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2145,6 +2156,7 @@ impl EffectRenderOp {
             EffectRenderOp::Glow { .. } => 4,
             EffectRenderOp::FractalNoise { .. } => 5,
             EffectRenderOp::Keylight { .. } => 5,
+            EffectRenderOp::MatteRefine { .. } => 6,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2700,7 +2712,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 71] {
+fn builtin_effect_types() -> [EffectType; 72] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2772,6 +2784,7 @@ fn builtin_effect_types() -> [EffectType; 71] {
         EffectType::Glow,
         EffectType::FractalNoise,
         EffectType::Keylight,
+        EffectType::MatteRefine,
         EffectType::Echo,
     ]
 }
@@ -7432,6 +7445,171 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::MatteRefine => {
+            for (parameter, name, value, minimum, maximum, step) in [
+                (
+                    "edge_detail",
+                    "计算边缘细节",
+                    crate::MATTE_REFINE_DEFAULT_EDGE_DETAIL,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_EDGE_DETAIL as f64,
+                    0.01,
+                ),
+                (
+                    "other_edge_radius",
+                    "其他边缘半径",
+                    crate::MATTE_REFINE_DEFAULT_OTHER_EDGE_RADIUS_PIXELS,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_OTHER_EDGE_RADIUS_PIXELS as f64,
+                    1.0,
+                ),
+                (
+                    "view_edge_region",
+                    "查看边缘区域",
+                    crate::MATTE_REFINE_DEFAULT_VIEW_EDGE_REGION,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_VIEW as f64,
+                    0.01,
+                ),
+                (
+                    "smooth",
+                    "平滑",
+                    crate::MATTE_REFINE_DEFAULT_SMOOTH_PIXELS,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_SMOOTH_PIXELS as f64,
+                    0.1,
+                ),
+                (
+                    "feather",
+                    "羽化",
+                    crate::MATTE_REFINE_DEFAULT_FEATHER_PIXELS,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_FEATHER_PIXELS as f64,
+                    0.1,
+                ),
+                (
+                    "contrast",
+                    "对比度",
+                    crate::MATTE_REFINE_DEFAULT_CONTRAST,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_CONTRAST as f64,
+                    0.1,
+                ),
+                (
+                    "shift_edge",
+                    "移动边缘",
+                    crate::MATTE_REFINE_DEFAULT_SHIFT_EDGE_PIXELS,
+                    -(crate::MATTE_REFINE_AUTHOR_MAX_SHIFT_EDGE_PIXELS as f64),
+                    crate::MATTE_REFINE_AUTHOR_MAX_SHIFT_EDGE_PIXELS as f64,
+                    1.0,
+                ),
+                (
+                    "clean_amount",
+                    "数量",
+                    crate::MATTE_REFINE_DEFAULT_CLEAN_AMOUNT,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_CLEAN_AMOUNT as f64,
+                    0.1,
+                ),
+                (
+                    "expand_radius",
+                    "增大半径",
+                    crate::MATTE_REFINE_DEFAULT_EXPAND_RADIUS_PIXELS,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_EXPAND_RADIUS_PIXELS as f64,
+                    1.0,
+                ),
+                (
+                    "view_map",
+                    "查看地图",
+                    crate::MATTE_REFINE_DEFAULT_VIEW_MAP,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_VIEW as f64,
+                    0.01,
+                ),
+                (
+                    "tremor_reduction",
+                    "震颤减少",
+                    crate::MATTE_REFINE_DEFAULT_TREMOR_REDUCTION,
+                    1.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_TREMOR_REDUCTION as f64,
+                    1.0,
+                ),
+                (
+                    "tremor_amount",
+                    "减少震颤",
+                    crate::MATTE_REFINE_DEFAULT_TREMOR_AMOUNT,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_TREMOR_AMOUNT as f64,
+                    0.1,
+                ),
+                (
+                    "more_motion_blur",
+                    "更多运动模糊",
+                    crate::MATTE_REFINE_DEFAULT_MORE_MOTION_BLUR,
+                    0.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_MORE_MOTION_BLUR as f64,
+                    0.01,
+                ),
+                (
+                    "per_frame_samples",
+                    "每帧样本",
+                    crate::MATTE_REFINE_DEFAULT_PER_FRAME_SAMPLES,
+                    2.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_PER_FRAME_SAMPLES as f64,
+                    1.0,
+                ),
+                (
+                    "shutter_angle_degrees",
+                    "快门角度",
+                    crate::MATTE_REFINE_DEFAULT_SHUTTER_ANGLE_DEGREES,
+                    1.0,
+                    crate::MATTE_REFINE_AUTHOR_MAX_SHUTTER_ANGLE_DEGREES as f64,
+                    1.0,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "遮罩精修",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            for (parameter, name, value) in [
+                (
+                    "better_quality",
+                    "较高品质",
+                    crate::MATTE_REFINE_DEFAULT_BETTER_QUALITY,
+                ),
+                (
+                    "clean_edge_color",
+                    "净化边缘颜色",
+                    crate::MATTE_REFINE_DEFAULT_CLEAN_EDGE_COLOR,
+                ),
+                (
+                    "extend_smooth",
+                    "扩展平滑的地方",
+                    crate::MATTE_REFINE_DEFAULT_EXTEND_SMOOTH,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "遮罩精修",
+                    name,
+                    PropertyValue::Bool(value),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
         EffectType::Echo => {
             for (parameter, name, value, minimum, maximum, step) in [
                 (
@@ -7812,6 +7990,18 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         }
         (EffectType::Keylight, "preblur" | "edge_shrink" | "edge_feather") => ParameterUnit::Pixels,
         (EffectType::Keylight, "inner_matte" | "outer_matte") => ParameterUnit::Percent,
+        (
+            EffectType::MatteRefine,
+            "other_edge_radius" | "smooth" | "feather" | "shift_edge" | "expand_radius",
+        ) => ParameterUnit::Pixels,
+        (EffectType::MatteRefine, "contrast" | "clean_amount" | "tremor_amount") => {
+            ParameterUnit::Percent
+        }
+        (EffectType::MatteRefine, "shutter_angle_degrees") => ParameterUnit::Degrees,
+        (
+            EffectType::MatteRefine,
+            "edge_detail" | "view_edge_region" | "view_map" | "more_motion_blur",
+        ) => ParameterUnit::Normalized,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -8039,6 +8229,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Keylight => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::MatteRefine => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -11681,6 +11876,108 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::MatteRefine => {
+            let edge_detail_id = builtin_parameter_id(effect_type, "edge_detail");
+            let other_edge_radius_id = builtin_parameter_id(effect_type, "other_edge_radius");
+            let view_edge_region_id = builtin_parameter_id(effect_type, "view_edge_region");
+            let smooth_id = builtin_parameter_id(effect_type, "smooth");
+            let feather_id = builtin_parameter_id(effect_type, "feather");
+            let contrast_id = builtin_parameter_id(effect_type, "contrast");
+            let shift_edge_id = builtin_parameter_id(effect_type, "shift_edge");
+            let better_quality_id = builtin_parameter_id(effect_type, "better_quality");
+            let clean_edge_color_id = builtin_parameter_id(effect_type, "clean_edge_color");
+            let clean_amount_id = builtin_parameter_id(effect_type, "clean_amount");
+            let extend_smooth_id = builtin_parameter_id(effect_type, "extend_smooth");
+            let expand_radius_id = builtin_parameter_id(effect_type, "expand_radius");
+            let view_map_id = builtin_parameter_id(effect_type, "view_map");
+            let tremor_reduction_id = builtin_parameter_id(effect_type, "tremor_reduction");
+            let tremor_amount_id = builtin_parameter_id(effect_type, "tremor_amount");
+            let more_motion_blur_id = builtin_parameter_id(effect_type, "more_motion_blur");
+            let per_frame_samples_id = builtin_parameter_id(effect_type, "per_frame_samples");
+            let shutter_angle_degrees_id =
+                builtin_parameter_id(effect_type, "shutter_angle_degrees");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let flag = |parameter_id: &ParameterId,
+                            name: &str,
+                            fallback: bool|
+                 -> Result<bool, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => Ok(value),
+                        Some(_) => Err(invalid(format!("matte refine {name} must be a boolean"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let numeric = |parameter_id: &ParameterId, fallback: f32| {
+                    effect.evaluate_f32_parameter(parameter_id, context.time, fallback)
+                };
+                let grade = crate::MatteRefineGrade::new(
+                    numeric(&edge_detail_id, crate::MATTE_REFINE_DEFAULT_EDGE_DETAIL),
+                    numeric(
+                        &other_edge_radius_id,
+                        crate::MATTE_REFINE_DEFAULT_OTHER_EDGE_RADIUS_PIXELS,
+                    ),
+                    numeric(
+                        &view_edge_region_id,
+                        crate::MATTE_REFINE_DEFAULT_VIEW_EDGE_REGION,
+                    ),
+                    numeric(&smooth_id, crate::MATTE_REFINE_DEFAULT_SMOOTH_PIXELS),
+                    numeric(&feather_id, crate::MATTE_REFINE_DEFAULT_FEATHER_PIXELS),
+                    numeric(&contrast_id, crate::MATTE_REFINE_DEFAULT_CONTRAST),
+                    numeric(
+                        &shift_edge_id,
+                        crate::MATTE_REFINE_DEFAULT_SHIFT_EDGE_PIXELS,
+                    ),
+                    flag(
+                        &better_quality_id,
+                        "better quality",
+                        crate::MATTE_REFINE_DEFAULT_BETTER_QUALITY,
+                    )?,
+                    flag(
+                        &clean_edge_color_id,
+                        "clean edge colour",
+                        crate::MATTE_REFINE_DEFAULT_CLEAN_EDGE_COLOR,
+                    )?,
+                    numeric(&clean_amount_id, crate::MATTE_REFINE_DEFAULT_CLEAN_AMOUNT),
+                    flag(
+                        &extend_smooth_id,
+                        "extend smooth",
+                        crate::MATTE_REFINE_DEFAULT_EXTEND_SMOOTH,
+                    )?,
+                    numeric(
+                        &expand_radius_id,
+                        crate::MATTE_REFINE_DEFAULT_EXPAND_RADIUS_PIXELS,
+                    ),
+                    numeric(&view_map_id, crate::MATTE_REFINE_DEFAULT_VIEW_MAP),
+                    numeric(
+                        &tremor_reduction_id,
+                        crate::MATTE_REFINE_DEFAULT_TREMOR_REDUCTION,
+                    ),
+                    numeric(&tremor_amount_id, crate::MATTE_REFINE_DEFAULT_TREMOR_AMOUNT),
+                    numeric(
+                        &more_motion_blur_id,
+                        crate::MATTE_REFINE_DEFAULT_MORE_MOTION_BLUR,
+                    ),
+                    numeric(
+                        &per_frame_samples_id,
+                        crate::MATTE_REFINE_DEFAULT_PER_FRAME_SAMPLES,
+                    ),
+                    numeric(
+                        &shutter_angle_degrees_id,
+                        crate::MATTE_REFINE_DEFAULT_SHUTTER_ANGLE_DEGREES,
+                    ),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::MatteRefine { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Echo => {
             let echo_time_id = builtin_parameter_id(effect_type, "echo_time");
             let echo_count_id = builtin_parameter_id(effect_type, "echo_count");
@@ -11828,6 +12125,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Glow => "发光",
         EffectType::FractalNoise => "分形噪波",
         EffectType::Keylight => "专业抠像",
+        EffectType::MatteRefine => "遮罩精修",
         EffectType::Echo => "残影",
         EffectType::External(_) => "外部效果",
     }
@@ -13133,6 +13431,7 @@ mod tests {
             EffectType::Glow,
             EffectType::FractalNoise,
             EffectType::Keylight,
+            EffectType::MatteRefine,
             EffectType::Echo,
         ]
         .into_iter()
@@ -19456,6 +19755,161 @@ mod tests {
         assert_eq!(grade.screen_gain(), 1.4);
         assert_eq!(grade.edge_feather(), 6.0);
         assert_eq!(grade.display(), crate::KeylightDisplay::Background);
+    }
+
+    fn matte_refine_op(graph: &EffectRenderGraph) -> Option<crate::MatteRefineGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::MatteRefine { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::MatteRefine { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_matte_refine(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::MatteRefine)
+            .expect("the matte refine effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::MatteRefine.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the matte refine parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn matte_refine_defaults_are_identity_and_compile_to_no_node() {
+        let effect = instantiate_effect_node(EffectType::MatteRefine)
+            .expect("the matte refine effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default matte refine should compile");
+        assert!(matte_refine_op(&graph).is_none());
+    }
+
+    #[test]
+    fn matte_refine_authored_configuration_reaches_the_operation() {
+        let effect = author_matte_refine(&[
+            ("edge_detail", PropertyValue::Float(0.25)),
+            ("other_edge_radius", PropertyValue::Float(18.0)),
+            ("view_edge_region", PropertyValue::Float(0.5)),
+            ("smooth", PropertyValue::Float(6.0)),
+            ("feather", PropertyValue::Float(12.0)),
+            ("contrast", PropertyValue::Float(60.0)),
+            ("shift_edge", PropertyValue::Float(-4.0)),
+            ("better_quality", PropertyValue::Bool(true)),
+            ("clean_edge_color", PropertyValue::Bool(true)),
+            ("clean_amount", PropertyValue::Float(80.0)),
+            ("extend_smooth", PropertyValue::Bool(true)),
+            ("expand_radius", PropertyValue::Float(8.0)),
+            ("view_map", PropertyValue::Float(1.0)),
+            ("tremor_reduction", PropertyValue::Float(3.0)),
+            ("tremor_amount", PropertyValue::Float(120.0)),
+            ("more_motion_blur", PropertyValue::Float(0.5)),
+            ("per_frame_samples", PropertyValue::Float(16.0)),
+            ("shutter_angle_degrees", PropertyValue::Float(270.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = matte_refine_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.edge_detail(), 0.25);
+        assert_eq!(grade.other_edge_radius(), 18.0);
+        assert_eq!(grade.view_edge_region(), 0.5);
+        assert_eq!(grade.smooth(), 6.0);
+        assert_eq!(grade.feather(), 12.0);
+        assert_eq!(grade.contrast(), 60.0);
+        assert_eq!(grade.shift_edge(), -4.0);
+        assert_eq!(grade.grow_radius(), 8.0);
+        assert_eq!(grade.shrink_radius(), 4.0);
+        assert!(grade.better_quality());
+        assert!(grade.cleans_edge_color());
+        assert_eq!(grade.clean_amount(), 80.0);
+        assert!(grade.extend_smooth());
+        assert_eq!(grade.expand_radius(), 8.0);
+        assert!(grade.views_map());
+        assert_eq!(grade.tremor_reduction(), 3.0);
+        assert_eq!(grade.tremor_amount(), 120.0);
+        assert_eq!(grade.more_motion_blur(), 0.5);
+        assert_eq!(grade.per_frame_samples(), 16.0);
+        assert_eq!(grade.shutter_angle_degrees(), 270.0);
+    }
+
+    #[test]
+    fn matte_refine_neutral_authors_elide_the_operation() {
+        // A view flag alone is an authored operation even though the alpha
+        // refinement stages are neutral.
+        let viewing = author_matte_refine(&[("view_map", PropertyValue::Float(1.0))]);
+        let graph = build_effect_render_graph(&[viewing], tt(0), TEST_WORKING_SPACE)
+            .expect("the view grade should compile");
+        assert!(matte_refine_op(&graph).is_some());
+
+        let neutral = author_matte_refine(&[
+            ("smooth", PropertyValue::Float(0.0)),
+            ("feather", PropertyValue::Float(0.0)),
+            ("contrast", PropertyValue::Float(0.0)),
+            ("shift_edge", PropertyValue::Float(0.0)),
+            ("expand_radius", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[neutral], tt(0), TEST_WORKING_SPACE)
+            .expect("the neutral grade should compile");
+        assert!(matte_refine_op(&graph).is_none());
+    }
+
+    #[test]
+    fn matte_refine_fail_closed_authors_are_rejected() {
+        let mut effect = instantiate_effect_node(EffectType::MatteRefine)
+            .expect("the matte refine effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::MatteRefine.property_path("smooth"),
+                value: PropertyValue::Float(51.0),
+            })
+            .expect_err("an out-of-range smooth radius must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 50]"), "{rendered}");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::MatteRefine.property_path("shift_edge"),
+                value: PropertyValue::Float(-101.0),
+            })
+            .expect_err("an out-of-range edge shift must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [-100, 100]"), "{rendered}");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::MatteRefine.property_path("better_quality"),
+                value: PropertyValue::Float(1.0),
+            })
+            .expect_err("a float on a boolean parameter must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("期望 bool"), "{rendered}");
+    }
+
+    #[test]
+    fn matte_refine_authored_state_round_trips_through_serialization() {
+        let effect = author_matte_refine(&[
+            ("feather", PropertyValue::Float(12.0)),
+            ("smooth", PropertyValue::Float(6.0)),
+            ("shift_edge", PropertyValue::Float(-4.0)),
+            ("clean_edge_color", PropertyValue::Bool(true)),
+            ("view_edge_region", PropertyValue::Float(1.0)),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the restored matte refine should compile");
+        let grade = matte_refine_op(&graph).expect("the restored grade emits a node");
+        assert_eq!(grade.feather(), 12.0);
+        assert_eq!(grade.smooth(), 6.0);
+        assert_eq!(grade.shift_edge(), -4.0);
+        assert!(grade.cleans_edge_color());
+        assert!(grade.views_edge_region());
     }
 
     fn echo_sample_offsets(graph: &EffectRenderGraph) -> Vec<f64> {

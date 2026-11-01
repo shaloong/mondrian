@@ -326,6 +326,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::MatteRefine { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "matte_refine",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Ramp { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "ramp",
@@ -905,6 +911,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Glow { .. } => 2,
         EffectRenderOp::FractalNoise { .. } => 0,
         EffectRenderOp::Keylight { .. } => 4,
+        EffectRenderOp::MatteRefine { .. } => 4,
         EffectRenderOp::Ramp { .. } => 0,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
@@ -1299,6 +1306,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Keylight { grade } => {
             crate::keylight::apply_keylight_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::MatteRefine { grade } => {
+            crate::matte_refine::apply_matte_refine_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,

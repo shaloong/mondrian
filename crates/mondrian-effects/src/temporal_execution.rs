@@ -2824,6 +2824,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Glow { .. } => "glow",
         crate::EffectRenderOp::FractalNoise { .. } => "fractal_noise",
         crate::EffectRenderOp::Keylight { .. } => "keylight",
+        crate::EffectRenderOp::MatteRefine { .. } => "matte_refine",
         crate::EffectRenderOp::Ramp { .. } => "ramp",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",

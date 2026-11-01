@@ -934,6 +934,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Glow { .. } => "glow",
         EffectRenderOp::FractalNoise { .. } => "fractal_noise",
         EffectRenderOp::Keylight { .. } => "keylight",
+        EffectRenderOp::MatteRefine { .. } => "matte_refine",
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
