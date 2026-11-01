@@ -68,6 +68,9 @@ pub(crate) struct EffectSpatialGpu {
     glow_extract: wgpu::RenderPipeline,
     glow_composite: wgpu::RenderPipeline,
     fractal_noise: wgpu::RenderPipeline,
+    keylight_key: wgpu::RenderPipeline,
+    keylight_erode: wgpu::RenderPipeline,
+    keylight_composite: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -935,6 +938,98 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Keylight keys the source into a matte, erodes that matte with a
+        // separable min filter, and composites the despilled source against it.
+        let keylight_key = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.keylight-key"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_keylight_key"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let keylight_erode = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.keylight-erode"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_keylight_erode"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let keylight_composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.keylight-composite"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_keylight_composite"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         // Fractal noise needs twenty-six scalars, so the shared uniform struct is
         // too small: the stage gets its own shader module, bind group layout, and
         // uniform payload instead of a sixth `extra` vector.
@@ -1031,6 +1126,9 @@ impl EffectSpatialGpu {
             glow_composite,
             fractal_noise,
             find_edges,
+            keylight_key,
+            keylight_erode,
+            keylight_composite,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -1534,6 +1632,14 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Glow { grade } => {
                 Ok(2 + grade.dimensions().axis_count() * mondrian_effects::GLOW_BLUR_ITERATIONS)
             }
+            // One key pass, two passes per enabled morphology stage, one
+            // composite. The preblur, the shrink, and the feather are all
+            // optional, so the count follows the authored grade.
+            EffectGpuSpatialPass::Keylight { grade } => Ok(1
+                + u32::from(grade.preblur() > 0.0) * 2
+                + u32::from(grade.edge_shrink() > 0.0) * 2
+                + u32::from(grade.edge_feather() > 0.0) * 2
+                + 1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1884,6 +1990,10 @@ impl EffectSpatialGpu {
                     width,
                     height,
                 );
+            }
+            EffectGpuSpatialPass::Keylight { grade } => {
+                return self
+                    .record_keylight(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -2658,6 +2768,196 @@ impl EffectSpatialGpu {
 
     /// Records one fullscreen pass that reads the original and one auxiliary
     /// texture and writes the destination.
+    /// Records the keylight stages and returns the merged frame.
+    ///
+    /// `scratch[0]` receives the merged frame, `scratch[1]` and `scratch[2]`
+    /// carry the preblur and the matte ping-pong, and `scratch[3]` holds the
+    /// keyed matte. The preblur and the feather reuse [`Self::box_blur`] with the
+    /// exact uniform packing of the standalone box blur; the shrink reuses
+    /// [`Self::keylight_erode`], which upsamples nothing and only reads `.x`.
+    fn record_keylight(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::KeylightGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if scratch.len() < 4 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "keylight_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // The preblur softens the source before the key reads it, so the matte
+        // follows the blurred separation instead of the sharp one.
+        let mut key_input = source;
+        if grade.preblur() > 0.0 {
+            let box_kernel = BoxKernel::new(grade.preblur());
+            for pass_index in 0..2_usize {
+                let axis = pass_index as f32;
+                let uniform = SpatialPassUniform {
+                    size,
+                    params: [
+                        0.0,
+                        axis,
+                        box_kernel.whole_radius as f32,
+                        box_kernel.fraction,
+                    ],
+                    extra: [
+                        box_kernel.normalization(),
+                        1.0,
+                        f32::from(u8::from(pass_index == 0)),
+                        f32::from(u8::from(pass_index == 1)),
+                    ],
+                    aces: [0.0; 4],
+                    extra1: [0.0; 4],
+                };
+                let input_view = if pass_index == 0 {
+                    source_view.clone()
+                } else {
+                    scratch[2].create_view(&wgpu::TextureViewDescriptor::default())
+                };
+                let output_view = if pass_index == 0 {
+                    scratch[2].create_view(&wgpu::TextureViewDescriptor::default())
+                } else {
+                    scratch[1].create_view(&wgpu::TextureViewDescriptor::default())
+                };
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.box_blur,
+                    &input_view,
+                    &output_view,
+                    &uniform,
+                );
+            }
+            key_input = &scratch[1];
+        }
+
+        // The key pass writes the matte into every channel of `scratch[3]`.
+        let (params, extra, aces, extra1) = grade.key_gpu_controls();
+        let key = SpatialPassUniform { size, params, extra, aces, extra1 };
+        let key_input_view = key_input.create_view(&wgpu::TextureViewDescriptor::default());
+        let matte_view = scratch[3].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.keylight_key,
+            &key_input_view,
+            &matte_view,
+            &key,
+        );
+
+        // The morphology ping-pongs between `scratch[3]` and `scratch[2]` and
+        // always ends on `scratch[3]`.
+        let written = 3_usize;
+        if grade.shrink_radius() > 0 {
+            let uniform = SpatialPassUniform {
+                size,
+                params: [grade.edge_shrink().round(), 0.0, 0.0, 0.0],
+                extra: [0.0; 4],
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            let destination = 2_usize;
+            let input_view = scratch[written].create_view(&wgpu::TextureViewDescriptor::default());
+            let output_view =
+                scratch[destination].create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_pass(
+                device,
+                encoder,
+                &self.keylight_erode,
+                &input_view,
+                &output_view,
+                &uniform,
+            );
+            let uniform = SpatialPassUniform {
+                size,
+                params: [grade.edge_shrink().round(), 1.0, 0.0, 0.0],
+                extra: [0.0; 4],
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            let input_view =
+                scratch[destination].create_view(&wgpu::TextureViewDescriptor::default());
+            let output_view = scratch[written].create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_pass(
+                device,
+                encoder,
+                &self.keylight_erode,
+                &input_view,
+                &output_view,
+                &uniform,
+            );
+        }
+        if grade.edge_feather() > 0.0 {
+            let box_kernel = BoxKernel::new(grade.edge_feather());
+            let destination = 2_usize;
+            for pass_index in 0..2_usize {
+                let uniform = SpatialPassUniform {
+                    size,
+                    params: [
+                        0.0,
+                        pass_index as f32,
+                        box_kernel.whole_radius as f32,
+                        box_kernel.fraction,
+                    ],
+                    extra: [
+                        box_kernel.normalization(),
+                        1.0,
+                        f32::from(u8::from(pass_index == 0)),
+                        f32::from(u8::from(pass_index == 1)),
+                    ],
+                    aces: [0.0; 4],
+                    extra1: [0.0; 4],
+                };
+                let input_index = if pass_index == 0 {
+                    written
+                } else {
+                    destination
+                };
+                let output_index = if pass_index == 0 {
+                    destination
+                } else {
+                    written
+                };
+                let input_view =
+                    scratch[input_index].create_view(&wgpu::TextureViewDescriptor::default());
+                let output_view =
+                    scratch[output_index].create_view(&wgpu::TextureViewDescriptor::default());
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.box_blur,
+                    &input_view,
+                    &output_view,
+                    &uniform,
+                );
+            }
+        }
+
+        let (params, extra, aces, extra1) = grade.composite_gpu_controls();
+        let composite = SpatialPassUniform { size, params, extra, aces, extra1 };
+        let matte_view = scratch[written].create_view(&wgpu::TextureViewDescriptor::default());
+        let destination_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.keylight_composite,
+            &source_view,
+            &matte_view,
+            &destination_view,
+            &composite,
+        );
+        Ok(scratch[0].clone())
+    }
+
+    /// Records one composite pass over the original frame and an auxiliary layer.
     #[allow(clippy::too_many_arguments)]
     fn record_composite_pass(
         &self,
@@ -2914,6 +3214,64 @@ fn fs_glow_extract(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
     }
     return vec4<f32>(tint, weight);
 }
+// The key pass pulls the matte out of the screen colour. Every branch mirrors
+// `KeylightGrade::matte_of_rgb` so the CPU and GPU paths evaluate the same
+// expression, and the matte lands in every channel so later stages can read it
+// from `.x` without an alpha convention.
+@fragment
+fn fs_keylight_key(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let sample = load_clamped(pixel);
+    let key_channel = u32(round(uniforms.extra.x));
+    var other_a = 1u;
+    var other_b = 2u;
+    if (key_channel == 1u) {
+        other_a = 0u;
+        other_b = 2u;
+    } else if (key_channel == 2u) {
+        other_a = 0u;
+        other_b = 1u;
+    }
+    let balance = uniforms.params.y;
+    let reference = balance * sample.rgb[other_a]
+        + (1.0 - balance) * sample.rgb[other_b]
+        + uniforms.extra.z
+        - 0.5;
+    let separation = max(uniforms.aces[key_channel], 0.01);
+    let raw = clamp(
+        1.0 - uniforms.params.x * (sample.rgb[key_channel] - reference) / separation,
+        0.0,
+        1.0,
+    );
+    let inner = uniforms.params.z;
+    let outer = uniforms.params.w;
+    var matte = clamp((raw - inner) / max(outer - inner, 0.0001), 0.0, 1.0);
+    if (sample.a <= 0.0) {
+        matte = 0.0;
+    }
+    return vec4<f32>(matte, matte, matte, 1.0);
+}
+
+// The erode is the separable minimum of the matte over `2r + 1` taps, so the
+// shrink pulls light coverage in from the foreground edge.
+@fragment
+fn fs_keylight_erode(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let axis = uniforms.params.y;
+    let radius = i32(round(uniforms.params.x));
+    var matte = 1.0;
+    for (var offset = -radius; offset <= radius; offset = offset + 1) {
+        var sample_at = pixel;
+        if (axis < 0.5) {
+            sample_at.x = sample_at.x + offset;
+        } else {
+            sample_at.y = sample_at.y + offset;
+        }
+        matte = min(matte, load_clamped(sample_at).x);
+    }
+    return vec4<f32>(matte, matte, matte, 1.0);
+}
+
 fn sobel_magnitude(pixel: vec2<i32>) -> f32 {
     let top_left = premultiply(load_clamped(pixel + vec2<i32>(-1, -1)));
     let top_center = premultiply(load_clamped(pixel + vec2<i32>(0, -1)));
@@ -4349,6 +4707,56 @@ fn fs_glow_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec
     }
     return vec4<f32>(blended, source.a);
 }
+
+// The keylight composite applies the matte to the original source. Every branch
+// mirrors `KeylightGrade::composite`: a pixel without coverage is returned
+// untouched, and the despill strips the key channel of the output colour.
+@fragment
+fn fs_keylight_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped_from(original_texture, pixel);
+    let matte = load_clamped_from(auxiliary_texture, pixel).x;
+    if (source.a <= 0.0) {
+        return source;
+    }
+    let display = u32(round(uniforms.params.x));
+    let despill = uniforms.params.y;
+    let key_channel = u32(round(uniforms.params.z));
+    if (display == 1u) {
+        return vec4<f32>(matte, matte, matte, 1.0);
+    }
+    if (display == 3u) {
+        return vec4<f32>(source.rgb, 1.0 - matte);
+    }
+    var other_a = 1u;
+    var other_b = 2u;
+    if (key_channel == 1u) {
+        other_a = 0u;
+        other_b = 2u;
+    } else if (key_channel == 2u) {
+        other_a = 0u;
+        other_b = 1u;
+    }
+    let bias = uniforms.extra.x;
+    let balance = uniforms.extra1.x;
+    let reference = balance * source.rgb[other_a]
+        + (1.0 - balance) * source.rgb[other_b]
+        + bias;
+    let stripped = max(
+        source.rgb[key_channel]
+            - despill * max(0.0, source.rgb[key_channel] - (reference - bias)),
+        0.0,
+    );
+    var colour = source.rgb;
+    colour[key_channel] = stripped;
+    var alpha = source.a;
+    if (display == 0u) {
+        alpha = source.a * matte;
+    } else {
+        alpha = 1.0;
+    }
+    return vec4<f32>(colour, alpha);
+}
 "#;
 
 // The fractal noise generator needs twenty-six scalars, more than the shared
@@ -5399,6 +5807,20 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_core::BlendMode::Overlay,
         )
         .expect("valid fractal noise grade");
+        let keylight = mondrian_effects::KeylightGrade::new(
+            [0.0, 1.0, 0.0],
+            1.0,
+            0.5,
+            1.0,
+            [0.5, 0.5, 0.5],
+            0.0,
+            100.0,
+            2.0,
+            1.0,
+            0.0,
+            mondrian_effects::KeylightDisplay::Final,
+        )
+        .expect("valid keylight grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -5417,6 +5839,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Deband { grade: deband },
             mondrian_effects::EffectGpuSpatialPass::Glow { grade: glow },
             mondrian_effects::EffectGpuSpatialPass::FractalNoise { grade: fractal_noise },
+            mondrian_effects::EffectGpuSpatialPass::Keylight { grade: keylight },
         ];
 
         let mut cpu = pixels.clone();
@@ -5494,6 +5917,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             &fractal_noise,
+        ));
+        assert!(mondrian_effects::keylight_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &keylight,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -6721,6 +7150,131 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "glow case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_keylight_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU keylight parity test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 13_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let pixel = if x <= 5 {
+                    // A pure screen field in the left third.
+                    [0.0, 1.0, 0.0, 1.0]
+                } else if x <= 10 {
+                    // A green-tinted foreground in the middle third.
+                    [0.2, 0.9, 0.3, 1.0]
+                } else {
+                    // A neutral foreground in the right third.
+                    [0.5, 0.5, 0.5, 1.0]
+                };
+                pixels[y * width as usize + x] = pixel;
+            }
+        }
+        // One fully transparent pixel must stay untouched in every display mode.
+        pixels[width as usize + 2] = [0.0, 0.0, 0.0, 0.0];
+        let cases = [
+            (
+                "defaults",
+                mondrian_effects::KeylightGrade::documented_defaults()
+                    .expect("documented keylight defaults"),
+            ),
+            (
+                "morphology",
+                mondrian_effects::KeylightGrade::new(
+                    [0.0, 1.0, 0.0],
+                    1.0,
+                    0.5,
+                    1.0,
+                    [0.5, 0.5, 0.5],
+                    0.0,
+                    100.0,
+                    3.0,
+                    2.0,
+                    2.0,
+                    mondrian_effects::KeylightDisplay::Final,
+                )
+                .expect("morphology keylight grade"),
+            ),
+            (
+                "matte",
+                mondrian_effects::KeylightGrade::new(
+                    [0.0, 1.0, 0.0],
+                    1.2,
+                    0.4,
+                    1.5,
+                    [0.45, 0.6, 0.5],
+                    5.0,
+                    90.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    mondrian_effects::KeylightDisplay::Matte,
+                )
+                .expect("matte keylight grade"),
+            ),
+            (
+                "background",
+                mondrian_effects::KeylightGrade::new(
+                    [0.0, 1.0, 0.0],
+                    0.8,
+                    0.65,
+                    1.0,
+                    [0.5, 0.5, 0.5],
+                    0.0,
+                    100.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    mondrian_effects::KeylightDisplay::Background,
+                )
+                .expect("background keylight grade"),
+            ),
+        ];
+        for (index, (label, grade)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::keylight_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let pool = scratch(&context, width, height, 8);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.keylight-encoder"),
+                });
+            let pass = mondrian_effects::EffectGpuSpatialPass::Keylight { grade: *grade };
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool,
+                    width,
+                    height,
+                )
+                .expect("recorded keylight");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "keylight case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
