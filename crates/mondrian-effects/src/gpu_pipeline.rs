@@ -147,6 +147,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored edge threshold, blur radius, and dither amplitude.
         grade: crate::DebandGrade,
     },
+    Glow {
+        /// Authored threshold, blur radius, blend operation, and colour pair.
+        grade: crate::GlowGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -181,6 +185,7 @@ impl EffectGpuSpatialPass {
             Self::CornerPin { .. } => "corner_pin",
             Self::TurbulentDisplace { .. } => "turbulent_displace",
             Self::Deband { .. } => "deband",
+            Self::Glow { .. } => "glow",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -227,6 +232,7 @@ impl EffectGpuSpatialPass {
             Self::CornerPin { .. } => u32::MAX,
             Self::TurbulentDisplace { .. } => u32::MAX,
             Self::Deband { .. } => u32::MAX,
+            Self::Glow { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -266,6 +272,7 @@ impl EffectGpuSpatialPass {
             Self::CornerPin { .. } => u32::MAX,
             Self::TurbulentDisplace { .. } => u32::MAX,
             Self::Deband { .. } => u32::MAX,
+            Self::Glow { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -554,6 +561,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::TurbulentDisplace { grade: *grade })
         }
         EffectRenderOp::Deband { grade } => Some(EffectGpuSpatialPass::Deband { grade: *grade }),
+        EffectRenderOp::Glow { grade } => Some(EffectGpuSpatialPass::Glow { grade: *grade }),
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }

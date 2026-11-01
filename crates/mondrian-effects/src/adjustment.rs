@@ -308,6 +308,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Glow { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "glow",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Ramp { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "ramp",
@@ -884,6 +890,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::CornerPin { .. } => 1,
         EffectRenderOp::TurbulentDisplace { .. } => 1,
         EffectRenderOp::Deband { .. } => 2,
+        EffectRenderOp::Glow { .. } => 2,
         EffectRenderOp::Ramp { .. } => 0,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
@@ -1248,6 +1255,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Deband { grade } => {
             crate::deband::apply_deband_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::Glow { grade } => {
+            crate::glow::apply_glow_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,
@@ -2569,7 +2586,7 @@ fn apply_grain(buffer: &mut [u8], width: usize, height: usize, amount: f32, fram
     }
 }
 
-fn blend_mode_rgb(mode: BlendMode, base: [f32; 3], blend: [f32; 3]) -> [f32; 3] {
+pub(crate) fn blend_mode_rgb(mode: BlendMode, base: [f32; 3], blend: [f32; 3]) -> [f32; 3] {
     match mode {
         BlendMode::Hue => set_lum(set_sat(blend, sat(base)), lum(base)),
         BlendMode::Saturation => set_lum(set_sat(base, sat(blend)), lum(base)),
@@ -2597,7 +2614,7 @@ fn blend_mode_rgb(mode: BlendMode, base: [f32; 3], blend: [f32; 3]) -> [f32; 3] 
     }
 }
 
-fn blend_mode_channel(mode: BlendMode, base: f32, blend: f32) -> f32 {
+pub(crate) fn blend_mode_channel(mode: BlendMode, base: f32, blend: f32) -> f32 {
     match mode {
         BlendMode::Normal | BlendMode::Dissolve => blend,
         BlendMode::Multiply => base * blend,

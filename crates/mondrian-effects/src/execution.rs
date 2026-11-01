@@ -2339,6 +2339,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CornerPin { .. } => "corner_pin",
         EffectRenderOp::TurbulentDisplace { .. } => "turbulent_displace",
         EffectRenderOp::Deband { .. } => "deband",
+        EffectRenderOp::Glow { .. } => "glow",
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",

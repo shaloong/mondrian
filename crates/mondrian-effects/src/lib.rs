@@ -57,6 +57,7 @@ pub mod extension_contract;
 pub mod extension_sdk;
 pub mod extract;
 pub mod gamut_mapping;
+pub mod glow;
 pub mod gpu_pipeline;
 pub mod gpu_plan;
 pub mod graph;
@@ -214,6 +215,15 @@ pub use extract::{
     EXTRACT_CHANNEL_COUNT,
 };
 pub use gamut_mapping::{GamutCompressionGrade, GamutMappingError, HighlightRecoveryGrade};
+pub use glow::{
+    glow_frame_f32, GlowBasedOn, GlowColors, GlowComposite, GlowDimensions, GlowError, GlowGrade,
+    GlowOperation, GLOW_AUTHOR_MAX_COLOR_LOOPS, GLOW_AUTHOR_MAX_COLOR_PHASE_DEGREES,
+    GLOW_AUTHOR_MAX_MIDPOINT, GLOW_AUTHOR_MAX_RADIUS_PIXELS, GLOW_AUTHOR_MAX_STRENGTH,
+    GLOW_AUTHOR_MAX_THRESHOLD, GLOW_AUTHOR_MIN_COLOR_LOOPS, GLOW_AUTHOR_MIN_MIDPOINT,
+    GLOW_BLUR_ITERATIONS, GLOW_DEFAULT_COLOR_LOOPS, GLOW_DEFAULT_COLOR_PHASE,
+    GLOW_DEFAULT_MIDPOINT, GLOW_DEFAULT_RADIUS_PIXELS, GLOW_DEFAULT_STRENGTH,
+    GLOW_DEFAULT_THRESHOLD, GLOW_INTENSITY_SCALE,
+};
 pub use gpu_pipeline::{
     lower_effect_graph_to_gpu_pipeline, spatial_pass_for, CompiledEffectGpuPipeline,
     EffectGpuSpatialPass, EffectGpuStage,

@@ -953,6 +953,10 @@ pub enum EffectRenderOp {
     Ramp {
         grade: crate::RampGrade,
     },
+    /// Glow: blooms the bright parts of the frame with a blurred mask.
+    Glow {
+        grade: crate::GlowGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1220,6 +1224,7 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("Deband").field("grade", grade).finish()
             }
             Self::Ramp { grade } => formatter.debug_struct("Ramp").field("grade", grade).finish(),
+            Self::Glow { grade } => formatter.debug_struct("Glow").field("grade", grade).finish(),
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
@@ -1901,6 +1906,10 @@ impl EffectRenderOp {
                 extra0.map(f32::to_bits).hash(state);
                 extra1.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Glow { grade } => {
+                69u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2111,6 +2120,7 @@ impl EffectRenderOp {
             EffectRenderOp::TurbulentDisplace { .. } => 5,
             EffectRenderOp::Deband { .. } => 3,
             EffectRenderOp::Ramp { .. } => 1,
+            EffectRenderOp::Glow { .. } => 4,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2666,7 +2676,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 67] {
+fn builtin_effect_types() -> [EffectType; 68] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2735,6 +2745,7 @@ fn builtin_effect_types() -> [EffectType; 67] {
         EffectType::TurbulentDisplace,
         EffectType::Deband,
         EffectType::Ramp,
+        EffectType::Glow,
     ]
 }
 
@@ -6131,6 +6142,121 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::Glow => {
+            for (parameter, name, value, minimum, maximum, step) in [
+                (
+                    "threshold",
+                    "阈值",
+                    crate::GLOW_DEFAULT_THRESHOLD,
+                    0.0,
+                    crate::GLOW_AUTHOR_MAX_THRESHOLD,
+                    1.0,
+                ),
+                (
+                    "radius",
+                    "半径",
+                    crate::GLOW_DEFAULT_RADIUS_PIXELS,
+                    0.0,
+                    crate::GLOW_AUTHOR_MAX_RADIUS_PIXELS,
+                    0.1,
+                ),
+                (
+                    "strength",
+                    "强度",
+                    crate::GLOW_DEFAULT_STRENGTH,
+                    0.0,
+                    crate::GLOW_AUTHOR_MAX_STRENGTH,
+                    1.0,
+                ),
+                (
+                    "composite_original",
+                    "合成原始项目",
+                    crate::GlowComposite::OnTop.as_menu() as f32,
+                    1.0,
+                    3.0,
+                    1.0,
+                ),
+                (
+                    "operation",
+                    "发光操作",
+                    crate::GlowOperation::Screen.as_menu() as f32,
+                    1.0,
+                    25.0,
+                    1.0,
+                ),
+                (
+                    "colors",
+                    "发光颜色",
+                    crate::GlowColors::Original.as_menu() as f32,
+                    1.0,
+                    3.0,
+                    1.0,
+                ),
+                (
+                    "color_loops",
+                    "颜色循环",
+                    crate::GLOW_DEFAULT_COLOR_LOOPS,
+                    crate::GLOW_AUTHOR_MIN_COLOR_LOOPS,
+                    crate::GLOW_AUTHOR_MAX_COLOR_LOOPS,
+                    0.01,
+                ),
+                (
+                    "midpoint",
+                    "A/B 中点",
+                    crate::GLOW_DEFAULT_MIDPOINT,
+                    crate::GLOW_AUTHOR_MIN_MIDPOINT,
+                    crate::GLOW_AUTHOR_MAX_MIDPOINT,
+                    0.001,
+                ),
+                (
+                    "dimensions",
+                    "发光维度",
+                    crate::GlowDimensions::Both.as_menu() as f32,
+                    1.0,
+                    3.0,
+                    1.0,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "发光",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(f64::from(minimum)),
+                    Some(f64::from(maximum)),
+                    Some(step),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color_phase",
+                "发光",
+                "色彩相位",
+                PropertyValue::Float(crate::GLOW_DEFAULT_COLOR_PHASE),
+                None,
+                None,
+                Some(1.0),
+            );
+            for (parameter, name, value) in [
+                ("color_a", "颜色 A", [1.0f32, 1.0, 1.0]),
+                ("color_b", "颜色 B", [0.0f32, 0.0, 0.0]),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "发光",
+                    name,
+                    PropertyValue::Color(Color { r: value[0], g: value[1], b: value[2], a: 1.0 }),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -7115,6 +7241,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         | (EffectType::TurbulentDisplace, "size")
         | (EffectType::TurbulentDisplace, "offset_x")
         | (EffectType::TurbulentDisplace, "offset_y") => ParameterUnit::Pixels,
+        (EffectType::Glow, "radius") => ParameterUnit::Pixels,
+        (EffectType::Glow, "color_phase") => ParameterUnit::Degrees,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -7327,6 +7455,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Deband => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Glow => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -9803,6 +9936,135 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Glow => {
+            let threshold_id = builtin_parameter_id(effect_type, "threshold");
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let strength_id = builtin_parameter_id(effect_type, "strength");
+            let composite_id = builtin_parameter_id(effect_type, "composite_original");
+            let operation_id = builtin_parameter_id(effect_type, "operation");
+            let colors_id = builtin_parameter_id(effect_type, "colors");
+            let color_loops_id = builtin_parameter_id(effect_type, "color_loops");
+            let color_phase_id = builtin_parameter_id(effect_type, "color_phase");
+            let midpoint_id = builtin_parameter_id(effect_type, "midpoint");
+            let color_a_id = builtin_parameter_id(effect_type, "color_a");
+            let color_b_id = builtin_parameter_id(effect_type, "color_b");
+            let dimensions_id = builtin_parameter_id(effect_type, "dimensions");
+            Some(Arc::new(move |effect, context, graph| {
+                let menu = |parameter_id: &ParameterId, fallback: u32| -> u32 {
+                    let value = effect.evaluate_f32_parameter(
+                        parameter_id,
+                        context.time,
+                        f32::from(fallback as u16),
+                    );
+                    // An animated value lands on the nearest menu entry; the
+                    // `from_menu` parsers below fail closed outside the authored
+                    // range.
+                    value.round().max(0.0) as u32
+                };
+                let composite = crate::GlowComposite::from_menu(menu(
+                    &composite_id,
+                    crate::GlowComposite::OnTop.as_menu(),
+                ))
+                .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: "glow composite original is outside the authored 1..=3 menu"
+                        .to_string(),
+                })?;
+                let operation = crate::GlowOperation::from_menu(menu(
+                    &operation_id,
+                    crate::GlowOperation::Screen.as_menu(),
+                ))
+                .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: "glow operation is outside the authored 1..=25 menu".to_string(),
+                })?;
+                let colors = crate::GlowColors::from_menu(menu(
+                    &colors_id,
+                    crate::GlowColors::Original.as_menu(),
+                ))
+                .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: "glow colours is outside the authored 1..=3 menu".to_string(),
+                })?;
+                let dimensions = crate::GlowDimensions::from_menu(menu(
+                    &dimensions_id,
+                    crate::GlowDimensions::Both.as_menu(),
+                ))
+                .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: "glow dimensions is outside the authored 1..=3 menu".to_string(),
+                })?;
+                let colour = |parameter_id: &ParameterId,
+                              name: &str,
+                              fallback: [f32; 3]|
+                 -> Result<[f32; 3], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Color(color)) => Ok([color.r, color.g, color.b]),
+                        Some(_) => Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("glow {name} must be a colour"),
+                        }),
+                        None => Ok(fallback),
+                    }
+                };
+                let grade = crate::GlowGrade::for_space(
+                    // The checklist leaves `based-on` implicit, so the authored
+                    // surface always thresholds the source luminance.
+                    crate::GlowBasedOn::Color,
+                    effect.evaluate_f32_parameter(
+                        &threshold_id,
+                        context.time,
+                        crate::GLOW_DEFAULT_THRESHOLD,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &radius_id,
+                        context.time,
+                        crate::GLOW_DEFAULT_RADIUS_PIXELS,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &strength_id,
+                        context.time,
+                        crate::GLOW_DEFAULT_STRENGTH,
+                    ),
+                    composite,
+                    operation,
+                    colors,
+                    effect.evaluate_f32_parameter(
+                        &color_loops_id,
+                        context.time,
+                        crate::GLOW_DEFAULT_COLOR_LOOPS,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &color_phase_id,
+                        context.time,
+                        crate::GLOW_DEFAULT_COLOR_PHASE,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &midpoint_id,
+                        context.time,
+                        crate::GLOW_DEFAULT_MIDPOINT,
+                    ),
+                    colour(&color_a_id, "colour A", [1.0, 1.0, 1.0])?,
+                    colour(&color_b_id, "colour B", [0.0, 0.0, 0.0])?,
+                    dimensions,
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Glow { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Ramp => {
             let start_id = builtin_parameter_id(effect_type, "start");
             let start_color_id = builtin_parameter_id(effect_type, "start_color");
@@ -10662,6 +10924,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::TurbulentDisplace => "湍流置换",
         EffectType::Deband => "去色带",
         EffectType::Ramp => "渐变",
+        EffectType::Glow => "发光",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -11963,6 +12226,7 @@ mod tests {
             EffectType::TurbulentDisplace,
             EffectType::Deband,
             EffectType::Ramp,
+            EffectType::Glow,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -17760,6 +18024,161 @@ mod tests {
             .expect_err("an out-of-range radius must be rejected");
         let rendered = format!("{error:?}");
         assert!(rendered.contains("outside [0, 100]"), "{rendered}");
+    }
+
+    fn glow_op(graph: &EffectRenderGraph) -> Option<crate::GlowGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Glow { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Glow { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_glow(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Glow).expect("the glow effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Glow.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the glow parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn glow_defaults_compile_to_the_documented_operation() {
+        // The default grade is not the identity: `radius` defaults to 10 px and
+        // `strength` to 1, so the node must appear and carry the defaults.
+        let effect =
+            instantiate_effect_node(EffectType::Glow).expect("the glow effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default glow should compile");
+        let grade = glow_op(&graph).expect("the default grade emits a node");
+        assert_eq!(grade.threshold(), 153.0);
+        assert_eq!(grade.radius(), 10.0);
+        assert_eq!(grade.strength(), 1.0);
+        assert_eq!(grade.intensity(), 0.01);
+        assert_eq!(grade.based_on(), crate::GlowBasedOn::Color);
+        assert_eq!(grade.composite_original(), crate::GlowComposite::OnTop);
+        assert_eq!(grade.operation(), crate::GlowOperation::Screen);
+        assert_eq!(grade.colors(), crate::GlowColors::Original);
+        assert_eq!(grade.color_loops(), 1.0);
+        assert_eq!(grade.color_phase(), 0.0);
+        assert_eq!(grade.midpoint(), 0.5);
+        assert_eq!(grade.color_a(), [1.0, 1.0, 1.0]);
+        assert_eq!(grade.color_b(), [0.0, 0.0, 0.0]);
+        assert_eq!(grade.dimensions(), crate::GlowDimensions::Both);
+        assert_eq!(
+            grade.luminance_coefficients(),
+            TEST_WORKING_SPACE.luminance_coefficients()
+        );
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn glow_authored_configuration_reaches_the_operation() {
+        let effect = author_glow(&[
+            ("threshold", PropertyValue::Float(90.0)),
+            ("radius", PropertyValue::Float(12.0)),
+            ("strength", PropertyValue::Float(120.0)),
+            ("composite_original", PropertyValue::Float(2.0)),
+            ("operation", PropertyValue::Float(17.0)),
+            ("colors", PropertyValue::Float(2.0)),
+            ("color_loops", PropertyValue::Float(3.0)),
+            ("color_phase", PropertyValue::Float(120.0)),
+            ("midpoint", PropertyValue::Float(0.25)),
+            (
+                "color_a",
+                PropertyValue::Color(Color { r: 1.0, g: 0.25, b: 0.0, a: 1.0 }),
+            ),
+            (
+                "color_b",
+                PropertyValue::Color(Color { r: 0.0, g: 0.5, b: 2.0, a: 1.0 }),
+            ),
+            ("dimensions", PropertyValue::Float(1.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = glow_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.threshold(), 90.0);
+        assert_eq!(grade.radius(), 12.0);
+        assert_eq!(grade.strength(), 120.0);
+        assert_eq!(grade.intensity(), 1.2);
+        assert_eq!(grade.composite_original(), crate::GlowComposite::Behind);
+        assert_eq!(grade.operation(), crate::GlowOperation::LinearDodge);
+        assert_eq!(grade.operation().as_menu(), 17);
+        assert_eq!(grade.colors(), crate::GlowColors::AAndB);
+        assert_eq!(grade.color_loops(), 3.0);
+        assert_eq!(grade.color_phase(), 120.0);
+        assert_eq!(grade.midpoint(), 0.25);
+        assert_eq!(grade.color_a(), [1.0, 0.25, 0.0]);
+        assert_eq!(grade.color_b(), [0.0, 0.5, 2.0]);
+        assert_eq!(grade.dimensions(), crate::GlowDimensions::Horizontal);
+        assert_eq!(grade.dimensions().as_menu(), 1);
+    }
+
+    #[test]
+    fn glow_zero_radius_compiles_to_no_node() {
+        let effect = author_glow(&[("radius", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity grade should compile");
+        assert!(glow_op(&graph).is_none());
+    }
+
+    #[test]
+    fn glow_zero_strength_is_the_identity() {
+        let effect = author_glow(&[("strength", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity grade should compile");
+        assert!(glow_op(&graph).is_none());
+    }
+
+    #[test]
+    fn glow_menus_fail_closed_outside_their_authored_range() {
+        assert_eq!(crate::GlowComposite::from_menu(0), None);
+        assert_eq!(crate::GlowComposite::from_menu(4), None);
+        assert_eq!(crate::GlowOperation::from_menu(0), None);
+        assert_eq!(crate::GlowOperation::from_menu(26), None);
+        assert_eq!(crate::GlowColors::from_menu(4), None);
+        assert_eq!(crate::GlowDimensions::from_menu(4), None);
+        let mut effect =
+            instantiate_effect_node(EffectType::Glow).expect("the glow effect should instantiate");
+        // The property contract rejects the value before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Glow.property_path("operation"),
+                value: PropertyValue::Float(26.0),
+            })
+            .expect_err("an out-of-range operation must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [1, 25]"), "{rendered}");
+    }
+
+    #[test]
+    fn glow_authored_state_round_trips_through_serialization() {
+        let effect = author_glow(&[
+            ("threshold", PropertyValue::Float(90.0)),
+            ("radius", PropertyValue::Float(12.0)),
+            ("colors", PropertyValue::Float(3.0)),
+            ("color_loops", PropertyValue::Float(3.0)),
+            ("color_phase", PropertyValue::Float(120.0)),
+            ("dimensions", PropertyValue::Float(2.0)),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the restored glow should compile");
+        let grade = glow_op(&graph).expect("the restored grade emits a node");
+        assert_eq!(grade.colors(), crate::GlowColors::Cycle);
+        assert_eq!(grade.color_loops(), 3.0);
+        assert_eq!(grade.color_phase(), 120.0);
+        assert_eq!(grade.dimensions(), crate::GlowDimensions::Vertical);
     }
 
     fn ramp_op(graph: &EffectRenderGraph) -> Option<crate::RampGrade> {
