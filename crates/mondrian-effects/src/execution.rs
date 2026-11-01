@@ -2333,6 +2333,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Mirror { .. } => "mirror",
         EffectRenderOp::PolarCoordinates { .. } => "polar_coordinates",
         EffectRenderOp::Flip { .. } => "flip",
+        EffectRenderOp::Ripple { .. } => "ripple",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

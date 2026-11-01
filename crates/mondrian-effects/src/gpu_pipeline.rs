@@ -123,6 +123,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored flip axis, mirror centre, and blend weight.
         grade: crate::FlipGrade,
     },
+    Ripple {
+        /// Authored centre, radius, wave shape, and folded phase.
+        grade: crate::RippleGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -151,6 +155,7 @@ impl EffectGpuSpatialPass {
             Self::PolarCoordinates { .. } => "polar_coordinates",
             Self::LensDistortion { .. } => "lens_distortion",
             Self::Flip { .. } => "flip",
+            Self::Ripple { .. } => "ripple",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -191,6 +196,7 @@ impl EffectGpuSpatialPass {
             // A flare reads only the pixel it writes, so it needs no neighbour.
             Self::LensDistortion { .. } => u32::MAX,
             Self::Flip { .. } => u32::MAX,
+            Self::Ripple { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -224,6 +230,7 @@ impl EffectGpuSpatialPass {
             | Self::PolarCoordinates { .. } => u32::MAX,
             Self::LensDistortion { .. } => u32::MAX,
             Self::Flip { .. } => u32::MAX,
+            Self::Ripple { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -498,6 +505,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::LensDistortion { grade: *grade })
         }
         EffectRenderOp::Flip { grade } => Some(EffectGpuSpatialPass::Flip { grade: *grade }),
+        EffectRenderOp::Ripple { grade } => Some(EffectGpuSpatialPass::Ripple { grade: *grade }),
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }

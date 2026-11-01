@@ -35,6 +35,7 @@ pub mod flip;
 mod project_properties;
 pub mod radial_blur;
 pub(crate) mod resample;
+pub mod ripple;
 pub mod spherize;
 pub mod split;
 pub mod threshold;
@@ -360,5 +361,11 @@ pub use find_edges::{
 pub use flip::{
     flip_frame_f32, FlipAxis, FlipError, FlipGrade, FLIP_AXIS_COUNT, FLIP_MAX_BLEND_PERCENT,
     FLIP_MAX_CENTRE_PIXELS,
+};
+pub use ripple::{
+    ripple_frame_f32, ripple_phase_turns, validate_wave_speed, RippleError, RippleGrade,
+    RippleType, RIPPLE_MAX_CENTRE_PIXELS, RIPPLE_MAX_PHASE_TURNS, RIPPLE_MAX_RADIUS_PERCENT,
+    RIPPLE_MAX_WAVE_HEIGHT, RIPPLE_MAX_WAVE_SPEED, RIPPLE_MAX_WAVE_WIDTH,
+    RIPPLE_MIN_RADIUS_PERCENT, RIPPLE_MIN_WAVE_WIDTH, RIPPLE_TYPE_COUNT,
 };
 pub use shift_channels::{ChannelSource, ShiftChannelsGrade};

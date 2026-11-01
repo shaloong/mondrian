@@ -925,6 +925,10 @@ pub enum EffectRenderOp {
     Flip {
         grade: crate::FlipGrade,
     },
+    /// Ripple: pushes the frame in and out along the radius from a centre.
+    Ripple {
+        grade: crate::RippleGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1163,6 +1167,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("PolarCoordinates").field("grade", grade).finish()
             }
             Self::Flip { grade } => formatter.debug_struct("Flip").field("grade", grade).finish(),
+            Self::Ripple { grade } => {
+                formatter.debug_struct("Ripple").field("grade", grade).finish()
+            }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
@@ -1766,6 +1773,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Ripple { grade } => {
+                60u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -1969,6 +1982,7 @@ impl EffectRenderOp {
             EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::PolarCoordinates { .. } => 3,
             EffectRenderOp::Flip { .. } => 1,
+            EffectRenderOp::Ripple { .. } => 2,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2522,7 +2536,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 58] {
+fn builtin_effect_types() -> [EffectType; 59] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2576,6 +2590,7 @@ fn builtin_effect_types() -> [EffectType; 58] {
         EffectType::PolarCoordinates,
         EffectType::LensDistortion,
         EffectType::Flip,
+        EffectType::Ripple,
         EffectType::LensFlare,
         EffectType::Bulge,
         EffectType::Split,
@@ -4957,6 +4972,105 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::Ripple => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "波纹",
+                "半径",
+                PropertyValue::Float(0.0),
+                Some(crate::RIPPLE_MIN_RADIUS_PERCENT as f64),
+                Some(crate::RIPPLE_MAX_RADIUS_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "波纹",
+                "波纹中心 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "波纹",
+                "波纹中心 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "wave_type",
+                "波纹",
+                "转换类型",
+                crate::RippleType::Asymmetric.as_key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "asymmetric",
+                        "非对称",
+                        "mondrian.effect.ripple.wave_type.asymmetric",
+                    ),
+                    ParameterEnumOption::new(
+                        "symmetric",
+                        "对称",
+                        "mondrian.effect.ripple.wave_type.symmetric",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "wave_speed",
+                "波纹",
+                "波形速度",
+                PropertyValue::Float(1.0),
+                Some(-(crate::RIPPLE_MAX_WAVE_SPEED as f64)),
+                Some(crate::RIPPLE_MAX_WAVE_SPEED as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "wave_width",
+                "波纹",
+                "波形宽度",
+                PropertyValue::Float(20.0),
+                Some(crate::RIPPLE_MIN_WAVE_WIDTH as f64),
+                Some(crate::RIPPLE_MAX_WAVE_WIDTH as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "wave_height",
+                "波纹",
+                "波形高度",
+                PropertyValue::Float(20.0),
+                Some(0.0),
+                Some(crate::RIPPLE_MAX_WAVE_HEIGHT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "phase",
+                "波纹",
+                "波纹相",
+                PropertyValue::Float(0.0),
+                None,
+                None,
+                Some(0.01),
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -5849,6 +5963,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::DirectionalBlur, "direction") => ParameterUnit::Degrees,
         (EffectType::Flip, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Flip, "blend_with_original") => ParameterUnit::Percent,
+        (EffectType::Ripple, "radius") => ParameterUnit::Percent,
+        (EffectType::Ripple, "centre_x" | "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Ripple, "wave_width" | "wave_height") => ParameterUnit::Pixels,
         (EffectType::LensDistortion, "fov") => ParameterUnit::Degrees,
         (EffectType::LensDistortion, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Mirror, "angle") => ParameterUnit::Degrees,
@@ -6109,6 +6226,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Flip => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Ripple => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -7917,6 +8039,75 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Ripple => {
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let wave_type_id = builtin_parameter_id(effect_type, "wave_type");
+            let wave_speed_id = builtin_parameter_id(effect_type, "wave_speed");
+            let wave_width_id = builtin_parameter_id(effect_type, "wave_width");
+            let wave_height_id = builtin_parameter_id(effect_type, "wave_height");
+            let phase_id = builtin_parameter_id(effect_type, "phase");
+            Some(Arc::new(move |effect, context, graph| {
+                let wave_type = match effect.evaluate_parameter(&wave_type_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match crate::RippleType::from_key(&key) {
+                        Some(wave_type) => wave_type,
+                        None => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key().to_string(),
+                                effect_id: effect.id,
+                                reason: format!("ripple wave type {key} is not a declared option"),
+                            })
+                        }
+                    },
+                    None => crate::RippleType::Asymmetric,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key().to_string(),
+                            effect_id: effect.id,
+                            reason: "ripple wave type must be an enum".to_string(),
+                        })
+                    }
+                };
+                let wave_speed = crate::validate_wave_speed(effect.evaluate_f32_parameter(
+                    &wave_speed_id,
+                    context.time,
+                    1.0,
+                ))
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key().to_string(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                // The wave speed is measured in turns per second, so the frame
+                // time is folded into the phase here instead of in the kernel.
+                let phase = crate::ripple_phase_turns(
+                    effect.evaluate_f32_parameter(&phase_id, context.time, 0.0),
+                    wave_speed,
+                    context.time.to_f64(),
+                );
+                let grade = crate::RippleGrade::new(
+                    effect.evaluate_f32_parameter(&radius_id, context.time, 0.0),
+                    [
+                        effect.evaluate_f32_parameter(&centre_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&centre_y_id, context.time, 128.0),
+                    ],
+                    wave_type,
+                    effect.evaluate_f32_parameter(&wave_width_id, context.time, 20.0),
+                    effect.evaluate_f32_parameter(&wave_height_id, context.time, 20.0),
+                    phase as f32,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key().to_string(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Ripple { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensDistortion => {
             let fov_id = builtin_parameter_id(effect_type, "fov");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -8681,6 +8872,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Mirror => "镜像",
         EffectType::PolarCoordinates => "极坐标",
         EffectType::Flip => "翻转",
+        EffectType::Ripple => "波纹",
         EffectType::LensDistortion => "镜头畸变",
         EffectType::LensFlare => "镜头光晕",
         EffectType::Bulge => "凸出",
@@ -9976,6 +10168,7 @@ mod tests {
             EffectType::PolarCoordinates,
             EffectType::LensDistortion,
             EffectType::Flip,
+            EffectType::Ripple,
             EffectType::LensFlare,
             EffectType::Bulge,
             EffectType::Split,
@@ -14783,6 +14976,123 @@ mod tests {
                 value: PropertyValue::Float(60.0),
             })
             .expect("the blend is accepted");
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+    }
+
+    fn ripple_op(graph: &EffectRenderGraph) -> Option<crate::RippleGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Ripple { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Ripple { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_ripple(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Ripple)
+            .expect("ripple node should be instantiable");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Ripple.property_path(parameter),
+                value,
+            })
+            .expect("authored value should be accepted");
+        effect
+    }
+
+    #[test]
+    fn ripple_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::Ripple)
+            .expect("ripple node should be instantiable");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default graph should build");
+        assert!(
+            ripple_op(&graph).is_none(),
+            "a zero radius leaves the frame untouched"
+        );
+    }
+
+    #[test]
+    fn ripple_authored_state_reaches_the_operation() {
+        let mut effect = author_ripple("radius", PropertyValue::Float(50.0));
+        for (parameter, value) in [
+            ("centre_x", 40.0),
+            ("centre_y", 12.5),
+            ("wave_width", 30.0),
+            ("wave_height", 12.0),
+            ("phase", 0.25),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Ripple.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect("the value is accepted");
+        }
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Ripple.property_path("wave_type"),
+                value: PropertyValue::Enum("symmetric".to_string()),
+            })
+            .expect("the wave type is accepted");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = ripple_op(&graph).expect("a non-zero radius emits a node");
+        assert!((grade.radius_percent() - 50.0).abs() <= 1e-6);
+        assert_eq!(grade.centre(), [40.0, 12.5]);
+        assert_eq!(grade.wave_type(), crate::RippleType::Symmetric);
+        assert!((grade.wave_width() - 30.0).abs() <= 1e-6);
+        assert!((grade.wave_height() - 12.0).abs() <= 1e-6);
+        assert!((grade.phase_turns() - 0.25).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn ripple_wave_speed_folds_the_frame_time_into_the_phase() {
+        let mut effect = author_ripple("radius", PropertyValue::Float(40.0));
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Ripple.property_path("wave_speed"),
+                value: PropertyValue::Float(2.0),
+            })
+            .expect("the wave speed is accepted");
+        // Two turns per second for 0.2 s advance the phase by 0.4 turns.
+        let graph = build_effect_render_graph(&[effect], tt(5), TEST_WORKING_SPACE)
+            .expect("the animated graph should build");
+        let grade = ripple_op(&graph).expect("a non-zero radius emits a node");
+        assert!((grade.phase_turns() - 0.4).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn ripple_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::Ripple)
+            .expect("ripple node should be instantiable");
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Ripple.property_path("radius"),
+            value: PropertyValue::Float(101.0),
+        });
+        assert!(outside.is_err(), "the radius is bounded by the schema");
+
+        let mut unknown = instantiate_effect_node(EffectType::Ripple)
+            .expect("ripple node should be instantiable");
+        let rejected = unknown.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Ripple.property_path("wave_type"),
+            value: PropertyValue::Enum("triangular".to_string()),
+        });
+        assert!(rejected.is_err(), "an undeclared wave type is rejected");
+    }
+
+    #[test]
+    fn ripple_authored_state_survives_serialization_round_trip() {
+        let mut effect = author_ripple("radius", PropertyValue::Float(75.0));
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Ripple.property_path("wave_type"),
+                value: PropertyValue::Enum("symmetric".to_string()),
+            })
+            .expect("the wave type is accepted");
         let json = serde_json::to_string(&effect).expect("the node serialises");
         let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
         assert_eq!(restored, effect);
