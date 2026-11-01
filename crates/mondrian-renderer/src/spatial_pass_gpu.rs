@@ -65,6 +65,8 @@ pub(crate) struct EffectSpatialGpu {
     color_offset: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
     deband: wgpu::RenderPipeline,
+    glow_extract: wgpu::RenderPipeline,
+    glow_composite: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
 }
@@ -871,6 +873,66 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let glow_extract = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.glow-extract"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_glow_extract"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let glow_composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.glow-composite"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_glow_composite"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -895,6 +957,8 @@ impl EffectSpatialGpu {
             color_offset,
             convolution,
             deband,
+            glow_extract,
+            glow_composite,
             find_edges,
             bindings,
             composite_bindings,
@@ -922,6 +986,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -957,6 +1022,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -992,6 +1058,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1027,6 +1094,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1061,6 +1129,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1095,6 +1164,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1129,6 +1199,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1167,6 +1238,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1205,6 +1277,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1240,6 +1313,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces,
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1274,6 +1348,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1309,6 +1384,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1358,6 +1434,10 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::TurbulentDisplace { .. } => Ok(1),
             // Two blur passes feed one composite pass.
             EffectGpuSpatialPass::Deband { .. } => Ok(3),
+            // One extract, one blur pass per axis and iteration, one composite.
+            EffectGpuSpatialPass::Glow { grade } => {
+                Ok(2 + grade.dimensions().axis_count() * mondrian_effects::GLOW_BLUR_ITERATIONS)
+            }
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1683,6 +1763,9 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Deband { grade } => {
                 return self.record_deband(device, encoder, *grade, source, scratch, width, height);
             }
+            EffectGpuSpatialPass::Glow { grade } => {
+                return self.record_glow(device, encoder, *grade, source, scratch, width, height);
+            }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
                 return Err(EffectSpatialGpuError::UnsupportedPass(pass.name()));
@@ -1728,6 +1811,7 @@ impl EffectSpatialGpu {
                         )),
                     ],
                     aces: [0.0; 4],
+                    extra1: [0.0; 4],
                 };
                 let input_view_owner;
                 let input_view = if written == 0 {
@@ -1779,6 +1863,7 @@ impl EffectSpatialGpu {
             ],
             extra: [1.0, 1.0, 0.0, 1.0],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1817,6 +1902,7 @@ impl EffectSpatialGpu {
                 0.0,
             ],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1849,6 +1935,7 @@ impl EffectSpatialGpu {
             params: controls,
             extra: [0.0; 4],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1899,6 +1986,7 @@ impl EffectSpatialGpu {
             params,
             extra: [0.0; 4],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1936,6 +2024,7 @@ impl EffectSpatialGpu {
             params,
             extra: [0.0; 4],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1973,6 +2062,7 @@ impl EffectSpatialGpu {
             params,
             extra: [0.0; 4],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2012,6 +2102,7 @@ impl EffectSpatialGpu {
             params,
             extra: [0.0; 4],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2044,6 +2135,7 @@ impl EffectSpatialGpu {
             params,
             extra: [0.0; 4],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2077,6 +2169,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2118,6 +2211,7 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces,
+            extra1: [0.0; 4],
         };
         let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
         let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2224,6 +2318,7 @@ impl EffectSpatialGpu {
                 0.0,
             ],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         self.record_pass(
             device,
@@ -2243,6 +2338,7 @@ impl EffectSpatialGpu {
             ],
             extra: [box_kernel.normalization(), 1.0, 0.0, 0.0],
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         self.record_pass(
             device,
@@ -2258,11 +2354,13 @@ impl EffectSpatialGpu {
             params,
             extra,
             aces: [0.0; 4],
+            extra1: [0.0; 4],
         };
         let destination_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
         self.record_composite_pass(
             device,
             encoder,
+            &self.deband,
             &source_view,
             &vertical_view,
             &destination_view,
@@ -2271,12 +2369,133 @@ impl EffectSpatialGpu {
         Ok(scratch[0].clone())
     }
 
+    /// Records the glow extract, blur, and composite stages.
+    ///
+    /// `scratch[0]` receives the merged frame, `scratch[1]` holds the extracted
+    /// glow layer, and the blur passes ping-pong between `scratch[1]` and
+    /// `scratch[2]`. The blur passes reuse [`Self::box_blur`] and the exact
+    /// uniform packing of the standalone box blur: the first pass premultiplies
+    /// the straight-alpha extraction and the last pass unpremultiplies it again,
+    /// so the merge reads straight-alpha glow.
+    fn record_glow(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::GlowGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if scratch.len() < 3 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "glow_scratch_geometry",
+            ));
+        }
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let (params, extra, aces, extra1) = grade.extract_gpu_controls();
+        let extract = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        let glow_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.glow_extract,
+            &source_view,
+            &glow_view,
+            &extract,
+        );
+
+        let box_kernel = BoxKernel::new(grade.radius());
+        let dimensions = grade.dimensions();
+        let mut axes = Vec::with_capacity(2);
+        if dimensions.blurs_horizontal() {
+            axes.push(0_u32);
+        }
+        if dimensions.blurs_vertical() {
+            axes.push(1_u32);
+        }
+        let iterations = mondrian_effects::GLOW_BLUR_ITERATIONS;
+        let total_passes = axes.len() * iterations as usize;
+        // The extract wrote `scratch[1]`, and every blur pass writes the buffer
+        // the previous pass did not read.
+        let mut written = 1_usize;
+        let mut pass_index = 0_usize;
+        for _ in 0..iterations {
+            for axis in &axes {
+                let output = if written == 1 { 2 } else { 1 };
+                let uniform = SpatialPassUniform {
+                    size: [width as f32, height as f32, 0.0, 0.0],
+                    params: [
+                        0.0,
+                        *axis as f32,
+                        box_kernel.whole_radius as f32,
+                        box_kernel.fraction,
+                    ],
+                    extra: [
+                        box_kernel.normalization(),
+                        // Repeat the edge pixels; premultiply the straight-alpha
+                        // extraction on the first pass and unpremultiply it on the
+                        // last, so the merge reads straight-alpha glow.
+                        1.0,
+                        f32::from(u8::from(pass_index == 0)),
+                        f32::from(u8::from(pass_index + 1 == total_passes)),
+                    ],
+                    aces: [0.0; 4],
+                    extra1: [0.0; 4],
+                };
+                let input_view =
+                    scratch[written].create_view(&wgpu::TextureViewDescriptor::default());
+                let output_view =
+                    scratch[output].create_view(&wgpu::TextureViewDescriptor::default());
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.box_blur,
+                    &input_view,
+                    &output_view,
+                    &uniform,
+                );
+                written = output;
+                pass_index += 1;
+            }
+        }
+
+        let (params, extra, aces, extra1) = grade.composite_gpu_controls();
+        let composite = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        let glow_view = scratch[written].create_view(&wgpu::TextureViewDescriptor::default());
+        let destination_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.glow_composite,
+            &source_view,
+            &glow_view,
+            &destination_view,
+            &composite,
+        );
+        Ok(scratch[0].clone())
+    }
+
     /// Records one fullscreen pass that reads the original and one auxiliary
     /// texture and writes the destination.
+    #[allow(clippy::too_many_arguments)]
     fn record_composite_pass(
         &self,
         device: &wgpu::Device,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
         original: &wgpu::TextureView,
         auxiliary: &wgpu::TextureView,
         output: &wgpu::TextureView,
@@ -2321,7 +2540,7 @@ impl EffectSpatialGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.deband);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
@@ -2357,6 +2576,9 @@ struct SpatialPassUniform {
     params: [f32; 4],
     extra: [f32; 4],
     aces: [f32; 4],
+    // The second spare cell, added for effects that need more than twelve
+    // scalars (glow's colour pair).
+    extra1: [f32; 4],
 }
 
 const SPATIAL_EFFECT_SHADER: &str = r#"
@@ -2365,6 +2587,7 @@ struct Uniforms {
     params: vec4<f32>,
     extra: vec4<f32>,
     aces: vec4<f32>,
+    extra1: vec4<f32>,
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -2462,6 +2685,49 @@ fn fs_box_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
         result = unpremultiply(result);
     }
     return result;
+}
+// The glow extraction turns the straight-alpha source into the straight-alpha
+// glow layer the blur passes then spread. Every branch mirrors
+// `GlowGrade::extract` so the CPU and GPU paths evaluate the same expression.
+@fragment
+fn fs_glow_extract(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let sample = load_clamped(pixel);
+    let alpha = sample.a;
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let luminance = dot(
+        sample.rgb,
+        vec3<f32>(uniforms.params.y, uniforms.params.z, uniforms.params.w),
+    );
+    let threshold = clamp(uniforms.params.x, 0.0, 1.0);
+    var colour_weight = 0.0;
+    if (threshold < 1.0) {
+        colour_weight = clamp((luminance - threshold) / (1.0 - threshold), 0.0, 1.0);
+    }
+    let based_on = u32(round(uniforms.extra.x));
+    var weight = colour_weight;
+    var colour = sample.rgb;
+    if (based_on == 1u) {
+        weight = alpha;
+        colour = vec3<f32>(1.0, 1.0, 1.0);
+    } else if (based_on == 2u) {
+        weight = max(colour_weight, alpha);
+    }
+    let colours = u32(round(uniforms.extra.y));
+    let midpoint = uniforms.extra.z;
+    var tint = colour;
+    if (colours == 1u) {
+        let ramp_low = 0.5 * luminance / midpoint;
+        let ramp_high = 0.5 + 0.5 * (luminance - midpoint) / (1.0 - midpoint);
+        let ramp = select(ramp_high, ramp_low, luminance < midpoint);
+        tint = mix(uniforms.aces.rgb, uniforms.extra1.rgb, ramp);
+    } else if (colours == 2u) {
+        let phase = uniforms.extra.w + luminance * uniforms.aces.a;
+        tint = mix(uniforms.aces.rgb, uniforms.extra1.rgb, fract(phase));
+    }
+    return vec4<f32>(tint, weight);
 }
 fn sobel_magnitude(pixel: vec2<i32>) -> f32 {
     let top_left = premultiply(load_clamped(pixel + vec2<i32>(-1, -1)));
@@ -3663,6 +3929,7 @@ struct Uniforms {
     params: vec4<f32>,
     extra: vec4<f32>,
     aces: vec4<f32>,
+    extra1: vec4<f32>,
 };
 
 @group(0) @binding(0) var original_texture: texture_2d<f32>;
@@ -3752,6 +4019,150 @@ fn fs_deband(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         mixed = vec4<f32>(mixed.rgb + vec3<f32>(dither), mixed.a);
     }
     return unpremultiply(mixed);
+}
+
+// The blend helpers below mirror the compositor's WGSL helpers in
+// `crates/mondrian-renderer/src/gpu_compositor.rs` and the CPU
+// `blend_mode_rgb` they were written against; they must stay in sync.
+fn blend_lum(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+fn clip_blend_color(color: vec3<f32>) -> vec3<f32> {
+    let luminance = blend_lum(color);
+    let minimum = min(color.r, min(color.g, color.b));
+    let maximum = max(color.r, max(color.g, color.b));
+    if (minimum < 0.0) {
+        let factor = luminance / (luminance - minimum);
+        return vec3<f32>(luminance) + (color - vec3<f32>(luminance)) * factor;
+    }
+    if (maximum > 1.0) {
+        let factor = (1.0 - luminance) / (maximum - luminance);
+        return vec3<f32>(luminance) + (color - vec3<f32>(luminance)) * factor;
+    }
+    return color;
+}
+
+fn set_blend_lum(color: vec3<f32>, target_lum: f32) -> vec3<f32> {
+    return clip_blend_color(color + vec3<f32>(target_lum - blend_lum(color)));
+}
+
+fn blend_sat(color: vec3<f32>) -> f32 {
+    return max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
+}
+
+fn set_blend_sat(color: vec3<f32>, target_sat: f32) -> vec3<f32> {
+    var result = vec3<f32>(0.0);
+    let minimum = min(color.r, min(color.g, color.b));
+    let maximum = max(color.r, max(color.g, color.b));
+    if (maximum <= minimum) {
+        return result;
+    }
+    let scale = target_sat / (maximum - minimum);
+    if (color.r <= color.g && color.r <= color.b) {
+        if (color.g <= color.b) {
+            result = vec3<f32>(0.0, (color.g - minimum) * scale, target_sat);
+        } else {
+            result = vec3<f32>(0.0, target_sat, (color.b - minimum) * scale);
+        }
+    } else if (color.g <= color.r && color.g <= color.b) {
+        if (color.r <= color.b) {
+            result = vec3<f32>((color.r - minimum) * scale, 0.0, target_sat);
+        } else {
+            result = vec3<f32>(target_sat, 0.0, (color.b - minimum) * scale);
+        }
+    } else if (color.r <= color.g) {
+        result = vec3<f32>((color.r - minimum) * scale, target_sat, 0.0);
+    } else {
+        result = vec3<f32>(target_sat, (color.g - minimum) * scale, 0.0);
+    }
+    return result;
+}
+
+fn blend_channel(mode: u32, base: f32, blend: f32) -> f32 {
+    if (mode == 2u) { return base * blend; }
+    if (mode == 3u) { return 1.0 - (1.0 - base) * (1.0 - blend); }
+    if (mode == 4u) {
+        return select(1.0 - 2.0 * (1.0 - base) * (1.0 - blend), 2.0 * base * blend, base <= 0.5);
+    }
+    if (mode == 5u) { return min(base, blend); }
+    if (mode == 6u) { return max(base, blend); }
+    if (mode == 7u) {
+        if (blend >= 0.999) { return 1.0; }
+        return clamp(base / (1.0 - blend), 0.0, 1.0);
+    }
+    if (mode == 8u) {
+        if (blend <= 0.001) { return 0.0; }
+        return clamp(1.0 - (1.0 - base) / blend, 0.0, 1.0);
+    }
+    if (mode == 9u) {
+        return select(1.0 - 2.0 * (1.0 - base) * (1.0 - blend), 2.0 * base * blend, blend <= 0.5);
+    }
+    if (mode == 10u) {
+        if (blend <= 0.5) { return base - (1.0 - 2.0 * blend) * base * (1.0 - base); }
+        var curved = ((16.0 * base - 12.0) * base + 4.0) * base;
+        if (base > 0.25) { curved = sqrt(base); }
+        return base + (2.0 * blend - 1.0) * (curved - base);
+    }
+    if (mode == 11u) { return abs(base - blend); }
+    if (mode == 12u) { return base + blend - 2.0 * base * blend; }
+    if (mode == 13u) { return clamp(base - blend, 0.0, 1.0); }
+    if (mode == 16u) { return clamp(base + blend - 1.0, 0.0, 1.0); }
+    if (mode == 17u) { return clamp(base + blend, 0.0, 1.0); }
+    if (mode == 18u) {
+        if (blend <= 0.5) {
+            if (blend <= 0.001) { return 0.0; }
+            return clamp(1.0 - (1.0 - base) / (2.0 * blend), 0.0, 1.0);
+        }
+        if (blend >= 0.999) { return 1.0; }
+        return clamp(base / (2.0 * (1.0 - blend)), 0.0, 1.0);
+    }
+    if (mode == 19u) { return clamp(base + 2.0 * blend - 1.0, 0.0, 1.0); }
+    if (mode == 20u) { return select(max(base, 2.0 * (blend - 0.5)), min(base, 2.0 * blend), blend <= 0.5); }
+    if (mode == 21u) { return select(1.0, 0.0, base + blend < 1.0); }
+    if (mode == 22u) {
+        if (blend <= 0.001) { return 1.0; }
+        return clamp(base / blend, 0.0, 1.0);
+    }
+    return blend;
+}
+
+fn blend_rgb(mode: u32, base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    if (mode == 14u) { return select(base, blend, blend_lum(blend) < blend_lum(base)); }
+    if (mode == 15u) { return select(base, blend, blend_lum(blend) > blend_lum(base)); }
+    if (mode == 23u) { return set_blend_lum(set_blend_sat(blend, blend_sat(base)), blend_lum(base)); }
+    if (mode == 24u) { return set_blend_lum(set_blend_sat(base, blend_sat(blend)), blend_lum(base)); }
+    if (mode == 25u) { return set_blend_lum(blend, blend_lum(base)); }
+    if (mode == 26u) { return set_blend_lum(base, blend_lum(blend)); }
+    return vec3<f32>(
+        blend_channel(mode, base.r, blend.r),
+        blend_channel(mode, base.g, blend.g),
+        blend_channel(mode, base.b, blend.b),
+    );
+}
+
+// The glow merge mirrors `GlowGrade::composite`: the contribution is the
+// extracted-and-blurred layer times its own coverage and the authored
+// intensity, and the merge always keeps the source alpha.
+@fragment
+fn fs_glow_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped_from(original_texture, pixel);
+    let glow = load_clamped_from(auxiliary_texture, pixel);
+    if (source.a <= 0.0) {
+        return source;
+    }
+    let intensity = uniforms.params.x;
+    let mode = u32(round(uniforms.params.y));
+    let composite = u32(round(uniforms.params.z));
+    let contribution = glow.rgb * glow.a * intensity;
+    var blended = contribution;
+    if (composite == 0u) {
+        blended = blend_rgb(mode, source.rgb, contribution);
+    } else if (composite == 1u) {
+        blended = blend_rgb(mode, contribution, source.rgb);
+    }
+    return vec4<f32>(blended, source.a);
 }
 "#;
 
@@ -4363,6 +4774,23 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         .expect("valid turbulent displace grade");
         let deband =
             mondrian_effects::DebandGrade::new(0.05, 2.0, 0.1).expect("valid deband grade");
+        let glow = mondrian_effects::GlowGrade::new(
+            mondrian_effects::GlowBasedOn::Color,
+            120.0,
+            4.0,
+            80.0,
+            mondrian_effects::GlowComposite::OnTop,
+            mondrian_effects::GlowOperation::Screen,
+            mondrian_effects::GlowColors::Original,
+            1.0,
+            0.0,
+            0.5,
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            mondrian_effects::GlowDimensions::Both,
+            [0.2126, 0.7152, 0.0722],
+        )
+        .expect("valid glow grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -4379,6 +4807,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::CornerPin { grade: corner_pin },
             mondrian_effects::EffectGpuSpatialPass::TurbulentDisplace { grade: turbulent_displace },
             mondrian_effects::EffectGpuSpatialPass::Deband { grade: deband },
+            mondrian_effects::EffectGpuSpatialPass::Glow { grade: glow },
         ];
 
         let mut cpu = pixels.clone();
@@ -4445,14 +4874,21 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             height as usize,
             &deband,
         ));
+        assert!(mondrian_effects::glow_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &glow,
+        ));
 
         let executor = EffectSpatialGpu::new(&context.device);
         let original = upload(&context, &pixels, width, height);
-        // Four rotating scratch textures keep every stage's destination out of
+        // Seven rotating scratch textures keep every stage's destination out of
         // its own source, which wgpu rejects as conflicting texture usage, and
-        // give the three-pass deband chain its blur intermediates.
+        // give the three-pass deband chain and the six-pass glow chain their
+        // intermediates.
         let pool: Vec<wgpu::Texture> =
-            (0..4).map(|_| scratch(&context, width, height, 1).remove(0)).collect();
+            (0..7).map(|_| scratch(&context, width, height, 1).remove(0)).collect();
         let mut current: Option<usize> = None;
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian.effect-spatial.chain-encoder"),
@@ -5546,6 +5982,130 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "deband case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_glow_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU glow parity test: no GPU adapter available");
+            return;
+        };
+        let width = 21_u32;
+        let height = 17_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                // A diagonal ramp crosses the threshold at different columns and
+                // rows, so the mask is not a single flat value.
+                let value = 0.02 * (3 * x + 2 * y) as f32;
+                pixels[y * width as usize + x] = [value, 0.55 - value * 0.5, value * 1.2, 1.0];
+            }
+        }
+        // One fully transparent pixel and one half-covered pixel: the first must
+        // stay untouched, the second must bloom with its own coverage weight.
+        pixels[37] = [0.0, 0.0, 0.0, 0.0];
+        pixels[59] = [0.9, 0.2, 0.3, 0.5];
+        let cases = [
+            (
+                "default",
+                mondrian_effects::GlowGrade::new(
+                    mondrian_effects::GlowBasedOn::Color,
+                    153.0,
+                    10.0,
+                    1.0,
+                    mondrian_effects::GlowComposite::OnTop,
+                    mondrian_effects::GlowOperation::Screen,
+                    mondrian_effects::GlowColors::Original,
+                    1.0,
+                    0.0,
+                    0.5,
+                    [1.0, 1.0, 1.0],
+                    [0.0, 0.0, 0.0],
+                    mondrian_effects::GlowDimensions::Both,
+                    [0.2126, 0.7152, 0.0722],
+                )
+                .expect("default glow grade"),
+            ),
+            (
+                "colour ramp behind",
+                mondrian_effects::GlowGrade::new(
+                    mondrian_effects::GlowBasedOn::Color,
+                    90.0,
+                    12.0,
+                    120.0,
+                    mondrian_effects::GlowComposite::Behind,
+                    mondrian_effects::GlowOperation::Overlay,
+                    mondrian_effects::GlowColors::AAndB,
+                    2.0,
+                    45.0,
+                    0.4,
+                    [0.8, 0.3, 0.1],
+                    [0.1, 0.2, 0.9],
+                    mondrian_effects::GlowDimensions::Both,
+                    [0.2126, 0.7152, 0.0722],
+                )
+                .expect("authored glow grade"),
+            ),
+            (
+                "cycling single axis",
+                mondrian_effects::GlowGrade::new(
+                    mondrian_effects::GlowBasedOn::ColorAndAlpha,
+                    120.0,
+                    7.0,
+                    200.0,
+                    mondrian_effects::GlowComposite::None,
+                    mondrian_effects::GlowOperation::ColorDodge,
+                    mondrian_effects::GlowColors::Cycle,
+                    3.0,
+                    120.0,
+                    0.6,
+                    [0.2, 0.9, 0.4],
+                    [0.9, 0.1, 0.6],
+                    mondrian_effects::GlowDimensions::Horizontal,
+                    [0.2126, 0.7152, 0.0722],
+                )
+                .expect("cycling glow grade"),
+            ),
+        ];
+        for (index, (label, grade)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::glow_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let pool = scratch(&context, width, height, 6);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.glow-encoder"),
+                });
+            let pass = mondrian_effects::EffectGpuSpatialPass::Glow { grade: *grade };
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool,
+                    width,
+                    height,
+                )
+                .expect("recorded glow");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "glow case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
