@@ -949,6 +949,10 @@ pub enum EffectRenderOp {
     Deband {
         grade: crate::DebandGrade,
     },
+    /// Ramp: paints a two-colour linear or radial gradient over the frame.
+    Ramp {
+        grade: crate::RampGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1215,6 +1219,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Deband { grade } => {
                 formatter.debug_struct("Deband").field("grade", grade).finish()
             }
+            Self::Ramp { grade } => formatter.debug_struct("Ramp").field("grade", grade).finish(),
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
@@ -1888,6 +1893,14 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Ramp { grade } => {
+                68u8.hash(state);
+                let (params, color, extra0, extra1) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                color.map(f32::to_bits).hash(state);
+                extra0.map(f32::to_bits).hash(state);
+                extra1.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2097,6 +2110,7 @@ impl EffectRenderOp {
             EffectRenderOp::CornerPin { .. } => 4,
             EffectRenderOp::TurbulentDisplace { .. } => 5,
             EffectRenderOp::Deband { .. } => 3,
+            EffectRenderOp::Ramp { .. } => 1,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2652,7 +2666,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 66] {
+fn builtin_effect_types() -> [EffectType; 67] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2720,6 +2734,7 @@ fn builtin_effect_types() -> [EffectType; 66] {
         EffectType::CornerPin,
         EffectType::TurbulentDisplace,
         EffectType::Deband,
+        EffectType::Ramp,
     ]
 }
 
@@ -6048,6 +6063,74 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.001),
             );
         }
+        EffectType::Ramp => {
+            for (parameter, name, value) in [
+                ("start", "渐变起点", [128.0f32, 0.0]),
+                ("end", "渐变终点", [128.0, 256.0]),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "渐变",
+                    name,
+                    PropertyValue::Vec2(glam::Vec2::new(value[0], value[1])),
+                    Some(-(crate::RAMP_MAX_CENTRE_PIXELS as f64)),
+                    Some(crate::RAMP_MAX_CENTRE_PIXELS as f64),
+                    Some(1.0),
+                );
+            }
+            for (parameter, name, value) in [
+                ("start_color", "起始颜色", [0.0f32, 0.0, 0.0]),
+                ("end_color", "结束颜色", [1.0, 1.0, 1.0]),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "渐变",
+                    name,
+                    PropertyValue::Color(Color { r: value[0], g: value[1], b: value[2], a: 1.0 }),
+                    None,
+                    None,
+                    None,
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "shape",
+                "渐变",
+                "渐变形状",
+                "linear",
+                vec![
+                    ParameterEnumOption::new("linear", "线性", "mondrian.effect.ramp.shape.linear"),
+                    ParameterEnumOption::new("radial", "径向", "mondrian.effect.ramp.shape.radial"),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "scatter",
+                "渐变",
+                "渐变散射",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::RAMP_MAX_SCATTER as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "渐变",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::RAMP_MAX_BLEND as f64),
+                Some(0.01),
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -6962,6 +7045,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Split, "point_a_x" | "point_a_y" | "point_b_x" | "point_b_y" | "split") => {
             ParameterUnit::Pixels
         }
+        (EffectType::Ramp, "start" | "end") => ParameterUnit::Pixels,
         (EffectType::ColorOffset, "red_phase" | "green_phase" | "blue_phase") => {
             ParameterUnit::Pixels
         }
@@ -7220,6 +7304,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Levels => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Ramp => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -9715,6 +9803,83 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Ramp => {
+            let start_id = builtin_parameter_id(effect_type, "start");
+            let start_color_id = builtin_parameter_id(effect_type, "start_color");
+            let end_id = builtin_parameter_id(effect_type, "end");
+            let end_color_id = builtin_parameter_id(effect_type, "end_color");
+            let shape_id = builtin_parameter_id(effect_type, "shape");
+            let scatter_id = builtin_parameter_id(effect_type, "scatter");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let point = |parameter_id: &ParameterId,
+                             name: &str,
+                             fallback: [f32; 2]|
+                 -> Result<[f32; 2], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Vec2(point)) => Ok([point.x, point.y]),
+                        Some(PropertyValue::DoubleVec2(point)) => {
+                            Ok([point[0] as f32, point[1] as f32])
+                        }
+                        Some(_) => Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("ramp {name} must be a point"),
+                        }),
+                        None => Ok(fallback),
+                    }
+                };
+                let colour = |parameter_id: &ParameterId,
+                              name: &str,
+                              fallback: [f32; 3]|
+                 -> Result<[f32; 3], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Color(color)) => Ok([color.r, color.g, color.b]),
+                        Some(_) => Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: format!("ramp {name} must be a colour"),
+                        }),
+                        None => Ok(fallback),
+                    }
+                };
+                let shape =
+                    match effect.evaluate_parameter(&shape_id, context.time) {
+                        Some(PropertyValue::Enum(key)) => crate::RampShape::from_key(&key)
+                            .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: format!("ramp shape {key} is not a declared option"),
+                            })?,
+                        Some(_) => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "ramp shape must be an enum option".to_string(),
+                            })
+                        }
+                        None => crate::RampShape::Linear,
+                    };
+                let grade = crate::RampGrade::new(
+                    point(&start_id, "start", [128.0, 0.0])?,
+                    colour(&start_color_id, "start colour", [0.0, 0.0, 0.0])?,
+                    point(&end_id, "end", [128.0, 256.0])?,
+                    colour(&end_color_id, "end colour", [1.0, 1.0, 1.0])?,
+                    shape,
+                    effect.evaluate_f32_parameter(&scatter_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&blend_id, context.time, 0.0),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Ramp { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensDistortion => {
             let fov_id = builtin_parameter_id(effect_type, "fov");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -10496,6 +10661,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::CornerPin => "边角定位",
         EffectType::TurbulentDisplace => "湍流置换",
         EffectType::Deband => "去色带",
+        EffectType::Ramp => "渐变",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -11796,6 +11962,7 @@ mod tests {
             EffectType::CornerPin,
             EffectType::TurbulentDisplace,
             EffectType::Deband,
+            EffectType::Ramp,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -17593,6 +17760,118 @@ mod tests {
             .expect_err("an out-of-range radius must be rejected");
         let rendered = format!("{error:?}");
         assert!(rendered.contains("outside [0, 100]"), "{rendered}");
+    }
+
+    fn ramp_op(graph: &EffectRenderGraph) -> Option<crate::RampGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Ramp { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Ramp { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_ramp(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Ramp).expect("the ramp effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Ramp.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the ramp parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn ramp_defaults_compile_to_the_documented_operation() {
+        // The default blend is 0, so the default grade is a real operation: a
+        // vertical ramp from black at row 0 to white at row 256.
+        let effect =
+            instantiate_effect_node(EffectType::Ramp).expect("the ramp effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default ramp should compile");
+        let grade = ramp_op(&graph).expect("the default grade emits a node");
+        assert_eq!(grade.start(), [128.0, 0.0]);
+        assert_eq!(grade.end(), [128.0, 256.0]);
+        assert_eq!(grade.start_color(), [0.0, 0.0, 0.0]);
+        assert_eq!(grade.end_color(), [1.0, 1.0, 1.0]);
+        assert_eq!(grade.shape(), crate::RampShape::Linear);
+        assert_eq!(grade.scatter(), 0.0);
+        assert_eq!(grade.blend_with_original(), 0.0);
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn ramp_authored_configuration_reaches_the_operation() {
+        let effect = author_ramp(&[
+            ("start", PropertyValue::Vec2(glam::Vec2::new(32.0, 8.0))),
+            (
+                "start_color",
+                PropertyValue::Color(Color { r: 1.0, g: 0.25, b: 0.0, a: 1.0 }),
+            ),
+            ("end", PropertyValue::Vec2(glam::Vec2::new(320.0, 8.0))),
+            (
+                "end_color",
+                PropertyValue::Color(Color { r: 0.0, g: 0.5, b: 2.0, a: 1.0 }),
+            ),
+            ("shape", PropertyValue::Enum("radial".to_string())),
+            ("scatter", PropertyValue::Float(120.0)),
+            ("blend_with_original", PropertyValue::Float(0.35)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = ramp_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.start(), [32.0, 8.0]);
+        assert_eq!(grade.end(), [320.0, 8.0]);
+        assert_eq!(grade.start_color(), [1.0, 0.25, 0.0]);
+        assert_eq!(grade.end_color(), [0.0, 0.5, 2.0]);
+        assert_eq!(grade.shape(), crate::RampShape::Radial);
+        assert_eq!(grade.scatter(), 120.0);
+        assert_eq!(grade.blend_with_original(), 0.35);
+    }
+
+    #[test]
+    fn ramp_identity_compiles_to_no_node() {
+        let effect = author_ramp(&[("blend_with_original", PropertyValue::Float(1.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity grade should compile");
+        assert!(ramp_op(&graph).is_none());
+    }
+
+    #[test]
+    fn ramp_undeclared_shape_key_is_rejected_at_authoring() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Ramp).expect("the ramp effect should instantiate");
+        // The enum contract rejects the key before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Ramp.property_path("shape"),
+                value: PropertyValue::Enum("mystery".to_string()),
+            })
+            .expect_err("an undeclared shape key must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("unknown enum key `mystery`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn ramp_out_of_range_scatter_is_rejected_at_authoring() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Ramp).expect("the ramp effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Ramp.property_path("scatter"),
+                value: PropertyValue::Float(513.0),
+            })
+            .expect_err("an out-of-range scatter must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 512]"), "{rendered}");
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {

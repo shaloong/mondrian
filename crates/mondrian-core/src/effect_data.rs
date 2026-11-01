@@ -93,6 +93,8 @@ pub enum EffectType {
     TurbulentDisplace,
     /// Deband: smooths the eight-bit colour banding of gradients.
     Deband,
+    /// Ramp: a two-colour linear or radial gradient generator.
+    Ramp,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -169,6 +171,7 @@ impl EffectType {
             Self::CornerPin => "builtin.corner_pin".to_string(),
             Self::TurbulentDisplace => "builtin.turbulent_displace".to_string(),
             Self::Deband => "builtin.deband".to_string(),
+            Self::Ramp => "builtin.ramp".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -241,6 +244,7 @@ impl EffectType {
             "builtin.corner_pin" => Self::CornerPin,
             "builtin.turbulent_displace" => Self::TurbulentDisplace,
             "builtin.deband" => Self::Deband,
+            "builtin.ramp" => Self::Ramp,
             other => Self::External(other.to_string()),
         }
     }
@@ -313,6 +317,7 @@ impl EffectType {
             Self::CornerPin => "边角定位",
             Self::TurbulentDisplace => "湍流置换",
             Self::Deband => "去色带",
+            Self::Ramp => "渐变",
             Self::External(name) => name,
         }
     }
@@ -383,6 +388,7 @@ impl EffectType {
             Self::CornerPin => vec!["变换"],
             Self::TurbulentDisplace => vec!["变形"],
             Self::Deband => vec!["修复"],
+            Self::Ramp => vec!["颜色"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -455,6 +461,7 @@ impl EffectType {
             Self::CornerPin => "corner_pin".to_string(),
             Self::TurbulentDisplace => "turbulent_displace".to_string(),
             Self::Deband => "deband".to_string(),
+            Self::Ramp => "ramp".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -776,6 +783,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::CornerPin => Ok(()),
             Self::TurbulentDisplace => Ok(()),
             Self::Deband => Ok(()),
+            Self::Ramp => Ok(()),
         }
     }
 }

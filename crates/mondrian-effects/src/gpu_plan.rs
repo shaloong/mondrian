@@ -132,6 +132,10 @@ pub enum EffectGpuPointOp {
     Levels {
         grade: crate::LevelsGrade,
     },
+    /// Ramp: a two-colour linear or radial gradient over the frame.
+    Ramp {
+        grade: crate::RampGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -837,6 +841,7 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::BrightnessContrast { grade: *grade })
         }
         EffectRenderOp::Levels { grade } => Ok(EffectGpuPointOp::Levels { grade: *grade }),
+        EffectRenderOp::Ramp { grade } => Ok(EffectGpuPointOp::Ramp { grade: *grade }),
         EffectRenderOp::Threshold { grade } => Ok(EffectGpuPointOp::Threshold {
             level: grade.level(),
             luminance_coefficients: grade.luminance_coefficients(),
@@ -926,6 +931,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CornerPin { .. } => "corner_pin",
         EffectRenderOp::TurbulentDisplace { .. } => "turbulent_displace",
         EffectRenderOp::Deband { .. } => "deband",
+        EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

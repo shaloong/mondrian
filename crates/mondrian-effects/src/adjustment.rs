@@ -308,6 +308,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Ramp { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "ramp",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LensDistortion { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "lens_distortion",
@@ -878,6 +884,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::CornerPin { .. } => 1,
         EffectRenderOp::TurbulentDisplace { .. } => 1,
         EffectRenderOp::Deband { .. } => 2,
+        EffectRenderOp::Ramp { .. } => 0,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
@@ -1241,6 +1248,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Deband { grade } => {
             crate::deband::apply_deband_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::Ramp { grade } => {
+            crate::ramp::apply_ramp_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,

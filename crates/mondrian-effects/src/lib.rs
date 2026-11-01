@@ -100,6 +100,7 @@ pub(crate) mod parallel;
 pub mod polar_coordinates;
 pub mod posterize;
 pub mod qualifier;
+pub mod ramp;
 pub mod scatter;
 pub mod shift_channels;
 pub(crate) mod straight_alpha;
@@ -316,6 +317,10 @@ pub use qualifier::{
 pub use radial_blur::{
     radial_blur_frame_f32, radial_blur_jitter, RadialBlurError, RadialBlurGrade, RadialBlurMode,
     RADIAL_BLUR_AUTHOR_MAX_AMOUNT, RADIAL_BLUR_MAX_TAPS,
+};
+pub use ramp::{
+    ramp_frame_f32, RampError, RampGrade, RampShape, RAMP_DITHER_SALT, RAMP_MAX_BLEND,
+    RAMP_MAX_CENTRE_PIXELS, RAMP_MAX_SCATTER, RAMP_SHAPE_COUNT,
 };
 pub use scatter::{
     scatter_frame_f32, ScatterError, ScatterGrade, SCATTER_MAX_AMOUNT_PIXELS, SCATTER_MAX_COPIES,
