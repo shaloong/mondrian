@@ -973,6 +973,10 @@ pub enum EffectRenderOp {
     Arithmetic {
         grade: crate::ArithmeticGrade,
     },
+    /// Leave color: keeps one authored colour and decolours everything else.
+    LeaveColor {
+        grade: crate::LeaveColorGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1252,6 +1256,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Arithmetic { grade } => {
                 formatter.debug_struct("Arithmetic").field("grade", grade).finish()
+            }
+            Self::LeaveColor { grade } => {
+                formatter.debug_struct("LeaveColor").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1956,6 +1963,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra0.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::LeaveColor { grade } => {
+                74u8.hash(state);
+                let (params, color) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                color.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2171,6 +2184,7 @@ impl EffectRenderOp {
             EffectRenderOp::Keylight { .. } => 5,
             EffectRenderOp::MatteRefine { .. } => 6,
             EffectRenderOp::Arithmetic { .. } => 1,
+            EffectRenderOp::LeaveColor { .. } => 2,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2726,7 +2740,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 73] {
+fn builtin_effect_types() -> [EffectType; 74] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2801,6 +2815,7 @@ fn builtin_effect_types() -> [EffectType; 73] {
         EffectType::MatteRefine,
         EffectType::Echo,
         EffectType::Arithmetic,
+        EffectType::LeaveColor,
     ]
 }
 
@@ -7736,6 +7751,70 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::LeaveColor => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "amount",
+                "保留颜色",
+                "脱色量",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "colour",
+                "保留颜色",
+                "要保留的颜色",
+                PropertyValue::Color(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tolerance",
+                "保留颜色",
+                "容差",
+                PropertyValue::Float(15.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_softness",
+                "保留颜色",
+                "边缘柔和度",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "match",
+                "保留颜色",
+                "匹配颜色",
+                crate::LeaveColorMatch::Rgb.as_key(),
+                crate::LeaveColorMatch::ALL
+                    .into_iter()
+                    .map(|criterion| {
+                        ParameterEnumOption::new(
+                            criterion.as_key(),
+                            criterion.label(),
+                            format!("mondrian.effect.leave_color.match.{}", criterion.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8305,6 +8384,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Arithmetic => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::LeaveColor => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -12160,6 +12243,53 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::LeaveColor => {
+            let amount_id = builtin_parameter_id(effect_type, "amount");
+            let colour_id = builtin_parameter_id(effect_type, "colour");
+            let tolerance_id = builtin_parameter_id(effect_type, "tolerance");
+            let softness_id = builtin_parameter_id(effect_type, "edge_softness");
+            let match_id = builtin_parameter_id(effect_type, "match");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let match_mode = match effect.evaluate_parameter(&match_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::LeaveColorMatch::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("leave color match {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "leave color match must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::LeaveColorMatch::Rgb,
+                };
+                let colour = match effect.evaluate_parameter(&colour_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(_) => {
+                        return Err(invalid(
+                            "leave color kept colour must be a colour".to_owned(),
+                        ));
+                    }
+                    None => [1.0, 0.0, 0.0],
+                };
+                let grade = crate::LeaveColorGrade::new(
+                    effect.evaluate_f32_parameter(&amount_id, context.time, 0.0),
+                    colour,
+                    effect.evaluate_f32_parameter(&tolerance_id, context.time, 15.0),
+                    effect.evaluate_f32_parameter(&softness_id, context.time, 0.0),
+                    match_mode,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::LeaveColor { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -12239,6 +12369,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::MatteRefine => "遮罩精修",
         EffectType::Echo => "残影",
         EffectType::Arithmetic => "算术",
+        EffectType::LeaveColor => "保留颜色",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -13546,6 +13677,7 @@ mod tests {
             EffectType::MatteRefine,
             EffectType::Echo,
             EffectType::Arithmetic,
+            EffectType::LeaveColor,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -20413,6 +20545,138 @@ mod tests {
         assert_eq!(grade.green(), 240.0);
         assert_eq!(grade.blue(), 96.0);
         assert!(!grade.clipping());
+    }
+
+    fn leave_color_op(graph: &EffectRenderGraph) -> Option<crate::LeaveColorGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::LeaveColor { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::LeaveColor { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_leave_color(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::LeaveColor)
+            .expect("the leave color effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::LeaveColor.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the leave color parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn leave_color_defaults_are_the_elided_identity() {
+        // The documented default amount is zero, which leaves every sample as it
+        // is: the builder must elide the operation instead of emitting a no-op.
+        let effect = instantiate_effect_node(EffectType::LeaveColor)
+            .expect("the leave color effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default leave color should compile");
+        assert!(
+            !graph.nodes.iter().any(|node| matches!(
+                &node.kind,
+                EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::LeaveColor { .. }, .. }
+                    | EffectGraphNodeKind::DomainEffect {
+                        op: EffectRenderOp::LeaveColor { .. },
+                        ..
+                    }
+            )),
+            "a zero amount must be elided"
+        );
+    }
+
+    #[test]
+    fn leave_color_authored_configuration_reaches_the_operation() {
+        let effect = author_leave_color(&[
+            ("amount", PropertyValue::Float(60.0)),
+            (
+                "colour",
+                PropertyValue::Color(Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }),
+            ),
+            ("tolerance", PropertyValue::Float(25.0)),
+            ("edge_softness", PropertyValue::Float(10.0)),
+            ("match", PropertyValue::Enum("hue".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = leave_color_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.amount(), 60.0);
+        assert_eq!(grade.colour(), [0.2, 0.4, 0.6]);
+        assert_eq!(grade.tolerance(), 25.0);
+        assert_eq!(grade.softness(), 10.0);
+        assert_eq!(grade.match_mode(), crate::LeaveColorMatch::Hue);
+        let (params, color) = grade.gpu_controls();
+        assert_eq!(params, [0.6, 0.25, 0.1, 1.0]);
+        assert_eq!(color, [0.2, 0.4, 0.6, 0.0]);
+    }
+
+    #[test]
+    fn leave_color_undeclared_match_key_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::LeaveColor)
+            .expect("the leave color effect should instantiate");
+        // The enum contract rejects the key before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LeaveColor.property_path("match"),
+                value: PropertyValue::Enum("mystery".to_string()),
+            })
+            .expect_err("an undeclared match key must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("unknown enum key `mystery`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn leave_color_out_of_range_value_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::LeaveColor)
+            .expect("the leave color effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LeaveColor.property_path("tolerance"),
+                value: PropertyValue::Float(120.0),
+            })
+            .expect_err("an out-of-range value must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 100]"), "{rendered}");
+    }
+
+    #[test]
+    fn leave_color_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_leave_color(&[
+            ("amount", PropertyValue::Float(100.0)),
+            (
+                "colour",
+                PropertyValue::Color(Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 }),
+            ),
+            ("tolerance", PropertyValue::Float(5.0)),
+            ("edge_softness", PropertyValue::Float(40.0)),
+            ("match", PropertyValue::Enum("rgb".to_string())),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the leave color node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the leave color node");
+        assert_eq!(restored.effect_type, EffectType::LeaveColor);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored leave color node");
+        let grade = leave_color_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.amount(), 100.0);
+        assert_eq!(grade.colour(), [0.1, 0.2, 0.3]);
+        assert_eq!(grade.tolerance(), 5.0);
+        assert_eq!(grade.softness(), 40.0);
+        assert_eq!(grade.match_mode(), crate::LeaveColorMatch::Rgb);
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {

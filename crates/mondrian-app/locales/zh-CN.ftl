@@ -2392,3 +2392,14 @@ parameter-mondrian-effect-arithmetic-operator-screen = 滤色
 parameter-mondrian-effect-arithmetic-operator-slice = 限制
 parameter-mondrian-effect-arithmetic-operator-subtract = 相减
 parameter-mondrian-effect-arithmetic-operator-xor = 异或
+
+## Leave Color 保留颜色
+effect-leave-color = 保留颜色
+parameter-group-leave-color = 保留颜色
+parameter-mondrian-effect-builtin-leave-color-amount-label = 脱色量
+parameter-mondrian-effect-builtin-leave-color-colour-label = 要保留的颜色
+parameter-mondrian-effect-builtin-leave-color-edge-softness-label = 边缘柔和度
+parameter-mondrian-effect-builtin-leave-color-match-label = 匹配颜色
+parameter-mondrian-effect-builtin-leave-color-tolerance-label = 容差
+parameter-mondrian-effect-leave-color-match-hue = 使用色相
+parameter-mondrian-effect-leave-color-match-rgb = 使用 RGB

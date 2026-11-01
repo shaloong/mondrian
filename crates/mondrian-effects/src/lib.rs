@@ -93,6 +93,7 @@ pub use processor_residency::{
 pub mod bevel;
 pub mod brush_strokes;
 pub mod kaleidoscope;
+pub mod leave_color;
 pub mod lens_distortion;
 pub mod lens_flare;
 pub mod levels;
@@ -273,6 +274,10 @@ pub use invert::{invert_rgba_f32, InvertChannels};
 pub use kaleidoscope::{
     kaleidoscope_frame_f32, KaleidoscopeError, KaleidoscopeGrade, KALEIDOSCOPE_MAX_MIRRORING,
     KALEIDOSCOPE_MAX_SIZE, KALEIDOSCOPE_MIN_MIRRORING, KALEIDOSCOPE_MIN_SIZE,
+};
+pub use leave_color::{
+    leave_color_frame_f32, LeaveColorError, LeaveColorGrade, LeaveColorMatch,
+    LEAVE_COLOR_MATCH_COUNT, LEAVE_COLOR_MAX_PERCENT, LEAVE_COLOR_MIN_PERCENT,
 };
 pub use lens_distortion::{
     lens_distortion_frame_f32, LensDistortionDirection, LensDistortionError, LensDistortionGrade,

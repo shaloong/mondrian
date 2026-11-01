@@ -344,6 +344,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::LeaveColor { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "leave_color",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LensDistortion { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "lens_distortion",
@@ -920,6 +926,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::MatteRefine { .. } => 4,
         EffectRenderOp::Ramp { .. } => 0,
         EffectRenderOp::Arithmetic { .. } => 0,
+        EffectRenderOp::LeaveColor { .. } => 0,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
@@ -1343,6 +1350,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Arithmetic { grade } => {
             crate::arithmetic::apply_arithmetic_f32_controlled(working, grade, checkpoint)?;
+            Ok(true)
+        }
+        EffectRenderOp::LeaveColor { grade } => {
+            crate::leave_color::apply_leave_color_f32_controlled(working, grade, checkpoint)?;
             Ok(true)
         }
         EffectRenderOp::LensDistortion { grade } => {

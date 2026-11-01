@@ -107,6 +107,8 @@ pub enum EffectType {
     Echo,
     /// Arithmetic: combines the RGB channels with a constant per channel.
     Arithmetic,
+    /// Leave color: keeps one authored colour and decolours everything else.
+    LeaveColor,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -190,6 +192,7 @@ impl EffectType {
             Self::MatteRefine => "builtin.matte_refine".to_string(),
             Self::Echo => "builtin.echo".to_string(),
             Self::Arithmetic => "builtin.arithmetic".to_string(),
+            Self::LeaveColor => "builtin.leave_color".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -269,6 +272,7 @@ impl EffectType {
             "builtin.matte_refine" => Self::MatteRefine,
             "builtin.echo" => Self::Echo,
             "builtin.arithmetic" => Self::Arithmetic,
+            "builtin.leave_color" => Self::LeaveColor,
             other => Self::External(other.to_string()),
         }
     }
@@ -348,6 +352,7 @@ impl EffectType {
             Self::MatteRefine => "遮罩精修",
             Self::Echo => "残影",
             Self::Arithmetic => "算术",
+            Self::LeaveColor => "保留颜色",
             Self::External(name) => name,
         }
     }
@@ -425,6 +430,7 @@ impl EffectType {
             Self::MatteRefine => vec!["抠像"],
             Self::Echo => vec!["时间"],
             Self::Arithmetic => vec!["通道"],
+            Self::LeaveColor => vec!["颜色"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -504,6 +510,7 @@ impl EffectType {
             Self::MatteRefine => "matte_refine".to_string(),
             Self::Echo => "echo".to_string(),
             Self::Arithmetic => "arithmetic".to_string(),
+            Self::LeaveColor => "leave_color".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -832,6 +839,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::MatteRefine => Ok(()),
             Self::Echo => Ok(()),
             Self::Arithmetic => Ok(()),
+            Self::LeaveColor => Ok(()),
         }
     }
 }

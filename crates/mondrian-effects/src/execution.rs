@@ -2345,6 +2345,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::MatteRefine { .. } => "matte_refine",
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::Arithmetic { .. } => "arithmetic",
+        EffectRenderOp::LeaveColor { .. } => "leave_color",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

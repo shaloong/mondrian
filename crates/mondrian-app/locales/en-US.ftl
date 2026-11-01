@@ -2460,3 +2460,14 @@ parameter-mondrian-effect-arithmetic-operator-screen = Screen
 parameter-mondrian-effect-arithmetic-operator-slice = Slice
 parameter-mondrian-effect-arithmetic-operator-subtract = Subtract
 parameter-mondrian-effect-arithmetic-operator-xor = Xor
+
+## Leave Color 保留颜色
+effect-leave-color = Leave Color
+parameter-group-leave-color = Leave Color
+parameter-mondrian-effect-builtin-leave-color-amount-label = Amount
+parameter-mondrian-effect-builtin-leave-color-colour-label = Kept Color
+parameter-mondrian-effect-builtin-leave-color-edge-softness-label = Edge Softness
+parameter-mondrian-effect-builtin-leave-color-match-label = Match
+parameter-mondrian-effect-builtin-leave-color-tolerance-label = Tolerance
+parameter-mondrian-effect-leave-color-match-hue = Use Hue
+parameter-mondrian-effect-leave-color-match-rgb = Use RGB

@@ -140,6 +140,10 @@ pub enum EffectGpuPointOp {
     Arithmetic {
         grade: crate::ArithmeticGrade,
     },
+    /// Leave color: keeps one authored colour and decolours everything else.
+    LeaveColor {
+        grade: crate::LeaveColorGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -847,6 +851,7 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::Levels { grade } => Ok(EffectGpuPointOp::Levels { grade: *grade }),
         EffectRenderOp::Ramp { grade } => Ok(EffectGpuPointOp::Ramp { grade: *grade }),
         EffectRenderOp::Arithmetic { grade } => Ok(EffectGpuPointOp::Arithmetic { grade: *grade }),
+        EffectRenderOp::LeaveColor { grade } => Ok(EffectGpuPointOp::LeaveColor { grade: *grade }),
         EffectRenderOp::Threshold { grade } => Ok(EffectGpuPointOp::Threshold {
             level: grade.level(),
             luminance_coefficients: grade.luminance_coefficients(),
@@ -942,6 +947,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::MatteRefine { .. } => "matte_refine",
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::Arithmetic { .. } => "arithmetic",
+        EffectRenderOp::LeaveColor { .. } => "leave_color",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",
