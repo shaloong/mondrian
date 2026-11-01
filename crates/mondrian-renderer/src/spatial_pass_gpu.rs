@@ -53,6 +53,7 @@ pub(crate) struct EffectSpatialGpu {
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
     flip: wgpu::RenderPipeline,
+    ripple: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
@@ -489,6 +490,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let ripple = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.ripple"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_ripple"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let lens_flare = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.lens-flare"),
             layout: Some(&layout),
@@ -651,6 +682,7 @@ impl EffectSpatialGpu {
             polar_coordinates,
             lens_distortion,
             flip,
+            ripple,
             lens_flare,
             bulge,
             split,
@@ -835,6 +867,40 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Records the ripple pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_ripple(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniforms = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.ripple,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -933,6 +999,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
             EffectGpuSpatialPass::Flip { .. } => Ok(1),
+            EffectGpuSpatialPass::Ripple { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1150,6 +1217,20 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_flip(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Ripple { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_ripple(
                     device,
                     encoder,
                     params,
@@ -2384,6 +2465,37 @@ fn lens_sample_position(column: f32, row: f32, focal: f32, scale: f32, invert: b
     return centre + delta * (mapped / radius);
 }
 
+fn ripple_displacement(distance: f32, radius: f32) -> f32 {
+    let normalized = distance / radius;
+    let envelope = 1.0 - normalized * normalized;
+    let wavelength = max(uniforms.extra.x, 1.0e-6);
+    let angle = 6.283185307179586 * (distance / wavelength - uniforms.extra.z);
+    var wave = sin(angle);
+    if (uniforms.params.w < 1.5) {
+        wave = 0.5 + 0.5 * wave;
+    }
+    return uniforms.extra.y * envelope * envelope * wave;
+}
+
+@fragment
+fn fs_ripple(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let centre = uniforms.params.xy;
+    let radius = uniforms.params.z * min(uniforms.size.x, uniforms.size.y);
+    if (uniforms.extra.y <= 1.0e-6 || radius <= 0.0) {
+        return load_clamped(pixel);
+    }
+    let delta = vec2<f32>(f32(pixel.x), f32(pixel.y)) - centre;
+    let distance = length(delta);
+    if (distance <= 0.0 || distance >= radius) {
+        return unpremultiply(premultiply(load_clamped(pixel)));
+    }
+    let displacement = ripple_displacement(distance, radius);
+    let scale = (distance + displacement) / distance;
+    let sample = centre + delta * scale;
+    return unpremultiply(sample_bilinear_premultiplied(sample.x, sample.y));
+}
+
 @fragment
 fn fs_flip(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
@@ -3103,6 +3215,15 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         let flip =
             mondrian_effects::FlipGrade::new(mondrian_effects::FlipAxis::Both, [7.5, 6.25], 70.0)
                 .expect("valid flip grade");
+        let ripple = mondrian_effects::RippleGrade::new(
+            70.0,
+            [7.0, 6.0],
+            mondrian_effects::RippleType::Asymmetric,
+            5.5,
+            2.0,
+            0.15,
+        )
+        .expect("valid ripple grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -3113,6 +3234,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Twirl { grade: twirl },
             mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
             mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
+            mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
         ];
 
         let mut cpu = pixels.clone();
@@ -3142,6 +3264,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             &flip,
+        ));
+        assert!(mondrian_effects::ripple_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            ripple,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -3424,6 +3552,109 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "split {point_a:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_ripple_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU ripple parity test: no GPU adapter available");
+            return;
+        };
+        let width = 23_u32;
+        let height = 19_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.021 * (x + 3 * y) as f32;
+                pixels[y * width as usize + x] = [
+                    value,
+                    0.62 - value * 0.35,
+                    0.15 + value * 0.8,
+                    1.0 - 0.02 * (x % 4) as f32,
+                ];
+            }
+        }
+        // Exact zero coverage must canonicalise hidden colour on both paths, and
+        // every pixel outside the ripple passes through the premultiplied
+        // round trip rather than the raw texture value.
+        pixels[16] = [0.0, 0.0, 0.0, 0.0];
+        pixels[100] = [3.0, 0.5, -1.0, 0.0];
+        pixels[240] = [1.75, -0.4, 0.9, 0.35];
+        for (radius, centre, wave_type, wave_width, wave_height, phase) in [
+            (
+                80.0_f32,
+                [11.0_f32, 9.5_f32],
+                mondrian_effects::RippleType::Asymmetric,
+                7.0_f32,
+                3.0_f32,
+                0.1_f32,
+            ),
+            (
+                45.0,
+                [10.25, 8.75],
+                mondrian_effects::RippleType::Symmetric,
+                11.0,
+                5.5,
+                0.35,
+            ),
+            (
+                100.0,
+                [0.0, 0.0],
+                mondrian_effects::RippleType::Asymmetric,
+                5.0,
+                2.5,
+                0.7,
+            ),
+        ] {
+            let grade = mondrian_effects::RippleGrade::new(
+                radius,
+                centre,
+                wave_type,
+                wave_width,
+                wave_height,
+                phase,
+            )
+            .expect("ripple grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::ripple_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.ripple-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_ripple(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded ripple");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "ripple {wave_type:?} pixel {index} channel {channel}: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
