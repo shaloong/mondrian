@@ -925,6 +925,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Transform { .. } => "transform",
         EffectRenderOp::CornerPin { .. } => "corner_pin",
         EffectRenderOp::TurbulentDisplace { .. } => "turbulent_displace",
+        EffectRenderOp::Deband { .. } => "deband",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

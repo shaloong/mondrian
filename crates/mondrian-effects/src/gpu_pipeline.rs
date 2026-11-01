@@ -143,6 +143,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored fractal-noise displacement parameters.
         grade: crate::TurbulentDisplaceGrade,
     },
+    Deband {
+        /// Authored edge threshold, blur radius, and dither amplitude.
+        grade: crate::DebandGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -176,6 +180,7 @@ impl EffectGpuSpatialPass {
             Self::Transform { .. } => "transform",
             Self::CornerPin { .. } => "corner_pin",
             Self::TurbulentDisplace { .. } => "turbulent_displace",
+            Self::Deband { .. } => "deband",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -221,6 +226,7 @@ impl EffectGpuSpatialPass {
             Self::Transform { .. } => u32::MAX,
             Self::CornerPin { .. } => u32::MAX,
             Self::TurbulentDisplace { .. } => u32::MAX,
+            Self::Deband { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -259,6 +265,7 @@ impl EffectGpuSpatialPass {
             Self::Transform { .. } => u32::MAX,
             Self::CornerPin { .. } => u32::MAX,
             Self::TurbulentDisplace { .. } => u32::MAX,
+            Self::Deband { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -546,6 +553,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::TurbulentDisplace { grade } => {
             Some(EffectGpuSpatialPass::TurbulentDisplace { grade: *grade })
         }
+        EffectRenderOp::Deband { grade } => Some(EffectGpuSpatialPass::Deband { grade: *grade }),
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }

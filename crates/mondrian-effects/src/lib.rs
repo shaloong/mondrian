@@ -28,6 +28,7 @@ pub mod color_offset;
 pub mod convolution;
 pub mod corner_pin;
 pub mod coverage;
+pub mod deband;
 pub mod directional_blur;
 pub mod drop_shadow;
 pub mod effect;
@@ -155,6 +156,10 @@ pub use corner_pin::{
     CORNER_PIN_MAX_COORDINATE, CORNER_PIN_MIN_COORDINATE,
 };
 pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_premultiplied};
+pub use deband::{
+    deband_frame_f32, DebandError, DebandGrade, DEBAND_DITHER_SALT_A, DEBAND_DITHER_SALT_B,
+    DEBAND_MAX_EDGE_THRESHOLD, DEBAND_MAX_POST_OPTIMIZATION, DEBAND_MAX_RADIUS, DEBAND_MIN_RADIUS,
+};
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
     effect_display_name, effect_library_types, effect_registry_revision, instantiate_effect_node,

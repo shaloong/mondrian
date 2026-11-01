@@ -2820,6 +2820,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Transform { .. } => "transform",
         crate::EffectRenderOp::CornerPin { .. } => "corner_pin",
         crate::EffectRenderOp::TurbulentDisplace { .. } => "turbulent_displace",
+        crate::EffectRenderOp::Deband { .. } => "deband",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",

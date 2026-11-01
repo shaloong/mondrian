@@ -945,6 +945,10 @@ pub enum EffectRenderOp {
     TurbulentDisplace {
         grade: crate::TurbulentDisplaceGrade,
     },
+    /// Deband: smooths the eight-bit colour banding of gradients.
+    Deband {
+        grade: crate::DebandGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1207,6 +1211,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::TurbulentDisplace { grade } => {
                 formatter.debug_struct("TurbulentDisplace").field("grade", grade).finish()
+            }
+            Self::Deband { grade } => {
+                formatter.debug_struct("Deband").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1875,6 +1882,12 @@ impl EffectRenderOp {
                 extra.map(f32::to_bits).hash(state);
                 aces.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Deband { grade } => {
+                67u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2083,6 +2096,7 @@ impl EffectRenderOp {
             EffectRenderOp::Transform { .. } => 4,
             EffectRenderOp::CornerPin { .. } => 4,
             EffectRenderOp::TurbulentDisplace { .. } => 5,
+            EffectRenderOp::Deband { .. } => 3,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2638,7 +2652,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 65] {
+fn builtin_effect_types() -> [EffectType; 66] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2705,6 +2719,7 @@ fn builtin_effect_types() -> [EffectType; 65] {
         EffectType::Transform,
         EffectType::CornerPin,
         EffectType::TurbulentDisplace,
+        EffectType::Deband,
     ]
 }
 
@@ -5998,6 +6013,41 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::Deband => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_threshold",
+                "去色带",
+                "边缘阈值",
+                PropertyValue::Float(0.025),
+                Some(0.0),
+                Some(1.0),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "去色带",
+                "半径",
+                PropertyValue::Float(3.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "post_optimization",
+                "去色带",
+                "色彩抖动",
+                PropertyValue::Float(0.05),
+                Some(0.0),
+                Some(1.0),
+                Some(0.001),
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -7184,6 +7234,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::TurbulentDisplace => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Deband => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -9639,6 +9694,27 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Deband => {
+            let edge_threshold_id = builtin_parameter_id(effect_type, "edge_threshold");
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let post_optimization_id = builtin_parameter_id(effect_type, "post_optimization");
+            Some(Arc::new(move |effect, context, graph| {
+                let grade = crate::DebandGrade::new(
+                    effect.evaluate_f32_parameter(&edge_threshold_id, context.time, 0.025),
+                    effect.evaluate_f32_parameter(&radius_id, context.time, 3.0),
+                    effect.evaluate_f32_parameter(&post_optimization_id, context.time, 0.05),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Deband { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensDistortion => {
             let fov_id = builtin_parameter_id(effect_type, "fov");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -10419,6 +10495,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Transform => "变换",
         EffectType::CornerPin => "边角定位",
         EffectType::TurbulentDisplace => "湍流置换",
+        EffectType::Deband => "去色带",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -11718,6 +11795,7 @@ mod tests {
             EffectType::Transform,
             EffectType::CornerPin,
             EffectType::TurbulentDisplace,
+            EffectType::Deband,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -17420,6 +17498,101 @@ mod tests {
             rendered.contains("unknown enum key `mystery`"),
             "{rendered}"
         );
+    }
+
+    fn deband_op(graph: &EffectRenderGraph) -> Option<crate::DebandGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Deband { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Deband { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_deband(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Deband)
+            .expect("the deband effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Deband.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the deband parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn deband_defaults_compile_to_the_documented_operation() {
+        // The default grade is not the identity: `radius` defaults to 3 px, so
+        // the node must appear and carry exactly the documented defaults.
+        let effect = instantiate_effect_node(EffectType::Deband)
+            .expect("the deband effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default deband should compile");
+        let grade = deband_op(&graph).expect("the default grade emits a node");
+        assert_eq!(grade.edge_threshold(), 0.025);
+        assert_eq!(grade.radius(), 3.0);
+        assert_eq!(grade.post_optimization(), 0.05);
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn deband_authored_configuration_reaches_the_operation() {
+        let effect = author_deband(&[
+            ("edge_threshold", PropertyValue::Float(0.25)),
+            ("radius", PropertyValue::Float(12.5)),
+            ("post_optimization", PropertyValue::Float(0.5)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = deband_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.edge_threshold(), 0.25);
+        assert_eq!(grade.radius(), 12.5);
+        assert_eq!(grade.post_optimization(), 0.5);
+    }
+
+    #[test]
+    fn deband_identity_compiles_to_no_node() {
+        let effect = author_deband(&[
+            ("radius", PropertyValue::Float(0.0)),
+            ("post_optimization", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity grade should compile");
+        assert!(deband_op(&graph).is_none());
+    }
+
+    #[test]
+    fn deband_zero_radius_still_emits_a_dither_node() {
+        // The identity is exactly `radius == 0 && post_optimization == 0`: a zero
+        // radius with dither is a real operation, not an identity.
+        let effect = author_deband(&[
+            ("radius", PropertyValue::Float(0.0)),
+            ("post_optimization", PropertyValue::Float(0.5)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a dithered identity radius should compile");
+        let grade = deband_op(&graph).expect("the dither still emits a node");
+        assert_eq!(grade.radius(), 0.0);
+        assert_eq!(grade.post_optimization(), 0.5);
+    }
+
+    #[test]
+    fn deband_out_of_range_radius_is_rejected() {
+        let mut effect = instantiate_effect_node(EffectType::Deband)
+            .expect("the deband effect should instantiate");
+        // The property contract rejects the value before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Deband.property_path("radius"),
+                value: PropertyValue::Float(101.0),
+            })
+            .expect_err("an out-of-range radius must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 100]"), "{rendered}");
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {
