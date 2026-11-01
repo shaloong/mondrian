@@ -922,6 +922,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Flip { .. } => "flip",
         EffectRenderOp::Ripple { .. } => "ripple",
         EffectRenderOp::WaveWarp { .. } => "wave_warp",
+        EffectRenderOp::Transform { .. } => "transform",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

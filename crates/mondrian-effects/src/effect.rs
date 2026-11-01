@@ -933,6 +933,10 @@ pub enum EffectRenderOp {
     WaveWarp {
         grade: crate::WaveWarpGrade,
     },
+    /// Transform: moves, scales, skews and rotates the frame about its centre.
+    Transform {
+        grade: crate::TransformGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1186,6 +1190,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::WaveWarp { grade } => {
                 formatter.debug_struct("WaveWarp").field("grade", grade).finish()
+            }
+            Self::Transform { grade } => {
+                formatter.debug_struct("Transform").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1820,6 +1827,29 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Transform { grade } => {
+                64u8.hash(state);
+                let (anchor_x, anchor_y) = (grade.anchor()[0], grade.anchor()[1]);
+                let (position_x, position_y) = (grade.position()[0], grade.position()[1]);
+                [
+                    anchor_x,
+                    anchor_y,
+                    position_x,
+                    position_y,
+                    grade.uniform_scale(),
+                    grade.scale_width(),
+                    grade.scale_height(),
+                    grade.skew_degrees(),
+                    grade.skew_axis_degrees(),
+                    grade.rotation_degrees(),
+                    grade.opacity_percent(),
+                    grade.shutter_angle_degrees(),
+                ]
+                .map(f32::to_bits)
+                .hash(state);
+                grade.use_composition_shutter().hash(state);
+                grade.sampling().as_u32().hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2025,6 +2055,7 @@ impl EffectRenderOp {
             EffectRenderOp::Flip { .. } => 1,
             EffectRenderOp::Ripple { .. } => 2,
             EffectRenderOp::WaveWarp { .. } => 3,
+            EffectRenderOp::Transform { .. } => 4,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2580,7 +2611,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 62] {
+fn builtin_effect_types() -> [EffectType; 63] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2644,6 +2675,7 @@ fn builtin_effect_types() -> [EffectType; 62] {
         EffectType::ColorOffset,
         EffectType::BrightnessContrast,
         EffectType::Levels,
+        EffectType::Transform,
     ]
 }
 
@@ -5430,6 +5462,181 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::Transform => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "anchor_x",
+                "变换",
+                "定位点 X",
+                PropertyValue::Float(0.0),
+                Some(-(crate::TRANSFORM_MAX_CENTRE_PIXELS as f64)),
+                Some(crate::TRANSFORM_MAX_CENTRE_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "anchor_y",
+                "变换",
+                "定位点 Y",
+                PropertyValue::Float(0.0),
+                Some(-(crate::TRANSFORM_MAX_CENTRE_PIXELS as f64)),
+                Some(crate::TRANSFORM_MAX_CENTRE_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "position_x",
+                "变换",
+                "位置 X",
+                PropertyValue::Float(0.0),
+                Some(-(crate::TRANSFORM_MAX_CENTRE_PIXELS as f64)),
+                Some(crate::TRANSFORM_MAX_CENTRE_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "position_y",
+                "变换",
+                "位置 Y",
+                PropertyValue::Float(0.0),
+                Some(-(crate::TRANSFORM_MAX_CENTRE_PIXELS as f64)),
+                Some(crate::TRANSFORM_MAX_CENTRE_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "uniform_scale",
+                "变换",
+                "统一缩放",
+                PropertyValue::Float(100.0),
+                Some(crate::TRANSFORM_MIN_SCALE_PERCENT as f64),
+                Some(crate::TRANSFORM_MAX_SCALE_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "scale_width",
+                "变换",
+                "宽度缩放",
+                PropertyValue::Float(100.0),
+                Some(crate::TRANSFORM_MIN_SCALE_PERCENT as f64),
+                Some(crate::TRANSFORM_MAX_SCALE_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "scale_height",
+                "变换",
+                "高度缩放",
+                PropertyValue::Float(100.0),
+                Some(crate::TRANSFORM_MIN_SCALE_PERCENT as f64),
+                Some(crate::TRANSFORM_MAX_SCALE_PERCENT as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "skew",
+                "变换",
+                "倾斜",
+                PropertyValue::Float(0.0),
+                Some(crate::TRANSFORM_MIN_SKEW_DEGREES as f64),
+                Some(crate::TRANSFORM_MAX_SKEW_DEGREES as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "skew_axis",
+                "变换",
+                "倾斜轴",
+                PropertyValue::Float(0.0),
+                Some(-(crate::TRANSFORM_MAX_AXIS_DEGREES as f64)),
+                Some(crate::TRANSFORM_MAX_AXIS_DEGREES as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "rotation",
+                "变换",
+                "旋转",
+                PropertyValue::Float(0.0),
+                Some(-(crate::TRANSFORM_MAX_ROTATION_DEGREES as f64)),
+                Some(crate::TRANSFORM_MAX_ROTATION_DEGREES as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "变换",
+                "不透明度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(100.0),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "use_composition_shutter",
+                "变换",
+                "使用合成快门角度（暂保留：运动模糊需要逐帧速度）",
+                "off",
+                vec![
+                    ParameterEnumOption::new(
+                        "off",
+                        "关闭",
+                        "mondrian.effect.transform.use_composition_shutter.off",
+                    ),
+                    ParameterEnumOption::new(
+                        "on",
+                        "开启",
+                        "mondrian.effect.transform.use_composition_shutter.on",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shutter_angle",
+                "变换",
+                "快门角度（暂保留：运动模糊需要逐帧速度）",
+                PropertyValue::Float(180.0),
+                Some(0.0),
+                Some(crate::TRANSFORM_MAX_SHUTTER_DEGREES as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "sampling",
+                "变换",
+                "采样",
+                crate::TransformSampling::Low.as_key(),
+                vec![
+                    ParameterEnumOption::new("low", "低", "mondrian.effect.transform.sampling.low"),
+                    ParameterEnumOption::new(
+                        "normal",
+                        "标准",
+                        "mondrian.effect.transform.sampling.normal",
+                    ),
+                    ParameterEnumOption::new(
+                        "high",
+                        "高",
+                        "mondrian.effect.transform.sampling.high",
+                    ),
+                ],
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -6327,6 +6534,15 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Ripple, "wave_width" | "wave_height") => ParameterUnit::Pixels,
         (EffectType::WaveWarp, "wave_width" | "wave_height") => ParameterUnit::Pixels,
         (EffectType::WaveWarp, "direction" | "phase") => ParameterUnit::Degrees,
+        (EffectType::Transform, "anchor_x" | "anchor_y" | "position_x" | "position_y") => {
+            ParameterUnit::Pixels
+        }
+        (EffectType::Transform, "uniform_scale" | "scale_width" | "scale_height" | "opacity") => {
+            ParameterUnit::Percent
+        }
+        (EffectType::Transform, "skew" | "skew_axis" | "rotation" | "shutter_angle") => {
+            ParameterUnit::Degrees
+        }
         (EffectType::LensDistortion, "fov") => ParameterUnit::Degrees,
         (EffectType::LensDistortion, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Mirror, "angle") => ParameterUnit::Degrees,
@@ -6582,6 +6798,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::Levels => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Transform => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ColorOffset => EffectExecutionContract {
@@ -8720,6 +8941,102 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Transform => {
+            let anchor_x_id = builtin_parameter_id(effect_type, "anchor_x");
+            let anchor_y_id = builtin_parameter_id(effect_type, "anchor_y");
+            let position_x_id = builtin_parameter_id(effect_type, "position_x");
+            let position_y_id = builtin_parameter_id(effect_type, "position_y");
+            let uniform_scale_id = builtin_parameter_id(effect_type, "uniform_scale");
+            let scale_width_id = builtin_parameter_id(effect_type, "scale_width");
+            let scale_height_id = builtin_parameter_id(effect_type, "scale_height");
+            let skew_id = builtin_parameter_id(effect_type, "skew");
+            let skew_axis_id = builtin_parameter_id(effect_type, "skew_axis");
+            let rotation_id = builtin_parameter_id(effect_type, "rotation");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let shutter_id = builtin_parameter_id(effect_type, "use_composition_shutter");
+            let shutter_angle_id = builtin_parameter_id(effect_type, "shutter_angle");
+            let sampling_id = builtin_parameter_id(effect_type, "sampling");
+            Some(Arc::new(move |effect, context, graph| {
+                let use_composition_shutter =
+                    match effect.evaluate_parameter(&shutter_id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match key.as_str() {
+                            "on" => true,
+                            "off" => false,
+                            _ => {
+                                return Err(EffectGraphBuildError::InvalidAuthorState {
+                                    effect_key: effect.effect_type.key(),
+                                    effect_id: effect.id,
+                                    reason: format!(
+                                "transform use composition shutter {key} is not a declared option"
+                            ),
+                                })
+                            }
+                        },
+                        None => false,
+                        Some(_) => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key(),
+                                effect_id: effect.id,
+                                reason: "transform use composition shutter must be an enum option"
+                                    .to_string(),
+                            })
+                        }
+                    };
+                let sampling = match effect.evaluate_parameter(&sampling_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        match crate::TransformSampling::from_key(&key) {
+                            Some(sampling) => sampling,
+                            None => {
+                                return Err(EffectGraphBuildError::InvalidAuthorState {
+                                    effect_key: effect.effect_type.key(),
+                                    effect_id: effect.id,
+                                    reason: format!(
+                                        "transform sampling {key} is not a declared option"
+                                    ),
+                                })
+                            }
+                        }
+                    }
+                    None => crate::TransformSampling::Low,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: "transform sampling must be an enum option".to_string(),
+                        })
+                    }
+                };
+                let grade = crate::TransformGrade::new(
+                    [
+                        effect.evaluate_f32_parameter(&anchor_x_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&anchor_y_id, context.time, 0.0),
+                    ],
+                    [
+                        effect.evaluate_f32_parameter(&position_x_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&position_y_id, context.time, 0.0),
+                    ],
+                    effect.evaluate_f32_parameter(&uniform_scale_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&scale_width_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&scale_height_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&skew_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&skew_axis_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&rotation_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&opacity_id, context.time, 100.0),
+                    use_composition_shutter,
+                    effect.evaluate_f32_parameter(&shutter_angle_id, context.time, 180.0),
+                    sampling,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Transform { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensDistortion => {
             let fov_id = builtin_parameter_id(effect_type, "fov");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -9497,6 +9814,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Emboss => "浮雕",
         EffectType::BrightnessContrast => "亮度对比度",
         EffectType::Levels => "色阶",
+        EffectType::Transform => "变换",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -10793,6 +11111,7 @@ mod tests {
             EffectType::ColorOffset,
             EffectType::BrightnessContrast,
             EffectType::Levels,
+            EffectType::Transform,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -15828,6 +16147,134 @@ mod tests {
         let effect = author_wave_warp(&[
             ("wave_type", PropertyValue::Enum("noise".to_string())),
             ("wave_height", PropertyValue::Float(-7.5)),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+    }
+
+    fn transform_op(graph: &EffectRenderGraph) -> Option<crate::TransformGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Transform { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Transform { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_transform(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Transform)
+            .expect("the transform effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Transform.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the transform parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn transform_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::Transform)
+            .expect("the transform effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default transform should compile");
+        assert!(transform_op(&graph).is_none());
+    }
+
+    #[test]
+    fn transform_authored_state_reaches_the_operation() {
+        let effect = author_transform(&[
+            ("anchor_x", PropertyValue::Float(12.5)),
+            ("anchor_y", PropertyValue::Float(-3.0)),
+            ("position_x", PropertyValue::Float(7.0)),
+            ("position_y", PropertyValue::Float(-4.5)),
+            ("uniform_scale", PropertyValue::Float(90.0)),
+            ("scale_width", PropertyValue::Float(110.0)),
+            ("scale_height", PropertyValue::Float(80.0)),
+            ("skew", PropertyValue::Float(12.0)),
+            ("skew_axis", PropertyValue::Float(45.0)),
+            ("rotation", PropertyValue::Float(30.0)),
+            ("opacity", PropertyValue::Float(60.0)),
+            (
+                "use_composition_shutter",
+                PropertyValue::Enum("on".to_string()),
+            ),
+            ("shutter_angle", PropertyValue::Float(200.0)),
+            ("sampling", PropertyValue::Enum("high".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = transform_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.anchor(), [12.5, -3.0]);
+        assert_eq!(grade.position(), [7.0, -4.5]);
+        assert!((grade.uniform_scale() - 90.0).abs() <= 1e-6);
+        assert!((grade.scale_width() - 110.0).abs() <= 1e-6);
+        assert!((grade.scale_height() - 80.0).abs() <= 1e-6);
+        assert!((grade.skew_degrees() - 12.0).abs() <= 1e-6);
+        assert!((grade.skew_axis_degrees() - 45.0).abs() <= 1e-6);
+        assert!((grade.rotation_degrees() - 30.0).abs() <= 1e-6);
+        assert!((grade.opacity_percent() - 60.0).abs() <= 1e-6);
+        assert!(grade.use_composition_shutter());
+        assert!((grade.shutter_angle_degrees() - 200.0).abs() <= 1e-6);
+        assert_eq!(grade.sampling(), crate::TransformSampling::High);
+    }
+
+    #[test]
+    fn transform_any_single_deviation_still_emits_a_node() {
+        for (parameter, value) in [
+            ("anchor_x", PropertyValue::Float(1.0)),
+            ("position_y", PropertyValue::Float(-1.0)),
+            ("uniform_scale", PropertyValue::Float(99.0)),
+            ("scale_width", PropertyValue::Float(101.0)),
+            ("scale_height", PropertyValue::Float(99.5)),
+            ("skew", PropertyValue::Float(0.5)),
+            ("rotation", PropertyValue::Float(0.25)),
+            ("opacity", PropertyValue::Float(99.0)),
+        ] {
+            let effect = author_transform(&[(parameter, value)]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the deviating graph should build");
+            assert!(
+                transform_op(&graph).is_some(),
+                "{parameter} must not be elided"
+            );
+        }
+    }
+
+    #[test]
+    fn transform_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::Transform)
+            .expect("the transform effect should instantiate");
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Transform.property_path("skew"),
+            value: PropertyValue::Float(89.5),
+        });
+        assert!(outside.is_err(), "the skew angle is bounded by the schema");
+
+        let mut unknown = instantiate_effect_node(EffectType::Transform)
+            .expect("the transform effect should instantiate");
+        let rejected = unknown.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Transform.property_path("sampling"),
+            value: PropertyValue::Enum("ultra".to_string()),
+        });
+        assert!(
+            rejected.is_err(),
+            "an undeclared sampling option is rejected"
+        );
+    }
+
+    #[test]
+    fn transform_authored_state_survives_serialization_round_trip() {
+        let effect = author_transform(&[
+            ("rotation", PropertyValue::Float(-45.0)),
+            ("sampling", PropertyValue::Enum("normal".to_string())),
         ]);
         let json = serde_json::to_string(&effect).expect("the node serialises");
         let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");

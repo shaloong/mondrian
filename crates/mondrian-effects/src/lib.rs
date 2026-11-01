@@ -41,6 +41,7 @@ pub mod spherize;
 pub mod split;
 pub mod threshold;
 pub mod tint;
+pub mod transform;
 pub mod tritone;
 pub mod twirl;
 pub mod vibrance;
@@ -329,6 +330,12 @@ pub use tint::{tint_frame_f32, TintError, TintGrade};
 pub use tracking::{
     canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingError,
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
+};
+pub use transform::{
+    transform_frame_f32, TransformError, TransformGrade, TransformSampling,
+    TRANSFORM_MAX_AXIS_DEGREES, TRANSFORM_MAX_CENTRE_PIXELS, TRANSFORM_MAX_ROTATION_DEGREES,
+    TRANSFORM_MAX_SCALE_PERCENT, TRANSFORM_MAX_SHUTTER_DEGREES, TRANSFORM_MAX_SKEW_DEGREES,
+    TRANSFORM_MIN_SCALE_PERCENT, TRANSFORM_MIN_SKEW_DEGREES, TRANSFORM_SAMPLING_COUNT,
 };
 pub use tritone::{tritone_frame_f32, TritoneError, TritoneGrade};
 pub use twirl::{

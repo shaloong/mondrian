@@ -85,6 +85,8 @@ pub enum EffectType {
     BrightnessContrast,
     /// Levels: per-channel input and output points around a gamma.
     Levels,
+    /// Transform: moves, scales, skews and rotates the frame about its centre.
+    Transform,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -157,6 +159,7 @@ impl EffectType {
             Self::Posterize => "builtin.posterize".to_string(),
             Self::BrightnessContrast => "builtin.brightness_contrast".to_string(),
             Self::Levels => "builtin.levels".to_string(),
+            Self::Transform => "builtin.transform".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -225,6 +228,7 @@ impl EffectType {
             "builtin.posterize" => Self::Posterize,
             "builtin.brightness_contrast" => Self::BrightnessContrast,
             "builtin.levels" => Self::Levels,
+            "builtin.transform" => Self::Transform,
             other => Self::External(other.to_string()),
         }
     }
@@ -293,6 +297,7 @@ impl EffectType {
             Self::Noise => "噪点",
             Self::BrightnessContrast => "亮度对比度",
             Self::Levels => "色阶",
+            Self::Transform => "变换",
             Self::External(name) => name,
         }
     }
@@ -359,6 +364,7 @@ impl EffectType {
             Self::Noise => vec!["胶片质感"],
             Self::BrightnessContrast => vec!["颜色", "调色"],
             Self::Levels => vec!["颜色", "调色"],
+            Self::Transform => vec!["变换"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -427,6 +433,7 @@ impl EffectType {
             Self::Noise => "noise".to_string(),
             Self::BrightnessContrast => "brightness_contrast".to_string(),
             Self::Levels => "levels".to_string(),
+            Self::Transform => "transform".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -744,6 +751,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Spherize => Ok(()),
             Self::BrightnessContrast => Ok(()),
             Self::Levels => Ok(()),
+            Self::Transform => Ok(()),
         }
     }
 }

@@ -284,6 +284,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Transform { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "transform",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LensDistortion { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "lens_distortion",
@@ -850,6 +856,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Flip { .. } => 0,
         EffectRenderOp::Ripple { .. } => 0,
         EffectRenderOp::WaveWarp { .. } => 0,
+        EffectRenderOp::Transform { .. } => 1,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
@@ -1181,6 +1188,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             *grade,
             checkpoint,
         ),
+        EffectRenderOp::Transform { grade } => {
+            crate::transform::apply_transform_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
         EffectRenderOp::LensDistortion { grade } => {
             crate::lens_distortion::apply_lens_distortion_f32_controlled(
                 working,
