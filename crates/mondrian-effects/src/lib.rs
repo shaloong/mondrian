@@ -26,6 +26,7 @@ pub mod color_curves;
 pub mod color_emboss;
 pub mod color_offset;
 pub mod convolution;
+pub mod corner_pin;
 pub mod coverage;
 pub mod directional_blur;
 pub mod drop_shadow;
@@ -147,6 +148,10 @@ pub use color_offset::{
 pub use convolution::{
     convolution_frame_f32, ConvolutionError, ConvolutionGrade, CONVOLUTION_HALO_PIXELS,
     CONVOLUTION_MAX_CELL, CONVOLUTION_MIN_CELL,
+};
+pub use corner_pin::{
+    corner_pin_frame_f32, CornerPinError, CornerPinGrade, CORNER_PIN_CORNER_COUNT,
+    CORNER_PIN_MAX_COORDINATE, CORNER_PIN_MIN_COORDINATE,
 };
 pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_premultiplied};
 pub use effect::{

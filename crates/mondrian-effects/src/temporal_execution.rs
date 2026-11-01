@@ -2818,6 +2818,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Ripple { .. } => "ripple",
         crate::EffectRenderOp::WaveWarp { .. } => "wave_warp",
         crate::EffectRenderOp::Transform { .. } => "transform",
+        crate::EffectRenderOp::CornerPin { .. } => "corner_pin",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",

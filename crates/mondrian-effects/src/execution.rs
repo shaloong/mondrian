@@ -2336,6 +2336,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Ripple { .. } => "ripple",
         EffectRenderOp::WaveWarp { .. } => "wave_warp",
         EffectRenderOp::Transform { .. } => "transform",
+        EffectRenderOp::CornerPin { .. } => "corner_pin",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

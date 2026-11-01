@@ -937,6 +937,10 @@ pub enum EffectRenderOp {
     Transform {
         grade: crate::TransformGrade,
     },
+    /// Corner pin: pins the frame onto an arbitrary quadrilateral.
+    CornerPin {
+        grade: crate::CornerPinGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1193,6 +1197,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Transform { grade } => {
                 formatter.debug_struct("Transform").field("grade", grade).finish()
+            }
+            Self::CornerPin { grade } => {
+                formatter.debug_struct("CornerPin").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1850,6 +1857,10 @@ impl EffectRenderOp {
                 grade.use_composition_shutter().hash(state);
                 grade.sampling().as_u32().hash(state);
             }
+            EffectRenderOp::CornerPin { grade } => {
+                65u8.hash(state);
+                grade.corners().map(|corner| corner.map(f32::to_bits)).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2056,6 +2067,7 @@ impl EffectRenderOp {
             EffectRenderOp::Ripple { .. } => 2,
             EffectRenderOp::WaveWarp { .. } => 3,
             EffectRenderOp::Transform { .. } => 4,
+            EffectRenderOp::CornerPin { .. } => 4,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2611,7 +2623,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 63] {
+fn builtin_effect_types() -> [EffectType; 64] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2676,6 +2688,7 @@ fn builtin_effect_types() -> [EffectType; 63] {
         EffectType::BrightnessContrast,
         EffectType::Levels,
         EffectType::Transform,
+        EffectType::CornerPin,
     ]
 }
 
@@ -5637,6 +5650,96 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::CornerPin => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "top_left_x",
+                "边角定位",
+                "左上 X",
+                PropertyValue::Float(0.0),
+                Some(crate::CORNER_PIN_MIN_COORDINATE as f64),
+                Some(crate::CORNER_PIN_MAX_COORDINATE as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "top_left_y",
+                "边角定位",
+                "左上 Y",
+                PropertyValue::Float(0.0),
+                Some(crate::CORNER_PIN_MIN_COORDINATE as f64),
+                Some(crate::CORNER_PIN_MAX_COORDINATE as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "top_right_x",
+                "边角定位",
+                "右上 X",
+                PropertyValue::Float(1.0),
+                Some(crate::CORNER_PIN_MIN_COORDINATE as f64),
+                Some(crate::CORNER_PIN_MAX_COORDINATE as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "top_right_y",
+                "边角定位",
+                "右上 Y",
+                PropertyValue::Float(0.0),
+                Some(crate::CORNER_PIN_MIN_COORDINATE as f64),
+                Some(crate::CORNER_PIN_MAX_COORDINATE as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "bottom_left_x",
+                "边角定位",
+                "左下 X",
+                PropertyValue::Float(0.0),
+                Some(crate::CORNER_PIN_MIN_COORDINATE as f64),
+                Some(crate::CORNER_PIN_MAX_COORDINATE as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "bottom_left_y",
+                "边角定位",
+                "左下 Y",
+                PropertyValue::Float(1.0),
+                Some(crate::CORNER_PIN_MIN_COORDINATE as f64),
+                Some(crate::CORNER_PIN_MAX_COORDINATE as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "bottom_right_x",
+                "边角定位",
+                "右下 X",
+                PropertyValue::Float(1.0),
+                Some(crate::CORNER_PIN_MIN_COORDINATE as f64),
+                Some(crate::CORNER_PIN_MAX_COORDINATE as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "bottom_right_y",
+                "边角定位",
+                "右下 Y",
+                PropertyValue::Float(1.0),
+                Some(crate::CORNER_PIN_MIN_COORDINATE as f64),
+                Some(crate::CORNER_PIN_MAX_COORDINATE as f64),
+                Some(0.001),
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -6608,6 +6711,14 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         | (EffectType::BlackAndWhite, "blue")
         | (EffectType::BlackAndWhite, "magenta") => ParameterUnit::Percent,
         (EffectType::BlackAndWhite, "tint_amount") => ParameterUnit::Normalized,
+        (EffectType::CornerPin, "top_left_x")
+        | (EffectType::CornerPin, "top_left_y")
+        | (EffectType::CornerPin, "top_right_x")
+        | (EffectType::CornerPin, "top_right_y")
+        | (EffectType::CornerPin, "bottom_left_x")
+        | (EffectType::CornerPin, "bottom_left_y")
+        | (EffectType::CornerPin, "bottom_right_x")
+        | (EffectType::CornerPin, "bottom_right_y") => ParameterUnit::Normalized,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -6801,6 +6912,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Transform => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::CornerPin => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -9037,6 +9153,45 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::CornerPin => {
+            let top_left_x_id = builtin_parameter_id(effect_type, "top_left_x");
+            let top_left_y_id = builtin_parameter_id(effect_type, "top_left_y");
+            let top_right_x_id = builtin_parameter_id(effect_type, "top_right_x");
+            let top_right_y_id = builtin_parameter_id(effect_type, "top_right_y");
+            let bottom_left_x_id = builtin_parameter_id(effect_type, "bottom_left_x");
+            let bottom_left_y_id = builtin_parameter_id(effect_type, "bottom_left_y");
+            let bottom_right_x_id = builtin_parameter_id(effect_type, "bottom_right_x");
+            let bottom_right_y_id = builtin_parameter_id(effect_type, "bottom_right_y");
+            Some(Arc::new(move |effect, context, graph| {
+                let grade = crate::CornerPinGrade::new(
+                    [
+                        effect.evaluate_f32_parameter(&top_left_x_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&top_left_y_id, context.time, 0.0),
+                    ],
+                    [
+                        effect.evaluate_f32_parameter(&top_right_x_id, context.time, 1.0),
+                        effect.evaluate_f32_parameter(&top_right_y_id, context.time, 0.0),
+                    ],
+                    [
+                        effect.evaluate_f32_parameter(&bottom_left_x_id, context.time, 0.0),
+                        effect.evaluate_f32_parameter(&bottom_left_y_id, context.time, 1.0),
+                    ],
+                    [
+                        effect.evaluate_f32_parameter(&bottom_right_x_id, context.time, 1.0),
+                        effect.evaluate_f32_parameter(&bottom_right_y_id, context.time, 1.0),
+                    ],
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::CornerPin { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensDistortion => {
             let fov_id = builtin_parameter_id(effect_type, "fov");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -9815,6 +9970,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BrightnessContrast => "亮度对比度",
         EffectType::Levels => "色阶",
         EffectType::Transform => "变换",
+        EffectType::CornerPin => "边角定位",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -11112,6 +11268,7 @@ mod tests {
             EffectType::BrightnessContrast,
             EffectType::Levels,
             EffectType::Transform,
+            EffectType::CornerPin,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -16279,6 +16436,144 @@ mod tests {
         let json = serde_json::to_string(&effect).expect("the node serialises");
         let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
         assert_eq!(restored, effect);
+    }
+
+    fn corner_pin_op(graph: &EffectRenderGraph) -> Option<crate::CornerPinGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::CornerPin { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::CornerPin { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_corner_pin(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::CornerPin)
+            .expect("the corner pin effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::CornerPin.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the corner pin parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn corner_pin_defaults_compile_to_no_node() {
+        let effect = instantiate_effect_node(EffectType::CornerPin)
+            .expect("the corner pin effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default corner pin should compile");
+        assert!(corner_pin_op(&graph).is_none());
+    }
+
+    #[test]
+    fn corner_pin_authored_quad_reaches_the_operation_and_hits_the_corners() {
+        let effect = author_corner_pin(&[
+            ("top_left_x", PropertyValue::Float(0.1)),
+            ("top_left_y", PropertyValue::Float(0.2)),
+            ("top_right_x", PropertyValue::Float(1.05)),
+            ("top_right_y", PropertyValue::Float(-0.05)),
+            ("bottom_left_x", PropertyValue::Float(0.15)),
+            ("bottom_left_y", PropertyValue::Float(0.85)),
+            ("bottom_right_x", PropertyValue::Float(0.95)),
+            ("bottom_right_y", PropertyValue::Float(1.1)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = corner_pin_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(
+            grade.corners(),
+            [[0.1, 0.2], [1.05, -0.05], [0.15, 0.85], [0.95, 1.1]]
+        );
+        let matrix = grade.homography(64, 64).expect("the quad is non-degenerate");
+        for (source, expected) in [
+            ([0.0, 0.0], grade.top_left()),
+            ([1.0, 0.0], grade.top_right()),
+            ([0.0, 1.0], grade.bottom_left()),
+            ([1.0, 1.0], grade.bottom_right()),
+        ] {
+            let projected = project(&matrix, source[0], source[1]);
+            assert!((projected[0] - expected[0] as f64).abs() <= 1e-5);
+            assert!((projected[1] - expected[1] as f64).abs() <= 1e-5);
+        }
+    }
+
+    #[test]
+    fn corner_pin_swapped_corners_mirror_the_quad() {
+        let effect = author_corner_pin(&[
+            ("top_left_x", PropertyValue::Float(1.0)),
+            ("top_left_y", PropertyValue::Float(0.0)),
+            ("top_right_x", PropertyValue::Float(0.0)),
+            ("top_right_y", PropertyValue::Float(0.0)),
+            ("bottom_left_x", PropertyValue::Float(1.0)),
+            ("bottom_left_y", PropertyValue::Float(1.0)),
+            ("bottom_right_x", PropertyValue::Float(0.0)),
+            ("bottom_right_y", PropertyValue::Float(1.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the mirrored graph should build");
+        let grade = corner_pin_op(&graph).expect("the mirrored graph emits a node");
+        assert_eq!(
+            grade.corners(),
+            [[1.0, 0.0], [0.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+        );
+        let matrix = grade.homography(64, 64).expect("the quad is non-degenerate");
+        let top_left = project(&matrix, 0.0, 0.0);
+        let top_right = project(&matrix, 1.0, 0.0);
+        assert!((top_left[0] - 1.0).abs() <= 1e-6);
+        assert!(top_left[1].abs() <= 1e-6);
+        assert!(top_right[0].abs() <= 1e-6);
+        assert!(top_right[1].abs() <= 1e-6);
+        // The mirrored homography reverses the orientation of the frame.
+        assert!(matrix[0] * matrix[4] - matrix[1] * matrix[3] < 0.0);
+    }
+
+    #[test]
+    fn corner_pin_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect = instantiate_effect_node(EffectType::CornerPin)
+            .expect("the corner pin effect should instantiate");
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::CornerPin.property_path("bottom_left_x"),
+            value: PropertyValue::Float(10.5),
+        });
+        assert!(
+            outside.is_err(),
+            "the author range is bounded by the schema"
+        );
+
+        let below = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::CornerPin.property_path("top_right_y"),
+            value: PropertyValue::Float(-10.25),
+        });
+        assert!(below.is_err(), "the author range is bounded from below");
+    }
+
+    #[test]
+    fn corner_pin_authored_state_survives_serialization_round_trip() {
+        let effect = author_corner_pin(&[
+            ("top_left_x", PropertyValue::Float(-0.25)),
+            ("top_left_y", PropertyValue::Float(0.125)),
+            ("bottom_right_x", PropertyValue::Float(1.25)),
+            ("bottom_right_y", PropertyValue::Float(0.875)),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+    }
+
+    fn project(matrix: &[f64; 9], x: f64, y: f64) -> [f64; 2] {
+        let third = matrix[6] * x + matrix[7] * y + matrix[8];
+        [
+            (matrix[0] * x + matrix[1] * y + matrix[2]) / third,
+            (matrix[3] * x + matrix[4] * y + matrix[5]) / third,
+        ]
     }
 
     fn brightness_contrast_op(graph: &EffectRenderGraph) -> Option<crate::BrightnessContrastGrade> {

@@ -87,6 +87,8 @@ pub enum EffectType {
     Levels,
     /// Transform: moves, scales, skews and rotates the frame about its centre.
     Transform,
+    /// Corner pin: pins the frame onto an arbitrary quadrilateral.
+    CornerPin,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -160,6 +162,7 @@ impl EffectType {
             Self::BrightnessContrast => "builtin.brightness_contrast".to_string(),
             Self::Levels => "builtin.levels".to_string(),
             Self::Transform => "builtin.transform".to_string(),
+            Self::CornerPin => "builtin.corner_pin".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -229,6 +232,7 @@ impl EffectType {
             "builtin.brightness_contrast" => Self::BrightnessContrast,
             "builtin.levels" => Self::Levels,
             "builtin.transform" => Self::Transform,
+            "builtin.corner_pin" => Self::CornerPin,
             other => Self::External(other.to_string()),
         }
     }
@@ -298,6 +302,7 @@ impl EffectType {
             Self::BrightnessContrast => "亮度对比度",
             Self::Levels => "色阶",
             Self::Transform => "变换",
+            Self::CornerPin => "边角定位",
             Self::External(name) => name,
         }
     }
@@ -365,6 +370,7 @@ impl EffectType {
             Self::BrightnessContrast => vec!["颜色", "调色"],
             Self::Levels => vec!["颜色", "调色"],
             Self::Transform => vec!["变换"],
+            Self::CornerPin => vec!["变换"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -434,6 +440,7 @@ impl EffectType {
             Self::BrightnessContrast => "brightness_contrast".to_string(),
             Self::Levels => "levels".to_string(),
             Self::Transform => "transform".to_string(),
+            Self::CornerPin => "corner_pin".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -752,6 +759,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::BrightnessContrast => Ok(()),
             Self::Levels => Ok(()),
             Self::Transform => Ok(()),
+            Self::CornerPin => Ok(()),
         }
     }
 }

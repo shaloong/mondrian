@@ -135,6 +135,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored anchor, position, scale, skew, rotation, and sampling.
         grade: crate::TransformGrade,
     },
+    CornerPin {
+        /// Authored destination quad in normalized frame coordinates.
+        grade: crate::CornerPinGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -166,6 +170,7 @@ impl EffectGpuSpatialPass {
             Self::Ripple { .. } => "ripple",
             Self::WaveWarp { .. } => "wave_warp",
             Self::Transform { .. } => "transform",
+            Self::CornerPin { .. } => "corner_pin",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -209,6 +214,7 @@ impl EffectGpuSpatialPass {
             Self::Ripple { .. } => u32::MAX,
             Self::WaveWarp { .. } => u32::MAX,
             Self::Transform { .. } => u32::MAX,
+            Self::CornerPin { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -245,6 +251,7 @@ impl EffectGpuSpatialPass {
             Self::Ripple { .. } => u32::MAX,
             Self::WaveWarp { .. } => u32::MAX,
             Self::Transform { .. } => u32::MAX,
+            Self::CornerPin { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -525,6 +532,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::Transform { grade } => {
             Some(EffectGpuSpatialPass::Transform { grade: *grade })
+        }
+        EffectRenderOp::CornerPin { grade } => {
+            Some(EffectGpuSpatialPass::CornerPin { grade: *grade })
         }
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
