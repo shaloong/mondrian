@@ -1572,6 +1572,48 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 let decolour = effect.params.x * (1.0 - keep);
                 pixel = vec4<f32>(mix(pixel.rgb, vec3<f32>(grey), decolour), pixel.a);
             }
+        } else if (effect.header.x == 30u) {
+            // `BroadcastSafeGrade`: params is [safety mode, limit, 0, 0] and
+            // extra0 is [locale, 0, 0, 0]. The limit was resolved on the CPU
+            // from the authored IRE amplitude and the locale, so the shader
+            // never re-derives the IRE. Mode 0 scales an over-limit luma toward
+            // the limit, mode 1 mixes an over-limit sample toward its luma,
+            // modes 2 and 3 key the unsafe or the safe samples out by clearing
+            // alpha, and mode 4 clamps each channel. A pixel without coverage is
+            // left exactly as it arrived, and the modes that do not key pass the
+            // source alpha through.
+            if (pixel.a > 0.0) {
+                let limit = effect.params.y;
+                let luma = dot(pixel.rgb, vec3<f32>(0.299, 0.587, 0.114));
+                let maximum = max(pixel.r, max(pixel.g, pixel.b));
+                let mode = i32(effect.params.x);
+                if (mode == 0) {
+                    if (luma > limit) {
+                        pixel = vec4<f32>(pixel.rgb * (limit / luma), pixel.a);
+                    }
+                } else if (mode == 1) {
+                    if (maximum > limit) {
+                        let chroma = maximum - luma;
+                        if (chroma > 1.0e-6) {
+                            let amount = clamp((maximum - limit) / chroma, 0.0, 1.0);
+                            pixel = vec4<f32>(mix(pixel.rgb, vec3<f32>(luma), amount), pixel.a);
+                        }
+                    }
+                } else if (mode == 2) {
+                    if (maximum > limit) {
+                        pixel = vec4<f32>(pixel.rgb, 0.0);
+                    }
+                } else if (mode == 3) {
+                    if (maximum <= limit) {
+                        pixel = vec4<f32>(pixel.rgb, 0.0);
+                    }
+                } else {
+                    pixel = vec4<f32>(
+                        clamp(pixel.rgb, vec3<f32>(0.0), vec3<f32>(limit)),
+                        pixel.a,
+                    );
+                }
+            }
         } else if (effect.header.x == 23u) {
             // `NoiseGrade`: params.x is the amount as a fraction of the full
             // signed range, params.y the grain type and params.z the clipping
@@ -4797,6 +4839,16 @@ fn effect_uniforms(
                     params,
                     color,
                     extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::BroadcastSafe { grade } => {
+                let (params, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [30, 0, 0, 0],
+                    params,
+                    color: [0.0; 4],
+                    extra0,
                     extra1: [0.0; 4],
                 }
             }
@@ -8316,6 +8368,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_broadcast_safe_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, BroadcastLocale, BroadcastSafeGrade, BroadcastSafeMode,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU broadcast safe parity test: no GPU adapter available");
+            return;
+        };
+        // 5x4: a bright primary, a saturated green, an HDR read with a negative
+        // channel, a half-covered pixel, a fully transparent pixel and the flat
+        // default. The transparent pixel keeps a zero colour because compositing a
+        // zero-coverage layer onto a transparent target discards its rgb, so the
+        // composite only observes its alpha; the kernel's bit-identical skip is
+        // covered by the unit tests.
+        let mut data = vec![[0.2_f32, 0.4, 0.6, 1.0]; 20];
+        data[0] = [1.0, 0.0, 0.0, 1.0];
+        data[2] = [0.0, 1.0, 0.0, 1.0];
+        data[3] = [2.5, -0.4, 0.9, 1.0];
+        data[5] = [0.5, 0.5, 0.5, 0.5];
+        data[7] = [0.0, 0.0, 0.0, 0.0];
+        data[9] = [1.5, 1.5, 1.5, 1.0];
+        data[11] = [0.7, 0.15, 0.3, 1.0];
+        data[13] = [0.05, 0.9, 0.5, 0.75];
+        data[17] = [-0.3, 0.2, 1.4, 1.0];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 5,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (locale, mode, amplitude) in [
+            // The luminance reduction under the NTSC setup: the HDR read keeps a
+            // luma under the limit even though its brightest channel is not.
+            (
+                BroadcastLocale::Ntsc,
+                BroadcastSafeMode::ReduceLuminance,
+                100.0_f32,
+            ),
+            // The saturation reduction under the PAL mapping.
+            (
+                BroadcastLocale::Pal,
+                BroadcastSafeMode::ReduceSaturation,
+                110.0,
+            ),
+            // Keying the unsafe samples out of the NTSC frame.
+            (
+                BroadcastLocale::Ntsc,
+                BroadcastSafeMode::KeyOutUnsafe,
+                110.0,
+            ),
+            // The hard per-channel ceiling under the PAL mapping.
+            (BroadcastLocale::Pal, BroadcastSafeMode::ClampRgb, 120.0),
+            // Keying the safe samples out of the NTSC frame.
+            (BroadcastLocale::Ntsc, BroadcastSafeMode::KeyOutSafe, 105.0),
+        ] {
+            let grade = BroadcastSafeGrade::new(locale, mode, amplitude)
+                .expect("valid broadcast safe grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::BroadcastSafe { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(5, 4),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            // The two keying modes lower alpha to zero and leave the rgb in the
+            // kernel, but compositing a zero-coverage pixel onto the transparent
+            // target discards that rgb before the readback.
+            let expected_pixels: Vec<[f32; 4]> = expected
+                .pixels()
+                .iter()
+                .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
+                .collect();
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                5,
+                4,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected_pixels,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU broadcast safe accuracy budget exceeded for {grade:?}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_noise_matches_the_cpu_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
             compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
@@ -8761,9 +8939,10 @@ mod tests {
         use mondrian_effects::{
             apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
             lower_effect_graph_to_gpu_plan, ArithmeticGrade, ArithmeticOperator,
-            BlackAndWhiteGrade, ChannelMixerGrade, ChannelSource, EffectGraphBuilderState,
-            EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels, LeaveColorGrade,
-            LeaveColorMatch, ShiftChannelsGrade,
+            BlackAndWhiteGrade, BroadcastLocale, BroadcastSafeGrade, BroadcastSafeMode,
+            ChannelMixerGrade, ChannelSource, EffectGraphBuilderState, EffectRenderOp, HueBand,
+            HueSaturationGrade, InvertChannels, LeaveColorGrade, LeaveColorMatch,
+            ShiftChannelsGrade,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -8855,10 +9034,18 @@ mod tests {
             grade: LeaveColorGrade::new(100.0, [0.25, 0.5, 0.75], 25.0, 20.0, LeaveColorMatch::Hue)
                 .expect("valid leave color grade"),
         });
+        builder.append_unary(EffectRenderOp::BroadcastSafe {
+            grade: BroadcastSafeGrade::new(
+                BroadcastLocale::Ntsc,
+                BroadcastSafeMode::ClampRgb,
+                100.0,
+            )
+            .expect("valid broadcast safe grade"),
+        });
         let graph = compile_reference_render_graph(builder.finish()).expect("valid built-in graph");
         let plan =
             lower_effect_graph_to_gpu_plan(&graph).expect("supported built-in point effects");
-        assert_eq!(plan.operations().len(), 9);
+        assert_eq!(plan.operations().len(), 10);
 
         let expected = apply_compiled_effect_graph_rgba_f32(
             mondrian_effects::EffectFloatFrameView::new(
@@ -8892,7 +9079,7 @@ mod tests {
             WorkingColorSpace::LinearRec709,
         );
         assert_eq!(diagnostics.execution.fused_layer_passes, 1);
-        assert_eq!(diagnostics.execution.fused_point_operations, 9);
+        assert_eq!(diagnostics.execution.fused_point_operations, 10);
         let report = compare_linear_rgba(
             expected.pixels(),
             &actual,
