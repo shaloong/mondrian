@@ -1037,6 +1037,24 @@ fn noise_signed_grain(x: u32, y: u32, salt: u32) -> f32 {
     let bits = (hash >> 8u) & 65535u;
     return f32(bits) / 65535.0 * 2.0 - 1.0;
 }
+
+// GEN-01 ramp: the scatter jitter mirrors `RampGrade::ramp_unit_noise` and
+// `noise_hash` bit for bit so a re-render is identical to the CPU kernel.
+const RAMP_DITHER_SALT: u32 = 0x9E3779B9u;
+
+fn ramp_hash(x: u32, y: u32, salt: u32) -> u32 {
+    var hash = x * 0x9E3779B9u ^ y * 0x85EBCA6Bu ^ salt;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x846CA68Bu;
+    hash = hash ^ (hash >> 16u);
+    return hash;
+}
+
+fn ramp_unit_noise(x: u32, y: u32) -> f32 {
+    return f32(ramp_hash(x, y, RAMP_DITHER_SALT) >> 8u) / 16777216.0;
+}
 // `ExtractGrade`: params.x is the channel, params.y the black point,
 // params.z the white point and params.w the invert toggle; extra0.xy are the
 // softness around each point.
@@ -1393,6 +1411,34 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                     channel < 1.5 || channel > 3.5
                 );
                 pixel = vec4<f32>(red, green, blue, pixel.a);
+            }
+        } else if (effect.header.x == 27u) {
+            // `RampGrade`: params is [start.x, start.y, end.x, end.y], color is
+            // the start colour, extra0 the end colour and extra1
+            // [shape tag, scatter, blend_with_original, 0]. The ramp never
+            // authors coverage, so a pixel without coverage is left alone. The
+            // gradient is straight alpha here: the composite blends it with
+            // `blend_straight_alpha`, so it must not be premultiplied.
+            if (pixel.a > 0.0) {
+                let coords = floor(max(position, vec2<f32>(0.0)) + vec2<f32>(0.5));
+                let delta = effect.params.zw - effect.params.xy;
+                let length_squared = dot(delta, delta);
+                let offset = coords - effect.params.xy;
+                var t = 0.0;
+                if (length_squared > 1.0e-12) {
+                    if (effect.extra1.x < 0.5) {
+                        t = dot(offset, delta) / length_squared;
+                    } else {
+                        t = length(offset) / sqrt(length_squared);
+                    }
+                }
+                if (effect.extra1.y > 0.0) {
+                    let jitter = ramp_unit_noise(u32(coords.x), u32(coords.y)) - 0.5;
+                    t = t + jitter * (effect.extra1.y / 255.0);
+                }
+                t = clamp(t, 0.0, 1.0);
+                let gradient = effect.color.rgb + (effect.extra0.rgb - effect.color.rgb) * t;
+                pixel = vec4<f32>(mix(gradient, pixel.rgb, effect.extra1.z), pixel.a);
             }
         } else if (effect.header.x == 23u) {
             // `NoiseGrade`: params.x is the amount as a fraction of the full
@@ -4592,6 +4638,16 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::Ramp { grade } => {
+                let (params, color, extra0, extra1) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [27, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                }
+            }
             EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
                 header: [23, 0, 0, 0],
                 params: grade.gpu_controls(),
@@ -7774,6 +7830,123 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU levels accuracy budget exceeded for {grade:?}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_ramp_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp, RampGrade,
+            RampShape,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU ramp parity test: no GPU adapter available");
+            return;
+        };
+        // 5x4: one HDR colour, one fully transparent pixel and one half-covered
+        // pixel exercise the unclamped gradient, the zero-coverage guard and the
+        // straight-alpha blend.
+        let mut data = vec![[0.2_f32, 0.4, 0.6, 1.0]; 20];
+        data[2] = [2.5, -0.4, 0.9, 1.0];
+        data[3] = [0.0, 0.0, 0.0, 0.0];
+        data[7] = [0.35, 0.35, 0.35, 0.5];
+        data[13] = [0.9, 0.1, 0.3, 1.0];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 5,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (start, start_color, end, end_color, shape, scatter, blend) in [
+            // The authoring defaults: black at row 0 to white at row 256.
+            (
+                [128.0_f32, 0.0_f32],
+                [0.0_f32, 0.0, 0.0],
+                [128.0, 256.0],
+                [1.0, 1.0, 1.0],
+                RampShape::Linear,
+                0.0_f32,
+                0.0_f32,
+            ),
+            // Scattered radial ramp along the diagonal.
+            (
+                [0.5, 0.5],
+                [1.0, 0.2, 0.0],
+                [4.5, 3.5],
+                [0.0, 0.4, 1.0],
+                RampShape::Radial,
+                120.0,
+                0.0,
+            ),
+            // Partial blend over the source.
+            (
+                [0.0, 3.0],
+                [0.9, 0.9, 0.9],
+                [4.0, 0.0],
+                [0.1, 0.0, 0.3],
+                RampShape::Linear,
+                0.0,
+                0.35,
+            ),
+        ] {
+            let grade = RampGrade::new(start, start_color, end, end_color, shape, scatter, blend)
+                .expect("valid ramp grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Ramp { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(5, 4),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                5,
+                4,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU ramp accuracy budget exceeded for {grade:?}: {report:#?}"
             );
         }
     }
