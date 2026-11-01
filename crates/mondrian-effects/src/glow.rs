@@ -516,7 +516,7 @@ impl GlowOperation {
 ///
 /// Kept in sync with `gpu_compositor.rs`'s `gpu_blend_mode_id`; the spatial
 /// composite shader ports the same table into `blend_channel`/`blend_rgb`.
-fn blend_mode_index(mode: BlendMode) -> u32 {
+pub(crate) fn blend_mode_index(mode: BlendMode) -> u32 {
     match mode {
         BlendMode::Normal => 0,
         BlendMode::Dissolve => 1,

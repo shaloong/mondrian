@@ -97,6 +97,8 @@ pub enum EffectType {
     Ramp,
     /// Glow: blooms the bright parts of the frame with a threshold mask.
     Glow,
+    /// Fractal noise: fills the frame with a fractal value-noise field.
+    FractalNoise,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -175,6 +177,7 @@ impl EffectType {
             Self::Deband => "builtin.deband".to_string(),
             Self::Ramp => "builtin.ramp".to_string(),
             Self::Glow => "builtin.glow".to_string(),
+            Self::FractalNoise => "builtin.fractal_noise".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -249,6 +252,7 @@ impl EffectType {
             "builtin.deband" => Self::Deband,
             "builtin.ramp" => Self::Ramp,
             "builtin.glow" => Self::Glow,
+            "builtin.fractal_noise" => Self::FractalNoise,
             other => Self::External(other.to_string()),
         }
     }
@@ -323,6 +327,7 @@ impl EffectType {
             Self::Deband => "去色带",
             Self::Ramp => "渐变",
             Self::Glow => "发光",
+            Self::FractalNoise => "分形噪波",
             Self::External(name) => name,
         }
     }
@@ -395,6 +400,7 @@ impl EffectType {
             Self::Deband => vec!["修复"],
             Self::Ramp => vec!["颜色"],
             Self::Glow => vec!["光"],
+            Self::FractalNoise => vec!["颜色"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -469,6 +475,7 @@ impl EffectType {
             Self::Deband => "deband".to_string(),
             Self::Ramp => "ramp".to_string(),
             Self::Glow => "glow".to_string(),
+            Self::FractalNoise => "fractal_noise".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -792,6 +799,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Deband => Ok(()),
             Self::Ramp => Ok(()),
             Self::Glow => Ok(()),
+            Self::FractalNoise => Ok(()),
         }
     }
 }

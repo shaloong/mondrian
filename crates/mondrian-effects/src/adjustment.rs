@@ -314,6 +314,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::FractalNoise { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "fractal_noise",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Ramp { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "ramp",
@@ -891,6 +897,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::TurbulentDisplace { .. } => 1,
         EffectRenderOp::Deband { .. } => 2,
         EffectRenderOp::Glow { .. } => 2,
+        EffectRenderOp::FractalNoise { .. } => 0,
         EffectRenderOp::Ramp { .. } => 0,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
@@ -1265,6 +1272,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Glow { grade } => {
             crate::glow::apply_glow_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::FractalNoise { grade } => {
+            crate::fractal_noise::apply_fractal_noise_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,

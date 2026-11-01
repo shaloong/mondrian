@@ -35,6 +35,7 @@ pub mod effect;
 pub mod emboss;
 pub mod find_edges;
 pub mod flip;
+pub mod fractal_noise;
 mod project_properties;
 pub mod radial_blur;
 pub(crate) mod resample;
@@ -414,6 +415,17 @@ pub use find_edges::{
 pub use flip::{
     flip_frame_f32, FlipAxis, FlipError, FlipGrade, FLIP_AXIS_COUNT, FLIP_MAX_BLEND_PERCENT,
     FLIP_MAX_CENTRE_PIXELS,
+};
+pub use fractal_noise::{
+    fractal_noise_frame_f32, FractalNoiseError, FractalNoiseGrade, FractalNoiseType,
+    FractalNoiseUniform, FractalOverflow, FractalType, FRACTAL_FEATURE_PIXELS,
+    FRACTAL_MAX_BRIGHTNESS, FRACTAL_MAX_CENTRE_AUXILIARY, FRACTAL_MAX_COMPLEXITY,
+    FRACTAL_MAX_CONTRAST, FRACTAL_MAX_CYCLE, FRACTAL_MAX_OFFSET_PIXELS, FRACTAL_MAX_OPACITY,
+    FRACTAL_MAX_RANDOM_SEED, FRACTAL_MAX_ROTATION_DEGREES, FRACTAL_MAX_SCALE,
+    FRACTAL_MAX_SUB_INFLUENCE, FRACTAL_MAX_SUB_SCALE, FRACTAL_MIN_BRIGHTNESS,
+    FRACTAL_MIN_CENTRE_AUXILIARY, FRACTAL_MIN_COMPLEXITY, FRACTAL_MIN_CONTRAST, FRACTAL_MIN_CYCLE,
+    FRACTAL_MIN_OPACITY, FRACTAL_MIN_SCALE, FRACTAL_MIN_SUB_INFLUENCE, FRACTAL_MIN_SUB_SCALE,
+    FRACTAL_NOISE_TYPE_COUNT, FRACTAL_OVERFLOW_COUNT, FRACTAL_TYPE_COUNT,
 };
 pub use ripple::{
     ripple_frame_f32, ripple_phase_turns, validate_wave_speed, RippleError, RippleGrade,

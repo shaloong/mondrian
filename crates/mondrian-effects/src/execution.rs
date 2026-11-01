@@ -2340,6 +2340,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::TurbulentDisplace { .. } => "turbulent_displace",
         EffectRenderOp::Deband { .. } => "deband",
         EffectRenderOp::Glow { .. } => "glow",
+        EffectRenderOp::FractalNoise { .. } => "fractal_noise",
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",

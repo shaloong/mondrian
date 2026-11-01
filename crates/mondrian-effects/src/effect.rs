@@ -957,6 +957,10 @@ pub enum EffectRenderOp {
     Glow {
         grade: crate::GlowGrade,
     },
+    /// Fractal noise: fills the frame with a fractal value-noise field.
+    FractalNoise {
+        grade: crate::FractalNoiseGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1225,6 +1229,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Ramp { grade } => formatter.debug_struct("Ramp").field("grade", grade).finish(),
             Self::Glow { grade } => formatter.debug_struct("Glow").field("grade", grade).finish(),
+            Self::FractalNoise { grade } => {
+                formatter.debug_struct("FractalNoise").field("grade", grade).finish()
+            }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
@@ -1910,6 +1917,10 @@ impl EffectRenderOp {
                 69u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::FractalNoise { grade } => {
+                70u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2121,6 +2132,7 @@ impl EffectRenderOp {
             EffectRenderOp::Deband { .. } => 3,
             EffectRenderOp::Ramp { .. } => 1,
             EffectRenderOp::Glow { .. } => 4,
+            EffectRenderOp::FractalNoise { .. } => 5,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2676,7 +2688,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 68] {
+fn builtin_effect_types() -> [EffectType; 69] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2746,6 +2758,7 @@ fn builtin_effect_types() -> [EffectType; 68] {
         EffectType::Deband,
         EffectType::Ramp,
         EffectType::Glow,
+        EffectType::FractalNoise,
     ]
 }
 
@@ -6257,6 +6270,320 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 );
             }
         }
+        EffectType::FractalNoise => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "fractal_type",
+                "分形噪波",
+                "分形类型",
+                crate::FractalType::Basic.as_key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "basic",
+                        "基本",
+                        "mondrian.effect.fractal_noise.fractal_type.basic",
+                    ),
+                    ParameterEnumOption::new(
+                        "turbulent_smooth",
+                        "湍流较平滑",
+                        "mondrian.effect.fractal_noise.fractal_type.turbulent_smooth",
+                    ),
+                    ParameterEnumOption::new(
+                        "turbulent_sharp",
+                        "湍流锐利",
+                        "mondrian.effect.fractal_noise.fractal_type.turbulent_sharp",
+                    ),
+                    ParameterEnumOption::new(
+                        "turbulent_basic",
+                        "湍流基本",
+                        "mondrian.effect.fractal_noise.fractal_type.turbulent_basic",
+                    ),
+                    ParameterEnumOption::new(
+                        "max",
+                        "最大值",
+                        "mondrian.effect.fractal_noise.fractal_type.max",
+                    ),
+                    ParameterEnumOption::new(
+                        "swirly",
+                        "旋转",
+                        "mondrian.effect.fractal_noise.fractal_type.swirly",
+                    ),
+                    ParameterEnumOption::new(
+                        "rock",
+                        "岩石",
+                        "mondrian.effect.fractal_noise.fractal_type.rock",
+                    ),
+                    ParameterEnumOption::new(
+                        "threads",
+                        "线条",
+                        "mondrian.effect.fractal_noise.fractal_type.threads",
+                    ),
+                    ParameterEnumOption::new(
+                        "multiply",
+                        "相乘",
+                        "mondrian.effect.fractal_noise.fractal_type.multiply",
+                    ),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "noise_type",
+                "分形噪波",
+                "噪波类型",
+                crate::FractalNoiseType::SoftLinear.as_key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "soft_linear",
+                        "较平滑",
+                        "mondrian.effect.fractal_noise.noise_type.soft_linear",
+                    ),
+                    ParameterEnumOption::new(
+                        "linear",
+                        "线性",
+                        "mondrian.effect.fractal_noise.noise_type.linear",
+                    ),
+                    ParameterEnumOption::new(
+                        "spline",
+                        "样条",
+                        "mondrian.effect.fractal_noise.noise_type.spline",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "分形噪波",
+                "反转",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            for (parameter, name, value, minimum, maximum, step) in [
+                ("contrast", "对比度", 100.0, 0.0, 400.0, 1.0),
+                ("brightness", "亮度", 0.0, -100.0, 100.0, 1.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "分形噪波",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "overflow",
+                "分形噪波",
+                "溢出",
+                crate::FractalOverflow::Clip.as_key(),
+                vec![
+                    ParameterEnumOption::new(
+                        "clip",
+                        "裁剪",
+                        "mondrian.effect.fractal_noise.overflow.clip",
+                    ),
+                    ParameterEnumOption::new(
+                        "soft_clamp",
+                        "柔和限幅",
+                        "mondrian.effect.fractal_noise.overflow.soft_clamp",
+                    ),
+                    ParameterEnumOption::new(
+                        "wrap",
+                        "环绕",
+                        "mondrian.effect.fractal_noise.overflow.wrap",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "rotation",
+                "分形噪波",
+                "旋转",
+                PropertyValue::Float(0.0),
+                Some(-(crate::FRACTAL_MAX_ROTATION_DEGREES as f64)),
+                Some(crate::FRACTAL_MAX_ROTATION_DEGREES as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "uniform_scale",
+                "分形噪波",
+                "等比缩放",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+            for (parameter, name, value, minimum, maximum, step) in [
+                ("scale", "缩放", 100.0, 1.0, 1_000.0, 1.0),
+                ("scale_width", "缩放宽度", 100.0, 1.0, 1_000.0, 1.0),
+                ("scale_height", "缩放高度", 100.0, 1.0, 1_000.0, 1.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "分形噪波",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "offset_turbulence",
+                "分形噪波",
+                "湍流偏移",
+                PropertyValue::Vec2(glam::Vec2::new(0.0, 0.0)),
+                Some(-(crate::FRACTAL_MAX_OFFSET_PIXELS as f64)),
+                Some(crate::FRACTAL_MAX_OFFSET_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "perspective_offset",
+                "分形噪波",
+                "透视偏移",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "complexity",
+                "分形噪波",
+                "复杂度",
+                PropertyValue::Int(6),
+                Some(crate::FRACTAL_MIN_COMPLEXITY as f64),
+                Some(crate::FRACTAL_MAX_COMPLEXITY as f64),
+                Some(1.0),
+            );
+            for (parameter, name, value, minimum, maximum, step) in [
+                ("sub_influence", "次级影响", 50.0, 0.0, 100.0, 1.0),
+                ("sub_scale", "次级缩放", 50.0, 0.0, 1_000.0, 1.0),
+                ("sub_rotation", "次级旋转", 0.0, -360_000.0, 360_000.0, 0.1),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "分形噪波",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sub_offset",
+                "分形噪波",
+                "次级偏移",
+                PropertyValue::Vec2(glam::Vec2::new(0.0, 0.0)),
+                Some(-(crate::FRACTAL_MAX_OFFSET_PIXELS as f64)),
+                Some(crate::FRACTAL_MAX_OFFSET_PIXELS as f64),
+                Some(1.0),
+            );
+            for (parameter, name, value, minimum, maximum, step) in [
+                ("centre_auxiliary", "中心辅助", 0.0, -5.0, 5.0, 0.01),
+                ("evolution", "演化", 0.0, -360_000.0, 360_000.0, 0.01),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "分形噪波",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle_evolution",
+                "分形噪波",
+                "循环演化",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle",
+                "分形噪波",
+                "循环",
+                PropertyValue::Int(1),
+                Some(crate::FRACTAL_MIN_CYCLE as f64),
+                Some(crate::FRACTAL_MAX_CYCLE as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "random_seed",
+                "分形噪波",
+                "随机种子",
+                PropertyValue::Int(0),
+                Some(0.0),
+                Some(crate::FRACTAL_MAX_RANDOM_SEED as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "分形噪波",
+                "不透明度",
+                PropertyValue::Float(100.0),
+                Some(crate::FRACTAL_MIN_OPACITY as f64),
+                Some(crate::FRACTAL_MAX_OPACITY as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "blend_mode",
+                "分形噪波",
+                "混合模式",
+                crate::fractal_noise::blend_mode_key(mondrian_core::BlendMode::Normal),
+                mondrian_core::display_labels::blend_mode_options()
+                    .iter()
+                    .filter_map(|option| {
+                        let mode = option.mode?;
+                        let key = crate::fractal_noise::blend_mode_key(mode);
+                        Some(ParameterEnumOption::new(
+                            key,
+                            option.label,
+                            format!("mondrian.effect.fractal_noise.blend_mode.{key}"),
+                        ))
+                    })
+                    .collect(),
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -7243,6 +7570,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         | (EffectType::TurbulentDisplace, "offset_y") => ParameterUnit::Pixels,
         (EffectType::Glow, "radius") => ParameterUnit::Pixels,
         (EffectType::Glow, "color_phase") => ParameterUnit::Degrees,
+        (EffectType::FractalNoise, "offset_turbulence") => ParameterUnit::Pixels,
+        (EffectType::FractalNoise, "rotation" | "sub_rotation" | "evolution") => {
+            ParameterUnit::Degrees
+        }
         _ => ParameterUnit::Unitless,
     }
 }
@@ -7460,6 +7791,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Glow => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::FractalNoise => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -10065,6 +10401,155 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::FractalNoise => {
+            let fractal_type_id = builtin_parameter_id(effect_type, "fractal_type");
+            let noise_type_id = builtin_parameter_id(effect_type, "noise_type");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            let contrast_id = builtin_parameter_id(effect_type, "contrast");
+            let brightness_id = builtin_parameter_id(effect_type, "brightness");
+            let overflow_id = builtin_parameter_id(effect_type, "overflow");
+            let rotation_id = builtin_parameter_id(effect_type, "rotation");
+            let uniform_scale_id = builtin_parameter_id(effect_type, "uniform_scale");
+            let scale_id = builtin_parameter_id(effect_type, "scale");
+            let scale_width_id = builtin_parameter_id(effect_type, "scale_width");
+            let scale_height_id = builtin_parameter_id(effect_type, "scale_height");
+            let offset_turbulence_id = builtin_parameter_id(effect_type, "offset_turbulence");
+            let perspective_offset_id = builtin_parameter_id(effect_type, "perspective_offset");
+            let complexity_id = builtin_parameter_id(effect_type, "complexity");
+            let sub_influence_id = builtin_parameter_id(effect_type, "sub_influence");
+            let sub_scale_id = builtin_parameter_id(effect_type, "sub_scale");
+            let sub_rotation_id = builtin_parameter_id(effect_type, "sub_rotation");
+            let sub_offset_id = builtin_parameter_id(effect_type, "sub_offset");
+            let centre_auxiliary_id = builtin_parameter_id(effect_type, "centre_auxiliary");
+            let evolution_id = builtin_parameter_id(effect_type, "evolution");
+            let cycle_evolution_id = builtin_parameter_id(effect_type, "cycle_evolution");
+            let cycle_id = builtin_parameter_id(effect_type, "cycle");
+            let random_seed_id = builtin_parameter_id(effect_type, "random_seed");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let blend_mode_id = builtin_parameter_id(effect_type, "blend_mode");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let enumeration =
+                    |parameter_id: &ParameterId,
+                     name: &str|
+                     -> Result<Option<String>, EffectGraphBuildError> {
+                        match effect.evaluate_parameter(parameter_id, context.time) {
+                            Some(PropertyValue::Enum(key)) => Ok(Some(key)),
+                            Some(_) => {
+                                Err(invalid(format!("fractal noise {name} must be an enum")))
+                            }
+                            None => Ok(None),
+                        }
+                    };
+                let boolean = |parameter_id: &ParameterId,
+                               name: &str,
+                               fallback: bool|
+                 -> Result<bool, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => Ok(value),
+                        Some(_) => Err(invalid(format!("fractal noise {name} must be a boolean"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let integer = |parameter_id: &ParameterId,
+                               name: &str,
+                               fallback: u32|
+                 -> Result<u32, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                            invalid(format!(
+                                "fractal noise {name} must be a non-negative integer"
+                            ))
+                        }),
+                        Some(_) => Err(invalid(format!("fractal noise {name} must be an integer"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let point = |parameter_id: &ParameterId,
+                             name: &str,
+                             fallback: [f32; 2]|
+                 -> Result<[f32; 2], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Vec2(point)) => Ok([point.x, point.y]),
+                        Some(PropertyValue::DoubleVec2(point)) => {
+                            Ok([point[0] as f32, point[1] as f32])
+                        }
+                        Some(_) => Err(invalid(format!("fractal noise {name} must be a point"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let fractal_type = match enumeration(&fractal_type_id, "fractal type")? {
+                    Some(key) => crate::FractalType::from_key(&key).ok_or_else(|| {
+                        invalid(format!(
+                            "fractal noise fractal type {key} is not a declared option"
+                        ))
+                    })?,
+                    None => crate::FractalType::Basic,
+                };
+                let noise_type = match enumeration(&noise_type_id, "noise type")? {
+                    Some(key) => crate::FractalNoiseType::from_key(&key).ok_or_else(|| {
+                        invalid(format!(
+                            "fractal noise noise type {key} is not a declared option"
+                        ))
+                    })?,
+                    None => crate::FractalNoiseType::SoftLinear,
+                };
+                let overflow = match enumeration(&overflow_id, "overflow")? {
+                    Some(key) => crate::FractalOverflow::from_key(&key).ok_or_else(|| {
+                        invalid(format!(
+                            "fractal noise overflow {key} is not a declared option"
+                        ))
+                    })?,
+                    None => crate::FractalOverflow::Clip,
+                };
+                let blend_mode = match enumeration(&blend_mode_id, "blend mode")? {
+                    Some(key) => {
+                        crate::fractal_noise::blend_mode_from_key(&key).ok_or_else(|| {
+                            invalid(format!(
+                                "fractal noise blend mode {key} is not a declared option"
+                            ))
+                        })?
+                    }
+                    None => mondrian_core::BlendMode::Normal,
+                };
+                let grade = crate::FractalNoiseGrade::new(
+                    fractal_type,
+                    noise_type,
+                    boolean(&invert_id, "invert", false)?,
+                    effect.evaluate_f32_parameter(&contrast_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&brightness_id, context.time, 0.0),
+                    overflow,
+                    effect.evaluate_f32_parameter(&rotation_id, context.time, 0.0),
+                    boolean(&uniform_scale_id, "uniform scale", true)?,
+                    effect.evaluate_f32_parameter(&scale_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&scale_width_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&scale_height_id, context.time, 100.0),
+                    point(&offset_turbulence_id, "offset turbulence", [0.0, 0.0])?,
+                    boolean(&perspective_offset_id, "perspective offset", false)?,
+                    integer(&complexity_id, "complexity", 6)?,
+                    effect.evaluate_f32_parameter(&sub_influence_id, context.time, 50.0),
+                    effect.evaluate_f32_parameter(&sub_scale_id, context.time, 50.0),
+                    effect.evaluate_f32_parameter(&sub_rotation_id, context.time, 0.0),
+                    point(&sub_offset_id, "sub offset", [0.0, 0.0])?,
+                    effect.evaluate_f32_parameter(&centre_auxiliary_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&evolution_id, context.time, 0.0),
+                    boolean(&cycle_evolution_id, "cycle evolution", false)?,
+                    integer(&cycle_id, "cycle", 1)?,
+                    integer(&random_seed_id, "random seed", 0)?,
+                    effect.evaluate_f32_parameter(&opacity_id, context.time, 100.0),
+                    blend_mode,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::FractalNoise { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Ramp => {
             let start_id = builtin_parameter_id(effect_type, "start");
             let start_color_id = builtin_parameter_id(effect_type, "start_color");
@@ -10925,6 +11410,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Deband => "去色带",
         EffectType::Ramp => "渐变",
         EffectType::Glow => "发光",
+        EffectType::FractalNoise => "分形噪波",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -12227,6 +12713,7 @@ mod tests {
             EffectType::Deband,
             EffectType::Ramp,
             EffectType::Glow,
+            EffectType::FractalNoise,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -18179,6 +18666,211 @@ mod tests {
         assert_eq!(grade.color_loops(), 3.0);
         assert_eq!(grade.color_phase(), 120.0);
         assert_eq!(grade.dimensions(), crate::GlowDimensions::Vertical);
+    }
+
+    fn fractal_noise_op(graph: &EffectRenderGraph) -> Option<crate::FractalNoiseGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::FractalNoise { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::FractalNoise { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_fractal_noise(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::FractalNoise)
+            .expect("the fractal noise effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::FractalNoise.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the fractal noise parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn fractal_noise_defaults_compile_to_the_documented_operation() {
+        let effect = instantiate_effect_node(EffectType::FractalNoise)
+            .expect("the fractal noise effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default fractal noise should compile");
+        let grade = fractal_noise_op(&graph).expect("the default grade emits a node");
+        assert_eq!(grade.fractal_type(), crate::FractalType::Basic);
+        assert_eq!(grade.noise_type(), crate::FractalNoiseType::SoftLinear);
+        assert!(!grade.invert());
+        assert_eq!(grade.contrast(), 100.0);
+        assert_eq!(grade.brightness(), 0.0);
+        assert_eq!(grade.overflow(), crate::FractalOverflow::Clip);
+        assert_eq!(grade.rotation(), 0.0);
+        assert!(grade.uniform_scale());
+        assert_eq!(grade.scale(), 100.0);
+        assert_eq!(grade.scale_width(), 100.0);
+        assert_eq!(grade.scale_height(), 100.0);
+        assert_eq!(grade.offset_turbulence(), [0.0, 0.0]);
+        assert!(!grade.perspective_offset());
+        assert_eq!(grade.complexity(), 6);
+        assert_eq!(grade.sub_influence(), 50.0);
+        assert_eq!(grade.sub_scale(), 50.0);
+        assert_eq!(grade.sub_rotation(), 0.0);
+        assert_eq!(grade.sub_offset(), [0.0, 0.0]);
+        assert_eq!(grade.centre_auxiliary(), 0.0);
+        assert_eq!(grade.evolution(), 0.0);
+        assert!(!grade.cycle_evolution());
+        assert_eq!(grade.cycle(), 1);
+        assert_eq!(grade.random_seed(), 0);
+        assert_eq!(grade.opacity(), 100.0);
+        assert_eq!(grade.blend_mode(), mondrian_core::BlendMode::Normal);
+    }
+
+    #[test]
+    fn fractal_noise_defaults_compile_to_a_non_identity_operation() {
+        // A full-opacity normal blend over the source is a real operation, so the
+        // default grade must not be elided by the builder.
+        let effect = instantiate_effect_node(EffectType::FractalNoise)
+            .expect("the fractal noise effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default fractal noise should compile");
+        let grade = fractal_noise_op(&graph).expect("the default grade emits a node");
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn fractal_noise_authored_configuration_reaches_the_operation() {
+        let effect = author_fractal_noise(&[
+            (
+                "fractal_type",
+                PropertyValue::Enum("turbulent_sharp".to_string()),
+            ),
+            ("noise_type", PropertyValue::Enum("spline".to_string())),
+            ("invert", PropertyValue::Bool(true)),
+            ("contrast", PropertyValue::Float(175.0)),
+            ("brightness", PropertyValue::Float(-20.0)),
+            ("overflow", PropertyValue::Enum("soft_clamp".to_string())),
+            ("rotation", PropertyValue::Float(45.0)),
+            ("uniform_scale", PropertyValue::Bool(false)),
+            ("scale", PropertyValue::Float(250.0)),
+            ("scale_width", PropertyValue::Float(120.0)),
+            ("scale_height", PropertyValue::Float(80.0)),
+            (
+                "offset_turbulence",
+                PropertyValue::Vec2(glam::Vec2::new(200.0, -150.0)),
+            ),
+            ("perspective_offset", PropertyValue::Bool(true)),
+            ("complexity", PropertyValue::Int(4)),
+            ("sub_influence", PropertyValue::Float(60.0)),
+            ("sub_scale", PropertyValue::Float(80.0)),
+            ("sub_rotation", PropertyValue::Float(30.0)),
+            (
+                "sub_offset",
+                PropertyValue::Vec2(glam::Vec2::new(2.0, -3.0)),
+            ),
+            ("centre_auxiliary", PropertyValue::Float(1.0)),
+            ("evolution", PropertyValue::Float(90.0)),
+            ("cycle_evolution", PropertyValue::Bool(true)),
+            ("cycle", PropertyValue::Int(2)),
+            ("random_seed", PropertyValue::Int(1234)),
+            ("opacity", PropertyValue::Float(60.0)),
+            ("blend_mode", PropertyValue::Enum("screen".to_string())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = fractal_noise_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.fractal_type(), crate::FractalType::TurbulentSharp);
+        assert_eq!(grade.noise_type(), crate::FractalNoiseType::Spline);
+        assert!(grade.invert());
+        assert_eq!(grade.contrast(), 175.0);
+        assert_eq!(grade.brightness(), -20.0);
+        assert_eq!(grade.overflow(), crate::FractalOverflow::SoftClamp);
+        assert_eq!(grade.rotation(), 45.0);
+        assert!(!grade.uniform_scale());
+        assert_eq!(grade.scale(), 250.0);
+        assert_eq!(grade.scale_width(), 120.0);
+        assert_eq!(grade.scale_height(), 80.0);
+        assert_eq!(grade.offset_turbulence(), [200.0, -150.0]);
+        assert!(grade.perspective_offset());
+        assert_eq!(grade.complexity(), 4);
+        assert_eq!(grade.sub_influence(), 60.0);
+        assert_eq!(grade.sub_scale(), 80.0);
+        assert_eq!(grade.sub_rotation(), 30.0);
+        assert_eq!(grade.sub_offset(), [2.0, -3.0]);
+        assert_eq!(grade.centre_auxiliary(), 1.0);
+        assert_eq!(grade.evolution(), 90.0);
+        assert!(grade.cycle_evolution());
+        assert_eq!(grade.cycle(), 2);
+        assert_eq!(grade.random_seed(), 1234);
+        assert_eq!(grade.opacity(), 60.0);
+        assert_eq!(grade.blend_mode(), mondrian_core::BlendMode::Screen);
+    }
+
+    #[test]
+    fn fractal_noise_zero_opacity_compiles_to_no_node() {
+        let effect = author_fractal_noise(&[("opacity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity grade should compile");
+        assert!(fractal_noise_op(&graph).is_none());
+    }
+
+    #[test]
+    fn fractal_noise_undeclared_keys_fail_closed() {
+        assert_eq!(crate::FractalType::from_key("mystery"), None);
+        assert_eq!(crate::FractalNoiseType::from_key("mystery"), None);
+        assert_eq!(crate::FractalOverflow::from_key("mystery"), None);
+        assert_eq!(crate::fractal_noise::blend_mode_from_key("mystery"), None);
+        assert_eq!(
+            crate::fractal_noise::blend_mode_from_key("normal"),
+            Some(mondrian_core::BlendMode::Normal)
+        );
+        let mut effect = instantiate_effect_node(EffectType::FractalNoise)
+            .expect("the fractal noise effect should instantiate");
+        // The enum contract rejects the key before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::FractalNoise.property_path("fractal_type"),
+                value: PropertyValue::Enum("mystery".to_string()),
+            })
+            .expect_err("an undeclared fractal type key must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("unknown enum key `mystery`"),
+            "{rendered}"
+        );
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::FractalNoise.property_path("contrast"),
+                value: PropertyValue::Float(401.0),
+            })
+            .expect_err("an out-of-range contrast must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 400]"), "{rendered}");
+    }
+
+    #[test]
+    fn fractal_noise_authored_state_round_trips_through_serialization() {
+        let effect = author_fractal_noise(&[
+            ("fractal_type", PropertyValue::Enum("swirly".to_string())),
+            ("noise_type", PropertyValue::Enum("linear".to_string())),
+            ("overflow", PropertyValue::Enum("wrap".to_string())),
+            ("complexity", PropertyValue::Int(3)),
+            ("blend_mode", PropertyValue::Enum("multiply".to_string())),
+        ]);
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the restored fractal noise should compile");
+        let grade = fractal_noise_op(&graph).expect("the restored grade emits a node");
+        assert_eq!(grade.fractal_type(), crate::FractalType::Swirly);
+        assert_eq!(grade.noise_type(), crate::FractalNoiseType::Linear);
+        assert_eq!(grade.overflow(), crate::FractalOverflow::Wrap);
+        assert_eq!(grade.complexity(), 3);
+        assert_eq!(grade.blend_mode(), mondrian_core::BlendMode::Multiply);
     }
 
     fn ramp_op(graph: &EffectRenderGraph) -> Option<crate::RampGrade> {

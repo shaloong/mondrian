@@ -2761,6 +2761,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::TurbulentDisplace { .. } => 67,
         EffectRenderOp::Deband { .. } => 68,
         EffectRenderOp::Glow { .. } => 70,
+        EffectRenderOp::FractalNoise { .. } => 71,
         EffectRenderOp::Ramp { .. } => 69,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
@@ -4833,6 +4834,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::TurbulentDisplace { .. }
             | crate::EffectRenderOp::Deband { .. }
             | crate::EffectRenderOp::Glow { .. }
+            | crate::EffectRenderOp::FractalNoise { .. }
             | crate::EffectRenderOp::Ramp { .. }
             | crate::EffectRenderOp::ColorOffset { .. }
             | crate::EffectRenderOp::Convolution { .. }
