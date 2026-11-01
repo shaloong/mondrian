@@ -55,6 +55,7 @@ pub(crate) struct EffectSpatialGpu {
     flip: wgpu::RenderPipeline,
     ripple: wgpu::RenderPipeline,
     wave_warp: wgpu::RenderPipeline,
+    transform: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
@@ -551,6 +552,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let transform = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.transform"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_transform"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let lens_flare = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.lens-flare"),
             layout: Some(&layout),
@@ -715,6 +746,7 @@ impl EffectSpatialGpu {
             flip,
             ripple,
             wave_warp,
+            transform,
             lens_flare,
             bulge,
             split,
@@ -967,6 +999,44 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Records the transform pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_transform(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: &mondrian_effects::TransformGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let Some((params, extra)) = grade.gpu_controls(width, height) else {
+            // A degenerate transform has no inverse matrix to sample with, so
+            // the frame passes through unchanged instead of being resampled.
+            return Ok(source.clone());
+        };
+        let uniforms = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.transform,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -1067,6 +1137,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Flip { .. } => Ok(1),
             EffectGpuSpatialPass::Ripple { .. } => Ok(1),
             EffectGpuSpatialPass::WaveWarp { .. } => Ok(1),
+            EffectGpuSpatialPass::Transform { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1316,6 +1387,18 @@ impl EffectSpatialGpu {
                     encoder,
                     params,
                     extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Transform { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_transform(
+                    device,
+                    encoder,
+                    grade,
                     source,
                     destination,
                     width,
@@ -2721,6 +2804,32 @@ fn fs_wave_warp(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
 }
 
 @fragment
+fn fs_transform(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let samples = max(u32(uniforms.extra.w + 0.5), 1u);
+    let step = 1.0 / f32(samples);
+    let opacity = uniforms.extra.z;
+    // `position.xy` is index + 0.5, so subtracting the half texel yields the
+    // continuous pixel-centre coordinates the inverse matrix expects.
+    let p = position.xy - vec2<f32>(0.5, 0.5);
+    let c = 0.5 * (uniforms.size.xy - vec2<f32>(1.0, 1.0));
+    let origin = p - c;
+    var accumulated = vec4<f32>(0.0);
+    for (var sample_row = 0u; sample_row < samples; sample_row = sample_row + 1u) {
+        let offset_y = (f32(sample_row) + 0.5) * step - 0.5;
+        for (var sample_column = 0u; sample_column < samples; sample_column = sample_column + 1u) {
+            let offset_x = (f32(sample_column) + 0.5) * step - 0.5;
+            let v = origin + vec2<f32>(offset_x, offset_y);
+            let sample_x =
+                uniforms.params.x * v.x + uniforms.params.y * v.y + uniforms.params.z + c.x;
+            let sample_y =
+                uniforms.params.w * v.x + uniforms.extra.x * v.y + uniforms.extra.y + c.y;
+            accumulated = accumulated + sample_bilinear_premultiplied(sample_x, sample_y);
+        }
+    }
+    return unpremultiply(accumulated * (step * step) * opacity);
+}
+
+@fragment
 fn fs_lens_distortion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
     let original = load_clamped(pixel);
@@ -3434,6 +3543,21 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::WaveQuality::Normal,
         )
         .expect("valid wave warp grade");
+        let transform = mondrian_effects::TransformGrade::new(
+            [0.0, 0.0],
+            [0.75, -0.5],
+            105.0,
+            100.0,
+            100.0,
+            6.0,
+            20.0,
+            15.0,
+            100.0,
+            false,
+            180.0,
+            mondrian_effects::TransformSampling::Normal,
+        )
+        .expect("valid transform grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -3446,6 +3570,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
             mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
             mondrian_effects::EffectGpuSpatialPass::WaveWarp { grade: wave_warp },
+            mondrian_effects::EffectGpuSpatialPass::Transform { grade: transform },
         ];
 
         let mut cpu = pixels.clone();
@@ -3487,6 +3612,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             wave_warp,
+        ));
+        assert!(mondrian_effects::transform_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &transform,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -4052,6 +4183,132 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                         difference <= 1.0e-4,
                         "wave warp {} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}",
                         wave_type.as_key()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_transform_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU transform parity test: no GPU adapter available");
+            return;
+        };
+        let width = 21_u32;
+        let height = 17_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.023 * (x + 3 * y) as f32;
+                pixels[y * width as usize + x] = [
+                    value,
+                    0.5 - 0.37 * value,
+                    0.15 + 0.8 * value,
+                    1.0 - 0.02 * (y % 5) as f32,
+                ];
+            }
+        }
+        pixels[36] = [0.0, 0.0, 0.0, 0.0];
+        pixels[301] = [1.75, -0.4, 0.9, 0.35];
+        for (index, grade) in [
+            mondrian_effects::TransformGrade::new(
+                [0.0, 0.0],
+                [1.5, -0.5],
+                100.0,
+                100.0,
+                100.0,
+                0.0,
+                0.0,
+                0.0,
+                100.0,
+                false,
+                180.0,
+                mondrian_effects::TransformSampling::Low,
+            )
+            .expect("translation transform grade"),
+            mondrian_effects::TransformGrade::new(
+                [-3.5, 2.0],
+                [2.5, 1.5],
+                85.0,
+                100.0,
+                100.0,
+                0.0,
+                0.0,
+                30.0,
+                100.0,
+                false,
+                180.0,
+                mondrian_effects::TransformSampling::Normal,
+            )
+            .expect("rotation transform grade"),
+            mondrian_effects::TransformGrade::new(
+                [0.0, 0.0],
+                [0.0, 0.0],
+                100.0,
+                100.0,
+                100.0,
+                18.0,
+                35.0,
+                -12.0,
+                100.0,
+                true,
+                240.0,
+                mondrian_effects::TransformSampling::Normal,
+            )
+            .expect("skew transform grade"),
+            mondrian_effects::TransformGrade::new(
+                [2.0, -1.0],
+                [-2.0, 3.0],
+                120.0,
+                90.0,
+                110.0,
+                -9.0,
+                0.0,
+                200.0,
+                40.0,
+                false,
+                180.0,
+                mondrian_effects::TransformSampling::High,
+            )
+            .expect("opacity transform grade"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::transform_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                &grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.transform-encoder"),
+                });
+            let output = executor
+                .record_transform(
+                    &context.device,
+                    &mut encoder,
+                    &grade,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded transform");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "transform grade {index} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
