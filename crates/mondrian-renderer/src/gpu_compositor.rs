@@ -1117,6 +1117,69 @@ fn levels_map(value: f32, effect: EffectUniform) -> f32 {
     return clamp(mapped, low, high);
 }
 
+fn arithmetic_quantise(sample: f32) -> i32 {
+    // The CPU kernel reads the sample as an eight-bit value, so the sample is
+    // first clamped into the display range and then rounded half away from zero,
+    // matching `f32::round` on the CPU side.
+    return i32(floor(clamp(sample, 0.0, 1.0) * 255.0 + 0.5));
+}
+
+fn arithmetic_combine(channel: f32, value: f32, operation: i32, clip_result: bool) -> f32 {
+    // The thirteen operators are numbered like the menu: 0 and, 1 or, 2 xor,
+    // 3 add, 4 subtract, 5 multiply, 6 difference, 7 min, 8 max, 9 block above,
+    // 10 block below, 11 slice, 12 screen. The bitwise operators combine the
+    // eight-bit readings, the rest combine the float samples, exactly like the
+    // CPU grade.
+    let k = arithmetic_quantise(channel);
+    let v = arithmetic_quantise(value);
+    var result = channel;
+    switch operation {
+        case 0: {
+            result = f32(k & v) / 255.0;
+        }
+        case 1: {
+            result = f32(k | v) / 255.0;
+        }
+        case 2: {
+            result = f32(k ^ v) / 255.0;
+        }
+        case 3: {
+            result = channel + value;
+        }
+        case 4: {
+            result = channel - value;
+        }
+        case 5: {
+            result = channel * value;
+        }
+        case 6: {
+            result = abs(channel - value);
+        }
+        case 7: {
+            result = min(channel, value);
+        }
+        case 8: {
+            result = max(channel, value);
+        }
+        case 9: {
+            result = select(channel, 0.0, channel > value);
+        }
+        case 10: {
+            result = select(channel, 0.0, channel < value);
+        }
+        case 11: {
+            result = select(0.0, 1.0, channel > value);
+        }
+        default: {
+            result = 1.0 - (1.0 - channel) * (1.0 - value);
+        }
+    }
+    if clip_result {
+        result = clamp(result, 0.0, 1.0);
+    }
+    return result;
+}
+
 fn effects_author_coverage() -> bool {
     // A pixel without coverage is invisible, so every grade could skip it — and
     // that is exactly what this early return does. The exception is a chain that
@@ -1439,6 +1502,20 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 t = clamp(t, 0.0, 1.0);
                 let gradient = effect.color.rgb + (effect.extra0.rgb - effect.color.rgb) * t;
                 pixel = vec4<f32>(mix(gradient, pixel.rgb, effect.extra1.z), pixel.a);
+            }
+        } else if (effect.header.x == 28u) {
+            // `ArithmeticGrade`: params is [operator index, red, green, blue] and
+            // extra0.x the clipping toggle. Each colour channel is combined with
+            // its own authored value; alpha is never authored, so a pixel without
+            // coverage is left exactly as it arrived.
+            if (pixel.a > 0.0) {
+                let operation = i32(effect.params.x);
+                let values = effect.params.yzw;
+                let clip_result = effect.extra0.x > 0.5;
+                let red = arithmetic_combine(pixel.r, values.x, operation, clip_result);
+                let green = arithmetic_combine(pixel.g, values.y, operation, clip_result);
+                let blue = arithmetic_combine(pixel.b, values.z, operation, clip_result);
+                pixel = vec4<f32>(red, green, blue, pixel.a);
             }
         } else if (effect.header.x == 23u) {
             // `NoiseGrade`: params.x is the amount as a fraction of the full
@@ -4646,6 +4723,16 @@ fn effect_uniforms(
                     color,
                     extra0,
                     extra1,
+                }
+            }
+            EffectGpuPointOp::Arithmetic { grade } => {
+                let (params, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [28, 0, 0, 0],
+                    params,
+                    color: [0.0; 4],
+                    extra0,
+                    extra1: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
@@ -7952,6 +8039,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_arithmetic_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ArithmeticGrade, ArithmeticOperator,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU arithmetic parity test: no GPU adapter available");
+            return;
+        };
+        // 5x4: one HDR colour, one fully transparent pixel and one half-covered
+        // pixel exercise the unclamped operators, the zero-coverage guard and the
+        // passthrough alpha. The sample values include exact eight-bit readings
+        // and values that only match after the documented rounding.
+        let mut data = vec![[0.2_f32, 0.4, 0.6, 1.0]; 20];
+        data[0] = [0.0, 0.0, 0.0, 1.0];
+        data[1] = [1.0, 0.5, 0.25, 1.0];
+        data[2] = [2.5, -0.4, 0.9, 1.0];
+        data[3] = [0.0, 0.0, 0.0, 0.0];
+        data[7] = [0.35, 0.35, 0.35, 0.5];
+        data[13] = [0.9, 0.1, 0.3, 1.0];
+        data[18] = [0.55, 0.15, 0.7, 1.0];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 5,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (operator, red, green, blue, clipping) in [
+            // The authoring defaults: `and` with three zero values, clamped.
+            (ArithmeticOperator::And, 0.0_f32, 0.0_f32, 0.0_f32, true),
+            // A bitwise `or` against three eight-bit readings.
+            (ArithmeticOperator::Or, 85.0, 170.0, 51.0, true),
+            // `add` over a mid grey lands above one before the clamp.
+            (ArithmeticOperator::Add, 128.0, 64.0, 200.0, true),
+            // `slice` thresholds every channel against its own value.
+            (ArithmeticOperator::Slice, 40.0, 180.0, 90.0, true),
+            // `screen` without the clamp keeps the HDR excursions.
+            (ArithmeticOperator::Screen, 200.0, 130.0, 60.0, false),
+        ] {
+            let grade = ArithmeticGrade::new(operator, red, green, blue, clipping)
+                .expect("valid arithmetic grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Arithmetic { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(5, 4),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                5,
+                4,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU arithmetic accuracy budget exceeded for {grade:?}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_noise_matches_the_cpu_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
             compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
@@ -8396,9 +8584,9 @@ mod tests {
         };
         use mondrian_effects::{
             apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
-            lower_effect_graph_to_gpu_plan, BlackAndWhiteGrade, ChannelMixerGrade, ChannelSource,
-            EffectGraphBuilderState, EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels,
-            ShiftChannelsGrade,
+            lower_effect_graph_to_gpu_plan, ArithmeticGrade, ArithmeticOperator,
+            BlackAndWhiteGrade, ChannelMixerGrade, ChannelSource, EffectGraphBuilderState,
+            EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels, ShiftChannelsGrade,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -8482,10 +8670,14 @@ mod tests {
             )
             .expect("valid channel mixer"),
         });
+        builder.append_unary(EffectRenderOp::Arithmetic {
+            grade: ArithmeticGrade::new(ArithmeticOperator::Screen, 128.0, 64.0, 200.0, false)
+                .expect("valid arithmetic grade"),
+        });
         let graph = compile_reference_render_graph(builder.finish()).expect("valid built-in graph");
         let plan =
             lower_effect_graph_to_gpu_plan(&graph).expect("supported built-in point effects");
-        assert_eq!(plan.operations().len(), 7);
+        assert_eq!(plan.operations().len(), 8);
 
         let expected = apply_compiled_effect_graph_rgba_f32(
             mondrian_effects::EffectFloatFrameView::new(
@@ -8519,7 +8711,7 @@ mod tests {
             WorkingColorSpace::LinearRec709,
         );
         assert_eq!(diagnostics.execution.fused_layer_passes, 1);
-        assert_eq!(diagnostics.execution.fused_point_operations, 7);
+        assert_eq!(diagnostics.execution.fused_point_operations, 8);
         let report = compare_linear_rgba(
             expected.pixels(),
             &actual,
