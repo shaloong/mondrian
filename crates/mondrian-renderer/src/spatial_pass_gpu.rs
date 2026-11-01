@@ -56,6 +56,7 @@ pub(crate) struct EffectSpatialGpu {
     ripple: wgpu::RenderPipeline,
     wave_warp: wgpu::RenderPipeline,
     transform: wgpu::RenderPipeline,
+    corner_pin: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
@@ -582,6 +583,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let corner_pin = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.corner-pin"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_corner_pin"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let lens_flare = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.lens-flare"),
             layout: Some(&layout),
@@ -747,6 +778,7 @@ impl EffectSpatialGpu {
             ripple,
             wave_warp,
             transform,
+            corner_pin,
             lens_flare,
             bulge,
             split,
@@ -1037,6 +1069,44 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Records the corner pin pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_corner_pin(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: &mondrian_effects::CornerPinGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let Some((params, extra)) = grade.gpu_controls(width, height) else {
+            // A degenerate quad has no homography to sample with, so the frame
+            // passes through unchanged instead of being resampled.
+            return Ok(source.clone());
+        };
+        let uniforms = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.corner_pin,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -1138,6 +1208,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Ripple { .. } => Ok(1),
             EffectGpuSpatialPass::WaveWarp { .. } => Ok(1),
             EffectGpuSpatialPass::Transform { .. } => Ok(1),
+            EffectGpuSpatialPass::CornerPin { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1396,6 +1467,18 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Transform { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return self.record_transform(
+                    device,
+                    encoder,
+                    grade,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::CornerPin { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_corner_pin(
                     device,
                     encoder,
                     grade,
@@ -2830,6 +2913,44 @@ fn fs_transform(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
 }
 
 @fragment
+fn fs_corner_pin(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    // `position.xy` is index + 0.5, so subtracting the half texel yields the
+    // continuous pixel-centre coordinates the inverse homography expects.
+    let p = position.xy - vec2<f32>(0.5, 0.5);
+    let denom = max(uniforms.size.xy - vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 1.0));
+    let d = p / denom;
+    // `params` holds [i00, i01, i02, i10] and `extra` holds
+    // [i11, i12, i20, i21]; `i22` is normalized to one.
+    let third = uniforms.extra.z * d.x + uniforms.extra.w * d.y + 1.0;
+    if (abs(third) <= 1.0e-12) {
+        return vec4<f32>(0.0);
+    }
+    let s = vec2<f32>(
+        (uniforms.params.x * d.x + uniforms.params.y * d.y + uniforms.params.z) / third,
+        (uniforms.params.w * d.x + uniforms.extra.x * d.y + uniforms.extra.y) / third,
+    );
+    if (s.x < -1.0e-6 || s.x > 1.0 + 1.0e-6 || s.y < -1.0e-6 || s.y > 1.0 + 1.0e-6) {
+        return vec4<f32>(0.0);
+    }
+    // Fold the denormalisation back into the numerator and sample in source
+    // pixel space directly. Reconstructing `s * denom` costs a second f32
+    // rounding of about one micro-pixel, which is enough for a fully
+    // transparent pixel to pick up a sliver of its neighbour and unpremultiply
+    // that sliver into a visible colour.
+    let sample = vec2<f32>(
+        (uniforms.params.x * p.x
+            + uniforms.params.y * p.y * (denom.x / denom.y)
+            + uniforms.params.z * denom.x)
+            / third,
+        (uniforms.params.w * p.x * (denom.y / denom.x)
+            + uniforms.extra.x * p.y
+            + uniforms.extra.y * denom.y)
+            / third,
+    );
+    return unpremultiply(sample_bilinear_premultiplied(sample.x, sample.y));
+}
+
+@fragment
 fn fs_lens_distortion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
     let original = load_clamped(pixel);
@@ -3558,6 +3679,13 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::TransformSampling::Normal,
         )
         .expect("valid transform grade");
+        let corner_pin = mondrian_effects::CornerPinGrade::new(
+            [0.08, 0.05],
+            [0.95, -0.02],
+            [0.02, 0.92],
+            [0.9, 1.03],
+        )
+        .expect("valid corner pin grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -3571,6 +3699,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
             mondrian_effects::EffectGpuSpatialPass::WaveWarp { grade: wave_warp },
             mondrian_effects::EffectGpuSpatialPass::Transform { grade: transform },
+            mondrian_effects::EffectGpuSpatialPass::CornerPin { grade: corner_pin },
         ];
 
         let mut cpu = pixels.clone();
@@ -3618,6 +3747,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             &transform,
+        ));
+        assert!(mondrian_effects::corner_pin_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &corner_pin,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -4309,6 +4444,90 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "transform grade {index} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_corner_pin_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU corner pin parity test: no GPU adapter available");
+            return;
+        };
+        let width = 23_u32;
+        let height = 19_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.019 * (x + 4 * y) as f32;
+                pixels[y * width as usize + x] = [
+                    value,
+                    0.5 - 0.4 * value,
+                    0.12 + 0.85 * value,
+                    1.0 - 0.02 * ((x + y) % 5) as f32,
+                ];
+            }
+        }
+        pixels[41] = [0.0, 0.0, 0.0, 0.0];
+        pixels[383] = [0.0, 0.0, 0.0, 0.0];
+        for (index, grade) in [
+            mondrian_effects::CornerPinGrade::new([0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0])
+                .expect("identity corner pin grade"),
+            mondrian_effects::CornerPinGrade::new(
+                [0.1, 0.05],
+                [1.1, 0.05],
+                [0.1, 1.05],
+                [1.1, 1.05],
+            )
+            .expect("translated corner pin grade"),
+            mondrian_effects::CornerPinGrade::new([1.0, 0.0], [0.0, 0.0], [1.0, 1.0], [0.0, 1.0])
+                .expect("mirrored corner pin grade"),
+            mondrian_effects::CornerPinGrade::new(
+                [0.15, 0.05],
+                [0.85, -0.05],
+                [-0.1, 1.02],
+                [1.05, 0.98],
+            )
+            .expect("trapezoid corner pin grade"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::corner_pin_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                &grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.corner-pin-encoder"),
+                });
+            let output = executor
+                .record_corner_pin(
+                    &context.device,
+                    &mut encoder,
+                    &grade,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded corner pin");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "corner pin grade {index} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
