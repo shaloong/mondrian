@@ -67,8 +67,10 @@ pub(crate) struct EffectSpatialGpu {
     deband: wgpu::RenderPipeline,
     glow_extract: wgpu::RenderPipeline,
     glow_composite: wgpu::RenderPipeline,
+    fractal_noise: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
+    fractal_noise_bindings: wgpu::BindGroupLayout,
 }
 
 impl EffectSpatialGpu {
@@ -933,6 +935,74 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Fractal noise needs twenty-six scalars, so the shared uniform struct is
+        // too small: the stage gets its own shader module, bind group layout, and
+        // uniform payload instead of a sixth `extra` vector.
+        let fractal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.effect-spatial.fractal-noise-shader"),
+            source: wgpu::ShaderSource::Wgsl(SPATIAL_FRACTAL_NOISE_SHADER.into()),
+        });
+        let fractal_noise_bindings =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mondrian.effect-spatial.fractal-noise-bindings"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let fractal_noise_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mondrian.effect-spatial.fractal-noise-layout"),
+            bind_group_layouts: &[Some(&fractal_noise_bindings)],
+            immediate_size: 0,
+        });
+        let fractal_noise = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.fractal-noise"),
+            layout: Some(&fractal_noise_layout),
+            vertex: wgpu::VertexState {
+                module: &fractal_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &fractal_shader,
+                entry_point: Some("fs_fractal_noise"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -959,9 +1029,11 @@ impl EffectSpatialGpu {
             deband,
             glow_extract,
             glow_composite,
+            fractal_noise,
             find_edges,
             bindings,
             composite_bindings,
+            fractal_noise_bindings,
         }
     }
 
@@ -1327,6 +1399,29 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Records the fractal noise generator pass.
+    ///
+    /// The stage reads only the pixel it writes, so the source is sampled
+    /// per-pixel and no scratch texture or halo is involved.
+    #[allow(clippy::too_many_arguments)]
+    fn record_fractal_noise(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        uniform: &FractalNoiseUniform,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_fractal_noise_pass(device, encoder, &input_view, &output_view, uniform);
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -1432,6 +1527,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Transform { .. } => Ok(1),
             EffectGpuSpatialPass::CornerPin { .. } => Ok(1),
             EffectGpuSpatialPass::TurbulentDisplace { .. } => Ok(1),
+            EffectGpuSpatialPass::FractalNoise { .. } => Ok(1),
             // Two blur passes feed one composite pass.
             EffectGpuSpatialPass::Deband { .. } => Ok(3),
             // One extract, one blur pass per axis and iteration, one composite.
@@ -1765,6 +1861,29 @@ impl EffectSpatialGpu {
             }
             EffectGpuSpatialPass::Glow { grade } => {
                 return self.record_glow(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::FractalNoise { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let controls = grade.gpu_controls(width, height);
+                let uniform = FractalNoiseUniform {
+                    size: controls.size,
+                    params: controls.params,
+                    extra0: controls.extra0,
+                    extra1: controls.extra1,
+                    extra2: controls.extra2,
+                    extra3: controls.extra3,
+                    extra4: controls.extra4,
+                    extra5: controls.extra5,
+                };
+                return self.record_fractal_noise(
+                    device,
+                    encoder,
+                    &uniform,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -2274,6 +2393,55 @@ impl EffectSpatialGpu {
         pass.draw(0..4, 0..1);
     }
 
+    /// Records one fractal noise pass with the stage's own bind group layout.
+    fn record_fractal_noise_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        uniforms: &FractalNoiseUniform,
+    ) {
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mondrian.effect-spatial.fractal-noise-uniforms"),
+            contents: bytemuck::bytes_of(uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian.effect-spatial.fractal-noise-bind-group"),
+            layout: &self.fractal_noise_bindings,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(input),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.effect-spatial.fractal-noise-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.fractal_noise);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..4, 0..1);
+    }
+
     /// Records the three-pass deband chain.
     ///
     /// The horizontal and vertical box blur passes reuse [`Self::box_blur`] and
@@ -2579,6 +2747,23 @@ struct SpatialPassUniform {
     // The second spare cell, added for effects that need more than twelve
     // scalars (glow's colour pair).
     extra1: [f32; 4],
+}
+
+/// The dedicated uniform payload of the fractal noise generator.
+///
+/// Merged into [`SpatialPassUniform`] this would need eight cells, so the stage
+/// carries its own struct and bind group layout instead.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FractalNoiseUniform {
+    size: [f32; 4],
+    params: [f32; 4],
+    extra0: [f32; 4],
+    extra1: [f32; 4],
+    extra2: [f32; 4],
+    extra3: [f32; 4],
+    extra4: [f32; 4],
+    extra5: [f32; 4],
 }
 
 const SPATIAL_EFFECT_SHADER: &str = r#"
@@ -4166,6 +4351,401 @@ fn fs_glow_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec
 }
 "#;
 
+// The fractal noise generator needs twenty-six scalars, more than the shared
+// `Uniforms` payload carries, so it gets its own shader module, bind group
+// layout, and eight-vec4 uniform block instead of another `extra` cell.
+//
+// Every helper below is a transcription of
+// `crates/mondrian-effects/src/fractal_noise.rs`, the CPU kernel that the parity
+// test compares against. `fractal_hash`/`fractal_sample` restate `noise_hash`/
+// `noise_sample` from `crates/mondrian-effects/src/noise.rs`, and the blend
+// helpers restate the ones in `SPATIAL_COMPOSITE_SHADER`; WGSL has no imports,
+// so all three copies have to be kept in sync by hand.
+const SPATIAL_FRACTAL_NOISE_SHADER: &str = r#"
+struct FractalUniforms {
+    size: vec4<f32>,
+    params: vec4<f32>,
+    extra0: vec4<f32>,
+    extra1: vec4<f32>,
+    extra2: vec4<f32>,
+    extra3: vec4<f32>,
+    extra4: vec4<f32>,
+    extra5: vec4<f32>,
+};
+
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> uniforms: FractalUniforms;
+
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(-1.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    var out: VsOut;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    return out;
+}
+
+const FEATURE_PIXELS: f32 = 100.0;
+const DEGREES_TO_RADIANS: f32 = 0.017453292;
+const OCTAVE_SALT_STEP: u32 = 0x9E3779B9u;
+const SEED_BASE: u32 = 0x85EBCA6Bu;
+const SWIRLY_STEP_COS: f32 = 0.8660254;
+const SWIRLY_STEP_SIN: f32 = 0.5;
+
+fn fractal_hash(x: u32, y: u32, salt: u32) -> u32 {
+    var hash = x * 0x9E3779B9u ^ y * 0x85EBCA6Bu ^ salt;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x846CA68Bu;
+    return hash ^ (hash >> 16u);
+}
+
+fn fractal_sample(x: u32, y: u32, salt: u32) -> f32 {
+    let bits = (fractal_hash(x, y, salt) >> 8u) & 0xFFFFu;
+    return f32(bits) / 65535.0 * 2.0 - 1.0;
+}
+
+fn fractal_rotate(x: f32, y: f32, rotation_cos: f32, rotation_sin: f32) -> vec2<f32> {
+    return vec2<f32>(x * rotation_cos - y * rotation_sin, x * rotation_sin + y * rotation_cos);
+}
+
+fn fractal_advance_rotation(rotation_cos: f32, rotation_sin: f32, step_cos: f32, step_sin: f32) -> vec2<f32> {
+    return vec2<f32>(
+        rotation_cos * step_cos - rotation_sin * step_sin,
+        rotation_cos * step_sin + rotation_sin * step_cos,
+    );
+}
+
+fn fractal_smooth_step(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn fractal_terraced(value: f32) -> f32 {
+    let scaled = value * 4.0;
+    let floored = floor(scaled);
+    let fraction = scaled - floored;
+    return clamp(floored / 4.0 + fractal_smooth_step(0.0, 0.25, fraction) * 0.125, 0.0, 1.0);
+}
+
+fn fractal_soft_clamp(value: f32) -> f32 {
+    let distance = value - 0.5;
+    var sign_value = 1.0;
+    if (distance < 0.0) {
+        sign_value = -1.0;
+    }
+    let denominator = 1.0 - exp(-2.0);
+    let saturation = 1.0 - exp(-2.0 * abs(distance));
+    return 0.5 + 0.5 * sign_value * saturation / denominator;
+}
+
+// Returns the floor of `value` converted numerically (not by reinterpreting the
+// float bit pattern) and the fractional part, matching the CPU `cell_of`.
+fn fractal_cell(value: f32) -> vec2<f32> {
+    let floored = floor(value);
+    return vec2<f32>(f32(i32(floored)), value - floored);
+}
+
+fn fractal_neighbour(cell: u32, offset: i32) -> u32 {
+    return bitcast<u32>(i32(cell) + offset);
+}
+
+fn fractal_interpolation_weight(noise_type: u32, fraction: f32) -> f32 {
+    if (noise_type == 0u) {
+        return fraction * fraction * (3.0 - 2.0 * fraction);
+    }
+    return fraction;
+}
+
+fn fractal_catmull_rom_weights(fraction: f32) -> vec4<f32> {
+    let squared = fraction * fraction;
+    let cubed = squared * fraction;
+    return vec4<f32>(
+        -0.5 * cubed + squared - 0.5 * fraction,
+        1.5 * cubed - 2.5 * squared + 1.0,
+        -1.5 * cubed + 2.0 * squared + 0.5 * fraction,
+        0.5 * cubed - 0.5 * squared,
+    );
+}
+
+fn fractal_sample_noise(x: f32, y: f32, noise_type: u32, salt: u32) -> f32 {
+    let cell_x = fractal_cell(x);
+    let cell_y = fractal_cell(y);
+    let base_x = bitcast<u32>(i32(cell_x.x));
+    let base_y = bitcast<u32>(i32(cell_y.x));
+    if (noise_type == 2u) {
+        let weights_x = fractal_catmull_rom_weights(cell_x.y);
+        let weights_y = fractal_catmull_rom_weights(cell_y.y);
+        var sum = 0.0;
+        for (var row = 0; row < 4; row = row + 1) {
+            for (var column = 0; column < 4; column = column + 1) {
+                sum = sum + weights_x[column] * weights_y[row]
+                    * fractal_sample(fractal_neighbour(base_x, column - 1), fractal_neighbour(base_y, row - 1), salt);
+            }
+        }
+        return sum;
+    }
+    let weight_x = fractal_interpolation_weight(noise_type, cell_x.y);
+    let weight_y = fractal_interpolation_weight(noise_type, cell_y.y);
+    let top_left = fractal_sample(base_x, base_y, salt);
+    let top_right = fractal_sample(fractal_neighbour(base_x, 1), base_y, salt);
+    let bottom_left = fractal_sample(base_x, fractal_neighbour(base_y, 1), salt);
+    let bottom_right = fractal_sample(fractal_neighbour(base_x, 1), fractal_neighbour(base_y, 1), salt);
+    let top = top_left + (top_right - top_left) * weight_x;
+    let bottom = bottom_left + (bottom_right - bottom_left) * weight_x;
+    return top + (bottom - top) * weight_y;
+}
+
+fn fractal_field(position: vec2<f32>, fractal_type: u32, noise_type: u32) -> f32 {
+    let complexity = u32(round(uniforms.extra1.y));
+    let seed_hash = SEED_BASE ^ u32(round(uniforms.extra4.z));
+    let sub_influence = uniforms.extra1.z;
+    let lacunarity = uniforms.extra1.w;
+    let sub_rotation = vec2<f32>(uniforms.extra2.x, uniforms.extra2.y);
+    let sub_offset = vec2<f32>(uniforms.extra2.z, uniforms.extra2.w);
+    let evolution_radians = uniforms.extra1.x * 360.0 * DEGREES_TO_RADIANS;
+    let evolution = vec2<f32>(cos(evolution_radians), sin(evolution_radians));
+    var amplitude = 1.0;
+    var total = 0.0;
+    var frequency = 1.0;
+    var offset = vec2<f32>(0.0, 0.0);
+    var rotation = vec2<f32>(1.0, 0.0);
+    var field = 0.0;
+    if (fractal_type == 8u) {
+        field = 1.0;
+    }
+    for (var octave = 0u; octave < complexity; octave = octave + 1u) {
+        let local = fractal_rotate(
+            (position * frequency + offset).x,
+            (position * frequency + offset).y,
+            rotation.x,
+            rotation.y,
+        );
+        let index = f32(octave);
+        let salt = seed_hash ^ (octave * OCTAVE_SALT_STEP);
+        let sample = fractal_sample_noise(
+            local.x + evolution.x * 0.5 * index,
+            local.y + evolution.y * 0.5 * index,
+            noise_type,
+            salt,
+        );
+        if (fractal_type == 0u || fractal_type == 5u) {
+            field = field + amplitude * sample;
+        } else if (fractal_type == 1u || fractal_type == 3u) {
+            field = field + amplitude * abs(sample * 2.0 - 1.0);
+        } else if (fractal_type == 2u) {
+            field = max(field, amplitude * abs(sample * 2.0 - 1.0));
+        } else if (fractal_type == 4u) {
+            field = max(field, amplitude * sample);
+        } else if (fractal_type == 6u) {
+            field = field + amplitude * fractal_terraced(sample);
+        } else if (fractal_type == 7u) {
+            field = field + amplitude * (1.0 - abs(sample * 2.0 - 1.0));
+        } else {
+            field = field * (0.5 + 0.5 * sample);
+        }
+        total = total + amplitude;
+        if (fractal_type == 3u) {
+            amplitude = amplitude * (sub_influence * sub_influence);
+        } else {
+            amplitude = amplitude * sub_influence;
+        }
+        frequency = frequency * lacunarity;
+        rotation = fractal_advance_rotation(rotation.x, rotation.y, sub_rotation.x, sub_rotation.y);
+        if (fractal_type == 5u) {
+            rotation = fractal_advance_rotation(rotation.x, rotation.y, SWIRLY_STEP_COS, SWIRLY_STEP_SIN);
+        }
+        offset = offset + sub_offset;
+    }
+    if (fractal_type == 8u) {
+        return field;
+    }
+    return field / max(total, 0.000001);
+}
+
+fn fractal_grade(value: f32, overflow: u32, invert: bool, contrast_gain: f32, brightness_offset: f32) -> f32 {
+    var graded = value;
+    if (overflow == 0u) {
+        graded = clamp(graded, 0.0, 1.0);
+    } else if (overflow == 1u) {
+        graded = fractal_soft_clamp(graded);
+    } else {
+        graded = graded - floor(graded);
+    }
+    if (invert) {
+        graded = 1.0 - graded;
+    }
+    return (graded - 0.5) * contrast_gain + 0.5 + brightness_offset;
+}
+
+fn blend_lum(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+fn clip_blend_color(color: vec3<f32>) -> vec3<f32> {
+    let luminance = blend_lum(color);
+    let minimum = min(color.r, min(color.g, color.b));
+    let maximum = max(color.r, max(color.g, color.b));
+    if (minimum < 0.0) {
+        let factor = luminance / (luminance - minimum);
+        return vec3<f32>(luminance) + (color - vec3<f32>(luminance)) * factor;
+    }
+    if (maximum > 1.0) {
+        let factor = (1.0 - luminance) / (maximum - luminance);
+        return vec3<f32>(luminance) + (color - vec3<f32>(luminance)) * factor;
+    }
+    return color;
+}
+
+fn set_blend_lum(color: vec3<f32>, target_lum: f32) -> vec3<f32> {
+    return clip_blend_color(color + vec3<f32>(target_lum - blend_lum(color)));
+}
+
+fn blend_sat(color: vec3<f32>) -> f32 {
+    return max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
+}
+
+fn set_blend_sat(color: vec3<f32>, target_sat: f32) -> vec3<f32> {
+    var result = vec3<f32>(0.0);
+    let minimum = min(color.r, min(color.g, color.b));
+    let maximum = max(color.r, max(color.g, color.b));
+    if (maximum <= minimum) {
+        return result;
+    }
+    let scale = target_sat / (maximum - minimum);
+    if (color.r <= color.g && color.r <= color.b) {
+        if (color.g <= color.b) {
+            result = vec3<f32>(0.0, (color.g - minimum) * scale, target_sat);
+        } else {
+            result = vec3<f32>(0.0, target_sat, (color.b - minimum) * scale);
+        }
+    } else if (color.g <= color.r && color.g <= color.b) {
+        if (color.r <= color.b) {
+            result = vec3<f32>((color.r - minimum) * scale, 0.0, target_sat);
+        } else {
+            result = vec3<f32>(target_sat, 0.0, (color.b - minimum) * scale);
+        }
+    } else if (color.r <= color.g) {
+        result = vec3<f32>((color.r - minimum) * scale, target_sat, 0.0);
+    } else {
+        result = vec3<f32>(target_sat, (color.g - minimum) * scale, 0.0);
+    }
+    return result;
+}
+
+fn blend_channel(mode: u32, base: f32, blend: f32) -> f32 {
+    if (mode == 2u) { return base * blend; }
+    if (mode == 3u) { return 1.0 - (1.0 - base) * (1.0 - blend); }
+    if (mode == 4u) {
+        return select(1.0 - 2.0 * (1.0 - base) * (1.0 - blend), 2.0 * base * blend, base <= 0.5);
+    }
+    if (mode == 5u) { return min(base, blend); }
+    if (mode == 6u) { return max(base, blend); }
+    if (mode == 7u) {
+        if (blend >= 0.999) { return 1.0; }
+        return clamp(base / (1.0 - blend), 0.0, 1.0);
+    }
+    if (mode == 8u) {
+        if (blend <= 0.001) { return 0.0; }
+        return clamp(1.0 - (1.0 - base) / blend, 0.0, 1.0);
+    }
+    if (mode == 9u) {
+        return select(1.0 - 2.0 * (1.0 - base) * (1.0 - blend), 2.0 * base * blend, blend <= 0.5);
+    }
+    if (mode == 10u) {
+        if (blend <= 0.5) { return base - (1.0 - 2.0 * blend) * base * (1.0 - base); }
+        var curved = ((16.0 * base - 12.0) * base + 4.0) * base;
+        if (base > 0.25) { curved = sqrt(base); }
+        return base + (2.0 * blend - 1.0) * (curved - base);
+    }
+    if (mode == 11u) { return abs(base - blend); }
+    if (mode == 12u) { return base + blend - 2.0 * base * blend; }
+    if (mode == 13u) { return clamp(base - blend, 0.0, 1.0); }
+    if (mode == 16u) { return clamp(base + blend - 1.0, 0.0, 1.0); }
+    if (mode == 17u) { return clamp(base + blend, 0.0, 1.0); }
+    if (mode == 18u) {
+        if (blend <= 0.5) {
+            if (blend <= 0.001) { return 0.0; }
+            return clamp(1.0 - (1.0 - base) / (2.0 * blend), 0.0, 1.0);
+        }
+        if (blend >= 0.999) { return 1.0; }
+        return clamp(base / (2.0 * (1.0 - blend)), 0.0, 1.0);
+    }
+    if (mode == 19u) { return clamp(base + 2.0 * blend - 1.0, 0.0, 1.0); }
+    if (mode == 20u) { return select(max(base, 2.0 * (blend - 0.5)), min(base, 2.0 * blend), blend <= 0.5); }
+    if (mode == 21u) { return select(1.0, 0.0, base + blend < 1.0); }
+    if (mode == 22u) {
+        if (blend <= 0.001) { return 1.0; }
+        return clamp(base / blend, 0.0, 1.0);
+    }
+    return blend;
+}
+
+fn blend_rgb(mode: u32, base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    if (mode == 14u) { return select(base, blend, blend_lum(blend) < blend_lum(base)); }
+    if (mode == 15u) { return select(base, blend, blend_lum(blend) > blend_lum(base)); }
+    if (mode == 23u) { return set_blend_lum(set_blend_sat(blend, blend_sat(base)), blend_lum(base)); }
+    if (mode == 24u) { return set_blend_lum(set_blend_sat(base, blend_sat(blend)), blend_lum(base)); }
+    if (mode == 25u) { return set_blend_lum(blend, blend_lum(base)); }
+    if (mode == 26u) { return set_blend_lum(base, blend_lum(blend)); }
+    return vec3<f32>(
+        blend_channel(mode, base.r, blend.r),
+        blend_channel(mode, base.g, blend.g),
+        blend_channel(mode, base.b, blend.b),
+    );
+}
+
+// Mirrors `FractalSetup::value_at` followed by its grade and composite steps: the
+// field is sampled in noise space, graded, blended over the source, and the
+// source alpha is always preserved. A fully transparent source pixel is returned
+// untouched, exactly like the CPU path.
+@fragment
+fn fs_fractal_noise(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let dims = vec2<i32>(uniforms.size.xy);
+    let clamped = clamp(pixel, vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+    let source = textureLoad(src, clamped, 0);
+    let centre_x = (uniforms.size.x - 1.0) * 0.5;
+    let centre_y = (uniforms.size.y - 1.0) * 0.5;
+    var x = (f32(clamped.x) - centre_x) / (FEATURE_PIXELS * uniforms.params.x);
+    var y = (f32(clamped.y) - centre_y) / (FEATURE_PIXELS * uniforms.params.y);
+    let centre_shift = uniforms.extra0.z / 10.0 * 0.5;
+    x = x + centre_shift;
+    y = y + centre_shift;
+    let rotated = fractal_rotate(x, y, uniforms.params.z, uniforms.params.w);
+    x = rotated.x + uniforms.extra0.x;
+    y = rotated.y + uniforms.extra0.y;
+    if (uniforms.extra0.w != 0.0) {
+        x = x + y * 0.5;
+    }
+    let fractal_type = u32(round(uniforms.extra3.z));
+    let noise_type = u32(round(uniforms.extra3.w));
+    let flags = u32(round(uniforms.extra4.y));
+    let graded = fractal_grade(
+        fractal_field(vec2<f32>(x, y), fractal_type, noise_type),
+        u32(round(uniforms.extra4.x)),
+        (flags & 1u) != 0u,
+        uniforms.extra3.x,
+        uniforms.extra3.y,
+    );
+    if (source.a <= 0.0) {
+        return source;
+    }
+    let blended = blend_rgb(u32(round(uniforms.extra5.x)), source.rgb, vec3<f32>(graded));
+    let rgb = source.rgb + (blended - source.rgb) * uniforms.extra4.w;
+    return vec4<f32>(rgb, source.a);
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4791,6 +5371,34 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             [0.2126, 0.7152, 0.0722],
         )
         .expect("valid glow grade");
+        let fractal_noise = mondrian_effects::FractalNoiseGrade::new(
+            mondrian_effects::FractalType::Rock,
+            mondrian_effects::FractalNoiseType::Linear,
+            false,
+            130.0,
+            5.0,
+            mondrian_effects::FractalOverflow::SoftClamp,
+            15.0,
+            true,
+            220.0,
+            100.0,
+            100.0,
+            [6.0, -4.0],
+            true,
+            5,
+            45.0,
+            40.0,
+            10.0,
+            [1.5, -0.5],
+            0.4,
+            360.0,
+            false,
+            1,
+            9,
+            85.0,
+            mondrian_core::BlendMode::Overlay,
+        )
+        .expect("valid fractal noise grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -4808,6 +5416,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::TurbulentDisplace { grade: turbulent_displace },
             mondrian_effects::EffectGpuSpatialPass::Deband { grade: deband },
             mondrian_effects::EffectGpuSpatialPass::Glow { grade: glow },
+            mondrian_effects::EffectGpuSpatialPass::FractalNoise { grade: fractal_noise },
         ];
 
         let mut cpu = pixels.clone();
@@ -4879,6 +5488,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             &glow,
+        ));
+        assert!(mondrian_effects::fractal_noise_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &fractal_noise,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -6106,6 +6721,192 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "glow case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_fractal_noise_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU fractal noise parity test: no GPU adapter available");
+            return;
+        };
+        let width = 21_u32;
+        let height = 17_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.02 * (3 * x + 2 * y) as f32;
+                pixels[y * width as usize + x] = [value, 0.55 - value * 0.5, value * 1.2, 1.0];
+            }
+        }
+        // One fully transparent pixel and one half-covered pixel: the first must
+        // stay untouched, the second must receive the blended field.
+        pixels[37] = [0.0, 0.0, 0.0, 0.0];
+        pixels[59] = [0.9, 0.2, 0.3, 0.5];
+        let cases = [
+            (
+                "default",
+                mondrian_effects::FractalNoiseGrade::new(
+                    mondrian_effects::FractalType::Basic,
+                    mondrian_effects::FractalNoiseType::SoftLinear,
+                    false,
+                    100.0,
+                    0.0,
+                    mondrian_effects::FractalOverflow::Clip,
+                    0.0,
+                    true,
+                    100.0,
+                    100.0,
+                    100.0,
+                    [0.0, 0.0],
+                    false,
+                    6,
+                    50.0,
+                    50.0,
+                    0.0,
+                    [0.0, 0.0],
+                    0.0,
+                    0.0,
+                    false,
+                    1,
+                    0,
+                    100.0,
+                    mondrian_core::BlendMode::Normal,
+                )
+                .expect("default fractal noise grade"),
+            ),
+            (
+                "turbulent sharp spline soft clamp",
+                mondrian_effects::FractalNoiseGrade::new(
+                    mondrian_effects::FractalType::TurbulentSharp,
+                    mondrian_effects::FractalNoiseType::Spline,
+                    false,
+                    175.0,
+                    0.0,
+                    mondrian_effects::FractalOverflow::SoftClamp,
+                    30.0,
+                    true,
+                    100.0,
+                    100.0,
+                    100.0,
+                    [95.0, -95.0],
+                    false,
+                    8,
+                    65.0,
+                    60.0,
+                    0.0,
+                    [0.0, 0.0],
+                    0.0,
+                    0.0,
+                    false,
+                    1,
+                    7,
+                    100.0,
+                    mondrian_core::BlendMode::Normal,
+                )
+                .expect("authored fractal noise grade"),
+            ),
+            (
+                "swirly wrap invert",
+                mondrian_effects::FractalNoiseGrade::new(
+                    mondrian_effects::FractalType::Swirly,
+                    mondrian_effects::FractalNoiseType::SoftLinear,
+                    true,
+                    100.0,
+                    10.0,
+                    mondrian_effects::FractalOverflow::Wrap,
+                    45.0,
+                    true,
+                    100.0,
+                    100.0,
+                    100.0,
+                    [50.0, 50.0],
+                    false,
+                    5,
+                    60.0,
+                    60.0,
+                    20.0,
+                    [0.0, 0.0],
+                    0.0,
+                    60.0,
+                    false,
+                    1,
+                    3,
+                    60.0,
+                    mondrian_core::BlendMode::Screen,
+                )
+                .expect("swirly fractal noise grade"),
+            ),
+            (
+                "max perspective cycle",
+                mondrian_effects::FractalNoiseGrade::new(
+                    mondrian_effects::FractalType::Max,
+                    mondrian_effects::FractalNoiseType::Linear,
+                    false,
+                    120.0,
+                    -10.0,
+                    mondrian_effects::FractalOverflow::Clip,
+                    0.0,
+                    false,
+                    300.0,
+                    250.0,
+                    180.0,
+                    [98.0, -49.0],
+                    true,
+                    4,
+                    40.0,
+                    30.0,
+                    0.0,
+                    [3.0, -2.0],
+                    0.6,
+                    540.0,
+                    true,
+                    2,
+                    11,
+                    100.0,
+                    mondrian_core::BlendMode::Normal,
+                )
+                .expect("projected fractal noise grade"),
+            ),
+        ];
+        for (index, (label, grade)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::fractal_noise_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let pool = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.fractal-noise-encoder"),
+                });
+            let pass = mondrian_effects::EffectGpuSpatialPass::FractalNoise { grade: *grade };
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool,
+                    width,
+                    height,
+                )
+                .expect("recorded fractal noise");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "fractal noise case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
