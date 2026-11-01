@@ -921,6 +921,10 @@ pub enum EffectRenderOp {
     PolarCoordinates {
         grade: crate::PolarCoordinatesGrade,
     },
+    /// Flip: mirrors the frame about an authored axis through the centre.
+    Flip {
+        grade: crate::FlipGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1158,6 +1162,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::PolarCoordinates { grade } => {
                 formatter.debug_struct("PolarCoordinates").field("grade", grade).finish()
             }
+            Self::Flip { grade } => formatter.debug_struct("Flip").field("grade", grade).finish(),
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
@@ -1755,6 +1760,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Flip { grade } => {
+                59u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -1957,6 +1968,7 @@ impl EffectRenderOp {
             EffectRenderOp::Mirror { .. } => 3,
             EffectRenderOp::Convolution { .. } => 3,
             EffectRenderOp::PolarCoordinates { .. } => 3,
+            EffectRenderOp::Flip { .. } => 1,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2510,7 +2522,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 57] {
+fn builtin_effect_types() -> [EffectType; 58] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2563,6 +2575,7 @@ fn builtin_effect_types() -> [EffectType; 57] {
         EffectType::Mirror,
         EffectType::PolarCoordinates,
         EffectType::LensDistortion,
+        EffectType::Flip,
         EffectType::LensFlare,
         EffectType::Bulge,
         EffectType::Split,
@@ -4888,6 +4901,62 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 ],
             );
         }
+        EffectType::Flip => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "axis",
+                "翻转",
+                "轴向",
+                "horizontal",
+                vec![
+                    ParameterEnumOption::new(
+                        "horizontal",
+                        "水平",
+                        "mondrian.effect.flip.axis.horizontal",
+                    ),
+                    ParameterEnumOption::new(
+                        "vertical",
+                        "垂直",
+                        "mondrian.effect.flip.axis.vertical",
+                    ),
+                    ParameterEnumOption::new("both", "两者", "mondrian.effect.flip.axis.both"),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "翻转",
+                "中心 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "翻转",
+                "中心 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "翻转",
+                "混合",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(crate::FLIP_MAX_BLEND_PERCENT as f64),
+                Some(0.1),
+            );
+        }
         EffectType::LensDistortion => {
             define_builtin_property(
                 &mut properties,
@@ -5778,6 +5847,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Percent
         }
         (EffectType::DirectionalBlur, "direction") => ParameterUnit::Degrees,
+        (EffectType::Flip, "centre_x" | "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Flip, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::LensDistortion, "fov") => ParameterUnit::Degrees,
         (EffectType::LensDistortion, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Mirror, "angle") => ParameterUnit::Degrees,
@@ -6033,6 +6104,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Bulge => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Flip => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -7796,6 +7872,51 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Flip => {
+            let axis_id = builtin_parameter_id(effect_type, "axis");
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let blend_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let axis = match effect.evaluate_parameter(&axis_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match crate::FlipAxis::from_key(&key) {
+                        Some(axis) => axis,
+                        None => {
+                            return Err(EffectGraphBuildError::InvalidAuthorState {
+                                effect_key: effect.effect_type.key().to_string(),
+                                effect_id: effect.id,
+                                reason: format!("flip axis {key} is not a declared option"),
+                            })
+                        }
+                    },
+                    None => crate::FlipAxis::Horizontal,
+                    Some(_) => {
+                        return Err(EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key().to_string(),
+                            effect_id: effect.id,
+                            reason: "flip axis must be an enum".to_string(),
+                        })
+                    }
+                };
+                let grade = crate::FlipGrade::new(
+                    axis,
+                    [
+                        effect.evaluate_f32_parameter(&centre_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&centre_y_id, context.time, 128.0),
+                    ],
+                    effect.evaluate_f32_parameter(&blend_id, context.time, 100.0),
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key().to_string(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Flip { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LensDistortion => {
             let fov_id = builtin_parameter_id(effect_type, "fov");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -8559,6 +8680,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Noise => "噪点",
         EffectType::Mirror => "镜像",
         EffectType::PolarCoordinates => "极坐标",
+        EffectType::Flip => "翻转",
         EffectType::LensDistortion => "镜头畸变",
         EffectType::LensFlare => "镜头光晕",
         EffectType::Bulge => "凸出",
@@ -9853,6 +9975,7 @@ mod tests {
             EffectType::Mirror,
             EffectType::PolarCoordinates,
             EffectType::LensDistortion,
+            EffectType::Flip,
             EffectType::LensFlare,
             EffectType::Bulge,
             EffectType::Split,
@@ -14558,6 +14681,112 @@ mod tests {
         assert!(grade.pinned());
     }
 
+    fn flip_op(graph: &EffectRenderGraph) -> Option<crate::FlipGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Flip { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Flip { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_flip(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Flip).expect("flip node should be instantiable");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Flip.property_path(parameter),
+                value,
+            })
+            .expect("authored value should be accepted");
+        effect
+    }
+
+    #[test]
+    fn flip_defaults_reach_the_operation() {
+        let effect =
+            instantiate_effect_node(EffectType::Flip).expect("flip node should be instantiable");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("default graph should build");
+        let grade = flip_op(&graph).expect("the default blend is a full flip");
+        assert_eq!(grade.axis(), crate::FlipAxis::Horizontal);
+        assert_eq!(grade.centre(), [128.0, 128.0]);
+        assert!((grade.blend() - 1.0).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn flip_authored_state_reaches_the_operation() {
+        let mut effect = author_flip("axis", PropertyValue::Enum("both".to_string()));
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Flip.property_path("centre_x"),
+                value: PropertyValue::Float(40.0),
+            })
+            .expect("the centre is accepted");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Flip.property_path("centre_y"),
+                value: PropertyValue::Float(12.5),
+            })
+            .expect("the centre is accepted");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Flip.property_path("blend_with_original"),
+                value: PropertyValue::Float(25.0),
+            })
+            .expect("the blend is accepted");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = flip_op(&graph).expect("a quarter blend still emits a node");
+        assert_eq!(grade.axis(), crate::FlipAxis::Both);
+        assert_eq!(grade.centre(), [40.0, 12.5]);
+        assert!((grade.blend() - 0.25).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn flip_zero_blend_compiles_to_identity() {
+        let effect = author_flip("blend_with_original", PropertyValue::Float(0.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a zero blend graph should build");
+        assert!(
+            flip_op(&graph).is_none(),
+            "a zero blend leaves the frame untouched"
+        );
+    }
+
+    #[test]
+    fn flip_rejects_author_values_outside_the_declared_ranges() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Flip).expect("flip node should be instantiable");
+        let outside = effect.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Flip.property_path("blend_with_original"),
+            value: PropertyValue::Float(101.0),
+        });
+        assert!(outside.is_err(), "the blend is bounded by the schema");
+
+        let mut unknown =
+            instantiate_effect_node(EffectType::Flip).expect("flip node should be instantiable");
+        let rejected = unknown.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: EffectType::Flip.property_path("axis"),
+            value: PropertyValue::Enum("diagonal".to_string()),
+        });
+        assert!(rejected.is_err(), "an undeclared axis option is rejected");
+    }
+
+    #[test]
+    fn flip_authored_state_survives_serialization_round_trip() {
+        let mut effect = author_flip("axis", PropertyValue::Enum("vertical".to_string()));
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Flip.property_path("blend_with_original"),
+                value: PropertyValue::Float(60.0),
+            })
+            .expect("the blend is accepted");
+        let json = serde_json::to_string(&effect).expect("the node serialises");
+        let restored: EffectNode = serde_json::from_str(&json).expect("the node restores");
+        assert_eq!(restored, effect);
+    }
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {

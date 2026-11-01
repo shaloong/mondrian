@@ -31,6 +31,7 @@ pub mod drop_shadow;
 pub mod effect;
 pub mod emboss;
 pub mod find_edges;
+pub mod flip;
 mod project_properties;
 pub mod radial_blur;
 pub(crate) mod resample;
@@ -355,5 +356,9 @@ pub use emboss::{
 };
 pub use find_edges::{
     FindEdgesError, FindEdgesGrade, FIND_EDGES_HALO_PIXELS, FIND_EDGES_MAX_HALO_PIXELS,
+};
+pub use flip::{
+    flip_frame_f32, FlipAxis, FlipError, FlipGrade, FLIP_AXIS_COUNT, FLIP_MAX_BLEND_PERCENT,
+    FLIP_MAX_CENTRE_PIXELS,
 };
 pub use shift_channels::{ChannelSource, ShiftChannelsGrade};

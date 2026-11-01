@@ -119,6 +119,10 @@ pub enum EffectGpuSpatialPass {
         /// Resolved authoring state for this stage.
         grade: crate::LensDistortionGrade,
     },
+    Flip {
+        /// Authored flip axis, mirror centre, and blend weight.
+        grade: crate::FlipGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -146,6 +150,7 @@ impl EffectGpuSpatialPass {
             Self::Mirror { .. } => "mirror",
             Self::PolarCoordinates { .. } => "polar_coordinates",
             Self::LensDistortion { .. } => "lens_distortion",
+            Self::Flip { .. } => "flip",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -185,6 +190,7 @@ impl EffectGpuSpatialPass {
             | Self::PolarCoordinates { .. } => u32::MAX,
             // A flare reads only the pixel it writes, so it needs no neighbour.
             Self::LensDistortion { .. } => u32::MAX,
+            Self::Flip { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -217,6 +223,7 @@ impl EffectGpuSpatialPass {
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             Self::LensDistortion { .. } => u32::MAX,
+            Self::Flip { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -490,6 +497,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::LensDistortion { grade } => {
             Some(EffectGpuSpatialPass::LensDistortion { grade: *grade })
         }
+        EffectRenderOp::Flip { grade } => Some(EffectGpuSpatialPass::Flip { grade: *grade }),
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }
