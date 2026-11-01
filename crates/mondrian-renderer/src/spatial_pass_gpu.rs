@@ -54,6 +54,7 @@ pub(crate) struct EffectSpatialGpu {
     lens_distortion: wgpu::RenderPipeline,
     flip: wgpu::RenderPipeline,
     ripple: wgpu::RenderPipeline,
+    wave_warp: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
@@ -520,6 +521,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let wave_warp = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.wave-warp"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_wave_warp"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let lens_flare = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.lens-flare"),
             layout: Some(&layout),
@@ -683,6 +714,7 @@ impl EffectSpatialGpu {
             lens_distortion,
             flip,
             ripple,
+            wave_warp,
             lens_flare,
             bulge,
             split,
@@ -901,6 +933,40 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Records the wave warp pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_wave_warp(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniforms = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.wave_warp,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -1000,6 +1066,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
             EffectGpuSpatialPass::Flip { .. } => Ok(1),
             EffectGpuSpatialPass::Ripple { .. } => Ok(1),
+            EffectGpuSpatialPass::WaveWarp { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1231,6 +1298,20 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_ripple(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::WaveWarp { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_wave_warp(
                     device,
                     encoder,
                     params,
@@ -2520,6 +2601,125 @@ fn fs_flip(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     return unpremultiply(mixed);
 }
 
+fn wave_warp_smoothstep01(value: f32) -> f32 {
+    let clamped = clamp(value, 0.0, 1.0);
+    return clamped * clamped * (3.0 - 2.0 * clamped);
+}
+
+fn wave_warp_noise_unit(cell: i32) -> f32 {
+    let mixed = bitcast<u32>(cell) * 2654435761u;
+    let rotated = ((mixed << 13u) | (mixed >> 19u)) ^ 0x9e3779b9u;
+    return f32(rotated >> 8u) / 16777215.0;
+}
+
+fn wave_warp_value(wave_type: u32, turns: f32) -> f32 {
+    let cell = floor(turns);
+    let fraction = turns - cell;
+    if (wave_type == 0u) {
+        return sin(6.283185307179586 * fraction);
+    }
+    if (wave_type == 1u) {
+        if (fraction < 0.5) {
+            return 1.0;
+        }
+        return -1.0;
+    }
+    if (wave_type == 2u) {
+        return 1.0 - 4.0 * abs(fraction - 0.5);
+    }
+    if (wave_type == 3u) {
+        return 2.0 * fraction - 1.0;
+    }
+    if (wave_type == 4u) {
+        let offset = 2.0 * fraction - 1.0;
+        return 2.0 * sqrt(max(1.0 - offset * offset, 0.0)) - 1.0;
+    }
+    if (wave_type == 5u) {
+        let offset = 2.0 * fraction - 1.0;
+        return sqrt(max(1.0 - offset * offset, 0.0));
+    }
+    if (wave_type == 6u) {
+        let offset = 2.0 * fraction - 1.0;
+        return 1.0 - 2.0 * sqrt(max(1.0 - offset * offset, 0.0));
+    }
+    if (wave_type == 7u) {
+        return 2.0 * wave_warp_noise_unit(i32(cell)) - 1.0;
+    }
+    let left = wave_warp_noise_unit(i32(cell));
+    let right = wave_warp_noise_unit(i32(cell) + 1);
+    return 2.0 * (left + (right - left) * wave_warp_smoothstep01(fraction)) - 1.0;
+}
+
+fn wave_warp_pin_damping(pin: u32, coord: vec2<f32>) -> f32 {
+    let dims = vec2<f32>(frame_dims());
+    let normalized = (coord + vec2<f32>(0.5, 0.5)) / dims;
+    let margin = 0.2;
+    let left = wave_warp_smoothstep01(normalized.x / margin);
+    let right = wave_warp_smoothstep01((1.0 - normalized.x) / margin);
+    let top = wave_warp_smoothstep01(normalized.y / margin);
+    let bottom = wave_warp_smoothstep01((1.0 - normalized.y) / margin);
+    if (pin == 0u) {
+        return 1.0;
+    }
+    if (pin == 1u) {
+        return min(min(left, right), min(top, bottom));
+    }
+    if (pin == 2u) {
+        let centre = 0.5 * (dims - vec2<f32>(1.0, 1.0));
+        let radius = 0.25 * min(dims.x, dims.y);
+        return wave_warp_smoothstep01(length(coord - centre) / radius);
+    }
+    if (pin == 3u) {
+        return left;
+    }
+    if (pin == 4u) {
+        return top;
+    }
+    if (pin == 5u) {
+        return right;
+    }
+    if (pin == 6u) {
+        return bottom;
+    }
+    if (pin == 7u) {
+        return min(top, bottom);
+    }
+    return min(left, right);
+}
+
+@fragment
+fn fs_wave_warp(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let crest = uniforms.params.x;
+    if (abs(crest) <= 1.0e-9) {
+        return load_clamped(pixel);
+    }
+    let wavelength = max(uniforms.params.y, 1.0e-6);
+    let direction = uniforms.params.z;
+    let phase = uniforms.params.w;
+    let axis = vec2<f32>(sin(direction), -cos(direction));
+    let wave_type = u32(uniforms.extra.x + 0.5);
+    let pin = u32(uniforms.extra.y + 0.5);
+    let samples = max(u32(uniforms.extra.z + 0.5), 1u);
+    let step = 1.0 / f32(samples);
+    let origin = position.xy - vec2<f32>(0.5, 0.5);
+    var accumulated = vec4<f32>(0.0);
+    for (var sample_row = 0u; sample_row < samples; sample_row = sample_row + 1u) {
+        let offset_y = (f32(sample_row) + 0.5) * step - 0.5;
+        for (var sample_column = 0u; sample_column < samples; sample_column = sample_column + 1u) {
+            let offset_x = (f32(sample_column) + 0.5) * step - 0.5;
+            let coord = origin + vec2<f32>(offset_x, offset_y);
+            let along = dot(coord, axis);
+            let damping = wave_warp_pin_damping(pin, coord);
+            let displacement =
+                crest * wave_warp_value(wave_type, along / wavelength - phase) * damping;
+            let sample = coord + axis * displacement;
+            accumulated = accumulated + sample_bilinear_premultiplied(sample.x, sample.y);
+        }
+    }
+    return unpremultiply(accumulated * (step * step));
+}
+
 @fragment
 fn fs_lens_distortion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
@@ -3224,6 +3424,16 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             0.15,
         )
         .expect("valid ripple grade");
+        let wave_warp = mondrian_effects::WaveWarpGrade::new(
+            mondrian_effects::WaveType::Triangle,
+            4.5,
+            26.0,
+            30.0,
+            0.2,
+            mondrian_effects::WavePin::AllEdges,
+            mondrian_effects::WaveQuality::Normal,
+        )
+        .expect("valid wave warp grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -3235,6 +3445,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
             mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
             mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
+            mondrian_effects::EffectGpuSpatialPass::WaveWarp { grade: wave_warp },
         ];
 
         let mut cpu = pixels.clone();
@@ -3270,6 +3481,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             ripple,
+        ));
+        assert!(mondrian_effects::wave_warp_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            wave_warp,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -3729,6 +3946,112 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                         difference <= 1.0e-4,
                         "flip {} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}",
                         axis.as_key()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_wave_warp_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU wave warp parity test: no GPU adapter available");
+            return;
+        };
+        let width = 19_u32;
+        let height = 17_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.027 * (x + 2 * y) as f32;
+                pixels[y * width as usize + x] = [
+                    value,
+                    0.5 - value * 0.35,
+                    0.15 + value * 0.8,
+                    1.0 - 0.015 * (y % 4) as f32,
+                ];
+            }
+        }
+        pixels[33] = [0.0, 0.0, 0.0, 0.0];
+        pixels[150] = [1.75, -0.4, 0.9, 0.35];
+        for (wave_type, crest, wavelength, direction, phase, pin, quality) in [
+            (
+                mondrian_effects::WaveType::Sine,
+                6.0_f32,
+                40.0_f32,
+                90.0_f32,
+                0.125_f32,
+                mondrian_effects::WavePin::None,
+                mondrian_effects::WaveQuality::Low,
+            ),
+            (
+                mondrian_effects::WaveType::Triangle,
+                5.5,
+                24.0,
+                0.0,
+                0.3,
+                mondrian_effects::WavePin::AllEdges,
+                mondrian_effects::WaveQuality::Normal,
+            ),
+            (
+                mondrian_effects::WaveType::Circle,
+                4.5,
+                18.0,
+                45.0,
+                0.6,
+                mondrian_effects::WavePin::Center,
+                mondrian_effects::WaveQuality::High,
+            ),
+            (
+                mondrian_effects::WaveType::SmoothNoise,
+                5.0,
+                30.0,
+                30.0,
+                0.2,
+                mondrian_effects::WavePin::VerticalEdges,
+                mondrian_effects::WaveQuality::Low,
+            ),
+        ] {
+            let grade = mondrian_effects::WaveWarpGrade::new(
+                wave_type, crest, wavelength, direction, phase, pin, quality,
+            )
+            .expect("wave warp grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::wave_warp_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.wave-warp-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_wave_warp(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded wave warp");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "wave warp {} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}",
+                        wave_type.as_key()
                     );
                 }
             }
