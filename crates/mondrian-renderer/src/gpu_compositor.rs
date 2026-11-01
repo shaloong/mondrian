@@ -1180,6 +1180,30 @@ fn arithmetic_combine(channel: f32, value: f32, operation: i32, clip_result: boo
     return result;
 }
 
+fn leave_color_hue(colour: vec3<f32>) -> f32 {
+    // `LeaveColorMatch::Hue`: the maximum/minimum difference expression the CPU
+    // kernel uses, written so both sides evaluate the same sectors. A grey
+    // sample has no hue; the red arm wraps a negative sector into the top of the
+    // circle instead of taking a remainder.
+    let maximum = max(colour.r, max(colour.g, colour.b));
+    let minimum = min(colour.r, min(colour.g, colour.b));
+    let delta = maximum - minimum;
+    if (delta == 0.0) {
+        return 0.0;
+    }
+    if (maximum == colour.r) {
+        let sector = (colour.g - colour.b) / delta;
+        if (sector < 0.0) {
+            return (sector + 6.0) / 6.0;
+        }
+        return sector / 6.0;
+    }
+    if (maximum == colour.g) {
+        return ((colour.b - colour.r) / delta + 2.0) / 6.0;
+    }
+    return ((colour.r - colour.g) / delta + 4.0) / 6.0;
+}
+
 fn effects_author_coverage() -> bool {
     // A pixel without coverage is invisible, so every grade could skip it — and
     // that is exactly what this early return does. The exception is a chain that
@@ -1516,6 +1540,37 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 let green = arithmetic_combine(pixel.g, values.y, operation, clip_result);
                 let blue = arithmetic_combine(pixel.b, values.z, operation, clip_result);
                 pixel = vec4<f32>(red, green, blue, pixel.a);
+            }
+        } else if (effect.header.x == 29u) {
+            // `LeaveColorGrade`: params is [amount, tolerance, softness, match
+            // mode] and color is the kept colour. The match distance follows the
+            // CPU kernel exactly: the RGB cube distance normalised by sqrt(3), or
+            // the circular hue distance from the shared hue expression. The
+            // explicit epsilon keeps the soft edge wider than the tolerance even
+            // when the authored softness is zero. Alpha is never authored, so a
+            // pixel without coverage is left exactly as it arrived.
+            if (pixel.a > 0.0) {
+                let kept = effect.color.rgb;
+                var match_distance: f32;
+                if (effect.params.w < 0.5) {
+                    let difference = pixel.rgb - kept;
+                    match_distance = sqrt(dot(difference, difference)) / 1.7320508;
+                } else {
+                    let difference = abs(leave_color_hue(pixel.rgb) - leave_color_hue(kept));
+                    match_distance = 2.0 * min(difference, 1.0 - difference);
+                }
+                let edge0 = effect.params.y;
+                let edge1 = effect.params.y + effect.params.z + 1.0e-4;
+                var keep = 0.0;
+                if (edge1 <= edge0) {
+                    keep = select(0.0, 1.0, match_distance <= edge0);
+                } else {
+                    let t = clamp((match_distance - edge0) / (edge1 - edge0), 0.0, 1.0);
+                    keep = 1.0 - t * t * (3.0 - 2.0 * t);
+                }
+                let grey = dot(pixel.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+                let decolour = effect.params.x * (1.0 - keep);
+                pixel = vec4<f32>(mix(pixel.rgb, vec3<f32>(grey), decolour), pixel.a);
             }
         } else if (effect.header.x == 23u) {
             // `NoiseGrade`: params.x is the amount as a fraction of the full
@@ -4732,6 +4787,16 @@ fn effect_uniforms(
                     params,
                     color: [0.0; 4],
                     extra0,
+                    extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::LeaveColor { grade } => {
+                let (params, color) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [29, 0, 0, 0],
+                    params,
+                    color,
+                    extra0: [0.0; 4],
                     extra1: [0.0; 4],
                 }
             }
@@ -8140,6 +8205,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_leave_color_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            LeaveColorGrade, LeaveColorMatch,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU leave color parity test: no GPU adapter available");
+            return;
+        };
+        // 5x4: an exact match, a same-hue darker tint, a far colour, an HDR read,
+        // a half-covered pixel and a fully transparent pixel exercise both match
+        // criteria, the zero-coverage guard and the passthrough alpha. The
+        // transparent pixel keeps a zero colour because compositing a zero-coverage
+        // layer onto a transparent target discards its rgb, so only its alpha is
+        // observable in the readback; the kernel's bit-identical skip is covered by
+        // the unit tests.
+        let mut data = vec![[0.2_f32, 0.4, 0.6, 1.0]; 20];
+        data[0] = [1.0, 0.0, 0.0, 1.0];
+        data[1] = [0.25, 0.0, 0.0, 1.0];
+        data[2] = [0.0, 1.0, 0.0, 1.0];
+        data[3] = [2.5, -0.4, 0.9, 1.0];
+        data[5] = [0.5, 0.5, 0.5, 0.5];
+        data[7] = [0.0, 0.0, 0.0, 0.0];
+        data[9] = [0.2, 0.4, 0.6, 1.0];
+        data[11] = [0.7, 0.15, 0.3, 1.0];
+        data[13] = [0.05, 0.9, 0.5, 0.75];
+        data[17] = [-0.3, 0.2, 1.4, 1.0];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 5,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (match_mode, amount, colour, tolerance, softness) in [
+            // The full decolour of everything that is not the kept red.
+            (
+                LeaveColorMatch::Rgb,
+                100.0_f32,
+                [1.0_f32, 0.0, 0.0],
+                20.0_f32,
+                0.0_f32,
+            ),
+            // The hue criterion with a wider soft edge.
+            (LeaveColorMatch::Hue, 80.0, [0.2, 0.4, 0.6], 10.0, 30.0),
+            // A partial amount leaves the far colours half saturated.
+            (LeaveColorMatch::Rgb, 50.0, [0.2, 0.4, 0.6], 15.0, 0.0),
+            // A zero tolerance only keeps the exact kept colour.
+            (LeaveColorMatch::Rgb, 100.0, [0.5, 0.5, 0.5], 0.0, 0.0),
+        ] {
+            let grade = LeaveColorGrade::new(amount, colour, tolerance, softness, match_mode)
+                .expect("valid leave color grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::LeaveColor { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(5, 4),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                5,
+                4,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU leave color accuracy budget exceeded for {grade:?}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_noise_matches_the_cpu_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
             compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
@@ -8586,7 +8762,8 @@ mod tests {
             apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
             lower_effect_graph_to_gpu_plan, ArithmeticGrade, ArithmeticOperator,
             BlackAndWhiteGrade, ChannelMixerGrade, ChannelSource, EffectGraphBuilderState,
-            EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels, ShiftChannelsGrade,
+            EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels, LeaveColorGrade,
+            LeaveColorMatch, ShiftChannelsGrade,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -8674,10 +8851,14 @@ mod tests {
             grade: ArithmeticGrade::new(ArithmeticOperator::Screen, 128.0, 64.0, 200.0, false)
                 .expect("valid arithmetic grade"),
         });
+        builder.append_unary(EffectRenderOp::LeaveColor {
+            grade: LeaveColorGrade::new(100.0, [0.25, 0.5, 0.75], 25.0, 20.0, LeaveColorMatch::Hue)
+                .expect("valid leave color grade"),
+        });
         let graph = compile_reference_render_graph(builder.finish()).expect("valid built-in graph");
         let plan =
             lower_effect_graph_to_gpu_plan(&graph).expect("supported built-in point effects");
-        assert_eq!(plan.operations().len(), 8);
+        assert_eq!(plan.operations().len(), 9);
 
         let expected = apply_compiled_effect_graph_rgba_f32(
             mondrian_effects::EffectFloatFrameView::new(
@@ -8711,7 +8892,7 @@ mod tests {
             WorkingColorSpace::LinearRec709,
         );
         assert_eq!(diagnostics.execution.fused_layer_passes, 1);
-        assert_eq!(diagnostics.execution.fused_point_operations, 8);
+        assert_eq!(diagnostics.execution.fused_point_operations, 9);
         let report = compare_linear_rgba(
             expected.pixels(),
             &actual,
