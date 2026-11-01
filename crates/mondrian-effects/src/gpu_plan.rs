@@ -144,6 +144,10 @@ pub enum EffectGpuPointOp {
     LeaveColor {
         grade: crate::LeaveColorGrade,
     },
+    /// Broadcast safe: pulls the signal back inside the authored IRE amplitude.
+    BroadcastSafe {
+        grade: crate::BroadcastSafeGrade,
+    },
     Threshold {
         level: f32,
         luminance_coefficients: [f32; 3],
@@ -852,6 +856,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::Ramp { grade } => Ok(EffectGpuPointOp::Ramp { grade: *grade }),
         EffectRenderOp::Arithmetic { grade } => Ok(EffectGpuPointOp::Arithmetic { grade: *grade }),
         EffectRenderOp::LeaveColor { grade } => Ok(EffectGpuPointOp::LeaveColor { grade: *grade }),
+        EffectRenderOp::BroadcastSafe { grade } => {
+            Ok(EffectGpuPointOp::BroadcastSafe { grade: *grade })
+        }
         EffectRenderOp::Threshold { grade } => Ok(EffectGpuPointOp::Threshold {
             level: grade.level(),
             luminance_coefficients: grade.luminance_coefficients(),
@@ -948,6 +955,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::Arithmetic { .. } => "arithmetic",
         EffectRenderOp::LeaveColor { .. } => "leave_color",
+        EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

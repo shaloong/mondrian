@@ -2403,3 +2403,17 @@ parameter-mondrian-effect-builtin-leave-color-match-label = 匹配颜色
 parameter-mondrian-effect-builtin-leave-color-tolerance-label = 容差
 parameter-mondrian-effect-leave-color-match-hue = 使用色相
 parameter-mondrian-effect-leave-color-match-rgb = 使用 RGB
+
+## Broadcast Safe 广播安全
+effect-broadcast-safe = 广播安全
+parameter-group-broadcast-safe = 广播安全
+parameter-mondrian-effect-builtin-broadcast-safe-ire-label = 最大信号振幅 (IRE)
+parameter-mondrian-effect-builtin-broadcast-safe-locale-label = 广播区域设置
+parameter-mondrian-effect-builtin-broadcast-safe-mode-label = 确保颜色安全的方式
+parameter-mondrian-effect-broadcast-safe-locale-ntsc = NTSC
+parameter-mondrian-effect-broadcast-safe-locale-pal = PAL
+parameter-mondrian-effect-broadcast-safe-mode-clamp-rgb = 逐通道钳位
+parameter-mondrian-effect-broadcast-safe-mode-key-out-safe = 抠出安全区域
+parameter-mondrian-effect-broadcast-safe-mode-key-out-unsafe = 抠出不安全区域
+parameter-mondrian-effect-broadcast-safe-mode-reduce-luminance = 降低明亮度
+parameter-mondrian-effect-broadcast-safe-mode-reduce-saturation = 降低饱和度

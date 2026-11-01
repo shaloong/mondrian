@@ -109,6 +109,8 @@ pub enum EffectType {
     Arithmetic,
     /// Leave color: keeps one authored colour and decolours everything else.
     LeaveColor,
+    /// Broadcast safe: pulls the signal back inside the authored IRE amplitude.
+    BroadcastSafe,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -193,6 +195,7 @@ impl EffectType {
             Self::Echo => "builtin.echo".to_string(),
             Self::Arithmetic => "builtin.arithmetic".to_string(),
             Self::LeaveColor => "builtin.leave_color".to_string(),
+            Self::BroadcastSafe => "builtin.broadcast_safe".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -273,6 +276,7 @@ impl EffectType {
             "builtin.echo" => Self::Echo,
             "builtin.arithmetic" => Self::Arithmetic,
             "builtin.leave_color" => Self::LeaveColor,
+            "builtin.broadcast_safe" => Self::BroadcastSafe,
             other => Self::External(other.to_string()),
         }
     }
@@ -353,6 +357,7 @@ impl EffectType {
             Self::Echo => "残影",
             Self::Arithmetic => "算术",
             Self::LeaveColor => "保留颜色",
+            Self::BroadcastSafe => "广播安全",
             Self::External(name) => name,
         }
     }
@@ -431,6 +436,7 @@ impl EffectType {
             Self::Echo => vec!["时间"],
             Self::Arithmetic => vec!["通道"],
             Self::LeaveColor => vec!["颜色"],
+            Self::BroadcastSafe => vec!["颜色"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -511,6 +517,7 @@ impl EffectType {
             Self::Echo => "echo".to_string(),
             Self::Arithmetic => "arithmetic".to_string(),
             Self::LeaveColor => "leave_color".to_string(),
+            Self::BroadcastSafe => "broadcast_safe".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -840,6 +847,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Echo => Ok(()),
             Self::Arithmetic => Ok(()),
             Self::LeaveColor => Ok(()),
+            Self::BroadcastSafe => Ok(()),
         }
     }
 }

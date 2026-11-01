@@ -2346,6 +2346,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::Arithmetic { .. } => "arithmetic",
         EffectRenderOp::LeaveColor { .. } => "leave_color",
+        EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

@@ -2471,3 +2471,17 @@ parameter-mondrian-effect-builtin-leave-color-match-label = Match
 parameter-mondrian-effect-builtin-leave-color-tolerance-label = Tolerance
 parameter-mondrian-effect-leave-color-match-hue = Use Hue
 parameter-mondrian-effect-leave-color-match-rgb = Use RGB
+
+## Broadcast Safe 广播安全
+effect-broadcast-safe = Broadcast Safe
+parameter-group-broadcast-safe = Broadcast Safe
+parameter-mondrian-effect-builtin-broadcast-safe-ire-label = Maximum Signal Amplitude (IRE)
+parameter-mondrian-effect-builtin-broadcast-safe-locale-label = Broadcast Locale
+parameter-mondrian-effect-builtin-broadcast-safe-mode-label = How to Make Colors Safe
+parameter-mondrian-effect-broadcast-safe-locale-ntsc = NTSC
+parameter-mondrian-effect-broadcast-safe-locale-pal = PAL
+parameter-mondrian-effect-broadcast-safe-mode-clamp-rgb = Clamp Each Channel
+parameter-mondrian-effect-broadcast-safe-mode-key-out-safe = Key Out Safe
+parameter-mondrian-effect-broadcast-safe-mode-key-out-unsafe = Key Out Unsafe
+parameter-mondrian-effect-broadcast-safe-mode-reduce-luminance = Reduce Luminance
+parameter-mondrian-effect-broadcast-safe-mode-reduce-saturation = Reduce Saturation

@@ -977,6 +977,10 @@ pub enum EffectRenderOp {
     LeaveColor {
         grade: crate::LeaveColorGrade,
     },
+    /// Broadcast safe: pulls the signal back inside the authored IRE amplitude.
+    BroadcastSafe {
+        grade: crate::BroadcastSafeGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1259,6 +1263,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::LeaveColor { grade } => {
                 formatter.debug_struct("LeaveColor").field("grade", grade).finish()
+            }
+            Self::BroadcastSafe { grade } => {
+                formatter.debug_struct("BroadcastSafe").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1969,6 +1976,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 color.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::BroadcastSafe { grade } => {
+                75u8.hash(state);
+                let (params, extra0) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra0.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2185,6 +2198,7 @@ impl EffectRenderOp {
             EffectRenderOp::MatteRefine { .. } => 6,
             EffectRenderOp::Arithmetic { .. } => 1,
             EffectRenderOp::LeaveColor { .. } => 2,
+            EffectRenderOp::BroadcastSafe { .. } => 1,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2740,7 +2754,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 74] {
+fn builtin_effect_types() -> [EffectType; 75] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2816,6 +2830,7 @@ fn builtin_effect_types() -> [EffectType; 74] {
         EffectType::Echo,
         EffectType::Arithmetic,
         EffectType::LeaveColor,
+        EffectType::BroadcastSafe,
     ]
 }
 
@@ -7815,6 +7830,55 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::BroadcastSafe => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "locale",
+                "广播安全",
+                "广播区域设置",
+                crate::BroadcastLocale::Ntsc.as_key(),
+                crate::BroadcastLocale::ALL
+                    .into_iter()
+                    .map(|locale| {
+                        ParameterEnumOption::new(
+                            locale.as_key(),
+                            locale.label(),
+                            format!("mondrian.effect.broadcast_safe.locale.{}", locale.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "mode",
+                "广播安全",
+                "确保颜色安全的方式",
+                crate::BroadcastSafeMode::ReduceLuminance.as_key(),
+                crate::BroadcastSafeMode::ALL
+                    .into_iter()
+                    .map(|mode| {
+                        ParameterEnumOption::new(
+                            mode.as_key(),
+                            mode.label(),
+                            format!("mondrian.effect.broadcast_safe.mode.{}", mode.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "ire",
+                "广播安全",
+                "最大信号振幅 (IRE)",
+                PropertyValue::Float(110.0),
+                Some(90.0),
+                Some(120.0),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8388,6 +8452,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::LeaveColor => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::BroadcastSafe => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -12290,6 +12358,54 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::BroadcastSafe => {
+            let locale_id = builtin_parameter_id(effect_type, "locale");
+            let mode_id = builtin_parameter_id(effect_type, "mode");
+            let ire_id = builtin_parameter_id(effect_type, "ire");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let locale = match effect.evaluate_parameter(&locale_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::BroadcastLocale::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "broadcast safe locale {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "broadcast safe locale must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::BroadcastLocale::Ntsc,
+                };
+                let mode = match effect.evaluate_parameter(&mode_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::BroadcastSafeMode::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "broadcast safe mode {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "broadcast safe mode must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::BroadcastSafeMode::ReduceLuminance,
+                };
+                let grade = crate::BroadcastSafeGrade::new(
+                    locale,
+                    mode,
+                    effect.evaluate_f32_parameter(&ire_id, context.time, 110.0),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                graph.append_unary(EffectRenderOp::BroadcastSafe { grade });
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -12370,6 +12486,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Echo => "残影",
         EffectType::Arithmetic => "算术",
         EffectType::LeaveColor => "保留颜色",
+        EffectType::BroadcastSafe => "广播安全",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -13678,6 +13795,7 @@ mod tests {
             EffectType::Echo,
             EffectType::Arithmetic,
             EffectType::LeaveColor,
+            EffectType::BroadcastSafe,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -20677,6 +20795,127 @@ mod tests {
         assert_eq!(grade.tolerance(), 5.0);
         assert_eq!(grade.softness(), 40.0);
         assert_eq!(grade.match_mode(), crate::LeaveColorMatch::Rgb);
+    }
+
+    fn broadcast_safe_op(graph: &EffectRenderGraph) -> Option<crate::BroadcastSafeGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::BroadcastSafe { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::BroadcastSafe { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_broadcast_safe(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::BroadcastSafe)
+            .expect("the broadcast safe effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BroadcastSafe.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the broadcast safe parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn broadcast_safe_defaults_still_emit_the_operation() {
+        // Safety is never an identity, so the documented defaults must emit the
+        // operation instead of being elided the way an unconfigured grade is.
+        let effect = instantiate_effect_node(EffectType::BroadcastSafe)
+            .expect("the broadcast safe effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default broadcast safe should compile");
+        let grade = broadcast_safe_op(&graph).expect("the default parameters emit a node");
+        assert_eq!(grade.locale(), crate::BroadcastLocale::Ntsc);
+        assert_eq!(grade.mode(), crate::BroadcastSafeMode::ReduceLuminance);
+        assert_eq!(grade.ire(), 110.0);
+        let expected: f32 = (110.0 - 7.5) / (100.0 - 7.5);
+        assert_eq!(grade.limit(), expected);
+    }
+
+    #[test]
+    fn broadcast_safe_authored_configuration_reaches_the_operation() {
+        let effect = author_broadcast_safe(&[
+            ("locale", PropertyValue::Enum("pal".to_string())),
+            ("mode", PropertyValue::Enum("key_out_safe".to_string())),
+            ("ire", PropertyValue::Float(95.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = broadcast_safe_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.locale(), crate::BroadcastLocale::Pal);
+        assert_eq!(grade.mode(), crate::BroadcastSafeMode::KeyOutSafe);
+        assert_eq!(grade.ire(), 95.0);
+        assert_eq!(grade.limit(), 0.95);
+        // The fused point uniform carries the CPU-computed limit, the zero-based
+        // mode, and the zero-based locale: the shader never re-derives the IRE.
+        let (params, extra0) = grade.gpu_controls();
+        assert_eq!(params, [3.0, 0.95, 0.0, 0.0]);
+        assert_eq!(extra0, [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn broadcast_safe_undeclared_enum_key_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::BroadcastSafe)
+            .expect("the broadcast safe effect should instantiate");
+        // The enum contract rejects the key before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BroadcastSafe.property_path("mode"),
+                value: PropertyValue::Enum("mystery".to_string()),
+            })
+            .expect_err("an undeclared mode key must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("unknown enum key `mystery`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn broadcast_safe_out_of_range_amplitude_is_rejected_at_authoring() {
+        for amplitude in [89.0, 121.0] {
+            let mut effect = instantiate_effect_node(EffectType::BroadcastSafe)
+                .expect("the broadcast safe effect should instantiate");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BroadcastSafe.property_path("ire"),
+                    value: PropertyValue::Float(amplitude),
+                })
+                .expect_err("an out-of-range amplitude must be rejected");
+            let rendered = format!("{error:?}");
+            assert!(rendered.contains("outside [90, 120]"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn broadcast_safe_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_broadcast_safe(&[
+            ("locale", PropertyValue::Enum("pal".to_string())),
+            ("mode", PropertyValue::Enum("clamp_rgb".to_string())),
+            ("ire", PropertyValue::Float(120.0)),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the broadcast safe node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the broadcast safe node");
+        assert_eq!(restored.effect_type, EffectType::BroadcastSafe);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored broadcast safe node");
+        let grade = broadcast_safe_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.locale(), crate::BroadcastLocale::Pal);
+        assert_eq!(grade.mode(), crate::BroadcastSafeMode::ClampRgb);
+        assert_eq!(grade.ire(), 120.0);
+        assert_eq!(grade.limit(), 1.2);
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {
