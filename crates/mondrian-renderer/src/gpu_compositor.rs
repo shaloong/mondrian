@@ -1303,6 +1303,20 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 let matte = extract_matte(value, effect);
                 pixel = vec4<f32>(matte, matte, matte, pixel.a);
             }
+        } else if (effect.header.x == 25u) {
+            // `BrightnessContrastGrade`: params.x is the gain, params.y the
+            // offset in the working domain and params.z the legacy clipping
+            // toggle. Alpha is never authored, so a pixel without coverage is
+            // left alone, exactly like the CPU kernel does.
+            if (pixel.a > 0.0) {
+                let shifted = pixel.rgb * effect.params.x + effect.params.y;
+                let rgb = select(
+                    shifted,
+                    clamp(shifted, vec3<f32>(0.0), vec3<f32>(1.0)),
+                    effect.params.z > 0.5
+                );
+                pixel = vec4<f32>(rgb, pixel.a);
+            }
         } else if (effect.header.x == 23u) {
             // `NoiseGrade`: params.x is the amount as a fraction of the full
             // signed range, params.y the grain type and params.z the clipping
@@ -4481,6 +4495,16 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::BrightnessContrast { grade } => {
+                let (params, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [25, 0, 0, 0],
+                    params,
+                    color: [0.0; 4],
+                    extra0,
+                    extra1: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
                 header: [23, 0, 0, 0],
                 params: grade.gpu_controls(),
@@ -7411,6 +7435,97 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU extract accuracy budget exceeded for {channel:?}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_brightness_contrast_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, BrightnessContrastGrade, EffectGraphBuilderState,
+            EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU brightness contrast parity test: no GPU adapter available");
+            return;
+        };
+        let data = vec![
+            [0.18_f32, 0.18, 0.18, 1.0],
+            [0.25, 0.55, 0.05, 1.0],
+            [2.5, -0.4, 0.9, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.5, 0.9, 0.1, 1.0],
+            [0.35, 0.35, 0.35, 0.25],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 3,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (brightness, contrast, legacy) in [
+            (0.0_f32, 0.0_f32, false),
+            (60.0, 50.0, false),
+            (-40.0, -70.0, false),
+            (-30.0, 25.0, true),
+        ] {
+            let grade = BrightnessContrastGrade::new(brightness, contrast, legacy)
+                .expect("valid brightness contrast grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::BrightnessContrast { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(3, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                3,
+                2,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU brightness contrast accuracy budget exceeded for ({brightness}, {contrast}, {legacy}): {report:#?}"
             );
         }
     }
