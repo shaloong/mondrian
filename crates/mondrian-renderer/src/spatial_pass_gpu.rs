@@ -57,6 +57,7 @@ pub(crate) struct EffectSpatialGpu {
     wave_warp: wgpu::RenderPipeline,
     transform: wgpu::RenderPipeline,
     corner_pin: wgpu::RenderPipeline,
+    turbulent_displace: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
@@ -613,6 +614,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let turbulent_displace = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.turbulent-displace"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_turbulent_displace"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let lens_flare = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.lens-flare"),
             layout: Some(&layout),
@@ -779,6 +810,7 @@ impl EffectSpatialGpu {
             wave_warp,
             transform,
             corner_pin,
+            turbulent_displace,
             lens_flare,
             bulge,
             split,
@@ -1107,6 +1139,41 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Records the turbulent displace pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_turbulent_displace(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        aces: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniforms = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.turbulent_displace,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -1209,6 +1276,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::WaveWarp { .. } => Ok(1),
             EffectGpuSpatialPass::Transform { .. } => Ok(1),
             EffectGpuSpatialPass::CornerPin { .. } => Ok(1),
+            EffectGpuSpatialPass::TurbulentDisplace { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1482,6 +1550,21 @@ impl EffectSpatialGpu {
                     device,
                     encoder,
                     grade,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::TurbulentDisplace { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra, aces) = grade.gpu_controls();
+                return self.record_turbulent_displace(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    aces,
                     source,
                     destination,
                     width,
@@ -2950,6 +3033,247 @@ fn fs_corner_pin(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
     return unpremultiply(sample_bilinear_premultiplied(sample.x, sample.y));
 }
 
+// The turbulent displace field. The hash, the octave sum and the displacement
+// formulas are transcribed from `mondrian_effects::turbulent_displace` in the
+// same f32 arithmetic order, because a single different rounding of the field
+// is amplified by the pixel-scale displacement.
+fn turbulent_hash(x: u32, y: u32, salt: u32) -> u32 {
+    var hash = x * 0x9E3779B9u ^ y * 0x85EBCA6Bu ^ salt;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x846CA68Bu;
+    return hash ^ (hash >> 16u);
+}
+
+fn turbulent_sample_value(hash: u32) -> f32 {
+    let bits = (hash >> 8u) & 0xFFFFu;
+    return f32(bits) / 65535.0 * 2.0 - 1.0;
+}
+
+fn turbulent_weight(t: f32, smoother: bool) -> f32 {
+    if (smoother) {
+        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    }
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn turbulent_value_noise(x: f32, y: f32, salt: u32, smoother: bool) -> f32 {
+    let cell_x = floor(x);
+    let cell_y = floor(y);
+    let fraction_x = x - cell_x;
+    let fraction_y = y - cell_y;
+    let weight_x = turbulent_weight(fraction_x, smoother);
+    let weight_y = turbulent_weight(fraction_y, smoother);
+    let x0 = bitcast<u32>(i32(cell_x));
+    let y0 = bitcast<u32>(i32(cell_y));
+    let x1 = bitcast<u32>(i32(cell_x) + 1);
+    let y1 = bitcast<u32>(i32(cell_y) + 1);
+    let top_left = turbulent_sample_value(turbulent_hash(x0, y0, salt));
+    let top_right = turbulent_sample_value(turbulent_hash(x1, y0, salt));
+    let bottom_left = turbulent_sample_value(turbulent_hash(x0, y1, salt));
+    let bottom_right = turbulent_sample_value(turbulent_hash(x1, y1, salt));
+    let top = top_left + (top_right - top_left) * weight_x;
+    let bottom = bottom_left + (bottom_right - bottom_left) * weight_x;
+    return top + (bottom - top) * weight_y;
+}
+
+fn turbulent_field(u: f32, v: f32, salt: u32, complexity: u32, smoother: bool) -> f32 {
+    var octaves = max(complexity, 1u);
+    if (smoother) {
+        octaves = max(complexity / 2u, 1u);
+    }
+    var total = 0.0;
+    var total_weight = 0.0;
+    var amplitude = 0.5;
+    var frequency = 1.0;
+    for (var octave = 0u; octave < octaves; octave = octave + 1u) {
+        let octave_salt = salt ^ (octave * 0x9E3779B9u);
+        total = total
+            + amplitude * turbulent_value_noise(u * frequency, v * frequency, octave_salt, smoother);
+        total_weight = total_weight + amplitude;
+        frequency = frequency * 2.0;
+        amplitude = amplitude * 0.5;
+    }
+    return total / total_weight;
+}
+
+fn turbulent_smoothstep01(value: f32) -> f32 {
+    let t = clamp(value, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn turbulent_pin_damping(pin: u32, coord: vec2<f32>) -> f32 {
+    let dims = vec2<f32>(frame_dims());
+    let normalized = (coord + vec2<f32>(0.5, 0.5)) / dims;
+    let margin = 0.2;
+    let left = turbulent_smoothstep01(normalized.x / margin);
+    let right = turbulent_smoothstep01((1.0 - normalized.x) / margin);
+    let top = turbulent_smoothstep01(normalized.y / margin);
+    let bottom = turbulent_smoothstep01((1.0 - normalized.y) / margin);
+    if (pin == 0u) {
+        return 1.0;
+    }
+    if (pin == 1u) {
+        return min(min(left, right), min(top, bottom));
+    }
+    if (pin == 2u) {
+        let centre = 0.5 * (dims - vec2<f32>(1.0, 1.0));
+        let radius = 0.25 * min(dims.x, dims.y);
+        return turbulent_smoothstep01(length(coord - centre) / radius);
+    }
+    if (pin == 3u) {
+        return left;
+    }
+    if (pin == 4u) {
+        return top;
+    }
+    if (pin == 5u) {
+        return right;
+    }
+    if (pin == 6u) {
+        return bottom;
+    }
+    if (pin == 7u) {
+        return min(top, bottom);
+    }
+    return min(left, right);
+}
+
+// Reflect one coordinate about the frame edges, applied once.
+fn turbulent_mirror(value: f32, extent: f32) -> f32 {
+    if (value < 0.0) {
+        return -value;
+    }
+    if (value > extent) {
+        return 2.0 * extent - value;
+    }
+    return value;
+}
+
+struct TurbulentField {
+    kind: u32,
+    amount: f32,
+    size_: f32,
+    offset: vec2<f32>,
+    evolution: vec2<f32>,
+    salt: u32,
+    complexity: u32,
+    smoother: bool,
+    centre: vec2<f32>,
+    pin: u32,
+};
+
+fn turbulent_domain(field: TurbulentField, coord: vec2<f32>) -> vec2<f32> {
+    return (coord - field.offset) / field.size_ + field.evolution;
+}
+
+fn turbulent_eval(field: TurbulentField, u: f32, v: f32) -> f32 {
+    return turbulent_field(u, v, field.salt, field.complexity, field.smoother);
+}
+
+fn turbulent_displacement(field: TurbulentField, coord: vec2<f32>) -> vec2<f32> {
+    let uv = turbulent_domain(field, coord);
+    let u = uv.x;
+    let v = uv.y;
+    if (field.kind == 0u || field.kind == 3u) {
+        // The gradient of the field in domain units, so the warp follows the
+        // contour of the noise instead of stretching along one axis. The
+        // quotient is not multiplied by `size_`: one domain unit is `size_`
+        // pixels wide, and scaling by it would turn the default grade into a
+        // thousands-of-pixels smear instead of the tens `amount` promises.
+        let h = 0.001;
+        let difference_x = turbulent_eval(field, u + h, v) - turbulent_eval(field, u - h, v);
+        let difference_y = turbulent_eval(field, u, v + h) - turbulent_eval(field, u, v - h);
+        return vec2<f32>(
+            field.amount * 0.5 * difference_x / (2.0 * h),
+            field.amount * 0.5 * difference_y / (2.0 * h),
+        );
+    }
+    if (field.kind == 1u || field.kind == 4u) {
+        let radial = (coord - field.centre) / max(length(coord - field.centre), 1.0e-6);
+        return radial * field.amount * turbulent_eval(field, u, v);
+    }
+    if (field.kind == 2u || field.kind == 5u) {
+        let radial = (coord - field.centre) / max(length(coord - field.centre), 1.0e-6);
+        let value = turbulent_eval(field, u, v);
+        return vec2<f32>(-radial.y * field.amount * value, radial.x * field.amount * value);
+    }
+    if (field.kind == 6u) {
+        return vec2<f32>(0.0, field.amount * turbulent_eval(field, u, v));
+    }
+    if (field.kind == 7u) {
+        return vec2<f32>(field.amount * turbulent_eval(field, u, v), 0.0);
+    }
+    return vec2<f32>(
+        field.amount * turbulent_eval(field, u, v),
+        field.amount * turbulent_eval(field, u + 5.2, v + 1.3),
+    );
+}
+
+@fragment
+fn fs_turbulent_displace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let amount = uniforms.params.x;
+    if (amount == 0.0) {
+        return load_clamped(pixel);
+    }
+    let dims = vec2<f32>(frame_dims());
+    // `position.xy` is index + 0.5, so subtracting the half texel yields the
+    // continuous pixel-centre coordinates the field is defined on.
+    let p = position.xy - vec2<f32>(0.5, 0.5);
+    let evolution = uniforms.extra.x;
+    let cycle = uniforms.extra.z;
+    var evolution_offset = vec2<f32>(evolution * 2.0, evolution * 0.618);
+    if (cycle > 0.0) {
+        let theta = 6.283185307179586 * evolution * cycle;
+        evolution_offset = vec2<f32>(cos(theta), sin(theta));
+    }
+    let kind = u32(uniforms.aces.x + 0.5);
+    let field = TurbulentField(
+        kind,
+        amount,
+        uniforms.params.y,
+        uniforms.params.zw,
+        evolution_offset,
+        0x85EBCA6Bu ^ u32(uniforms.aces.y + 0.5),
+        u32(uniforms.extra.y + 0.5),
+        kind == 3u || kind == 4u || kind == 5u,
+        0.5 * (dims - vec2<f32>(1.0, 1.0)),
+        u32(uniforms.extra.w + 0.5),
+    );
+    let samples = max(u32(uniforms.aces.w + 0.5), 1u);
+    let step = 1.0 / f32(samples);
+    let resize_layer = uniforms.aces.z;
+    var accumulated = vec4<f32>(0.0);
+    for (var sample_row = 0u; sample_row < samples; sample_row = sample_row + 1u) {
+        let offset_y = (f32(sample_row) + 0.5) * step - 0.5;
+        for (var sample_column = 0u; sample_column < samples; sample_column = sample_column + 1u) {
+            let offset_x = (f32(sample_column) + 0.5) * step - 0.5;
+            let coord = p + vec2<f32>(offset_x, offset_y);
+            let damping = turbulent_pin_damping(field.pin, coord);
+            let warped = coord + turbulent_displacement(field, coord) * damping;
+            let clamped = sample_bilinear_premultiplied(warped.x, warped.y);
+            var sample = clamped;
+            if (resize_layer > 0.0) {
+                let mirrored_target = vec2<f32>(
+                    turbulent_mirror(warped.x, dims.x - 1.0),
+                    turbulent_mirror(warped.y, dims.y - 1.0),
+                );
+                let mirrored =
+                    sample_bilinear_premultiplied(mirrored_target.x, mirrored_target.y);
+                if (resize_layer >= 1.0) {
+                    sample = mirrored;
+                } else {
+                    sample = mix(clamped, mirrored, resize_layer);
+                }
+            }
+            accumulated = accumulated + sample;
+        }
+    }
+    return unpremultiply(accumulated * (step * step));
+}
+
 @fragment
 fn fs_lens_distortion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
@@ -3686,6 +4010,21 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             [0.9, 1.03],
         )
         .expect("valid corner pin grade");
+        let turbulent_displace = mondrian_effects::TurbulentDisplaceGrade::new(
+            mondrian_effects::DisplacementType::Bulge,
+            3.5,
+            24.0,
+            [4.0, 3.5],
+            2,
+            0.25,
+            true,
+            3,
+            7,
+            mondrian_effects::DisplacePin::HorizontalEdges,
+            0.5,
+            mondrian_effects::DisplaceAntialias::Low,
+        )
+        .expect("valid turbulent displace grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -3700,6 +4039,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::WaveWarp { grade: wave_warp },
             mondrian_effects::EffectGpuSpatialPass::Transform { grade: transform },
             mondrian_effects::EffectGpuSpatialPass::CornerPin { grade: corner_pin },
+            mondrian_effects::EffectGpuSpatialPass::TurbulentDisplace { grade: turbulent_displace },
         ];
 
         let mut cpu = pixels.clone();
@@ -3753,6 +4093,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             &corner_pin,
+        ));
+        assert!(mondrian_effects::turbulent_displace_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &turbulent_displace,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -4528,6 +4874,240 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "corner pin grade {index} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_turbulent_displace_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU turbulent displace parity test: no GPU adapter available");
+            return;
+        };
+        let width = 23_u32;
+        let height = 19_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.017 * (x + 3 * y) as f32;
+                pixels[y * width as usize + x] = [
+                    value,
+                    0.55 - 0.4 * value,
+                    0.15 + 0.8 * value,
+                    1.0 - 0.02 * ((x * 3 + y) % 4) as f32,
+                ];
+            }
+        }
+        pixels[41] = [0.0, 0.0, 0.0, 0.0];
+        pixels[383] = [2.4, -0.7, 1.6, 0.65];
+        let cases = [
+            (
+                "default",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::Turbulent,
+                    50.0,
+                    100.0,
+                    [128.0, 128.0],
+                    1,
+                    0.0,
+                    false,
+                    1,
+                    0,
+                    mondrian_effects::DisplacePin::None,
+                    0.0,
+                    mondrian_effects::DisplaceAntialias::Low,
+                )
+                .expect("default turbulent displace grade"),
+            ),
+            (
+                "bulge",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::Bulge,
+                    -120.0,
+                    64.0,
+                    [100.0, 90.0],
+                    3,
+                    0.5,
+                    false,
+                    2,
+                    11,
+                    mondrian_effects::DisplacePin::None,
+                    0.0,
+                    mondrian_effects::DisplaceAntialias::Low,
+                )
+                .expect("bulge turbulent displace grade"),
+            ),
+            (
+                "twist cycle",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::Twist,
+                    80.0,
+                    32.0,
+                    [60.0, 70.0],
+                    3,
+                    0.375,
+                    true,
+                    5,
+                    42,
+                    mondrian_effects::DisplacePin::None,
+                    0.0,
+                    mondrian_effects::DisplaceAntialias::Low,
+                )
+                .expect("twist turbulent displace grade"),
+            ),
+            (
+                "cross resize",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::Cross,
+                    12.0,
+                    18.0,
+                    [90.0, 80.0],
+                    2,
+                    0.2,
+                    false,
+                    1,
+                    9,
+                    mondrian_effects::DisplacePin::None,
+                    1.0,
+                    mondrian_effects::DisplaceAntialias::High,
+                )
+                .expect("cross turbulent displace grade"),
+            ),
+            (
+                "pinned all edges",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::Horizontal,
+                    14.0,
+                    20.0,
+                    [110.0, 60.0],
+                    4,
+                    0.6,
+                    true,
+                    2,
+                    5,
+                    mondrian_effects::DisplacePin::AllEdges,
+                    0.25,
+                    mondrian_effects::DisplaceAntialias::Low,
+                )
+                .expect("pinned turbulent displace grade"),
+            ),
+            (
+                "turbulent gradient",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::Turbulent,
+                    2.0,
+                    8.0,
+                    [70.0, 40.0],
+                    3,
+                    0.15,
+                    true,
+                    2,
+                    3,
+                    mondrian_effects::DisplacePin::VerticalEdges,
+                    0.3,
+                    mondrian_effects::DisplaceAntialias::Low,
+                )
+                .expect("gradient turbulent displace grade"),
+            ),
+            (
+                "turbulent smoother one octave",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::TurbulentSmoother,
+                    0.5,
+                    16.0,
+                    [80.0, 60.0],
+                    1,
+                    0.3,
+                    false,
+                    1,
+                    21,
+                    mondrian_effects::DisplacePin::None,
+                    0.0,
+                    mondrian_effects::DisplaceAntialias::Low,
+                )
+                .expect("diagnostic smoother grade"),
+            ),
+            (
+                // The turbulent gradient divides a finite difference by
+                // `2 * 0.001`, so a one-ulp difference between the CPU and the
+                // shader field evaluation is amplified five-hundredfold; this
+                // case keeps `amount * 0.5 * size` small enough that the
+                // residual stays inside the 1e-4 colour tolerance.
+                "turbulent smoother",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::TurbulentSmoother,
+                    0.125,
+                    16.0,
+                    [80.0, 60.0],
+                    4,
+                    0.3,
+                    false,
+                    1,
+                    21,
+                    mondrian_effects::DisplacePin::None,
+                    0.0,
+                    mondrian_effects::DisplaceAntialias::Low,
+                )
+                .expect("smoother turbulent displace grade"),
+            ),
+            (
+                "vertical centre pin",
+                mondrian_effects::TurbulentDisplaceGrade::new(
+                    mondrian_effects::DisplacementType::Vertical,
+                    5.0,
+                    10.0,
+                    [50.0, 30.0],
+                    2,
+                    0.4,
+                    true,
+                    3,
+                    8,
+                    mondrian_effects::DisplacePin::Center,
+                    0.75,
+                    mondrian_effects::DisplaceAntialias::High,
+                )
+                .expect("vertical turbulent displace grade"),
+            ),
+        ];
+        for (index, (label, grade)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::turbulent_displace_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.turbulent-displace-encoder"),
+                });
+            let (params, extra, aces) = grade.gpu_controls();
+            let output = executor
+                .record_turbulent_displace(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    aces,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded turbulent displace");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "turbulent displace case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
