@@ -52,6 +52,7 @@ pub(crate) struct EffectSpatialGpu {
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
+    flip: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
     split: wgpu::RenderPipeline,
@@ -458,6 +459,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let flip = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.flip"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_flip"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let lens_flare = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.lens-flare"),
             layout: Some(&layout),
@@ -619,6 +650,7 @@ impl EffectSpatialGpu {
             mirror,
             polar_coordinates,
             lens_distortion,
+            flip,
             lens_flare,
             bulge,
             split,
@@ -769,6 +801,40 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Records the flip pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_flip(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniforms = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.flip,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -866,6 +932,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Convolution { .. }
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
+            EffectGpuSpatialPass::Flip { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1069,6 +1136,20 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_split(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Flip { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_flip(
                     device,
                     encoder,
                     params,
@@ -2304,6 +2385,30 @@ fn lens_sample_position(column: f32, row: f32, focal: f32, scale: f32, invert: b
 }
 
 @fragment
+fn fs_flip(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let centre = uniforms.params.xy;
+    let weight = clamp(uniforms.params.z, 0.0, 1.0);
+    let axis = uniforms.params.w;
+    let column = f32(pixel.x);
+    let row = f32(pixel.y);
+    var sample_x = column;
+    var sample_y = row;
+    if (axis > 1.5 && axis < 2.5) {
+        sample_x = 2.0 * centre.x - column;
+    } else if (axis >= 2.5) {
+        sample_x = 2.0 * centre.x - column;
+        sample_y = 2.0 * centre.y - row;
+    } else {
+        sample_y = 2.0 * centre.y - row;
+    }
+    let flipped = sample_bilinear_premultiplied(sample_x, sample_y);
+    let original = premultiply(load_clamped(pixel));
+    let mixed = original * (1.0 - weight) + flipped * weight;
+    return unpremultiply(mixed);
+}
+
+@fragment
 fn fs_lens_distortion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
     let original = load_clamped(pixel);
@@ -2995,6 +3100,9 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::TwirlGrade::new(180.0, 60.0, [7.5, 6.0]).expect("valid twirl grade");
         let spherize =
             mondrian_effects::SpherizeGrade::new(4.0, [6.0, 5.5]).expect("valid spherize grade");
+        let flip =
+            mondrian_effects::FlipGrade::new(mondrian_effects::FlipAxis::Both, [7.5, 6.25], 70.0)
+                .expect("valid flip grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -3004,6 +3112,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             },
             mondrian_effects::EffectGpuSpatialPass::Twirl { grade: twirl },
             mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
+            mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
         ];
 
         let mut cpu = pixels.clone();
@@ -3027,6 +3136,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             spherize,
+        ));
+        assert!(mondrian_effects::flip_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &flip,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -3309,6 +3424,80 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "split {point_a:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_flip_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU flip parity test: no GPU adapter available");
+            return;
+        };
+        let width = 13_u32;
+        let height = 11_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.03 * (x + 2 * y) as f32;
+                pixels[y * width as usize + x] = [
+                    value,
+                    0.55 - value * 0.4,
+                    0.2 + value * 0.9,
+                    1.0 - 0.01 * (x % 5) as f32,
+                ];
+            }
+        }
+        pixels[16] = [0.0, 0.0, 0.0, 0.0];
+        pixels[81] = [2.5, -0.75, 1.25, 0.5];
+        for (axis, centre, blend) in [
+            (
+                mondrian_effects::FlipAxis::Horizontal,
+                [6.0_f32, 5.0_f32],
+                100.0_f32,
+            ),
+            (mondrian_effects::FlipAxis::Vertical, [5.5, 4.5], 60.0),
+            (mondrian_effects::FlipAxis::Both, [5.25, 4.75], 35.0),
+        ] {
+            let grade = mondrian_effects::FlipGrade::new(axis, centre, blend).expect("flip grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::flip_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                &grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.flip-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_flip(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded flip");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "flip {} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}",
+                        axis.as_key()
                     );
                 }
             }
