@@ -1064,8 +1064,59 @@ fn extract_matte(value: f32, effect: EffectUniform) -> f32 {
     return select(matte, 1.0 - matte, effect.params.w > 0.5);
 }
 
+fn levels_map(value: f32, effect: EffectUniform) -> f32 {
+    let input_black = effect.params.x;
+    let input_white = effect.params.y;
+    let gamma = effect.params.z;
+    let output_black = effect.params.w;
+    let output_white = effect.extra0.x;
+    let span = input_white - input_black;
+    // A degenerate input range is a hard step at the black point, exactly as the
+    // CPU kernel documents it. Both arms of the select are evaluated, so the
+    // divisor is guarded instead of the division.
+    let degenerate = abs(span) <= 0.0;
+    let normalized = (value - input_black) / select(span, 1.0, degenerate);
+    let stepped = select(0.0, 1.0, value > input_black);
+    let base = select(normalized, stepped, degenerate);
+    // Gamma above one brightens, so the exponent is its reciprocal.
+    let shaped = pow(max(base, 0.0), 1.0 / gamma);
+    let mapped = output_black + shaped * (output_white - output_black);
+    // The two clipping menus: 1 is off, 2 clamps into the output range and 3
+    // clamps into the display range. Each end of the output range is authored
+    // by its own menu.
+    let black_clip = effect.extra0.z;
+    let low = select(
+        select(min(output_black, output_white), 0.0, black_clip > 2.5),
+        -3.4028235e38,
+        black_clip < 1.5
+    );
+    let white_clip = effect.extra0.w;
+    let high = select(
+        select(max(output_black, output_white), 1.0, white_clip > 2.5),
+        3.4028235e38,
+        white_clip < 1.5
+    );
+    return clamp(mapped, low, high);
+}
+
+fn effects_author_coverage() -> bool {
+    // A pixel without coverage is invisible, so every grade could skip it — and
+    // that is exactly what this early return does. The exception is a chain that
+    // contains a stage able to author coverage: Levels in alpha mode can lift an
+    // empty pixel into view, and then whatever the earlier stages did to its
+    // hidden colour becomes visible. The CPU reference applies every stage to
+    // every pixel, so once the chain can reveal a pixel the GPU has to run the
+    // whole chain as well, or the two sides would reveal different colours.
+    for (var index = 0u; index < 16u; index = index + 1u) {
+        if (index >= uniforms.effect_count) { break; }
+        let effect = uniforms.effects[index];
+        if (effect.header.x == 26u && effect.extra0.y > 4.5) { return true; }
+    }
+    return false;
+}
+
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
-    if (input.a <= 0.0) { return input; }
+    if (input.a <= 0.0 && !effects_author_coverage()) { return input; }
     var pixel = input;
     for (var index = 0u; index < 16u; index = index + 1u) {
         if (index >= uniforms.effect_count) { break; }
@@ -1316,6 +1367,32 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                     effect.params.z > 0.5
                 );
                 pixel = vec4<f32>(rgb, pixel.a);
+            }
+        } else if (effect.header.x == 26u) {
+            // `LevelsGrade`: params is [input_black, input_white, gamma,
+            // output_black] and extra0 is [output_white, channel menu number,
+            // clip_output_black menu number, clip_output_white menu number].
+            let channel = effect.extra0.y;
+            if (channel > 4.5) {
+                // Alpha mode authors coverage, so the value is mapped even when
+                // it arrives at zero: creating coverage is the point of the
+                // grade. The colour channels are never authored here.
+                pixel = vec4<f32>(pixel.rgb, levels_map(pixel.a, effect));
+            } else if (pixel.a > 0.0) {
+                // Colour modes never author coverage, so a pixel without
+                // coverage is left exactly as it arrived.
+                let red = select(pixel.r, levels_map(pixel.r, effect), channel < 2.5);
+                let green = select(
+                    pixel.g,
+                    levels_map(pixel.g, effect),
+                    channel < 1.5 || (channel > 2.5 && channel < 3.5)
+                );
+                let blue = select(
+                    pixel.b,
+                    levels_map(pixel.b, effect),
+                    channel < 1.5 || channel > 3.5
+                );
+                pixel = vec4<f32>(red, green, blue, pixel.a);
             }
         } else if (effect.header.x == 23u) {
             // `NoiseGrade`: params.x is the amount as a fraction of the full
@@ -4505,6 +4582,16 @@ fn effect_uniforms(
                     extra1: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::Levels { grade } => {
+                let (params, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [26, 0, 0, 0],
+                    params,
+                    color: [0.0; 4],
+                    extra0,
+                    extra1: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
                 header: [23, 0, 0, 0],
                 params: grade.gpu_controls(),
@@ -7526,6 +7613,167 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU brightness contrast accuracy budget exceeded for ({brightness}, {contrast}, {legacy}): {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_levels_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp, LevelsChannel,
+            LevelsClip, LevelsGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU levels parity test: no GPU adapter available");
+            return;
+        };
+        let data = vec![
+            [0.18_f32, 0.18, 0.18, 1.0],
+            [0.25, 0.55, 0.05, 1.0],
+            [2.5, -0.4, 0.9, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.5, 0.9, 0.1, 1.0],
+            [0.35, 0.35, 0.35, 0.25],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 3,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (
+            input_black,
+            input_white,
+            gamma,
+            output_black,
+            output_white,
+            channel,
+            clip_black,
+            clip_white,
+        ) in [
+            // Identity, still appended so the fused kind runs end to end.
+            (
+                0.0_f32,
+                1.0_f32,
+                1.0_f32,
+                0.0_f32,
+                1.0_f32,
+                LevelsChannel::Rgb,
+                LevelsClip::Off,
+                LevelsClip::Off,
+            ),
+            // Strong contrast push.
+            (
+                0.2,
+                0.85,
+                1.0,
+                0.05,
+                0.95,
+                LevelsChannel::Rgb,
+                LevelsClip::Off,
+                LevelsClip::Off,
+            ),
+            // Gamma only.
+            (
+                0.0,
+                1.0,
+                2.2,
+                0.0,
+                1.0,
+                LevelsChannel::Rgb,
+                LevelsClip::Off,
+                LevelsClip::Off,
+            ),
+            // Alpha: authors coverage, including a pixel that arrives empty.
+            (
+                0.0,
+                1.0,
+                1.0,
+                0.25,
+                1.0,
+                LevelsChannel::Alpha,
+                LevelsClip::Off,
+                LevelsClip::Off,
+            ),
+            // Display clipping: the compressed input range pushes 2.5 and -0.4
+            // far outside [0, 1] before the clip.
+            (
+                0.25,
+                0.75,
+                1.0,
+                0.0,
+                1.0,
+                LevelsChannel::Rgb,
+                LevelsClip::ClampDisplay,
+                LevelsClip::ClampDisplay,
+            ),
+        ] {
+            let grade = LevelsGrade::new(
+                input_black,
+                input_white,
+                gamma,
+                output_black,
+                output_white,
+                channel,
+                clip_black,
+                clip_white,
+            )
+            .expect("valid levels grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Levels { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(3, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                3,
+                2,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU levels accuracy budget exceeded for {grade:?}: {report:#?}"
             );
         }
     }
