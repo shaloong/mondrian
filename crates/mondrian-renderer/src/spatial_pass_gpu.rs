@@ -64,7 +64,9 @@ pub(crate) struct EffectSpatialGpu {
     linear_color_key: wgpu::RenderPipeline,
     color_offset: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
+    deband: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
+    composite_bindings: wgpu::BindGroupLayout,
 }
 
 impl EffectSpatialGpu {
@@ -794,6 +796,81 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.effect-spatial.composite-shader"),
+            source: wgpu::ShaderSource::Wgsl(SPATIAL_COMPOSITE_SHADER.into()),
+        });
+        let composite_bindings =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mondrian.effect-spatial.composite-bindings"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let composite_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mondrian.effect-spatial.composite-layout"),
+            bind_group_layouts: &[Some(&composite_bindings)],
+            immediate_size: 0,
+        });
+        let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.deband"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_deband"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -817,8 +894,10 @@ impl EffectSpatialGpu {
             linear_color_key,
             color_offset,
             convolution,
+            deband,
             find_edges,
             bindings,
+            composite_bindings,
         }
     }
 
@@ -1277,6 +1356,8 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Transform { .. } => Ok(1),
             EffectGpuSpatialPass::CornerPin { .. } => Ok(1),
             EffectGpuSpatialPass::TurbulentDisplace { .. } => Ok(1),
+            // Two blur passes feed one composite pass.
+            EffectGpuSpatialPass::Deband { .. } => Ok(3),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -1598,6 +1679,9 @@ impl EffectSpatialGpu {
                     width,
                     height,
                 );
+            }
+            EffectGpuSpatialPass::Deband { grade } => {
+                return self.record_deband(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -2092,6 +2176,152 @@ impl EffectSpatialGpu {
             multiview_mask: None,
         });
         pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..4, 0..1);
+    }
+
+    /// Records the three-pass deband chain.
+    ///
+    /// The horizontal and vertical box blur passes reuse [`Self::box_blur`] and
+    /// the exact uniform packing of the standalone box blur, except that the
+    /// last pass deliberately does **not** unpremultiply: the merge needs the
+    /// blurred copy in the same premultiplied plane as the original. The
+    /// composite pass then writes `scratch[0]`, the texture the framework hands
+    /// back, while `scratch[1]` and `scratch[2]` hold the blur intermediates.
+    fn record_deband(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::DebandGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if scratch.len() < 3 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "deband_scratch_geometry",
+            ));
+        }
+        let box_kernel = BoxKernel::new(grade.radius());
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let horizontal_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+        let vertical_view = scratch[2].create_view(&wgpu::TextureViewDescriptor::default());
+        let horizontal = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params: [
+                0.0,
+                0.0,
+                box_kernel.whole_radius as f32,
+                box_kernel.fraction,
+            ],
+            extra: [
+                box_kernel.normalization(),
+                // Repeat the edge pixels, premultiply on the first pass, and never
+                // unpremultiply: the auxiliary texture stays premultiplied.
+                1.0,
+                1.0,
+                0.0,
+            ],
+            aces: [0.0; 4],
+        };
+        self.record_pass(
+            device,
+            encoder,
+            &self.box_blur,
+            &source_view,
+            &horizontal_view,
+            &horizontal,
+        );
+        let vertical = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params: [
+                0.0,
+                1.0,
+                box_kernel.whole_radius as f32,
+                box_kernel.fraction,
+            ],
+            extra: [box_kernel.normalization(), 1.0, 0.0, 0.0],
+            aces: [0.0; 4],
+        };
+        self.record_pass(
+            device,
+            encoder,
+            &self.box_blur,
+            &horizontal_view,
+            &vertical_view,
+            &vertical,
+        );
+        let (params, extra) = grade.gpu_controls();
+        let composite = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+        };
+        let destination_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &source_view,
+            &vertical_view,
+            &destination_view,
+            &composite,
+        );
+        Ok(scratch[0].clone())
+    }
+
+    /// Records one fullscreen pass that reads the original and one auxiliary
+    /// texture and writes the destination.
+    fn record_composite_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        original: &wgpu::TextureView,
+        auxiliary: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        uniforms: &SpatialPassUniform,
+    ) {
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mondrian.effect-spatial.composite-uniforms"),
+            contents: bytemuck::bytes_of(uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian.effect-spatial.composite-bind-group"),
+            layout: &self.composite_bindings,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(original),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(auxiliary),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.effect-spatial.composite-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.deband);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
@@ -3419,6 +3649,112 @@ fn fs_radial_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f
     return unpremultiply(sum * weight);
 }"#;
 
+/// Shader for passes that need the original frame and one auxiliary texture.
+///
+/// The primary spatial shader binds one texture plus the uniforms; this module
+/// binds the original, the auxiliary and the uniforms in one group, so the
+/// deband merge can compare a blurred copy against the source in a single pass.
+/// The blur passes leave the auxiliary texture premultiplied, so `fs_deband`
+/// premultiplies the original before the merge and unpremultiplies once at the
+/// end.
+const SPATIAL_COMPOSITE_SHADER: &str = r#"
+struct Uniforms {
+    size: vec4<f32>,
+    params: vec4<f32>,
+    extra: vec4<f32>,
+    aces: vec4<f32>,
+};
+
+@group(0) @binding(0) var original_texture: texture_2d<f32>;
+@group(0) @binding(1) var auxiliary_texture: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var out: VsOut;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    return out;
+}
+
+fn frame_dims() -> vec2<i32> {
+    return vec2<i32>(uniforms.size.xy);
+}
+
+// The auxiliary texture is read through its own binding, so the clamped load
+// has to take the texture as an argument instead of closing over `src`.
+fn load_clamped_from(texture: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
+    let limit = frame_dims() - vec2<i32>(1);
+    return textureLoad(texture, clamp(p, vec2<i32>(0), limit), 0);
+}
+
+fn premultiply(sample: vec4<f32>) -> vec4<f32> {
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    return vec4<f32>(sample.rgb * alpha, alpha);
+}
+
+fn unpremultiply(sample: vec4<f32>) -> vec4<f32> {
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(sample.rgb / alpha, alpha);
+}
+
+// The CPU hash is wrapping `u32` arithmetic, so the shader mirrors it bit for
+// bit: same salts, same shifts, same multipliers.
+fn deband_hash(x: u32, y: u32, salt: u32) -> u32 {
+    var hash = (x * 0x9E3779B9u) ^ (y * 0x85EBCA6Bu) ^ salt;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x846CA68Bu;
+    return hash ^ (hash >> 16u);
+}
+
+fn deband_unit_noise(x: u32, y: u32, salt: u32) -> f32 {
+    return f32(deband_hash(x, y, salt) >> 8u) / 16777216.0;
+}
+
+fn deband_luma(colour: vec3<f32>) -> f32 {
+    return dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+@fragment
+fn fs_deband(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let original = premultiply(load_clamped_from(original_texture, pixel));
+    let blurred = load_clamped_from(auxiliary_texture, pixel);
+    let threshold = uniforms.params.x;
+    let amplitude = uniforms.params.z;
+    let difference = abs(deband_luma(original.rgb) - deband_luma(blurred.rgb));
+    var weight = 1.0;
+    if (threshold > 0.0) {
+        weight = clamp(1.0 - difference / threshold, 0.0, 1.0);
+    }
+    var mixed = mix(original, blurred, weight);
+    // Coverage is never a colour: the merge keeps the original alpha, so a
+    // transparent pixel cannot pick up the blurred coverage.
+    mixed = vec4<f32>(mixed.rgb, original.a);
+    if (weight > 0.0 && mixed.a > 0.0) {
+        let dither = amplitude
+            * (deband_unit_noise(u32(pixel.x), u32(pixel.y), 0x9E3779B9u)
+                - deband_unit_noise(u32(pixel.x), u32(pixel.y), 0x85EBCA6Bu));
+        mixed = vec4<f32>(mixed.rgb + vec3<f32>(dither), mixed.a);
+    }
+    return unpremultiply(mixed);
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4025,6 +4361,8 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::DisplaceAntialias::Low,
         )
         .expect("valid turbulent displace grade");
+        let deband =
+            mondrian_effects::DebandGrade::new(0.05, 2.0, 0.1).expect("valid deband grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -4040,6 +4378,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Transform { grade: transform },
             mondrian_effects::EffectGpuSpatialPass::CornerPin { grade: corner_pin },
             mondrian_effects::EffectGpuSpatialPass::TurbulentDisplace { grade: turbulent_displace },
+            mondrian_effects::EffectGpuSpatialPass::Deband { grade: deband },
         ];
 
         let mut cpu = pixels.clone();
@@ -4100,13 +4439,20 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             height as usize,
             &turbulent_displace,
         ));
+        assert!(mondrian_effects::deband_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &deband,
+        ));
 
         let executor = EffectSpatialGpu::new(&context.device);
         let original = upload(&context, &pixels, width, height);
-        // Three rotating scratch textures keep every stage's destination out of
-        // its own source, which wgpu rejects as conflicting texture usage.
+        // Four rotating scratch textures keep every stage's destination out of
+        // its own source, which wgpu rejects as conflicting texture usage, and
+        // give the three-pass deband chain its blur intermediates.
         let pool: Vec<wgpu::Texture> =
-            (0..3).map(|_| scratch(&context, width, height, 1).remove(0)).collect();
+            (0..4).map(|_| scratch(&context, width, height, 1).remove(0)).collect();
         let mut current: Option<usize> = None;
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian.effect-spatial.chain-encoder"),
@@ -4137,11 +4483,13 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     height,
                 )
                 .expect("recorded spatial stage");
-            let written = *available.last().expect("a write target");
-            assert_eq!(
-                output, pool[written],
-                "the stage must write its last pool texture"
-            );
+            // A multi-pass stage may hand back any texture it wrote, so locate
+            // the destination instead of assuming the last candidate.
+            let written = available
+                .iter()
+                .copied()
+                .find(|index| pool[*index] == output)
+                .expect("the stage must write one of its pool textures");
             current = Some(written);
         }
         context.queue.submit(Some(encoder.finish()));
@@ -5108,6 +5456,96 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "turbulent displace case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_deband_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU deband parity test: no GPU adapter available");
+            return;
+        };
+        let width = 21_u32;
+        let height = 17_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                // A smooth diagonal ramp is exactly the eight-bit banding the
+                // effect exists to flatten.
+                let value = 0.01 * (2 * x + 3 * y) as f32;
+                pixels[y * width as usize + x] = [value, 0.45 - value * 0.5, value * 1.4, 1.0];
+            }
+        }
+        // Two hard edges whose two sides the merge must leave alone.
+        for y in 0..height as usize {
+            for x in 11..width as usize {
+                pixels[y * width as usize + x] = [0.78, 0.22, 0.12, 1.0];
+            }
+        }
+        for y in 9..height as usize {
+            for x in 0..5 {
+                pixels[y * width as usize + x] = [0.05, 0.05, 0.09, 1.0];
+            }
+        }
+        // Zero coverage must survive both sides of the seam.
+        pixels[37] = [0.0, 0.0, 0.0, 0.0];
+        let cases = [
+            (
+                "default",
+                mondrian_effects::DebandGrade::new(0.025, 3.0, 0.05).expect("default deband grade"),
+            ),
+            (
+                "wide",
+                mondrian_effects::DebandGrade::new(0.01, 8.0, 0.2).expect("wide deband grade"),
+            ),
+            (
+                "narrow band",
+                mondrian_effects::DebandGrade::new(0.2, 1.5, 0.0).expect("narrow deband grade"),
+            ),
+            (
+                "dither only",
+                mondrian_effects::DebandGrade::new(0.025, 0.0, 0.5)
+                    .expect("dither-only deband grade"),
+            ),
+        ];
+        for (index, (label, grade)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::deband_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let pool = scratch(&context, width, height, 3);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.deband-encoder"),
+                });
+            let pass = mondrian_effects::EffectGpuSpatialPass::Deband { grade: *grade };
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool,
+                    width,
+                    height,
+                )
+                .expect("recorded deband");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "deband case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
