@@ -323,6 +323,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "输出" => Some("parameter-group-output"),
         "边角定位" => Some("parameter-group-corner-pin"),
         "裁切" => Some("parameter-group-crop"),
+        "通道" => Some("parameter-group-channel"),
         "通道混合器" => Some("parameter-group-channel-mixer"),
         "遮罩精修" => Some("parameter-group-matte-refine"),
         "钝化蒙版" => Some("parameter-group-unsharp-mask"),

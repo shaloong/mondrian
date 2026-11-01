@@ -2438,3 +2438,25 @@ parameter-mondrian-effect-builtin-matte-refine-tremor-amount-label = Reduce Trem
 parameter-mondrian-effect-builtin-matte-refine-tremor-reduction-label = Tremor Reduction
 parameter-mondrian-effect-builtin-matte-refine-view-edge-region-label = View Edge Region
 parameter-mondrian-effect-builtin-matte-refine-view-map-label = View Map
+
+## Arithmetic 算术
+effect-arithmetic = Arithmetic
+parameter-group-channel = Channel
+parameter-mondrian-effect-builtin-arithmetic-blue-label = Blue Value
+parameter-mondrian-effect-builtin-arithmetic-clipping-label = Clip Result Values
+parameter-mondrian-effect-builtin-arithmetic-green-label = Green Value
+parameter-mondrian-effect-builtin-arithmetic-operator-label = Operator
+parameter-mondrian-effect-builtin-arithmetic-red-label = Red Value
+parameter-mondrian-effect-arithmetic-operator-add = Add
+parameter-mondrian-effect-arithmetic-operator-and = And
+parameter-mondrian-effect-arithmetic-operator-block-above = Block Above
+parameter-mondrian-effect-arithmetic-operator-block-below = Block Below
+parameter-mondrian-effect-arithmetic-operator-difference = Difference
+parameter-mondrian-effect-arithmetic-operator-max = Maximum
+parameter-mondrian-effect-arithmetic-operator-min = Minimum
+parameter-mondrian-effect-arithmetic-operator-multiply = Multiply
+parameter-mondrian-effect-arithmetic-operator-or = Or
+parameter-mondrian-effect-arithmetic-operator-screen = Screen
+parameter-mondrian-effect-arithmetic-operator-slice = Slice
+parameter-mondrian-effect-arithmetic-operator-subtract = Subtract
+parameter-mondrian-effect-arithmetic-operator-xor = Xor

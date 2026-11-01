@@ -2370,3 +2370,25 @@ parameter-mondrian-effect-builtin-matte-refine-tremor-amount-label = 减少震�
 parameter-mondrian-effect-builtin-matte-refine-tremor-reduction-label = 震颤减少
 parameter-mondrian-effect-builtin-matte-refine-view-edge-region-label = 查看边缘区域
 parameter-mondrian-effect-builtin-matte-refine-view-map-label = 查看地图
+
+## Arithmetic 算术
+effect-arithmetic = 算术
+parameter-group-channel = 通道
+parameter-mondrian-effect-builtin-arithmetic-blue-label = 蓝色值
+parameter-mondrian-effect-builtin-arithmetic-clipping-label = 剪切
+parameter-mondrian-effect-builtin-arithmetic-green-label = 绿色值
+parameter-mondrian-effect-builtin-arithmetic-operator-label = 运算符
+parameter-mondrian-effect-builtin-arithmetic-red-label = 红色值
+parameter-mondrian-effect-arithmetic-operator-add = 相加
+parameter-mondrian-effect-arithmetic-operator-and = 与
+parameter-mondrian-effect-arithmetic-operator-block-above = 上界
+parameter-mondrian-effect-arithmetic-operator-block-below = 下界
+parameter-mondrian-effect-arithmetic-operator-difference = 差值
+parameter-mondrian-effect-arithmetic-operator-max = 最大值
+parameter-mondrian-effect-arithmetic-operator-min = 最小值
+parameter-mondrian-effect-arithmetic-operator-multiply = 相乘
+parameter-mondrian-effect-arithmetic-operator-or = 或
+parameter-mondrian-effect-arithmetic-operator-screen = 滤色
+parameter-mondrian-effect-arithmetic-operator-slice = 限制
+parameter-mondrian-effect-arithmetic-operator-subtract = 相减
+parameter-mondrian-effect-arithmetic-operator-xor = 异或

@@ -5,6 +5,7 @@
 pub mod adjustment;
 pub use mondrian_core::EffectPassBlendPolicy;
 pub mod alpha_contract;
+pub mod arithmetic;
 mod float_frame;
 pub use alpha_contract::{
     ColorFrameAlphaFormats, EffectAlphaConsumer, EffectAlphaContract, EffectAlphaOutputContract,
@@ -118,6 +119,10 @@ pub mod unsharp_mask;
 
 pub use adjustment::{
     blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,
+};
+pub use arithmetic::{
+    arithmetic_frame_f32, ArithmeticError, ArithmeticGrade, ArithmeticOperator,
+    ARITHMETIC_MAX_VALUE, ARITHMETIC_MIN_VALUE, ARITHMETIC_OPERATOR_COUNT,
 };
 pub use black_white::{
     BlackAndWhiteError, BlackAndWhiteGrade, BLACK_WHITE_HUE_STOPS, BLACK_WHITE_NEUTRAL_WEIGHT,

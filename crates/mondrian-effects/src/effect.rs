@@ -969,6 +969,10 @@ pub enum EffectRenderOp {
     MatteRefine {
         grade: crate::MatteRefineGrade,
     },
+    /// Arithmetic: combines the RGB channels with a constant per channel.
+    Arithmetic {
+        grade: crate::ArithmeticGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1245,6 +1249,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::MatteRefine { grade } => {
                 formatter.debug_struct("MatteRefine").field("grade", grade).finish()
+            }
+            Self::Arithmetic { grade } => {
+                formatter.debug_struct("Arithmetic").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1943,6 +1950,12 @@ impl EffectRenderOp {
                 72u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::Arithmetic { grade } => {
+                73u8.hash(state);
+                let (params, extra0) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra0.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2157,6 +2170,7 @@ impl EffectRenderOp {
             EffectRenderOp::FractalNoise { .. } => 5,
             EffectRenderOp::Keylight { .. } => 5,
             EffectRenderOp::MatteRefine { .. } => 6,
+            EffectRenderOp::Arithmetic { .. } => 1,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2712,7 +2726,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 72] {
+fn builtin_effect_types() -> [EffectType; 73] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2786,6 +2800,7 @@ fn builtin_effect_types() -> [EffectType; 72] {
         EffectType::Keylight,
         EffectType::MatteRefine,
         EffectType::Echo,
+        EffectType::Arithmetic,
     ]
 }
 
@@ -7676,6 +7691,51 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Arithmetic => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "operator",
+                "通道",
+                "运算符",
+                crate::ArithmeticOperator::And.as_key(),
+                crate::ArithmeticOperator::ALL
+                    .into_iter()
+                    .map(|operator| {
+                        ParameterEnumOption::new(
+                            operator.as_key(),
+                            operator.label(),
+                            format!("mondrian.effect.arithmetic.operator.{}", operator.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            for (parameter, name) in [("red", "红色值"), ("green", "绿色值"), ("blue", "蓝色值")]
+            {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "通道",
+                    name,
+                    PropertyValue::Float(0.0),
+                    Some(f64::from(crate::ARITHMETIC_MIN_VALUE)),
+                    Some(f64::from(crate::ARITHMETIC_MAX_VALUE)),
+                    Some(1.0),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "clipping",
+                "通道",
+                "剪切",
+                PropertyValue::Int(1),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8242,6 +8302,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32,
             temporal_input: EffectTemporalInputExtent::UNBOUNDED,
             topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::Arithmetic => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::ColorOffset => EffectExecutionContract {
@@ -12049,6 +12113,53 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Arithmetic => {
+            let operator_id = builtin_parameter_id(effect_type, "operator");
+            let red_id = builtin_parameter_id(effect_type, "red");
+            let green_id = builtin_parameter_id(effect_type, "green");
+            let blue_id = builtin_parameter_id(effect_type, "blue");
+            let clipping_id = builtin_parameter_id(effect_type, "clipping");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let operator = match effect.evaluate_parameter(&operator_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::ArithmeticOperator::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "arithmetic operator {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "arithmetic operator must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::ArithmeticOperator::And,
+                };
+                let clipping = match effect.evaluate_parameter(&clipping_id, context.time) {
+                    Some(PropertyValue::Int(value)) => value >= 1,
+                    Some(_) => {
+                        return Err(invalid(
+                            "arithmetic clipping must be an integer toggle".to_owned(),
+                        ));
+                    }
+                    None => true,
+                };
+                let grade = crate::ArithmeticGrade::new(
+                    operator,
+                    effect.evaluate_f32_parameter(&red_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&green_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&blue_id, context.time, 0.0),
+                    clipping,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                graph.append_unary(EffectRenderOp::Arithmetic { grade });
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -12127,6 +12238,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Keylight => "专业抠像",
         EffectType::MatteRefine => "遮罩精修",
         EffectType::Echo => "残影",
+        EffectType::Arithmetic => "算术",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -13433,6 +13545,7 @@ mod tests {
             EffectType::Keylight,
             EffectType::MatteRefine,
             EffectType::Echo,
+            EffectType::Arithmetic,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -20181,6 +20294,125 @@ mod tests {
             .expect_err("an out-of-range scatter must be rejected");
         let rendered = format!("{error:?}");
         assert!(rendered.contains("outside [0, 512]"), "{rendered}");
+    }
+
+    fn arithmetic_op(graph: &EffectRenderGraph) -> Option<crate::ArithmeticGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Arithmetic { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Arithmetic { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_arithmetic(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Arithmetic)
+            .expect("the arithmetic effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Arithmetic.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the arithmetic parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn arithmetic_defaults_compile_to_the_documented_operation() {
+        // The documented default is `and` with three zero values and clipping on,
+        // which turns every colour into black: a real operation, not the identity.
+        let effect = instantiate_effect_node(EffectType::Arithmetic)
+            .expect("the arithmetic effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default arithmetic should compile");
+        let grade = arithmetic_op(&graph).expect("the defaults emit a node");
+        assert_eq!(grade.operator(), crate::ArithmeticOperator::And);
+        assert_eq!(grade.red(), 0.0);
+        assert_eq!(grade.green(), 0.0);
+        assert_eq!(grade.blue(), 0.0);
+        assert!(grade.clipping());
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn arithmetic_authored_configuration_reaches_the_operation() {
+        let effect = author_arithmetic(&[
+            ("operator", PropertyValue::Enum("screen".to_string())),
+            ("red", PropertyValue::Float(128.0)),
+            ("green", PropertyValue::Float(64.0)),
+            ("blue", PropertyValue::Float(200.0)),
+            ("clipping", PropertyValue::Int(0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = arithmetic_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.operator(), crate::ArithmeticOperator::Screen);
+        assert_eq!(grade.red(), 128.0);
+        assert_eq!(grade.green(), 64.0);
+        assert_eq!(grade.blue(), 200.0);
+        assert!(!grade.clipping());
+    }
+
+    #[test]
+    fn arithmetic_undeclared_operator_key_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::Arithmetic)
+            .expect("the arithmetic effect should instantiate");
+        // The enum contract rejects the key before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Arithmetic.property_path("operator"),
+                value: PropertyValue::Enum("mystery".to_string()),
+            })
+            .expect_err("an undeclared operator key must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("unknown enum key `mystery`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn arithmetic_out_of_range_value_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::Arithmetic)
+            .expect("the arithmetic effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Arithmetic.property_path("red"),
+                value: PropertyValue::Float(256.0),
+            })
+            .expect_err("an out-of-range value must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 255]"), "{rendered}");
+    }
+
+    #[test]
+    fn arithmetic_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_arithmetic(&[
+            ("operator", PropertyValue::Enum("slice".to_string())),
+            ("red", PropertyValue::Float(12.0)),
+            ("green", PropertyValue::Float(240.0)),
+            ("blue", PropertyValue::Float(96.0)),
+            ("clipping", PropertyValue::Int(0)),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the arithmetic node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the arithmetic node");
+        assert_eq!(restored.effect_type, EffectType::Arithmetic);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored arithmetic node");
+        let grade = arithmetic_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.operator(), crate::ArithmeticOperator::Slice);
+        assert_eq!(grade.red(), 12.0);
+        assert_eq!(grade.green(), 240.0);
+        assert_eq!(grade.blue(), 96.0);
+        assert!(!grade.clipping());
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {

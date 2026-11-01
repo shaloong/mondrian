@@ -338,6 +338,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Arithmetic { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "arithmetic",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LensDistortion { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "lens_distortion",
@@ -913,6 +919,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Keylight { .. } => 4,
         EffectRenderOp::MatteRefine { .. } => 4,
         EffectRenderOp::Ramp { .. } => 0,
+        EffectRenderOp::Arithmetic { .. } => 0,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
@@ -1332,6 +1339,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 grade,
                 checkpoint,
             )?;
+            Ok(true)
+        }
+        EffectRenderOp::Arithmetic { grade } => {
+            crate::arithmetic::apply_arithmetic_f32_controlled(working, grade, checkpoint)?;
             Ok(true)
         }
         EffectRenderOp::LensDistortion { grade } => {
