@@ -49,6 +49,7 @@ pub(crate) struct EffectSpatialGpu {
     offset: wgpu::RenderPipeline,
     twirl: wgpu::RenderPipeline,
     spherize: wgpu::RenderPipeline,
+    dent: wgpu::RenderPipeline,
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
@@ -372,6 +373,36 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_spherize"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let dent = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.dent"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_dent"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -1332,6 +1363,7 @@ impl EffectSpatialGpu {
             offset,
             twirl,
             spherize,
+            dent,
             mirror,
             polar_coordinates,
             lens_distortion,
@@ -1849,6 +1881,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Offset { .. }
             | EffectGpuSpatialPass::Twirl { .. }
             | EffectGpuSpatialPass::Spherize { .. }
+            | EffectGpuSpatialPass::Dent { .. }
             | EffectGpuSpatialPass::Convolution { .. }
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
@@ -1999,6 +2032,20 @@ impl EffectSpatialGpu {
                     device,
                     encoder,
                     grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Dent { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_dent(
+                    device,
+                    encoder,
+                    params,
+                    extra,
                     source,
                     destination,
                     width,
@@ -2485,6 +2532,46 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.spherize,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+    /// Records the circular dent distortion.
+    ///
+    /// `params` carries `[centre_x, centre_y, size_fraction, strength]` and
+    /// `extra` carries `[kind, edge, 0, 0]`. The inverse mapping uses the same
+    /// `(1 - u^2)^2` falloff as the CPU kernel and returns pixels at or beyond
+    /// the rim untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_dent(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.dent,
             &input_view,
             &output_view,
             &uniform,
@@ -4385,6 +4472,28 @@ fn fs_spherize(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
     let sample_x = centre.x + delta.x * scale;
     let sample_y = centre.y + delta.y * scale;
     return unpremultiply(sample_bilinear_premultiplied(sample_x, sample_y));
+}
+fn dent_radius() -> f32 {
+    return uniforms.params.z * min(uniforms.size.x, uniforms.size.y);
+}
+
+@fragment
+fn fs_dent(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(position.xy);
+    let centre = uniforms.params.xy;
+    let radius = dent_radius();
+    let delta = vec2<f32>(f32(pixel.x), f32(pixel.y)) - centre;
+    let distance = sqrt(dot(delta, delta));
+    if (radius <= 0.0 || distance >= radius || distance <= 1.0e-6) {
+        return load_clamped(pixel);
+    }
+    let u = distance / radius;
+    let base = 1.0 - u * u;
+    let falloff = select(base * base, 1.0, uniforms.extra.y > 0.5);
+    let direction = select(-1.0, 1.0, uniforms.extra.x < 0.5);
+    let scale = 1.0 + direction * uniforms.params.w * falloff;
+    let sample = centre + delta * scale;
+    return unpremultiply(sample_bilinear_premultiplied(sample.x, sample.y));
 }
 fn sample_nearest_premultiplied(x: f32, y: f32) -> vec4<f32> {
     let limit = uniforms.size.xy - vec2<f32>(1.0);
@@ -6674,6 +6783,14 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::TwirlGrade::new(180.0, 60.0, [7.5, 6.0]).expect("valid twirl grade");
         let spherize =
             mondrian_effects::SpherizeGrade::new(4.0, [6.0, 5.5]).expect("valid spherize grade");
+        let dent = mondrian_effects::DentGrade::new(
+            0.6,
+            0.5,
+            [6.5, 6.0],
+            mondrian_effects::DentKind::Dent,
+            mondrian_effects::DentEdge::Smooth,
+        )
+        .expect("valid dent grade");
         let flip =
             mondrian_effects::FlipGrade::new(mondrian_effects::FlipAxis::Both, [7.5, 6.25], 70.0)
                 .expect("valid flip grade");
@@ -6853,6 +6970,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             },
             mondrian_effects::EffectGpuSpatialPass::Twirl { grade: twirl },
             mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
+            mondrian_effects::EffectGpuSpatialPass::Dent { grade: dent },
             mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
             mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
             mondrian_effects::EffectGpuSpatialPass::WaveWarp { grade: wave_warp },
@@ -6890,6 +7008,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             spherize,
+        ));
+        assert!(mondrian_effects::dent_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            dent,
         ));
         assert!(mondrian_effects::flip_frame_f32(
             &mut cpu,
@@ -9590,6 +9714,112 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "radius {radius} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn gpu_dent_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU dent parity test: no GPU adapter available");
+            return;
+        };
+        let cases = [
+            (
+                13_u32,
+                11_u32,
+                0_usize,
+                0.4_f32,
+                0.5_f32,
+                [6.0_f32, 5.0_f32],
+                mondrian_effects::DentKind::Dent,
+                mondrian_effects::DentEdge::Smooth,
+            ),
+            (
+                13_u32,
+                11_u32,
+                142_usize,
+                1.0_f32,
+                1.0_f32,
+                [0.0_f32, 0.0_f32],
+                mondrian_effects::DentKind::Bulge,
+                mondrian_effects::DentEdge::Smooth,
+            ),
+            (
+                16_u32,
+                9_u32,
+                // Pixel (0, 8): outside the disk and only ever sampled exactly on
+                // its texel. Pixel (0, 0) would also be outside, but pixel (2, 2)
+                // clamps its sample onto that texel with a fractional y near one
+                // epsilon, where the GPU's FMA contraction and the CPU's two-step
+                // rounding disagree about zero coverage.
+                128_usize,
+                0.75_f32,
+                0.8_f32,
+                [7.5_f32, 4.5_f32],
+                mondrian_effects::DentKind::Dent,
+                mondrian_effects::DentEdge::Hard,
+            ),
+        ];
+        for (width, height, zero_coverage, size, strength, centre, kind, edge) in cases {
+            let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let value = 0.05 * (x + 2 * y) as f32;
+                    pixels[y * width as usize + x] = [value, 0.45 - value * 0.3, value * 1.6, 1.0];
+                }
+            }
+            pixels[30] = [0.0, 0.0, 0.0, 0.0];
+            pixels[61] = [2.5, -0.75, 1.25, 0.5];
+            pixels[zero_coverage] = [0.0, 0.0, 0.0, 0.0];
+            let grade = mondrian_effects::DentGrade::new(size, strength, centre, kind, edge)
+                .expect("dent grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::dent_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            assert_eq!(
+                cpu[zero_coverage],
+                [0.0, 0.0, 0.0, 0.0],
+                "cpu zero-coverage pixel {zero_coverage} must stay transparent",
+            );
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.dent-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_dent(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded dent");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            assert_eq!(
+                gpu[zero_coverage],
+                [0.0, 0.0, 0.0, 0.0],
+                "gpu zero-coverage pixel {zero_coverage} must stay transparent",
+            );
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "size {size} strength {strength} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
