@@ -114,6 +114,7 @@ pub mod scatter;
 pub mod shift_channels;
 pub(crate) mod straight_alpha;
 pub mod temporal_execution;
+pub mod test_signals;
 #[cfg(test)]
 mod throughput;
 pub mod tracking;
@@ -493,6 +494,11 @@ pub use ripple::{
     RIPPLE_MIN_RADIUS_PERCENT, RIPPLE_MIN_WAVE_WIDTH, RIPPLE_TYPE_COUNT,
 };
 pub use shift_channels::{ChannelSource, ShiftChannelsGrade};
+pub use test_signals::{
+    test_signals_frame_f32, TestSignalsError, TestSignalsGrade, TestSignalsPattern,
+    TEST_SIGNALS_DEFAULT_INTENSITY, TEST_SIGNALS_MAX_INTENSITY, TEST_SIGNALS_MIN_INTENSITY,
+    TEST_SIGNALS_PATTERN_COUNT,
+};
 pub use wave_warp::{
     validate_wave_speed as validate_wave_warp_speed, wave_warp_frame_f32, wave_warp_phase_turns,
     WavePin, WaveQuality, WaveType, WaveWarpError, WaveWarpGrade, WAVE_WARP_CENTRE_PIN_FRACTION,

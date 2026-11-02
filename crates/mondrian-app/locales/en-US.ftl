@@ -215,6 +215,7 @@ effect-category-transform = Transform
 effect-category-keying = Keying
 effect-category-plugins = Plugins
 effect-category-external = External Effects
+effect-category-generator = Generator
 effect-basic-correction = Basic Correction
 effect-white-balance = White Balance
 effect-lut-3d = 3D LUT
@@ -2490,3 +2491,17 @@ parameter-mondrian-effect-broadcast-safe-mode-key-out-safe = Key Out Safe
 parameter-mondrian-effect-broadcast-safe-mode-key-out-unsafe = Key Out Unsafe
 parameter-mondrian-effect-broadcast-safe-mode-reduce-luminance = Reduce Luminance
 parameter-mondrian-effect-broadcast-safe-mode-reduce-saturation = Reduce Saturation
+
+## Test Signals 彩条与测试信号
+effect-test-signals = Test Signals
+parameter-group-test-signals = Test Signals
+parameter-mondrian-effect-builtin-test-signals-display-labels-label = Show Calibration Marks
+parameter-mondrian-effect-builtin-test-signals-intensity-label = Intensity
+parameter-mondrian-effect-builtin-test-signals-pattern-label = Test Pattern
+parameter-mondrian-effect-builtin-test-signals-safe-frames-label = Show Safe Frames
+parameter-mondrian-effect-test-signals-pattern-bars = Color Bars
+parameter-mondrian-effect-test-signals-pattern-checkerboard = Checkerboard
+parameter-mondrian-effect-test-signals-pattern-concentric-rings = Concentric Rings
+parameter-mondrian-effect-test-signals-pattern-grayscale = Grayscale
+parameter-mondrian-effect-test-signals-pattern-hdr-staircase = HDR Staircase
+parameter-mondrian-effect-test-signals-pattern-zone-plate = Resolution Chart

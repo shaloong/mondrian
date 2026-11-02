@@ -2769,6 +2769,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::LeaveColor { .. } => 75,
         EffectRenderOp::BroadcastSafe { .. } => 76,
         EffectRenderOp::Choker { .. } => 77,
+        EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4848,6 +4849,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::LeaveColor { .. }
             | crate::EffectRenderOp::BroadcastSafe { .. }
             | crate::EffectRenderOp::Choker { .. }
+            | crate::EffectRenderOp::TestSignals { .. }
             | crate::EffectRenderOp::ColorOffset { .. }
             | crate::EffectRenderOp::Convolution { .. }
             | crate::EffectRenderOp::Offset { .. }

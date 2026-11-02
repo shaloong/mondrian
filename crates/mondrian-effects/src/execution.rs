@@ -2347,6 +2347,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Arithmetic { .. } => "arithmetic",
         EffectRenderOp::LeaveColor { .. } => "leave_color",
         EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
+        EffectRenderOp::TestSignals { .. } => "test_signals",
         EffectRenderOp::Choker { .. } => "choker",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",

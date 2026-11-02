@@ -209,6 +209,7 @@ effect-category-transform = 变换
 effect-category-keying = 抠像
 effect-category-plugins = 插件
 effect-category-external = 外部效果
+effect-category-generator = 生成器
 effect-basic-correction = 基础调色
 effect-white-balance = 白平衡
 effect-lut-3d = 3D LUT
@@ -2422,3 +2423,17 @@ parameter-mondrian-effect-broadcast-safe-mode-key-out-safe = 抠出安全区域
 parameter-mondrian-effect-broadcast-safe-mode-key-out-unsafe = 抠出不安全区域
 parameter-mondrian-effect-broadcast-safe-mode-reduce-luminance = 降低明亮度
 parameter-mondrian-effect-broadcast-safe-mode-reduce-saturation = 降低饱和度
+
+## Test Signals 彩条与测试信号
+effect-test-signals = 彩条与测试信号
+parameter-group-test-signals = 测试信号
+parameter-mondrian-effect-builtin-test-signals-display-labels-label = 显示校准标记
+parameter-mondrian-effect-builtin-test-signals-intensity-label = 图案强度
+parameter-mondrian-effect-builtin-test-signals-pattern-label = 测试图案
+parameter-mondrian-effect-builtin-test-signals-safe-frames-label = 显示安全框
+parameter-mondrian-effect-test-signals-pattern-bars = 彩条
+parameter-mondrian-effect-test-signals-pattern-checkerboard = 棋盘
+parameter-mondrian-effect-test-signals-pattern-concentric-rings = 同心圆
+parameter-mondrian-effect-test-signals-pattern-grayscale = 灰阶
+parameter-mondrian-effect-test-signals-pattern-hdr-staircase = HDR 阶梯
+parameter-mondrian-effect-test-signals-pattern-zone-plate = 分辨率图

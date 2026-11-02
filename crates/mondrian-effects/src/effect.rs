@@ -985,6 +985,10 @@ pub enum EffectRenderOp {
     Choker {
         grade: crate::ChokerGrade,
     },
+    /// Test signals: generates a calibration frame from the pixel position alone.
+    TestSignals {
+        grade: crate::TestSignalsGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1273,6 +1277,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Choker { grade } => {
                 formatter.debug_struct("Choker").field("grade", grade).finish()
+            }
+            Self::TestSignals { grade } => {
+                formatter.debug_struct("TestSignals").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1993,6 +2000,12 @@ impl EffectRenderOp {
                 76u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::TestSignals { grade } => {
+                77u8.hash(state);
+                let (params, extra0) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra0.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2211,6 +2224,7 @@ impl EffectRenderOp {
             EffectRenderOp::LeaveColor { .. } => 2,
             EffectRenderOp::BroadcastSafe { .. } => 1,
             EffectRenderOp::Choker { .. } => 2,
+            EffectRenderOp::TestSignals { .. } => 1,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2766,7 +2780,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 76] {
+fn builtin_effect_types() -> [EffectType; 77] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2844,6 +2858,7 @@ fn builtin_effect_types() -> [EffectType; 76] {
         EffectType::LeaveColor,
         EffectType::BroadcastSafe,
         EffectType::Choker,
+        EffectType::TestSignals,
     ]
 }
 
@@ -7905,6 +7920,59 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::TestSignals => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "pattern",
+                "测试信号",
+                "测试图案",
+                crate::TestSignalsPattern::Bars.as_key(),
+                crate::TestSignalsPattern::ALL
+                    .into_iter()
+                    .map(|pattern| {
+                        ParameterEnumOption::new(
+                            pattern.as_key(),
+                            pattern.label(),
+                            format!("mondrian.effect.test_signals.pattern.{}", pattern.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "intensity",
+                "测试信号",
+                "图案强度",
+                PropertyValue::Float(crate::TEST_SIGNALS_DEFAULT_INTENSITY),
+                Some(f64::from(crate::TEST_SIGNALS_MIN_INTENSITY)),
+                Some(f64::from(crate::TEST_SIGNALS_MAX_INTENSITY)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "display_labels",
+                "测试信号",
+                "显示校准标记",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "safe_frames",
+                "测试信号",
+                "显示安全框",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8491,6 +8559,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The alpha morphology reads the whole frame, so the definition-level
             // envelope cannot narrow the input to a pixel-local tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::TestSignals => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::ColorOffset => EffectExecutionContract {
@@ -12462,6 +12534,64 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::TestSignals => {
+            let pattern_id = builtin_parameter_id(effect_type, "pattern");
+            let intensity_id = builtin_parameter_id(effect_type, "intensity");
+            let display_labels_id = builtin_parameter_id(effect_type, "display_labels");
+            let safe_frames_id = builtin_parameter_id(effect_type, "safe_frames");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let pattern = match effect.evaluate_parameter(&pattern_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::TestSignalsPattern::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "test signals pattern {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "test signals pattern must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::TestSignalsPattern::Bars,
+                };
+                let intensity = effect.evaluate_f32_parameter(
+                    &intensity_id,
+                    context.time,
+                    crate::TEST_SIGNALS_DEFAULT_INTENSITY,
+                );
+                let display_labels =
+                    match effect.evaluate_parameter(&display_labels_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => value,
+                        Some(_) => {
+                            return Err(invalid(
+                                "test signals display labels must be a switch".to_owned(),
+                            ));
+                        }
+                        None => false,
+                    };
+                let safe_frames = match effect.evaluate_parameter(&safe_frames_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(
+                            "test signals safe frames must be a switch".to_owned(),
+                        ));
+                    }
+                    None => false,
+                };
+                let grade =
+                    crate::TestSignalsGrade::new(pattern, intensity, display_labels, safe_frames)
+                        .map_err(|error| invalid(error.to_string()))?;
+                // A generator replaces the frame even at intensity 0, so the
+                // op is appended unconditionally.
+                graph.append_unary(EffectRenderOp::TestSignals { grade });
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -12544,6 +12674,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::LeaveColor => "保留颜色",
         EffectType::BroadcastSafe => "广播安全",
         EffectType::Choker => "阻塞收缩",
+        EffectType::TestSignals => "彩条与测试信号",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -13854,6 +13985,7 @@ mod tests {
             EffectType::LeaveColor,
             EffectType::BroadcastSafe,
             EffectType::Choker,
+            EffectType::TestSignals,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -20974,6 +21106,114 @@ mod tests {
         assert_eq!(grade.mode(), crate::BroadcastSafeMode::ClampRgb);
         assert_eq!(grade.ire(), 120.0);
         assert_eq!(grade.limit(), 1.2);
+    }
+
+    fn test_signals_op(graph: &EffectRenderGraph) -> Option<crate::TestSignalsGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::TestSignals { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::TestSignals { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_test_signals(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::TestSignals)
+            .expect("the test signals effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::TestSignals.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the test signals parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn test_signals_defaults_still_emit_the_generator() {
+        // A generator replaces the whole frame, so even the default parameters
+        // must emit the operation instead of being elided as an identity.
+        let effect = instantiate_effect_node(EffectType::TestSignals)
+            .expect("the test signals effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default test signals should compile");
+        let grade = test_signals_op(&graph).expect("the default parameters emit a node");
+        assert_eq!(grade.pattern(), crate::TestSignalsPattern::Bars);
+        assert_eq!(grade.intensity(), 100.0);
+        assert!(!grade.display_labels());
+        assert!(!grade.safe_frames());
+        assert!(!grade.is_identity());
+        // The fused point uniform carries [pattern ordinal, intensity / 100,
+        // labels, safety] and leaves the frame extent for the host.
+        assert_eq!(
+            grade.gpu_controls(),
+            ([0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn test_signals_authored_configuration_reaches_the_operation() {
+        let effect = author_test_signals(&[
+            ("pattern", PropertyValue::Enum("zone_plate".to_string())),
+            ("intensity", PropertyValue::Float(50.0)),
+            ("display_labels", PropertyValue::Bool(true)),
+            ("safe_frames", PropertyValue::Bool(true)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = test_signals_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.pattern(), crate::TestSignalsPattern::ZonePlate);
+        assert_eq!(grade.intensity(), 50.0);
+        assert!(grade.display_labels());
+        assert!(grade.safe_frames());
+        assert_eq!(
+            grade.gpu_controls(),
+            ([5.0, 0.5, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn test_signals_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_test_signals(&[
+            (
+                "pattern",
+                PropertyValue::Enum("concentric_rings".to_string()),
+            ),
+            ("intensity", PropertyValue::Float(75.0)),
+            ("display_labels", PropertyValue::Bool(true)),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the test signals node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the test signals node");
+        assert_eq!(restored.effect_type, EffectType::TestSignals);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored test signals node");
+        let grade = test_signals_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.pattern(), crate::TestSignalsPattern::ConcentricRings);
+        assert_eq!(grade.intensity(), 75.0);
+        assert!(grade.display_labels());
+        assert!(!grade.safe_frames());
+    }
+
+    #[test]
+    fn test_signals_out_of_range_intensity_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::TestSignals)
+            .expect("the test signals effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::TestSignals.property_path("intensity"),
+                value: PropertyValue::Float(150.0),
+            })
+            .expect_err("an out-of-range intensity must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 100]"), "{rendered}");
     }
 
     fn choker_op(graph: &EffectRenderGraph) -> Option<crate::ChokerGrade> {

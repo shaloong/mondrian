@@ -249,6 +249,7 @@ pub(crate) fn effect_category_message_id(category: &str) -> Option<&'static str>
         "胶片质感" => Some("effect-category-film-look"),
         "边缘效果" => Some("effect-category-edge"),
         "通道" => Some("effect-category-channel"),
+        "生成器" => Some("effect-category-generator"),
         "颜色/调色" => Some("effect-category-color-grading"),
         _ => None,
     }
@@ -302,6 +303,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "查找边缘" => Some("parameter-group-find-edges"),
         "模糊" => Some("parameter-group-blur"),
         "残影" => Some("parameter-group-echo"),
+        "测试信号" => Some("parameter-group-test-signals"),
         "波形变形" => Some("parameter-group-wave-warp"),
         "波纹" => Some("parameter-group-ripple"),
         "浮雕" => Some("parameter-group-emboss"),
