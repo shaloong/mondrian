@@ -7,9 +7,11 @@
 //! and grade-node ordering reuse the same immutable upload without weakening
 //! pixel semantics.
 
+#[cfg(test)]
+use mondrian_effects::CompiledEffectGpuPlan;
 use mondrian_effects::{
-    CompiledEffectGpuPlan, EffectGpuPointOp, PreparedColorCurves, PreparedHdrGrading,
-    PreparedLut3D, COLOR_CURVE_SAMPLE_COUNT, COLOR_CURVE_SAMPLE_ROWS, HDR_GRADING_SAMPLE_COUNT,
+    EffectGpuPointOp, PreparedColorCurves, PreparedHdrGrading, PreparedLut3D,
+    COLOR_CURVE_SAMPLE_COUNT, COLOR_CURVE_SAMPLE_ROWS, HDR_GRADING_SAMPLE_COUNT,
     HDR_GRADING_SAMPLE_ROWS,
 };
 use parking_lot::Mutex;
@@ -207,15 +209,37 @@ impl GpuCreativeLutRuntime {
         &self.layout
     }
 
+    /// Plan-level entry point kept for the cache tests; production paths hold
+    /// an operation slice and call [`Self::prepare_ops`].
+    #[cfg(test)]
     pub(crate) fn prepare_plan(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         plan: Option<&CompiledEffectGpuPlan>,
     ) -> Result<GpuCreativeLutPreparedBinding, GpuCreativeLutError> {
-        let luts = collect_active_luts(plan)?;
-        let curves = collect_active_curves(plan)?;
-        let hdr_gradings = collect_active_hdr_gradings(plan)?;
+        self.prepare_ops(
+            device,
+            queue,
+            plan.map_or(&[], CompiledEffectGpuPlan::operations),
+        )
+    }
+
+    /// Prepare every creative LUT, curve set, and HDR grading an operation
+    /// slice samples.
+    ///
+    /// The point stage of a spatial effect chain holds a bare
+    /// `[EffectGpuPointOp]` rather than a `CompiledEffectGpuPlan`, so it can
+    /// only reach the cache through this entry point.
+    pub(crate) fn prepare_ops(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        operations: &[EffectGpuPointOp],
+    ) -> Result<GpuCreativeLutPreparedBinding, GpuCreativeLutError> {
+        let luts = collect_active_luts(operations)?;
+        let curves = collect_active_curves(operations)?;
+        let hdr_gradings = collect_active_hdr_gradings(operations)?;
         if luts.is_empty() && curves.is_empty() && hdr_gradings.is_empty() {
             return Ok(GpuCreativeLutPreparedBinding { resident: Arc::clone(&self.dummy) });
         }
@@ -284,10 +308,10 @@ impl GpuCreativeLutRuntime {
 }
 
 fn collect_active_hdr_gradings(
-    plan: Option<&CompiledEffectGpuPlan>,
+    operations: &[EffectGpuPointOp],
 ) -> Result<Vec<Arc<PreparedHdrGrading>>, GpuCreativeLutError> {
     let mut unique = BTreeMap::<[u8; 32], Arc<PreparedHdrGrading>>::new();
-    for operation in plan.into_iter().flat_map(CompiledEffectGpuPlan::operations) {
+    for operation in operations {
         let EffectGpuPointOp::HdrGrading { grade } = operation else {
             continue;
         };
@@ -306,10 +330,10 @@ fn collect_active_hdr_gradings(
 }
 
 fn collect_active_curves(
-    plan: Option<&CompiledEffectGpuPlan>,
+    operations: &[EffectGpuPointOp],
 ) -> Result<Vec<Arc<PreparedColorCurves>>, GpuCreativeLutError> {
     let mut unique = BTreeMap::<[u8; 32], Arc<PreparedColorCurves>>::new();
-    for operation in plan.into_iter().flat_map(CompiledEffectGpuPlan::operations) {
+    for operation in operations {
         let EffectGpuPointOp::ColorCurves { curves } = operation else {
             continue;
         };
@@ -326,10 +350,10 @@ fn collect_active_curves(
 }
 
 fn collect_active_luts(
-    plan: Option<&CompiledEffectGpuPlan>,
+    operations: &[EffectGpuPointOp],
 ) -> Result<Vec<Arc<PreparedLut3D>>, GpuCreativeLutError> {
     let mut unique = BTreeMap::<[u8; 32], Arc<PreparedLut3D>>::new();
-    for operation in plan.into_iter().flat_map(CompiledEffectGpuPlan::operations) {
+    for operation in operations {
         let EffectGpuPointOp::Lut3D { lut, intensity } = operation else {
             continue;
         };

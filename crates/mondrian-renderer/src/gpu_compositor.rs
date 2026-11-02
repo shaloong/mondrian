@@ -13,6 +13,10 @@ use crate::gpu_composite_execution::{
     GpuCompositeExecutionPolicy, GpuCompositeLayerExecution, GpuCompositeLayerFootprint,
     GpuCompositeRect, GpuCompositeSourceCrop,
 };
+use crate::spatial_driver::{
+    gpu_spatial_chain_plan, GpuSpatialChainPlan, GpuSpatialScratchPool, GpuSpatialStagePlan,
+};
+use crate::spatial_pass_gpu::EffectSpatialGpu;
 use crate::{
     product_gpu_working_texture_format, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, GpuColorFrameAllocationPlan,
@@ -27,8 +31,8 @@ use mondrian_core::{
     types::{BlendMode, Color},
 };
 use mondrian_effects::{
-    CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MaskOp, PreparedQualifier,
-    QualifierMode, MAX_FUSED_GPU_EFFECT_OPS,
+    CompiledEffectGpuPipeline, CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MaskOp,
+    PreparedQualifier, QualifierMode, MAX_FUSED_GPU_EFFECT_OPS,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -2499,6 +2503,8 @@ pub enum GpuCompositingBlockerReason {
     UnsupportedTransform,
     /// A source frame is not already GPU-resident and uploads were disallowed.
     FrameNotGpuResident,
+    /// A lowered spatial effect chain cannot run on the GPU for this layer.
+    SpatialChainUnsupported,
     /// GPU compositor is not initialized (device/queue unavailable).
     GpuUnavailable,
 }
@@ -2510,6 +2516,7 @@ impl GpuCompositingBlockerReason {
             Self::EffectRequiresCpu => "effect_requires_cpu",
             Self::UnsupportedTransform => "unsupported_transform",
             Self::FrameNotGpuResident => "frame_not_gpu_resident",
+            Self::SpatialChainUnsupported => "spatial_chain_unsupported",
             Self::GpuUnavailable => "gpu_unavailable",
         }
     }
@@ -2522,6 +2529,9 @@ impl GpuCompositingBlockerReason {
             }
             Self::UnsupportedTransform => "Transform cannot be represented by GPU compositor",
             Self::FrameNotGpuResident => "Frame requires CPU-to-GPU upload before compositing",
+            Self::SpatialChainUnsupported => {
+                "Spatial effect chain has no GPU execution for this layer"
+            }
             Self::GpuUnavailable => "GPU device/queue not available for compositing",
         }
     }
@@ -2552,6 +2562,21 @@ pub struct GpuCompositingDiagnostics {
     pub gpu_composited_pixels: u64,
     /// Total pixels processed through CPU compositing.
     pub cpu_composited_pixels: u64,
+    /// Layers whose lowered spatial effect chain ran on the GPU.
+    #[serde(default)]
+    pub spatial_effect_layers: u64,
+    /// Spatial texture passes recorded by those chains.
+    #[serde(default)]
+    pub spatial_effect_passes: u64,
+    /// Standalone fused point stages recorded for those chains.
+    #[serde(default)]
+    pub spatial_point_stages: u64,
+    /// Peak scratch textures one composite asked the spatial pool to retain.
+    #[serde(default)]
+    pub spatial_scratch_textures_peak: u32,
+    /// Peak scratch bytes one composite asked the spatial pool to retain.
+    #[serde(default)]
+    pub spatial_scratch_bytes_peak: u64,
     /// Exact spatial execution evidence for GPU layer passes.
     #[serde(default)]
     pub execution: GpuCompositeExecutionDiagnostics,
@@ -2584,6 +2609,16 @@ impl GpuCompositingDiagnostics {
             self.gpu_composited_pixels.saturating_add(other.gpu_composited_pixels);
         self.cpu_composited_pixels =
             self.cpu_composited_pixels.saturating_add(other.cpu_composited_pixels);
+        self.spatial_effect_layers =
+            self.spatial_effect_layers.saturating_add(other.spatial_effect_layers);
+        self.spatial_effect_passes =
+            self.spatial_effect_passes.saturating_add(other.spatial_effect_passes);
+        self.spatial_point_stages =
+            self.spatial_point_stages.saturating_add(other.spatial_point_stages);
+        self.spatial_scratch_textures_peak =
+            self.spatial_scratch_textures_peak.max(other.spatial_scratch_textures_peak);
+        self.spatial_scratch_bytes_peak =
+            self.spatial_scratch_bytes_peak.max(other.spatial_scratch_bytes_peak);
         self.execution.accumulate(other.execution);
         if self.first_blocker.is_none() {
             self.first_blocker = other.first_blocker;
@@ -2674,6 +2709,30 @@ pub struct GpuCompositeRecord {
     pub output: GpuColorFrameHandle,
     /// Diagnostics proving which compositing path executed.
     pub diagnostics: GpuCompositingDiagnostics,
+}
+
+/// One layer of a composite request whose effects may include spatial kernels.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCompositeSpatialLayer<'a> {
+    /// The ordinary layer contract: source, opacity, blend, transform, frame seed.
+    pub layer: GpuCompositeLayer<'a>,
+    /// Lowered per-layer spatial effect chain, executed before the layer draw.
+    ///
+    /// An attached pipeline must run: admission failure is a hard error, never a
+    /// silent CPU fallback inside the compositor.
+    pub spatial_plan: Option<&'a CompiledEffectGpuPipeline>,
+}
+
+/// Request for recording a GPU composite whose layers may carry spatial chains.
+pub struct GpuCompositeSpatialRequest<'a> {
+    /// Output width.
+    pub width: u32,
+    /// Output height.
+    pub height: u32,
+    /// Working color space of the composite output.
+    pub working_color_space: mondrian_core::WorkingColorSpace,
+    /// Layers in bottom-to-top order.
+    pub layers: &'a [GpuCompositeSpatialLayer<'a>],
 }
 
 /// Result of recording one standalone GPU point-effect pass.
@@ -2832,6 +2891,23 @@ pub enum GpuCompositeError {
         /// Rejected coefficient encoded without weakening structural equality.
         progress_bits: u32,
     },
+    /// An attached spatial effect chain failed while recording.
+    #[error("GPU spatial effect chain failed in `{pass}`: {detail}")]
+    SpatialChainFailed {
+        /// Spatial pass or chain stage that refused.
+        pass: &'static str,
+        /// Full executor failure text.
+        detail: String,
+    },
+    /// A layer carried both a fused point plan and a spatial chain.
+    #[error("GPU composite layer cannot carry both an effect plan and a spatial chain")]
+    SpatialPlanWithPointPlan,
+    /// A spatial chain was attached to a source the driver cannot process.
+    #[error("GPU spatial effect chain does not support source {source_kind}")]
+    SpatialPlanOnUnsupportedSource {
+        /// Rejected layer source kind.
+        source_kind: &'static str,
+    },
 }
 
 /// Runtime for recording GPU working-space composites.
@@ -2856,11 +2932,16 @@ pub struct GpuFrameCompositor {
     procedural_layer_bind_group: wgpu::BindGroup,
     procedural_accum_bind_group: wgpu::BindGroup,
     creative_luts: GpuCreativeLutRuntime,
+    spatial: EffectSpatialGpu,
+    spatial_scratch: Mutex<GpuSpatialScratchPool>,
 }
 
 #[derive(Clone, Copy)]
 enum GpuCompositeTextureBinding<'a> {
     Resource(&'a GpuColorFrameWgpuResource),
+    /// A texture view that is not owned by the resource table, such as an
+    /// intermediate spatial chain raster. Its bind group is never cached.
+    TextureView(&'a wgpu::TextureView),
     ProceduralDummy,
 }
 
@@ -3189,6 +3270,8 @@ impl GpuFrameCompositor {
             procedural_layer_bind_group,
             procedural_accum_bind_group,
             creative_luts,
+            spatial: EffectSpatialGpu::new(device),
+            spatial_scratch: Mutex::new(GpuSpatialScratchPool::new()),
         })
     }
 
@@ -3218,6 +3301,13 @@ impl GpuFrameCompositor {
         self.creative_luts.diagnostics()
     }
 
+    /// Current residency of the spatial effect scratch pool.
+    pub fn spatial_scratch_diagnostics(
+        &self,
+    ) -> crate::spatial_driver::GpuSpatialScratchPoolDiagnostics {
+        self.spatial_scratch.lock().diagnostics()
+    }
+
     /// Record a GPU working-space composite into the supplied command encoder
     /// and resource table.
     pub fn record(
@@ -3230,8 +3320,75 @@ impl GpuFrameCompositor {
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
         request: GpuCompositeRequest<'_>,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
-        validate_request(&request)?;
-        if let Some(output) = single_layer_gpu_passthrough(&request) {
+        self.record_layers(
+            device,
+            queue,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            &request,
+            &|_| None,
+        )
+    }
+
+    /// Record a GPU working-space composite whose layers may each carry a
+    /// lowered spatial effect chain.
+    ///
+    /// A layer with an attached chain runs that chain on its own straight-alpha
+    /// working raster before its layer draw; a layer without one is recorded
+    /// exactly as [`Self::record`] records it.
+    pub fn record_with_spatial_effect_chains(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        request: GpuCompositeSpatialRequest<'_>,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        validate_spatial_request(&request)?;
+        let mut layers = Vec::with_capacity(request.layers.len());
+        for entry in request.layers {
+            layers.push(entry.layer);
+        }
+        let plain = GpuCompositeRequest {
+            width: request.width,
+            height: request.height,
+            working_color_space: request.working_color_space,
+            layers: &layers,
+        };
+        self.record_layers(
+            device,
+            queue,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            &plain,
+            &|index| request.layers[index].spatial_plan,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_layers<'a>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        request: &GpuCompositeRequest<'a>,
+        spatial_plan_at: &dyn Fn(usize) -> Option<&'a CompiledEffectGpuPipeline>,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        validate_request(request)?;
+        let has_spatial_plan =
+            (0..request.layers.len()).any(|index| spatial_plan_at(index).is_some());
+        // A spatial chain changes coverage in ways the passthrough fast path
+        // cannot prove, so it must never fire while a chain is attached.
+        if !has_spatial_plan && let Some(output) = single_layer_gpu_passthrough(request) {
             table.get(output).map_err(GpuCompositeError::ResourceTable)?;
             return Ok(GpuCompositeRecord {
                 output: output.clone(),
@@ -3261,9 +3418,10 @@ impl GpuFrameCompositor {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: composite_output_alpha(&request),
+            alpha: composite_output_alpha(request, has_spatial_plan),
         };
-        let opaque_normal_accumulator = can_use_opaque_normal_accumulator(&request, &execution);
+        let opaque_normal_accumulator =
+            can_use_opaque_normal_accumulator(request, &execution, has_spatial_plan);
         let target_a = create_working_resource(
             device,
             ids,
@@ -3316,6 +3474,11 @@ impl GpuFrameCompositor {
         let mut uploaded_cpu_layers = false;
         let mut data_texture_uploads = 0_u64;
         let mut src_is_a = true;
+        let mut spatial_effect_layers = 0_u64;
+        let mut spatial_effect_passes = 0_u64;
+        let mut spatial_point_stages = 0_u64;
+        let mut spatial_scratch_textures_peak = 0_u32;
+        let mut spatial_scratch_bytes_peak = 0_u64;
         for (pass_index, layer_execution) in execution.layers.iter().enumerate() {
             let index = layer_execution.input_index;
             let layer = &request.layers[index];
@@ -3332,7 +3495,7 @@ impl GpuFrameCompositor {
                     &target_a,
                 )
             };
-            let (layer_binding, source_kind, solid_color, source_size) = match layer.source {
+            let (mut layer_binding, source_kind, solid_color, source_size) = match layer.source {
                 GpuCompositeLayerSource::CpuFrame(frame) => {
                     uploaded_cpu_layers = true;
                     let descriptor = frame.descriptor();
@@ -3404,6 +3567,61 @@ impl GpuFrameCompositor {
                     [width as f32, height as f32],
                 ),
             };
+            if let Some(spatial_plan) = spatial_plan_at(index) {
+                let source_descriptor = layer_source_descriptor(layer.source).ok_or(
+                    GpuCompositeError::SpatialPlanOnUnsupportedSource {
+                        source_kind: composite_layer_source_name(layer.source),
+                    },
+                )?;
+                let chain = gpu_spatial_chain_plan(
+                    spatial_plan,
+                    source_descriptor.width,
+                    source_descriptor.height,
+                )
+                .map_err(|blocker| GpuCompositeError::SpatialChainFailed {
+                    pass: spatial_chain_blocker_pass(&blocker),
+                    detail: blocker.to_string(),
+                })?;
+                // Clone the sampled texture, its view, and the resource table's
+                // own handle out of the binding before the chain inserts its
+                // intermediates, so no immutable and mutable table borrow
+                // overlap.
+                let (source_texture, source_view) = match layer_binding {
+                    GpuCompositeTextureBinding::Resource(resource) => {
+                        (resource.texture.clone(), resource.texture_view.clone())
+                    }
+                    GpuCompositeTextureBinding::TextureView(_)
+                    | GpuCompositeTextureBinding::ProceduralDummy => {
+                        return Err(GpuCompositeError::SpatialPlanOnUnsupportedSource {
+                            source_kind: composite_layer_source_name(layer.source),
+                        });
+                    }
+                };
+                let chain_output = self.record_spatial_chain(
+                    device,
+                    queue,
+                    encoder,
+                    ids,
+                    table,
+                    resource_pool,
+                    &source_texture,
+                    &source_view,
+                    source_descriptor,
+                    &chain,
+                    layer.frame_seed,
+                )?;
+                layer_binding = GpuCompositeTextureBinding::Resource(
+                    table.get(&chain_output).map_err(GpuCompositeError::ResourceTable)?.resource(),
+                );
+                spatial_effect_layers = spatial_effect_layers.saturating_add(1);
+                spatial_effect_passes =
+                    spatial_effect_passes.saturating_add(u64::from(chain.spatial_passes));
+                spatial_point_stages =
+                    spatial_point_stages.saturating_add(u64::from(chain.point_stages));
+                spatial_scratch_textures_peak =
+                    spatial_scratch_textures_peak.max(chain.scratch_texture_request());
+                spatial_scratch_bytes_peak = spatial_scratch_bytes_peak.max(chain.scratch_bytes);
+            }
             let inv_transform = invert_affine(layer.transform)
                 .expect("validate_request rejects unsupported transforms");
             if !opaque_normal_accumulator && !layer_execution.initializes_accumulator {
@@ -3492,7 +3710,7 @@ impl GpuFrameCompositor {
                     geometry: [width as f32, height as f32, source_size[0], source_size[1]],
                     effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
                 },
-                effect_plan,
+                effect_plan.map(CompiledEffectGpuPlan::operations),
                 layer_execution,
                 pipeline,
                 opaque_normal_accumulator.then_some(if pass_index == 0 {
@@ -3538,11 +3756,222 @@ impl GpuFrameCompositor {
             diagnostics.gpu_native_composites = 1;
         }
         diagnostics.data_texture_uploads = data_texture_uploads;
+        diagnostics.spatial_effect_layers = spatial_effect_layers;
+        diagnostics.spatial_effect_passes = spatial_effect_passes;
+        diagnostics.spatial_point_stages = spatial_point_stages;
+        diagnostics.spatial_scratch_textures_peak = spatial_scratch_textures_peak;
+        diagnostics.spatial_scratch_bytes_peak = spatial_scratch_bytes_peak;
         if opaque_normal_accumulator {
             diagnostics.opaque_normal_single_accumulator_composites = 1;
             diagnostics.avoided_accumulator_sample_pixels = execution.diagnostics.shaded_pixels;
         }
         Ok(GpuCompositeRecord { output, diagnostics })
+    }
+
+    /// Run one lowered spatial chain over a layer's own straight-alpha raster.
+    ///
+    /// Every stage reads the previous stage's raster and writes a fresh table
+    /// resource, so the chain never aliases a pass's source with its own
+    /// destination and the layer draw can sample the chain output unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn record_spatial_chain(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        source_texture: &wgpu::Texture,
+        source_view: &wgpu::TextureView,
+        descriptor: ColorFrameDescriptor,
+        chain: &GpuSpatialChainPlan,
+        frame_seed: i64,
+    ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
+        let width = descriptor.width;
+        let height = descriptor.height;
+        // The chain writes working rasters, while the source descriptor may
+        // still describe a CPU-resident upload; only the extent and colour
+        // space carry over.
+        let working_descriptor = ColorFrameDescriptor {
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            ..descriptor
+        };
+        let mut current_texture = source_texture.clone();
+        let mut current_view = source_view.clone();
+        let mut current_handle = None;
+        for stage in &chain.stages {
+            match stage {
+                GpuSpatialStagePlan::PointOps { operations } => {
+                    let output = create_working_resource(
+                        device,
+                        ids,
+                        working_descriptor,
+                        "gpu-spatial-point",
+                        resource_pool,
+                    )?;
+                    self.record_point_ops_pass(
+                        device,
+                        queue,
+                        encoder,
+                        &current_view,
+                        &output.resource().texture_view,
+                        operations,
+                        width,
+                        height,
+                        frame_seed,
+                    )?;
+                    let handle = output.handle().clone();
+                    table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
+                    current_texture = table
+                        .get(&handle)
+                        .map_err(GpuCompositeError::ResourceTable)?
+                        .resource()
+                        .texture
+                        .clone();
+                    current_view = table
+                        .get(&handle)
+                        .map_err(GpuCompositeError::ResourceTable)?
+                        .resource()
+                        .texture_view
+                        .clone();
+                    current_handle = Some(handle);
+                }
+                GpuSpatialStagePlan::Spatial { pass, scratch_textures, .. } => {
+                    // The pool holds `max(pass count) + 1` textures so no
+                    // stage's destination aliases its own source; the guard
+                    // here proves the kernel's declared pass count fits.
+                    let scratch = {
+                        let mut pool = self.spatial_scratch.lock();
+                        pool.acquire(device, width, height, chain.scratch_texture_request())
+                    };
+                    if scratch.len() < usize::try_from(*scratch_textures).unwrap_or(usize::MAX) {
+                        return Err(GpuCompositeError::SpatialChainFailed {
+                            pass: "spatial_scratch_geometry",
+                            detail: format!(
+                                "stage needs {scratch_textures} scratch texture(s) but the pool \
+                                 supplied {}",
+                                scratch.len()
+                            ),
+                        });
+                    }
+                    let produced = self
+                        .spatial
+                        .record(
+                            device,
+                            encoder,
+                            pass,
+                            &current_texture,
+                            &scratch,
+                            width,
+                            height,
+                        )
+                        .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                            pass: spatial_failure_pass(&error),
+                            detail: error.to_string(),
+                        })?;
+                    let output = create_working_resource(
+                        device,
+                        ids,
+                        working_descriptor,
+                        "gpu-spatial-pass",
+                        resource_pool,
+                    )?;
+                    // `record` returns one of the rotating scratch textures,
+                    // whose identity depends on the kernel's pass table; copy
+                    // it out so every stage hands a table resource to the next
+                    // one and to the layer draw.
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &produced,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &output.resource().texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    );
+                    let handle = output.handle().clone();
+                    table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
+                    current_texture = table
+                        .get(&handle)
+                        .map_err(GpuCompositeError::ResourceTable)?
+                        .resource()
+                        .texture
+                        .clone();
+                    current_view = table
+                        .get(&handle)
+                        .map_err(GpuCompositeError::ResourceTable)?
+                        .resource()
+                        .texture_view
+                        .clone();
+                    current_handle = Some(handle);
+                }
+            }
+        }
+        current_handle.ok_or(GpuCompositeError::SpatialChainFailed {
+            pass: "spatial_chain",
+            detail: "the spatial chain produced no raster".to_string(),
+        })
+    }
+
+    /// Record a standalone full-raster point-op pass over a chain intermediate.
+    #[allow(clippy::too_many_arguments)]
+    fn record_point_ops_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source_view: &wgpu::TextureView,
+        destination_view: &wgpu::TextureView,
+        operations: &[EffectGpuPointOp],
+        width: u32,
+        height: u32,
+        frame_seed: i64,
+    ) -> Result<(), GpuCompositeError> {
+        let canvas = GpuCompositeRect { x: 0, y: 0, width, height };
+        let execution = GpuCompositeLayerExecution {
+            input_index: 0,
+            damage: canvas,
+            preserved_regions: Vec::new(),
+            tiles: vec![canvas],
+            initializes_accumulator: true,
+            fused_point_operations: operations.len() as u32,
+        };
+        self.record_layer_pass_scheduled(
+            device,
+            queue,
+            encoder,
+            GpuCompositeTextureBinding::ProceduralDummy,
+            destination_view,
+            GpuCompositeTextureBinding::TextureView(source_view),
+            GpuCompositeUniforms {
+                opacity: 1.0,
+                source_kind: 3,
+                effect_count: operations.len() as u32,
+                blend_mode: gpu_blend_mode_id(BlendMode::Normal),
+                frame_seed_lo: frame_seed as u32,
+                frame_seed_hi: (frame_seed >> 32) as u32,
+                mask_controls: [0; 2],
+                solid_color: [0.0; 4],
+                inv_transform0: [1.0, 0.0, 0.0, 0.0],
+                inv_transform1: [1.0, 0.0, 0.0, 0.0],
+                geometry: [width as f32, height as f32, width as f32, height as f32],
+                effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
+            },
+            Some(operations),
+            &execution,
+            &self.pipeline,
+            None,
+        )
     }
 
     /// Record a standalone point-effect pass over a typed effect-domain frame.
@@ -4394,7 +4823,7 @@ impl GpuFrameCompositor {
             dst_view,
             layer_binding,
             uniforms,
-            effect_plan,
+            effect_plan.map(CompiledEffectGpuPlan::operations),
             &execution,
             pipeline,
             None,
@@ -4411,22 +4840,23 @@ impl GpuFrameCompositor {
         dst_view: &wgpu::TextureView,
         layer_binding: GpuCompositeTextureBinding<'_>,
         mut uniforms: GpuCompositeUniforms,
-        effect_plan: Option<&CompiledEffectGpuPlan>,
+        point_operations: Option<&[EffectGpuPointOp]>,
         execution: &GpuCompositeLayerExecution,
         pipeline: &wgpu::RenderPipeline,
         load_op: Option<wgpu::LoadOp<wgpu::Color>>,
     ) -> Result<(), GpuCompositeError> {
-        let creative_lut_binding = self.creative_luts.prepare_plan(device, queue, effect_plan)?;
-        uniforms.effect_count = effect_plan.map_or(0, |plan| plan.operations().len() as u32);
-        uniforms.effects = effect_uniforms(effect_plan, Some(&creative_lut_binding))?;
+        let operations = point_operations.unwrap_or_default();
+        let creative_lut_binding = self.creative_luts.prepare_ops(device, queue, operations)?;
+        uniforms.effect_count = operations.len() as u32;
+        uniforms.effects = effect_uniforms_for_ops(operations, Some(&creative_lut_binding))?;
         // Test signals places its geometry from the frame extent, but
-        // `effect_uniforms` has no extent in scope. Stamp it here, where the
-        // composite path and `record_point_effect_pass` converge: the point
+        // `effect_uniforms_for_ops` has no extent in scope. Stamp it here, where
+        // the composite path and `record_point_effect_pass` converge: the point
         // uniform's `extra0` is `[width, height, 0, 0]` for that op, exactly
         // as `TestSignalsGrade::gpu_controls` documents.
-        if let Some(plan) = effect_plan {
+        {
             let source_extent = [uniforms.geometry[2], uniforms.geometry[3], 0.0, 0.0];
-            for (uniform, operation) in uniforms.effects.iter_mut().zip(plan.operations()) {
+            for (uniform, operation) in uniforms.effects.iter_mut().zip(operations) {
                 if matches!(operation, EffectGpuPointOp::TestSignals { .. }) {
                     uniform.extra0 = source_extent;
                 }
@@ -4491,6 +4921,23 @@ impl GpuFrameCompositor {
                 self.record_texture_binding_cache_result(cache_hit);
                 bind_group
             }
+            GpuCompositeTextureBinding::TextureView(texture_view) => {
+                self.record_texture_binding_cache_result(false);
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mondrian_gpu_working_compositor_layer_binding"),
+                    layout: &self.layer_texture_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                })
+            }
             GpuCompositeTextureBinding::ProceduralDummy => {
                 self.texture_bind_group_cache_hits.fetch_add(1, Ordering::Relaxed);
                 self.procedural_layer_bind_group.clone()
@@ -4511,6 +4958,17 @@ impl GpuFrameCompositor {
                     });
                 self.record_texture_binding_cache_result(cache_hit);
                 bind_group
+            }
+            GpuCompositeTextureBinding::TextureView(texture_view) => {
+                self.record_texture_binding_cache_result(false);
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mondrian_gpu_working_compositor_accum_binding"),
+                    layout: &self.accum_texture_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(texture_view),
+                    }],
+                })
             }
             GpuCompositeTextureBinding::ProceduralDummy => {
                 self.texture_bind_group_cache_hits.fetch_add(1, Ordering::Relaxed);
@@ -4881,7 +5339,7 @@ const fn gpu_mask_op_id(mask_op: MaskOp) -> u32 {
 }
 
 fn single_layer_gpu_passthrough<'a>(
-    request: &'a GpuCompositeRequest<'a>,
+    request: &GpuCompositeRequest<'a>,
 ) -> Option<&'a GpuColorFrameHandle> {
     let mut contributing_layers =
         request.layers.iter().filter(|layer| !layer_has_zero_contribution(layer));
@@ -4966,15 +5424,25 @@ fn gpu_blend_mode_id(mode: BlendMode) -> u32 {
     }
 }
 
+/// Plan-level wrapper kept for the uniform-packing tests; production paths hold
+/// an operation slice and call [`effect_uniforms_for_ops`].
+#[cfg(test)]
 fn effect_uniforms(
     plan: Option<&CompiledEffectGpuPlan>,
     creative_luts: Option<&GpuCreativeLutPreparedBinding>,
 ) -> Result<[GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS], GpuCompositeError> {
+    effect_uniforms_for_ops(
+        plan.map_or(&[], CompiledEffectGpuPlan::operations),
+        creative_luts,
+    )
+}
+
+fn effect_uniforms_for_ops(
+    operations: &[EffectGpuPointOp],
+    creative_luts: Option<&GpuCreativeLutPreparedBinding>,
+) -> Result<[GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS], GpuCompositeError> {
     let mut uniforms = [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS];
-    let Some(plan) = plan else {
-        return Ok(uniforms);
-    };
-    for (target, operation) in uniforms.iter_mut().zip(plan.operations()) {
+    for (target, operation) in uniforms.iter_mut().zip(operations) {
         *target = match operation {
             EffectGpuPointOp::ColorAdjust {
                 exposure,
@@ -5457,6 +5925,42 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
     Ok(())
 }
 
+/// Reject spatial effect plans the compositor cannot honour, before any GPU
+/// work is recorded.
+///
+/// The spatial plan is not a field of [`GpuCompositeRequest`], so this is the
+/// admission check for [`GpuFrameCompositor::record_with_spatial_effect_chains`]
+/// in exactly the role `validate_request` plays for [`GpuFrameCompositor::record`].
+fn validate_spatial_request(
+    request: &GpuCompositeSpatialRequest<'_>,
+) -> Result<(), GpuCompositeError> {
+    for entry in request.layers {
+        let Some(plan) = entry.spatial_plan else {
+            continue;
+        };
+        // A spatial chain already flushed the point run; a fused point plan
+        // alongside it would apply the same operations twice.
+        if entry.layer.effect_plan.is_some() {
+            return Err(GpuCompositeError::SpatialPlanWithPointPlan);
+        }
+        match entry.layer.source {
+            GpuCompositeLayerSource::CpuFrame(_) | GpuCompositeLayerSource::GpuFrame(_) => {}
+            GpuCompositeLayerSource::CpuDataTexture(_)
+            | GpuCompositeLayerSource::SolidColor(_)
+            | GpuCompositeLayerSource::Adjustment => {
+                return Err(GpuCompositeError::SpatialPlanOnUnsupportedSource {
+                    source_kind: composite_layer_source_name(entry.layer.source),
+                });
+            }
+        }
+        let domain = plan.processing_domain();
+        if domain != EffectColorDomain::SceneLinearRgb {
+            return Err(GpuCompositeError::EffectDomainRequiresExternalPass { domain });
+        }
+    }
+    Ok(())
+}
+
 fn require_straight_compatible_alpha(
     alpha: crate::ColorFrameAlpha,
 ) -> Result<(), GpuCompositeError> {
@@ -5491,7 +5995,10 @@ fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
     }
 }
 
-fn composite_output_alpha(request: &GpuCompositeRequest<'_>) -> crate::ColorFrameAlpha {
+fn composite_output_alpha(
+    request: &GpuCompositeRequest<'_>,
+    has_spatial_plan: bool,
+) -> crate::ColorFrameAlpha {
     let mut opaque = false;
     for layer in request.layers {
         if layer_has_zero_contribution(layer) {
@@ -5503,7 +6010,12 @@ fn composite_output_alpha(request: &GpuCompositeRequest<'_>) -> crate::ColorFram
         {
             // A processed Crop can lower coverage even over an opaque original.
             opaque = false;
-        } else if layer_establishes_opaque_canvas(request.width, request.height, layer) {
+        } else if layer_establishes_opaque_canvas(
+            request.width,
+            request.height,
+            layer,
+            has_spatial_plan,
+        ) {
             opaque = true;
         }
     }
@@ -5526,8 +6038,13 @@ fn layer_establishes_opaque_canvas(
     output_width: u32,
     output_height: u32,
     layer: &GpuCompositeLayer<'_>,
+    has_spatial_plan: bool,
 ) -> bool {
-    if layer.opacity.clamp(0.0, 1.0) != 1.0
+    // A spatial chain runs on the layer raster before the draw and can change
+    // coverage (colour key, split, and every remapping kernel), so no spatial
+    // layer establishes an opaque canvas.
+    if has_spatial_plan
+        || layer.opacity.clamp(0.0, 1.0) != 1.0
         || layer.blend_policy != mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal)
         || !is_identity_transform(layer.transform)
         || !effect_plan_preserves_full_coverage(layer.effect_plan)
@@ -5555,7 +6072,11 @@ fn layer_establishes_opaque_canvas(
 fn can_use_opaque_normal_accumulator(
     request: &GpuCompositeRequest<'_>,
     execution: &crate::gpu_composite_execution::GpuCompositeExecutionPlan,
+    has_spatial_plan: bool,
 ) -> bool {
+    if has_spatial_plan {
+        return false;
+    }
     let Some(first) = execution.layers.first() else {
         return false;
     };
@@ -5570,6 +6091,7 @@ fn can_use_opaque_normal_accumulator(
             request.width,
             request.height,
             &request.layers[first.input_index],
+            has_spatial_plan,
         )
         && execution.layers.iter().all(|scheduled| {
             let layer = &request.layers[scheduled.input_index];
@@ -5704,6 +6226,32 @@ fn layer_source_descriptor(source: GpuCompositeLayerSource<'_>) -> Option<ColorF
         }
         GpuCompositeLayerSource::GpuFrame(handle) => Some(handle.descriptor()),
         GpuCompositeLayerSource::SolidColor(_) | GpuCompositeLayerSource::Adjustment => None,
+    }
+}
+
+fn spatial_chain_blocker_pass(
+    blocker: &crate::spatial_driver::GpuSpatialChainBlocker,
+) -> &'static str {
+    match blocker {
+        crate::spatial_driver::GpuSpatialChainBlocker::UnsupportedPass { pass, .. } => pass,
+        other => other.code(),
+    }
+}
+
+fn spatial_failure_pass(error: &crate::spatial_pass_gpu::EffectSpatialGpuError) -> &'static str {
+    match error {
+        crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(pass) => pass,
+        crate::spatial_pass_gpu::EffectSpatialGpuError::EmptyFrame => "empty_frame",
+    }
+}
+
+fn composite_layer_source_name(source: GpuCompositeLayerSource<'_>) -> &'static str {
+    match source {
+        GpuCompositeLayerSource::CpuFrame(_) => "cpu_frame",
+        GpuCompositeLayerSource::CpuDataTexture(_) => "cpu_data_texture",
+        GpuCompositeLayerSource::GpuFrame(_) => "gpu_frame",
+        GpuCompositeLayerSource::SolidColor(_) => "solid_color",
+        GpuCompositeLayerSource::Adjustment => "adjustment",
     }
 }
 
@@ -5950,12 +6498,15 @@ mod tests {
             frame_seed: 0,
         };
         let output_alpha = |layers: &[GpuCompositeLayer<'_>]| {
-            composite_output_alpha(&GpuCompositeRequest {
-                width: 4,
-                height: 4,
-                working_color_space: WorkingColorSpace::LinearRec709,
-                layers,
-            })
+            composite_output_alpha(
+                &GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers,
+                },
+                false,
+            )
         };
         assert_eq!(
             output_alpha(&[base, adjustment]),
@@ -7291,6 +7842,7 @@ mod tests {
             GpuCompositingBlockerReason::UnsupportedTransform,
             GpuCompositingBlockerReason::FrameNotGpuResident,
             GpuCompositingBlockerReason::GpuUnavailable,
+            GpuCompositingBlockerReason::SpatialChainUnsupported,
         ];
         let mut codes: Vec<_> = reasons.iter().map(|r| r.code()).collect();
         codes.sort();
@@ -11389,13 +11941,76 @@ mod tests {
             )
             .expect("record GPU effect composite");
         let diagnostics = record.diagnostics;
+        let actual =
+            readback_composite_output(context, encoder, &mut table, &record.output, width, height);
+        (actual, diagnostics)
+    }
+
+    fn readback_spatial_test_composite_with_diagnostics(
+        context: &crate::GpuContext,
+        layers: &[GpuCompositeSpatialLayer<'_>],
+        width: u32,
+        height: u32,
+        working_color_space: WorkingColorSpace,
+    ) -> (Vec<[f32; 4]>, GpuCompositingDiagnostics) {
+        readback_spatial_test_composite_with_compositor(
+            context,
+            layers,
+            width,
+            height,
+            working_color_space,
+        )
+        .0
+    }
+
+    fn readback_spatial_test_composite_with_compositor(
+        context: &crate::GpuContext,
+        layers: &[GpuCompositeSpatialLayer<'_>],
+        width: u32,
+        height: u32,
+        working_color_space: WorkingColorSpace,
+    ) -> (
+        (Vec<[f32; 4]>, GpuCompositingDiagnostics),
+        GpuFrameCompositor,
+    ) {
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
+        let mut table = GpuColorFrameResourceTable::new();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-spatial-chain-parity"),
+        });
+        let record = compositor
+            .record_with_spatial_effect_chains(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                GpuCompositeSpatialRequest { width, height, working_color_space, layers },
+            )
+            .expect("record GPU spatial chain composite");
+        let diagnostics = record.diagnostics;
+        let actual =
+            readback_composite_output(context, encoder, &mut table, &record.output, width, height);
+        ((actual, diagnostics), compositor)
+    }
+
+    fn readback_composite_output(
+        context: &crate::GpuContext,
+        mut encoder: wgpu::CommandEncoder,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        output: &GpuColorFrameHandle,
+        width: u32,
+        height: u32,
+    ) -> Vec<[f32; 4]> {
         let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mondrian-test-gpu-point-effect-readback"),
             size: 256 * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let output = table.get(&record.output).expect("composite output resource");
+        let output = table.get(output).expect("composite output resource");
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &output.resource().texture,
@@ -11424,7 +12039,7 @@ mod tests {
             );
         }
         readback.unmap();
-        (actual, diagnostics)
+        actual
     }
 
     fn map_test_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
@@ -11481,7 +12096,7 @@ mod tests {
         };
 
         assert_eq!(
-            composite_output_alpha(&request),
+            composite_output_alpha(&request, false),
             crate::ColorFrameAlpha::Opaque
         );
     }
@@ -11505,7 +12120,7 @@ mod tests {
         };
 
         assert_eq!(
-            composite_output_alpha(&request),
+            composite_output_alpha(&request, false),
             crate::ColorFrameAlpha::StraightCoverage
         );
     }
@@ -12209,5 +12824,505 @@ mod tests {
             .expect("new diagnostic report file");
         serde_json::to_writer_pretty(&mut file, &report).expect("diagnostic JSON");
         eprintln!("GPU_MIX_SMALL_COST_REPORT: {report}");
+    }
+
+    fn spatial_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                pixels.push([
+                    0.05 + 0.9 * u,
+                    0.08 + 0.7 * v,
+                    0.2 + 0.6 * (u * 0.4 + v * 0.6),
+                    1.0,
+                ]);
+            }
+        }
+        pixels
+    }
+
+    fn spatial_test_frame(pixels: &[[f32; 4]], width: u32, height: u32) -> CpuColorFrame {
+        CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::Opaque,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: pixels.to_vec(),
+        })
+    }
+
+    fn spatial_test_layer<'a>(frame: &'a CpuColorFrame) -> GpuCompositeLayer<'a> {
+        GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        }
+    }
+
+    fn spatial_test_pipeline(op: mondrian_effects::EffectRenderOp) -> CompiledEffectGpuPipeline {
+        use mondrian_effects::{compile_reference_render_graph, EffectGraphBuilderState};
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid effect graph");
+        mondrian_effects::lower_effect_graph_to_gpu_pipeline(&graph)
+            .expect("lowered GPU effect pipeline")
+    }
+
+    fn assert_spatial_chain_matches(expected: &[[f32; 4]], actual: &[[f32; 4]]) {
+        assert_eq!(expected.len(), actual.len(), "spatial chain pixel count");
+        for (index, (cpu_pixel, gpu_pixel)) in expected.iter().zip(actual.iter()).enumerate() {
+            for channel in 0..4 {
+                let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                assert!(
+                    difference <= 1.0e-4,
+                    "pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+            }
+        }
+    }
+
+    /// The compositor's `fs_main` source-over branch for a fully opaque base.
+    fn spatial_test_normal_over_opaque(base: [f32; 4], blend: [f32; 4]) -> [f32; 4] {
+        let base_alpha = base[3].clamp(0.0, 1.0);
+        let blend_alpha = blend[3].clamp(0.0, 1.0);
+        if blend_alpha <= 0.0 {
+            return base;
+        }
+        if base_alpha <= 0.0 {
+            return [blend[0], blend[1], blend[2], blend_alpha];
+        }
+        let out_alpha = blend_alpha + base_alpha * (1.0 - blend_alpha);
+        if out_alpha <= 0.0 {
+            return [0.0; 4];
+        }
+        let mut out = [0.0; 4];
+        for channel in 0..3 {
+            let premultiplied =
+                blend[channel] * blend_alpha + base[channel] * base_alpha * (1.0 - blend_alpha);
+            out[channel] = premultiplied / out_alpha;
+        }
+        out[3] = out_alpha;
+        out
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_runs_on_a_single_layer_before_compositing() {
+        use mondrian_effects::{EffectRenderOp, TwirlGrade};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping spatial chain single layer test: no GPU adapter available");
+            return;
+        };
+        let width = 9;
+        let height = 7;
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        let grade = TwirlGrade::new(45.0, 80.0, [width as f32 * 0.5, height as f32 * 0.5])
+            .expect("valid twirl grade");
+        let pipeline = spatial_test_pipeline(EffectRenderOp::Twirl { grade });
+        let layer = spatial_test_layer(&frame);
+        let entries = [GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }];
+        let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+            &context,
+            &entries,
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+
+        let mut expected = pixels;
+        assert!(mondrian_effects::twirl_frame_f32(
+            &mut expected,
+            width as usize,
+            height as usize,
+            grade
+        ));
+        assert_spatial_chain_matches(&expected, &actual);
+        assert_eq!(diagnostics.spatial_effect_layers, 1);
+        assert_eq!(diagnostics.spatial_effect_passes, 1);
+        assert_eq!(diagnostics.spatial_point_stages, 0);
+        assert_eq!(diagnostics.spatial_scratch_textures_peak, 2);
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_runs_a_four_pass_kernel_in_one_chain() {
+        use mondrian_effects::{
+            EffectRenderOp, MinimaxChannel, MinimaxDirection, MinimaxGrade, MinimaxOperation,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping spatial chain four pass test: no GPU adapter available");
+            return;
+        };
+        let width = 11;
+        let height = 9;
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        let grade = MinimaxGrade::new(
+            1.0,
+            MinimaxOperation::MinimumThenMaximum,
+            MinimaxChannel::Color,
+            MinimaxDirection::Both,
+            0.0,
+        )
+        .expect("valid minimax grade");
+        let pipeline = spatial_test_pipeline(EffectRenderOp::Minimax { grade });
+        let layer = spatial_test_layer(&frame);
+        let entries = [GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }];
+        let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+            &context,
+            &entries,
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+
+        let mut expected = pixels;
+        assert!(mondrian_effects::minimax_frame_f32(
+            &mut expected,
+            width as usize,
+            height as usize,
+            &grade
+        ));
+        assert_spatial_chain_matches(&expected, &actual);
+        assert_eq!(diagnostics.spatial_effect_layers, 1);
+        // Both directions over the RGB mask is four texture passes, and the
+        // scratch pool must hand the kernel four rotating rasters plus one.
+        assert_eq!(diagnostics.spatial_effect_passes, 4);
+        assert_eq!(diagnostics.spatial_scratch_textures_peak, 5);
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_runs_point_spatial_point_stages_in_order() {
+        use mondrian_effects::{
+            compile_reference_render_graph, EffectFloatFrameView, EffectFrameExtent,
+            EffectGraphBuilderState, EffectRenderOp, EffectValueFormat, EffectWorkingPrecision,
+            InvertChannels, TwirlGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping point/spatial/point chain test: no GPU adapter available");
+            return;
+        };
+        let width = 11;
+        let height = 9;
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::BrightnessContrast {
+            grade: mondrian_effects::BrightnessContrastGrade::new(40.0, 20.0, false)
+                .expect("valid brightness contrast grade"),
+        });
+        builder.append_unary(EffectRenderOp::Twirl {
+            grade: TwirlGrade::new(-35.0, 70.0, [width as f32 * 0.4, height as f32 * 0.6])
+                .expect("valid twirl grade"),
+        });
+        builder.append_unary(EffectRenderOp::Invert {
+            channels: InvertChannels::Rgb,
+            blend_with_original: 0.25,
+        });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let pipeline = mondrian_effects::lower_effect_graph_to_gpu_pipeline(&graph)
+            .expect("lowered GPU effect pipeline");
+        assert_eq!(pipeline.stages().len(), 3);
+        assert_eq!(pipeline.point_operation_count(), 2);
+        assert_eq!(pipeline.spatial_stage_count(), 1);
+
+        let layer = spatial_test_layer(&frame);
+        let entries = [GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }];
+        let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+            &context,
+            &entries,
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+
+        let expected = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+            EffectFloatFrameView::new(
+                EffectFrameExtent::new(width, height),
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::Opaque,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        assert_spatial_chain_matches(expected.pixels(), &actual);
+        assert_eq!(diagnostics.spatial_point_stages, 2);
+        assert_eq!(diagnostics.spatial_effect_passes, 1);
+        assert_eq!(diagnostics.spatial_effect_layers, 1);
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_glow_runs_on_a_multi_layer_request() {
+        use mondrian_effects::{
+            EffectGpuSpatialPass, EffectRenderOp, GlowBasedOn, GlowColors, GlowComposite,
+            GlowDimensions, GlowGrade, GlowOperation,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping glow spatial chain test: no GPU adapter available");
+            return;
+        };
+        let width = 11;
+        let height = 9;
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        let grade = GlowGrade::new(
+            GlowBasedOn::Color,
+            153.0,
+            4.0,
+            60.0,
+            GlowComposite::OnTop,
+            GlowOperation::Screen,
+            GlowColors::Original,
+            1.0,
+            0.0,
+            0.5,
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            GlowDimensions::Both,
+            [0.2126, 0.7152, 0.0722],
+        )
+        .expect("valid glow grade");
+        assert_eq!(
+            crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(
+                &EffectGpuSpatialPass::Glow { grade }
+            )
+            .expect("glow pass count"),
+            6
+        );
+        let pipeline = spatial_test_pipeline(EffectRenderOp::Glow { grade });
+        let base = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color {
+                r: 0.05,
+                g: 0.10,
+                b: 0.15,
+                a: 1.0,
+            }),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let glow_layer = spatial_test_layer(&frame);
+        let entries = [
+            GpuCompositeSpatialLayer { layer: base, spatial_plan: None },
+            GpuCompositeSpatialLayer { layer: glow_layer, spatial_plan: Some(&pipeline) },
+        ];
+        let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+            &context,
+            &entries,
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+
+        let mut expected = pixels;
+        assert!(mondrian_effects::glow_frame_f32(
+            &mut expected,
+            width as usize,
+            height as usize,
+            &grade
+        ));
+        for pixel in expected.iter_mut() {
+            *pixel = spatial_test_normal_over_opaque([0.05, 0.10, 0.15, 1.0], *pixel);
+        }
+        assert_spatial_chain_matches(&expected, &actual);
+        assert_eq!(diagnostics.spatial_effect_layers, 1);
+        assert_eq!(diagnostics.spatial_effect_passes, 6);
+        assert!(diagnostics.spatial_scratch_textures_peak >= 7);
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_reports_a_directional_blur_unsupported_pass() {
+        use mondrian_effects::EffectRenderOp;
+
+        let width = 9;
+        let height = 7;
+        let pipeline = spatial_test_pipeline(EffectRenderOp::DirectionalBlur {
+            length: 4.0,
+            direction_degrees: 30.0,
+        });
+        let blocker = crate::spatial_driver::gpu_spatial_chain_plan(&pipeline, width, height)
+            .expect_err("directional blur has no GPU spatial math");
+        assert!(
+            matches!(
+                &blocker,
+                crate::spatial_driver::GpuSpatialChainBlocker::UnsupportedPass { pass, .. }
+                    if *pass == "directional_blur"
+            ),
+            "{blocker:?}"
+        );
+        assert_eq!(blocker.code(), "spatial_pass_unsupported");
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping directional blur admission test: no GPU adapter available");
+            return;
+        };
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        let layer = spatial_test_layer(&frame);
+        let entries = [GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }];
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
+        let mut table = GpuColorFrameResourceTable::new();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-spatial-chain-admission"),
+        });
+        let error = compositor
+            .record_with_spatial_effect_chains(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                GpuCompositeSpatialRequest {
+                    width,
+                    height,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &entries,
+                },
+            )
+            .err()
+            .expect("an attached unsupported chain must fail closed");
+        assert!(
+            matches!(
+                &error,
+                GpuCompositeError::SpatialChainFailed { pass, .. } if *pass == "directional_blur"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            compositor.spatial_scratch_diagnostics().retained_textures,
+            0
+        );
+    }
+
+    #[test]
+    fn spatial_chain_rejects_a_layer_carrying_both_plans() {
+        use mondrian_effects::{EffectRenderOp, TwirlGrade};
+
+        let width = 5;
+        let height = 4;
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        let pipeline = spatial_test_pipeline(EffectRenderOp::Twirl {
+            grade: TwirlGrade::new(30.0, 60.0, [2.0, 2.0]).expect("valid twirl grade"),
+        });
+        let mut builder = mondrian_effects::EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::BrightnessContrast {
+            grade: mondrian_effects::BrightnessContrastGrade::new(20.0, 10.0, false)
+                .expect("valid brightness contrast grade"),
+        });
+        let graph = mondrian_effects::compile_reference_render_graph(builder.finish())
+            .expect("valid graph");
+        let point_plan =
+            mondrian_effects::lower_effect_graph_to_gpu_plan(&graph).expect("supported point plan");
+
+        let mut layer = spatial_test_layer(&frame);
+        layer.effect_plan = Some(&point_plan);
+        let entries = [GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }];
+        let request = GpuCompositeSpatialRequest {
+            width,
+            height,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            layers: &entries,
+        };
+        let error = validate_spatial_request(&request)
+            .expect_err("a layer cannot carry both a point and a spatial plan");
+        assert!(
+            matches!(error, GpuCompositeError::SpatialPlanWithPointPlan),
+            "{error:?}"
+        );
+
+        let solid = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color { r: 1.0, g: 0.5, b: 0.25, a: 1.0 }),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let entries = [GpuCompositeSpatialLayer { layer: solid, spatial_plan: Some(&pipeline) }];
+        let request = GpuCompositeSpatialRequest {
+            width,
+            height,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            layers: &entries,
+        };
+        let error = validate_spatial_request(&request)
+            .expect_err("a solid colour cannot carry a spatial chain");
+        assert!(
+            matches!(
+                error,
+                GpuCompositeError::SpatialPlanOnUnsupportedSource { source_kind }
+                    if source_kind == "solid_color"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_disables_the_opaque_normal_fast_path() {
+        use mondrian_effects::{DentEdge, DentGrade, DentKind, EffectRenderOp};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping spatial chain opaque fast path test: no GPU adapter available");
+            return;
+        };
+        let width = 10;
+        let height = 8;
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        let layer = spatial_test_layer(&frame);
+        let plain = [GpuCompositeSpatialLayer { layer, spatial_plan: None }];
+        let (_, fast) = readback_spatial_test_composite_with_diagnostics(
+            &context,
+            &plain,
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(fast.opaque_normal_single_accumulator_composites, 1);
+        assert_eq!(fast.spatial_effect_layers, 0);
+
+        let grade = DentGrade::new(
+            0.4,
+            0.6,
+            [width as f32 * 0.5, height as f32 * 0.5],
+            DentKind::Dent,
+            DentEdge::Smooth,
+        )
+        .expect("valid dent grade");
+        let pipeline = spatial_test_pipeline(EffectRenderOp::Dent { grade });
+        let layer = spatial_test_layer(&frame);
+        let dented = [GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }];
+        let (_, slow) = readback_spatial_test_composite_with_diagnostics(
+            &context,
+            &dented,
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(slow.opaque_normal_single_accumulator_composites, 0);
+        assert_eq!(slow.avoided_accumulator_sample_pixels, 0);
+        assert_eq!(slow.spatial_effect_layers, 1);
     }
 }
