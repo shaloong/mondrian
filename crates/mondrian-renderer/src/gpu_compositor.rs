@@ -1801,6 +1801,31 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 }
                 pixel = vec4<f32>(rgb, 1.0);
             }
+        } else if (effect.header.x == 32u) {
+            // `ColorBalanceGrade`: params is [shadow r, shadow g, shadow b,
+            // midtone r], colour is [midtone g, midtone b, highlight r,
+            // highlight g] and extra0 is [highlight b, preserve, 0, 0]. The
+            // region weights come from the source Rec.709 luma and are shared
+            // by all three channels, so the three transfers cannot drift
+            // apart. The luminosity rescale is deliberately not clamped again:
+            // keeping the source luma has priority over the unit range.
+            let source_luma = dot(pixel.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let shadows = clamp(1.0 - 2.0 * source_luma, 0.0, 1.0);
+            let highlights = clamp(2.0 * source_luma - 1.0, 0.0, 1.0);
+            let midtones = 1.0 - shadows - highlights;
+            let amounts = (
+                vec3<f32>(effect.params.x, effect.params.y, effect.params.z) * shadows
+                + vec3<f32>(effect.params.w, effect.color.x, effect.color.y) * midtones
+                + vec3<f32>(effect.color.z, effect.color.w, effect.extra0.x) * highlights
+            ) / 100.0 * 0.5;
+            var balanced = clamp(pixel.rgb + amounts, vec3<f32>(0.0), vec3<f32>(1.0));
+            if (effect.extra0.y > 0.5) {
+                let balanced_luma = dot(balanced, vec3<f32>(0.2126, 0.7152, 0.0722));
+                if (balanced_luma > 0.000001) {
+                    balanced = balanced * (source_luma / balanced_luma);
+                }
+            }
+            pixel = vec4<f32>(balanced, pixel.a);
         }
     }
     return pixel;
@@ -5023,6 +5048,16 @@ fn effect_uniforms(
                     header: [31, 0, 0, 0],
                     params,
                     color: [0.0; 4],
+                    extra0,
+                    extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::ColorBalance { grade } => {
+                let (params, color, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [32, 0, 0, 0],
+                    params,
+                    color,
                     extra0,
                     extra1: [0.0; 4],
                 }
@@ -8765,6 +8800,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_color_balance_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ColorBalanceGrade, EffectGraphBuilderState,
+            EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU color balance parity test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        // One transparent, one semi-transparent and the rest opaque: the alpha
+        // passthrough and the zero-coverage early return both have to match. The
+        // palette stops at 16/17 so a positive amount can still clamp, while the
+        // preserve-luminosity case keeps every expected channel inside the unit
+        // range the composite target can carry.
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for index in 0..width * height {
+            let channel = |offset: u32| ((index * (offset + 3)) % 17) as f32 / 17.0;
+            data.push([channel(0), channel(1), channel(2), 1.0]);
+        }
+        data[0] = [0.0, 0.0, 0.0, 0.0];
+        data[5][3] = 0.25;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (shadow, midtone, highlight, preserve_luminosity) in [
+            ([100.0_f32, 0.0, 0.0], [0.0_f32; 3], [0.0_f32; 3], false),
+            ([0.0_f32; 3], [0.0_f32; 3], [0.0_f32, 0.0, -100.0], false),
+            (
+                [30.0_f32, -10.0, 5.0],
+                [0.0_f32, 25.0, -15.0],
+                [-20.0_f32, 0.0, 40.0],
+                true,
+            ),
+        ] {
+            let grade = ColorBalanceGrade::new(shadow, midtone, highlight, preserve_luminosity)
+                .expect("valid color balance grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::ColorBalance { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(width, height),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let expected_pixels: Vec<[f32; 4]> = expected.pixels().to_vec();
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected_pixels,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU color balance accuracy budget exceeded for {grade:?}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_noise_matches_the_cpu_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
             compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
@@ -9211,9 +9348,9 @@ mod tests {
             apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
             lower_effect_graph_to_gpu_plan, ArithmeticGrade, ArithmeticOperator,
             BlackAndWhiteGrade, BroadcastLocale, BroadcastSafeGrade, BroadcastSafeMode,
-            ChannelMixerGrade, ChannelSource, EffectGraphBuilderState, EffectRenderOp, HueBand,
-            HueSaturationGrade, InvertChannels, LeaveColorGrade, LeaveColorMatch,
-            ShiftChannelsGrade, TestSignalsGrade, TestSignalsPattern,
+            ChannelMixerGrade, ChannelSource, ColorBalanceGrade, EffectGraphBuilderState,
+            EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels, LeaveColorGrade,
+            LeaveColorMatch, ShiftChannelsGrade, TestSignalsGrade, TestSignalsPattern,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -9313,8 +9450,17 @@ mod tests {
             )
             .expect("valid broadcast safe grade"),
         });
-        // The generator runs last, so its frame replaces whatever the ten
-        // colour ops produced; the chain still has to fuse all eleven ops.
+        builder.append_unary(EffectRenderOp::ColorBalance {
+            grade: ColorBalanceGrade::new(
+                [40.0, -20.0, 0.0],
+                [0.0, 30.0, -25.0],
+                [-15.0, 0.0, 35.0],
+                true,
+            )
+            .expect("valid color balance grade"),
+        });
+        // The generator runs last, so its frame replaces whatever the eleven
+        // colour ops produced; the chain still has to fuse all twelve ops.
         builder.append_unary(EffectRenderOp::TestSignals {
             grade: TestSignalsGrade::new(TestSignalsPattern::Grayscale, 100.0, true, true)
                 .expect("valid test signals grade"),
@@ -9322,7 +9468,7 @@ mod tests {
         let graph = compile_reference_render_graph(builder.finish()).expect("valid built-in graph");
         let plan =
             lower_effect_graph_to_gpu_plan(&graph).expect("supported built-in point effects");
-        assert_eq!(plan.operations().len(), 11);
+        assert_eq!(plan.operations().len(), 12);
 
         let expected = apply_compiled_effect_graph_rgba_f32(
             mondrian_effects::EffectFloatFrameView::new(
@@ -9356,7 +9502,7 @@ mod tests {
             WorkingColorSpace::LinearRec709,
         );
         assert_eq!(diagnostics.execution.fused_layer_passes, 1);
-        assert_eq!(diagnostics.execution.fused_point_operations, 11);
+        assert_eq!(diagnostics.execution.fused_point_operations, 12);
         let report = compare_linear_rgba(
             expected.pixels(),
             &actual,
