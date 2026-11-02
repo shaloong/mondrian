@@ -76,6 +76,7 @@ pub(crate) struct EffectSpatialGpu {
     matte_refine_feather: wgpu::RenderPipeline,
     matte_refine_composite: wgpu::RenderPipeline,
     choker_composite: wgpu::RenderPipeline,
+    minimax: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -1190,6 +1191,38 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Minimax runs one separable minimum or maximum step per pass and writes
+        // straight into the scratch ping-pong: no separate composite stage.
+        let minimax = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.minimax"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_minimax"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         // Fractal noise needs twenty-six scalars, so the shared uniform struct is
         // too small: the stage gets its own shader module, bind group layout, and
         // uniform payload instead of a sixth `extra` vector.
@@ -1294,6 +1327,7 @@ impl EffectSpatialGpu {
             matte_refine_feather,
             matte_refine_composite,
             choker_composite,
+            minimax,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -1812,6 +1846,9 @@ impl EffectSpatialGpu {
             // The choker runs one horizontal and one vertical morphology pass;
             // the composite reuses the texture the horizontal pass wrote.
             EffectGpuSpatialPass::Choker { .. } => Ok(2),
+            // The chain is one pass per operation step and axis: 1, 2 or 4.
+            // `record_minimax` executes exactly the same table.
+            EffectGpuSpatialPass::Minimax { grade } => Ok(grade.pass_count()),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -2173,6 +2210,10 @@ impl EffectSpatialGpu {
             }
             EffectGpuSpatialPass::Choker { grade } => {
                 return self.record_choker(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::Minimax { grade } => {
+                return self
+                    .record_minimax(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -3404,6 +3445,69 @@ impl EffectSpatialGpu {
         Ok(scratch[1].clone())
     }
 
+    /// Records the minimax chain: one minimum or maximum step per pass.
+    ///
+    /// The chain comes straight from the grade's table, so it is 1, 2 or 4
+    /// passes and always matches [`EffectSpatialGpu::texture_pass_count`]. Each
+    /// pass reads the original texture (first pass) or the previous scratch
+    /// frame, and writes into its own scratch frame; the last one is the result.
+    fn record_minimax(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::MinimaxGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        let passes = grade.passes();
+        if scratch.len() < passes.len() {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "minimax_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        // `dont_shrink_edges` travels in `extra`; the shader strips the alpha bit
+        // from minimum passes itself, exactly like the CPU kernel does.
+        let extra = [
+            f32::from(u8::from(grade.dont_shrink_edges())),
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let mask = grade.channel().mask() as f32;
+        for (index, pass) in passes.iter().enumerate() {
+            let uniform = SpatialPassUniform {
+                size,
+                params: [
+                    grade.radius() as f32,
+                    pass.axis as f32,
+                    pass.extreme as f32,
+                    mask,
+                ],
+                extra,
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            let input_view = if index == 0 {
+                source.create_view(&wgpu::TextureViewDescriptor::default())
+            } else {
+                scratch[index - 1].create_view(&wgpu::TextureViewDescriptor::default())
+            };
+            let output_view = scratch[index].create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_pass(
+                device,
+                encoder,
+                &self.minimax,
+                &input_view,
+                &output_view,
+                &uniform,
+            );
+        }
+        Ok(scratch[passes.len() - 1].clone())
+    }
+
     /// Records one matte filter pass and advances the matte ping-pong.
     ///
     /// The first matte pass binds the frame and asks the shader for the frame
@@ -3601,6 +3705,11 @@ fn frame_dims() -> vec2<i32> {
 fn load_clamped(p: vec2<i32>) -> vec4<f32> {
     let limit = frame_dims() - vec2<i32>(1);
     return textureLoad(src, clamp(p, vec2<i32>(0), limit), 0);
+}
+
+fn load_clamped_from(texture: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
+    let limit = frame_dims() - vec2<i32>(1);
+    return textureLoad(texture, clamp(p, vec2<i32>(0), limit), 0);
 }
 
 fn load_window(p: vec2<i32>, repeat_edge: bool) -> vec4<f32> {
@@ -3905,6 +4014,42 @@ fn fs_keylight_erode(@builtin(position) position: vec4<f32>) -> @location(0) vec
         matte = select(min(matte, value), max(matte, value), dilate);
     }
     return vec4<f32>(matte, matte, matte, 1.0);
+}
+
+// The minimax pass is the separable minimum or maximum over `2r + 1` taps of
+// the selected channels. `params` is `[radius, axis, extreme, channel_mask]`
+// with axis 0 horizontal / 1 vertical, extreme 0 minimum / 1 maximum, and the
+// mask bits 1 red, 2 green, 4 blue, 8 alpha. `extra.x` is the
+// "don't shrink edges" switch: a minimum pass drops the alpha bit, so the
+// matte is never eroded, while every maximum pass keeps the authored mask.
+@fragment
+fn fs_minimax(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let radius = i32(round(uniforms.params.x));
+    let horizontal = uniforms.params.y < 0.5;
+    let maximum = uniforms.params.z > 0.5;
+    var mask = u32(uniforms.params.w);
+    if (uniforms.extra.x >= 0.5 && !maximum) {
+        mask = mask & 7u;
+    }
+    let step = select(vec2<i32>(0, 1), vec2<i32>(1, 0), horizontal);
+    var value = load_clamped_from(src, pixel);
+    for (var offset = -radius; offset <= radius; offset = offset + 1) {
+        let sample_value = load_clamped_from(src, pixel + step * offset);
+        if ((mask & 1u) != 0u) {
+            value.r = select(min(value.r, sample_value.r), max(value.r, sample_value.r), maximum);
+        }
+        if ((mask & 2u) != 0u) {
+            value.g = select(min(value.g, sample_value.g), max(value.g, sample_value.g), maximum);
+        }
+        if ((mask & 4u) != 0u) {
+            value.b = select(min(value.b, sample_value.b), max(value.b, sample_value.b), maximum);
+        }
+        if ((mask & 8u) != 0u) {
+            value.a = select(min(value.a, sample_value.a), max(value.a, sample_value.a), maximum);
+        }
+    }
+    return value;
 }
 
 fn sobel_magnitude(pixel: vec2<i32>) -> f32 {
@@ -6539,6 +6684,18 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         // Erode the chain alpha by 2.5 px: two morphology passes plus the
         // composite, which fits the two scratch textures the stage is sized for.
         let choker = mondrian_effects::ChokerGrade::new(2.5).expect("valid choker grade");
+        // Protect the alpha channel, then run a four-pass minimum-then-maximum
+        // chain: the two minimum passes leave the matte alone and the two
+        // maximum passes dilate the holes, so the stage also checks that the
+        // chain table and the scratch geometry agree.
+        let minimax = mondrian_effects::MinimaxGrade::new(
+            2.0,
+            mondrian_effects::MinimaxOperation::MinimumThenMaximum,
+            mondrian_effects::MinimaxChannel::Alpha,
+            mondrian_effects::MinimaxDirection::Both,
+            1.0,
+        )
+        .expect("valid minimax grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -6560,6 +6717,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Keylight { grade: keylight },
             mondrian_effects::EffectGpuSpatialPass::MatteRefine { grade: matte_refine },
             mondrian_effects::EffectGpuSpatialPass::Choker { grade: choker },
+            mondrian_effects::EffectGpuSpatialPass::Minimax { grade: minimax },
         ];
 
         let mut cpu = pixels.clone();
@@ -6656,13 +6814,19 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             height as usize,
             &choker,
         ));
+        assert!(mondrian_effects::minimax_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &minimax,
+        ));
 
         let executor = EffectSpatialGpu::new(&context.device);
         let original = upload(&context, &pixels, width, height);
         // Seven rotating scratch textures keep every stage's destination out of
         // its own source, which wgpu rejects as conflicting texture usage, and
-        // give the three-pass deband chain and the six-pass glow chain their
-        // intermediates.
+        // give the three-pass deband chain, the six-pass glow chain, and the
+        // four-pass minimax chain their intermediates.
         let pool: Vec<wgpu::Texture> =
             (0..7).map(|_| scratch(&context, width, height, 1).remove(0)).collect();
         let mut current: Option<usize> = None;
@@ -8275,6 +8439,163 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             matches!(
                 error,
                 EffectSpatialGpuError::UnsupportedPass("choker_scratch_geometry")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn gpu_minimax_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU minimax parity test: no GPU adapter available");
+            return;
+        };
+        let width = 11_u32;
+        let height = 9_u32;
+        // A deterministic ramp with transparent corners: every channel varies,
+        // so a minimum, a maximum, and the alpha-only chain all differ from the
+        // source in observable places.
+        let mut pixels = vec![[0.0_f32; 4]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let phase = 3 * x + 11 * y;
+                pixels[y * width as usize + x] = [
+                    (phase % 11) as f32 / 10.0,
+                    (phase % 7) as f32 / 6.0,
+                    (phase % 13) as f32 / 12.0,
+                    (phase % 5) as f32 / 4.0,
+                ];
+            }
+        }
+        let build = |radius, operation, channel, direction, dont_shrink_edges| {
+            mondrian_effects::MinimaxGrade::new(
+                radius,
+                operation,
+                channel,
+                direction,
+                dont_shrink_edges,
+            )
+            .expect("valid minimax grade")
+        };
+        let cases = [
+            (
+                "minimum both",
+                build(
+                    3.0,
+                    mondrian_effects::MinimaxOperation::Minimum,
+                    mondrian_effects::MinimaxChannel::All,
+                    mondrian_effects::MinimaxDirection::Both,
+                    0.0,
+                ),
+                2_u32,
+            ),
+            (
+                "maximum horizontal red",
+                build(
+                    2.0,
+                    mondrian_effects::MinimaxOperation::Maximum,
+                    mondrian_effects::MinimaxChannel::Red,
+                    mondrian_effects::MinimaxDirection::Horizontal,
+                    0.0,
+                ),
+                1_u32,
+            ),
+            (
+                "minimum then maximum vertical alpha protected",
+                build(
+                    2.0,
+                    mondrian_effects::MinimaxOperation::MinimumThenMaximum,
+                    mondrian_effects::MinimaxChannel::Alpha,
+                    mondrian_effects::MinimaxDirection::Vertical,
+                    1.0,
+                ),
+                2_u32,
+            ),
+            (
+                "minimum then maximum both colour",
+                build(
+                    1.0,
+                    mondrian_effects::MinimaxOperation::MinimumThenMaximum,
+                    mondrian_effects::MinimaxChannel::Color,
+                    mondrian_effects::MinimaxDirection::Both,
+                    0.0,
+                ),
+                4_u32,
+            ),
+        ];
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let pool = scratch(&context, width, height, 4);
+        for (index, (label, grade, expected_passes)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::minimax_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let pass = mondrian_effects::EffectGpuSpatialPass::Minimax { grade: *grade };
+            assert_eq!(
+                EffectSpatialGpu::texture_pass_count(&pass).expect("supported pass"),
+                *expected_passes,
+                "case {index} ({label}) pass count"
+            );
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.minimax-encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool[..*expected_passes as usize],
+                    width,
+                    height,
+                )
+                .expect("recorded minimax");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "minimax case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+
+        // A chain of four passes needs four rasters, and three must be refused
+        // with the documented geometry error instead of silently clamping.
+        let grade = build(
+            1.0,
+            mondrian_effects::MinimaxOperation::MaximumThenMinimum,
+            mondrian_effects::MinimaxChannel::All,
+            mondrian_effects::MinimaxDirection::Both,
+            0.0,
+        );
+        let short = scratch(&context, width, height, 3);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.minimax-geometry-encoder"),
+        });
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &mondrian_effects::EffectGpuSpatialPass::Minimax { grade },
+                &source,
+                &short,
+                width,
+                height,
+            )
+            .expect_err("three scratch textures cannot run the four-pass chain");
+        assert!(
+            matches!(
+                error,
+                EffectSpatialGpuError::UnsupportedPass("minimax_scratch_geometry")
             ),
             "unexpected error: {error:?}"
         );
