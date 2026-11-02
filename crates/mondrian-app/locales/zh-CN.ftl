@@ -2451,3 +2451,25 @@ parameter-mondrian-effect-builtin-color-balance-preserve-luminosity-label = 保�
 parameter-mondrian-effect-builtin-color-balance-shadow-blue-label = 阴影蓝色平衡
 parameter-mondrian-effect-builtin-color-balance-shadow-green-label = 阴影绿色平衡
 parameter-mondrian-effect-builtin-color-balance-shadow-red-label = 阴影红色平衡
+
+## Minimax 最小/最大
+effect-minimax = 最小/最大
+parameter-group-minimax = 最小/最大
+parameter-mondrian-effect-builtin-minimax-channel-label = 通道
+parameter-mondrian-effect-builtin-minimax-direction-label = 方向
+parameter-mondrian-effect-builtin-minimax-dont-shrink-edges-label = 不要收缩边缘
+parameter-mondrian-effect-builtin-minimax-operation-label = 操作
+parameter-mondrian-effect-builtin-minimax-radius-label = 半径
+parameter-mondrian-effect-minimax-channel-alpha = Alpha
+parameter-mondrian-effect-minimax-channel-all = 全部
+parameter-mondrian-effect-minimax-channel-blue = 蓝
+parameter-mondrian-effect-minimax-channel-color = 红绿蓝
+parameter-mondrian-effect-minimax-channel-green = 绿
+parameter-mondrian-effect-minimax-channel-red = 红
+parameter-mondrian-effect-minimax-direction-both = 双向
+parameter-mondrian-effect-minimax-direction-horizontal = 水平
+parameter-mondrian-effect-minimax-direction-vertical = 垂直
+parameter-mondrian-effect-minimax-operation-maximum = 最大
+parameter-mondrian-effect-minimax-operation-maximum-then-minimum = 先最大后最小
+parameter-mondrian-effect-minimax-operation-minimum = 最小
+parameter-mondrian-effect-minimax-operation-minimum-then-maximum = 先最小后最大

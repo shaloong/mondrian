@@ -993,6 +993,10 @@ pub enum EffectRenderOp {
     ColorBalance {
         grade: crate::ColorBalanceGrade,
     },
+    /// Minimax: minimum or maximum morphology over the selected channels.
+    Minimax {
+        grade: crate::MinimaxGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1287,6 +1291,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ColorBalance { grade } => {
                 formatter.debug_struct("ColorBalance").field("grade", grade).finish()
+            }
+            Self::Minimax { grade } => {
+                formatter.debug_struct("Minimax").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2020,6 +2027,10 @@ impl EffectRenderOp {
                 color.map(f32::to_bits).hash(state);
                 extra0.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Minimax { grade } => {
+                79u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2240,6 +2251,7 @@ impl EffectRenderOp {
             EffectRenderOp::Choker { .. } => 2,
             EffectRenderOp::TestSignals { .. } => 1,
             EffectRenderOp::ColorBalance { .. } => 1,
+            EffectRenderOp::Minimax { .. } => 5,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2795,7 +2807,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 78] {
+fn builtin_effect_types() -> [EffectType; 79] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2875,6 +2887,7 @@ fn builtin_effect_types() -> [EffectType; 78] {
         EffectType::Choker,
         EffectType::TestSignals,
         EffectType::ColorBalance,
+        EffectType::Minimax,
     ]
 }
 
@@ -8025,6 +8038,84 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Minimax => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "operation",
+                "最小/最大",
+                "操作",
+                crate::MinimaxOperation::Minimum.as_key(),
+                crate::MinimaxOperation::ALL
+                    .iter()
+                    .map(|operation| {
+                        ParameterEnumOption::new(
+                            operation.as_key(),
+                            operation.label(),
+                            format!("mondrian.effect.minimax.operation.{}", operation.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "最小/最大",
+                "半径",
+                PropertyValue::Float(crate::MINIMAX_DEFAULT_RADIUS),
+                Some(0.0),
+                Some(f64::from(crate::MINIMAX_MAX_RADIUS)),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "channel",
+                "最小/最大",
+                "通道",
+                crate::MinimaxChannel::Red.as_key(),
+                crate::MinimaxChannel::ALL
+                    .iter()
+                    .map(|channel| {
+                        ParameterEnumOption::new(
+                            channel.as_key(),
+                            channel.label(),
+                            format!("mondrian.effect.minimax.channel.{}", channel.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "最小/最大",
+                "方向",
+                crate::MinimaxDirection::Horizontal.as_key(),
+                crate::MinimaxDirection::ALL
+                    .iter()
+                    .map(|direction| {
+                        ParameterEnumOption::new(
+                            direction.as_key(),
+                            direction.label(),
+                            format!("mondrian.effect.minimax.direction.{}", direction.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "dont_shrink_edges",
+                "最小/最大",
+                "不要收缩边缘",
+                PropertyValue::Float(crate::MINIMAX_DEFAULT_DONT_SHRINK_EDGES),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8353,6 +8444,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         | (EffectType::ColorBalance, "highlight_red" | "highlight_green" | "highlight_blue") => {
             ParameterUnit::Percent
         }
+        (EffectType::Minimax, "radius") => ParameterUnit::Pixels,
         (
             EffectType::MatteRefine,
             "edge_detail" | "view_edge_region" | "view_map" | "more_motion_blur",
@@ -8624,6 +8716,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::ColorBalance => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Minimax => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The morphology window can be as wide as the frame, so the
+            // definition-level envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ColorOffset => EffectExecutionContract {
@@ -12705,6 +12804,77 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Minimax => {
+            let operation_id = builtin_parameter_id(effect_type, "operation");
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let channel_id = builtin_parameter_id(effect_type, "channel");
+            let direction_id = builtin_parameter_id(effect_type, "direction");
+            let dont_shrink_edges_id = builtin_parameter_id(effect_type, "dont_shrink_edges");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let operation = match effect.evaluate_parameter(&operation_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::MinimaxOperation::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("minimax operation {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "minimax operation must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::MinimaxOperation::Minimum,
+                };
+                let channel = match effect.evaluate_parameter(&channel_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::MinimaxChannel::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("minimax channel {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid("minimax channel must be an enumeration".to_owned()));
+                    }
+                    None => crate::MinimaxChannel::Red,
+                };
+                let direction = match effect.evaluate_parameter(&direction_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::MinimaxDirection::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("minimax direction {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "minimax direction must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::MinimaxDirection::Horizontal,
+                };
+                let radius = effect.evaluate_f32_parameter(
+                    &radius_id,
+                    context.time,
+                    crate::MINIMAX_DEFAULT_RADIUS,
+                );
+                let dont_shrink_edges = effect.evaluate_f32_parameter(
+                    &dont_shrink_edges_id,
+                    context.time,
+                    crate::MINIMAX_DEFAULT_DONT_SHRINK_EDGES,
+                );
+                let grade = crate::MinimaxGrade::new(
+                    radius,
+                    operation,
+                    channel,
+                    direction,
+                    dont_shrink_edges,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // A zero radius is the identity, so no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Minimax { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -12789,6 +12959,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Choker => "阻塞收缩",
         EffectType::TestSignals => "彩条与测试信号",
         EffectType::ColorBalance => "颜色平衡",
+        EffectType::Minimax => "最小/最大",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -14101,6 +14272,7 @@ mod tests {
             EffectType::Choker,
             EffectType::TestSignals,
             EffectType::ColorBalance,
+            EffectType::Minimax,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -21530,6 +21702,124 @@ mod tests {
         assert_eq!(grade.choke(), -6.0);
         assert!(grade.dilates());
         assert_eq!(grade.radius(), 6);
+    }
+
+    fn minimax_op(graph: &EffectRenderGraph) -> Option<crate::MinimaxGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Minimax { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Minimax { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_minimax(
+        radius: f32,
+        operation: &str,
+        channel: &str,
+        direction: &str,
+        dont_shrink_edges: f32,
+    ) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Minimax)
+            .expect("the minimax effect should instantiate");
+        for (parameter, value) in [
+            ("operation", PropertyValue::Enum(operation.to_owned())),
+            ("channel", PropertyValue::Enum(channel.to_owned())),
+            ("direction", PropertyValue::Enum(direction.to_owned())),
+            ("radius", PropertyValue::Float(radius)),
+            ("dont_shrink_edges", PropertyValue::Float(dont_shrink_edges)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Minimax.property_path(parameter),
+                    value,
+                })
+                .expect("the minimax parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn minimax_defaults_are_elided_from_the_graph() {
+        let effect = instantiate_effect_node(EffectType::Minimax)
+            .expect("the minimax effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default minimax should compile");
+        assert_eq!(minimax_op(&graph), None, "a zero radius is the identity");
+    }
+
+    #[test]
+    fn minimax_authored_state_reaches_the_operation() {
+        let effect = author_minimax(2.4, "minimum_then_maximum", "alpha", "both", 1.0);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored minimax should build");
+        let grade = minimax_op(&graph).expect("a non-zero radius emits a node");
+        assert_eq!(grade.radius(), 2);
+        assert_eq!(
+            grade.operation(),
+            crate::MinimaxOperation::MinimumThenMaximum
+        );
+        assert_eq!(grade.channel(), crate::MinimaxChannel::Alpha);
+        assert_eq!(grade.direction(), crate::MinimaxDirection::Both);
+        assert!(grade.dont_shrink_edges());
+        assert_eq!(grade.pass_count(), 4);
+        // The first pass packs [radius, axis, extreme, mask]; the authored mask
+        // travels as-is and the shader strips alpha from minimum passes itself.
+        assert_eq!(
+            grade.gpu_controls(),
+            ([2.0, 0.0, 0.0, 8.0], [1.0, 0.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn minimax_menu_out_of_range_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::Minimax)
+            .expect("the minimax effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Minimax.property_path("operation"),
+                value: PropertyValue::Enum("not_an_operation".to_owned()),
+            })
+            .expect_err("an undeclared menu option must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("not_an_operation") || rendered.contains("option"),
+            "{rendered}"
+        );
+
+        let mut effect = instantiate_effect_node(EffectType::Minimax)
+            .expect("the minimax effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Minimax.property_path("radius"),
+                value: PropertyValue::Float(crate::MINIMAX_MAX_RADIUS as f32 + 1.0),
+            })
+            .expect_err("a radius past the authored range must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 32000]"), "{rendered}");
+    }
+
+    #[test]
+    fn minimax_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_minimax(3.0, "maximum_then_minimum", "color", "vertical", 0.0);
+        let wire = serde_json::to_string(&effect).expect("serialize the minimax node");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restore the minimax node");
+        assert_eq!(restored.effect_type, EffectType::Minimax);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored minimax node");
+        let grade = minimax_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.radius(), 3);
+        assert_eq!(
+            grade.operation(),
+            crate::MinimaxOperation::MaximumThenMinimum
+        );
+        assert_eq!(grade.channel(), crate::MinimaxChannel::Color);
+        assert_eq!(grade.direction(), crate::MinimaxDirection::Vertical);
+        assert!(!grade.dont_shrink_edges());
+        assert_eq!(grade.gpu_controls(), ([3.0, 1.0, 1.0, 7.0], [0.0; 4]));
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {

@@ -101,6 +101,7 @@ pub mod lens_distortion;
 pub mod lens_flare;
 pub mod levels;
 pub mod linear_color_key;
+pub mod minimax;
 pub mod mirror;
 pub mod mosaic;
 pub mod motion_tile;
@@ -491,6 +492,11 @@ pub use matte_refine::{
     MATTE_REFINE_DEFAULT_SHUTTER_ANGLE_DEGREES, MATTE_REFINE_DEFAULT_SMOOTH_PIXELS,
     MATTE_REFINE_DEFAULT_TREMOR_AMOUNT, MATTE_REFINE_DEFAULT_TREMOR_REDUCTION,
     MATTE_REFINE_DEFAULT_VIEW_EDGE_REGION, MATTE_REFINE_DEFAULT_VIEW_MAP,
+};
+pub use minimax::{
+    apply_minimax_f32_controlled, minimax_frame_f32, MinimaxChannel, MinimaxDirection,
+    MinimaxError, MinimaxGrade, MinimaxOperation, MinimaxPass, MINIMAX_CHANNEL_COUNT,
+    MINIMAX_DEFAULT_DONT_SHRINK_EDGES, MINIMAX_DEFAULT_RADIUS, MINIMAX_MAX_RADIUS,
 };
 pub use ripple::{
     ripple_frame_f32, ripple_phase_turns, validate_wave_speed, RippleError, RippleGrade,

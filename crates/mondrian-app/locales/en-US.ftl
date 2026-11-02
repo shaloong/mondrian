@@ -2519,3 +2519,25 @@ parameter-mondrian-effect-builtin-color-balance-preserve-luminosity-label = Pres
 parameter-mondrian-effect-builtin-color-balance-shadow-blue-label = Shadow Blue Balance
 parameter-mondrian-effect-builtin-color-balance-shadow-green-label = Shadow Green Balance
 parameter-mondrian-effect-builtin-color-balance-shadow-red-label = Shadow Red Balance
+
+## Minimax 最小/最大
+effect-minimax = Minimax
+parameter-group-minimax = Minimax
+parameter-mondrian-effect-builtin-minimax-channel-label = Channel
+parameter-mondrian-effect-builtin-minimax-direction-label = Direction
+parameter-mondrian-effect-builtin-minimax-dont-shrink-edges-label = Don't Shrink Edges
+parameter-mondrian-effect-builtin-minimax-operation-label = Operation
+parameter-mondrian-effect-builtin-minimax-radius-label = Radius
+parameter-mondrian-effect-minimax-channel-alpha = Alpha
+parameter-mondrian-effect-minimax-channel-all = All
+parameter-mondrian-effect-minimax-channel-blue = Blue
+parameter-mondrian-effect-minimax-channel-color = Red Green Blue
+parameter-mondrian-effect-minimax-channel-green = Green
+parameter-mondrian-effect-minimax-channel-red = Red
+parameter-mondrian-effect-minimax-direction-both = Both
+parameter-mondrian-effect-minimax-direction-horizontal = Horizontal
+parameter-mondrian-effect-minimax-direction-vertical = Vertical
+parameter-mondrian-effect-minimax-operation-maximum = Maximum
+parameter-mondrian-effect-minimax-operation-maximum-then-minimum = Maximum then Minimum
+parameter-mondrian-effect-minimax-operation-minimum = Minimum
+parameter-mondrian-effect-minimax-operation-minimum-then-maximum = Minimum then Maximum

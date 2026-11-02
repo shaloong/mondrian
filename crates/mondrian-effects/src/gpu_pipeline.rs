@@ -167,6 +167,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored alpha erosion (positive) or dilation (negative) radius.
         grade: crate::ChokerGrade,
     },
+    Minimax {
+        /// Authored radius, operation, channel selection, and direction.
+        grade: crate::MinimaxGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -206,6 +210,7 @@ impl EffectGpuSpatialPass {
             Self::Keylight { .. } => "keylight",
             Self::MatteRefine { .. } => "matte_refine",
             Self::Choker { .. } => "choker",
+            Self::Minimax { .. } => "minimax",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -257,6 +262,7 @@ impl EffectGpuSpatialPass {
             Self::Keylight { .. } => u32::MAX,
             Self::MatteRefine { .. } => u32::MAX,
             Self::Choker { .. } => u32::MAX,
+            Self::Minimax { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -301,6 +307,7 @@ impl EffectGpuSpatialPass {
             Self::Keylight { .. } => u32::MAX,
             Self::MatteRefine { .. } => u32::MAX,
             Self::Choker { .. } => u32::MAX,
+            Self::Minimax { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -600,6 +607,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::MatteRefine { grade: *grade })
         }
         EffectRenderOp::Choker { grade } => Some(EffectGpuSpatialPass::Choker { grade: *grade }),
+        EffectRenderOp::Minimax { grade } => Some(EffectGpuSpatialPass::Minimax { grade: *grade }),
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }
@@ -802,6 +810,38 @@ mod tests {
             .expect("choker emits a spatial stage");
         assert_eq!(pass.name(), "choker");
         // Alpha morphology reads the whole frame, so no local halo bounds it.
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+    }
+
+    #[test]
+    fn minimax_lowers_to_a_full_frame_spatial_stage() {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(invert());
+        builder.append_unary(EffectRenderOp::Minimax {
+            grade: crate::MinimaxGrade::new(
+                3.0,
+                crate::MinimaxOperation::MinimumThenMaximum,
+                crate::MinimaxChannel::Alpha,
+                crate::MinimaxDirection::Both,
+                1.0,
+            )
+            .expect("valid minimax"),
+        });
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("minimax pipeline");
+
+        assert_eq!(pipeline.spatial_stage_count(), 1);
+        let pass = pipeline
+            .stages()
+            .iter()
+            .find_map(|stage| match stage {
+                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::PointOps { .. } => None,
+            })
+            .expect("minimax emits a spatial stage");
+        assert_eq!(pass.name(), "minimax");
+        // The window is bounded only by the frame, so no local halo applies.
         assert_eq!(pass.horizontal_halo(), u32::MAX);
         assert_eq!(pass.vertical_halo(), u32::MAX);
     }

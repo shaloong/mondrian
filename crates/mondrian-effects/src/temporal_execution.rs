@@ -2832,6 +2832,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::TestSignals { .. } => "test_signals",
         crate::EffectRenderOp::ColorBalance { .. } => "color_balance",
         crate::EffectRenderOp::Choker { .. } => "choker",
+        crate::EffectRenderOp::Minimax { .. } => "minimax",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",
