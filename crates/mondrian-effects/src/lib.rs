@@ -33,6 +33,7 @@ pub mod convolution;
 pub mod corner_pin;
 pub mod coverage;
 pub mod deband;
+pub mod dent;
 pub mod directional_blur;
 pub mod drop_shadow;
 pub mod echo;
@@ -187,6 +188,11 @@ pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_
 pub use deband::{
     deband_frame_f32, DebandError, DebandGrade, DEBAND_DITHER_SALT_A, DEBAND_DITHER_SALT_B,
     DEBAND_MAX_EDGE_THRESHOLD, DEBAND_MAX_POST_OPTIMIZATION, DEBAND_MAX_RADIUS, DEBAND_MIN_RADIUS,
+};
+pub use dent::{
+    dent_frame_f32, DentEdge, DentError, DentGrade, DentKind, DENT_DEFAULT_CENTRE_PIXELS,
+    DENT_DEFAULT_SIZE_FRACTION, DENT_DEFAULT_STRENGTH, DENT_MAX_SIZE_FRACTION, DENT_MAX_STRENGTH,
+    DENT_MIN_SIZE_FRACTION, DENT_MIN_STRENGTH,
 };
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,

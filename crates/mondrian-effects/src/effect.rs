@@ -1055,6 +1055,11 @@ pub enum EffectRenderOp {
     Spherize {
         grade: crate::SpherizeGrade,
     },
+    /// Dent: pulls pixels towards (or pushes them away from) a circular
+    /// control point (DST-16).
+    Dent {
+        grade: crate::DentGrade,
+    },
     /// Film-style grain keyed off the integer pixel position (FLM-02).
     Noise {
         grade: crate::NoiseGrade,
@@ -1340,6 +1345,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Spherize { grade } => {
                 formatter.debug_struct("Spherize").field("grade", grade).finish()
             }
+            Self::Dent { grade } => formatter.debug_struct("Dent").field("grade", grade).finish(),
             Self::Noise { grade } => formatter.debug_struct("Noise").field("grade", grade).finish(),
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
@@ -2099,6 +2105,13 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::Dent { grade } => {
+                82u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                for value in params.into_iter().chain(extra) {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -2293,6 +2306,7 @@ impl EffectRenderOp {
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
             EffectRenderOp::Spherize { .. } => 3,
+            EffectRenderOp::Dent { .. } => 3,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2835,7 +2849,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 81] {
+fn builtin_effect_types() -> [EffectType; 82] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2918,6 +2932,7 @@ fn builtin_effect_types() -> [EffectType; 81] {
         EffectType::Minimax,
         EffectType::SpillSuppressor,
         EffectType::ChannelBlur,
+        EffectType::Dent,
     ]
 }
 
@@ -8272,6 +8287,90 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Dent => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "kind",
+                "凹痕",
+                "凹痕类型",
+                crate::DentKind::Dent.as_key(),
+                crate::DentKind::ALL
+                    .iter()
+                    .map(|kind| {
+                        let key = kind.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            kind.label(),
+                            format!("mondrian.effect.dent.kind.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "凹痕",
+                "位置 X",
+                PropertyValue::Float(crate::DENT_DEFAULT_CENTRE_PIXELS),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "凹痕",
+                "位置 Y",
+                PropertyValue::Float(crate::DENT_DEFAULT_CENTRE_PIXELS),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "size",
+                "凹痕",
+                "大小",
+                PropertyValue::Float(crate::DENT_DEFAULT_SIZE_FRACTION),
+                Some(f64::from(crate::DENT_MIN_SIZE_FRACTION)),
+                Some(f64::from(crate::DENT_MAX_SIZE_FRACTION)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "strength",
+                "凹痕",
+                "强度",
+                PropertyValue::Float(crate::DENT_DEFAULT_STRENGTH),
+                Some(f64::from(crate::DENT_MIN_STRENGTH)),
+                Some(f64::from(crate::DENT_MAX_STRENGTH)),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "edge",
+                "凹痕",
+                "边缘处理",
+                crate::DentEdge::Smooth.as_key(),
+                crate::DentEdge::ALL
+                    .iter()
+                    .map(|edge| {
+                        let key = edge.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            edge.label(),
+                            format!("mondrian.effect.dent.edge.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8547,6 +8646,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Spherize, "radius") => ParameterUnit::Pixels,
         (EffectType::Spherize, "centre_x") => ParameterUnit::Pixels,
         (EffectType::Spherize, "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Dent, "centre_x" | "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Dent, "size" | "strength") => ParameterUnit::Normalized,
         (EffectType::Noise, "amount") => ParameterUnit::Percent,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
@@ -8968,6 +9069,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::Spherize => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Dent => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -13202,6 +13308,70 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Dent => {
+            let kind_id = builtin_parameter_id(effect_type, "kind");
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let size_id = builtin_parameter_id(effect_type, "size");
+            let strength_id = builtin_parameter_id(effect_type, "strength");
+            let edge_id = builtin_parameter_id(effect_type, "edge");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let kind = match effect.evaluate_parameter(&kind_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::DentKind::from_key(&key).ok_or_else(|| {
+                            invalid(format!("dent kind {key} is not a declared option"))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid("dent kind must be an enumeration".to_owned()));
+                    }
+                    None => crate::DentKind::Dent,
+                };
+                let edge = match effect.evaluate_parameter(&edge_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::DentEdge::from_key(&key).ok_or_else(|| {
+                            invalid(format!("dent edge {key} is not a declared option"))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid("dent edge must be an enumeration".to_owned()));
+                    }
+                    None => crate::DentEdge::Smooth,
+                };
+                let centre_x = effect.evaluate_f32_parameter(
+                    &centre_x_id,
+                    context.time,
+                    crate::DENT_DEFAULT_CENTRE_PIXELS,
+                );
+                let centre_y = effect.evaluate_f32_parameter(
+                    &centre_y_id,
+                    context.time,
+                    crate::DENT_DEFAULT_CENTRE_PIXELS,
+                );
+                let size = effect.evaluate_f32_parameter(
+                    &size_id,
+                    context.time,
+                    crate::DENT_DEFAULT_SIZE_FRACTION,
+                );
+                let strength = effect.evaluate_f32_parameter(
+                    &strength_id,
+                    context.time,
+                    crate::DENT_DEFAULT_STRENGTH,
+                );
+                let grade = crate::DentGrade::new(size, strength, [centre_x, centre_y], kind, edge)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // A zero strength or a zero size is the identity, so no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Dent { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -13289,6 +13459,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Minimax => "最小/最大",
         EffectType::SpillSuppressor => "溢色抑制",
         EffectType::ChannelBlur => "通道模糊",
+        EffectType::Dent => "凹痕",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -14604,6 +14775,7 @@ mod tests {
             EffectType::Minimax,
             EffectType::SpillSuppressor,
             EffectType::ChannelBlur,
+            EffectType::Dent,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -18351,6 +18523,112 @@ mod tests {
         let grade = spherize_op(&graph).expect("spherize op");
         assert!((grade.radius_pixels() - 88.0).abs() < 1.0e-5);
         assert_eq!(grade.centre()[1], -16.0);
+    }
+
+    fn dent_op(graph: &EffectRenderGraph) -> Option<crate::DentGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Dent { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_dent(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Dent).expect("registered dent definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Dent.property_path(parameter),
+                value,
+            })
+            .expect("authors dent parameter");
+        effect
+    }
+
+    fn author_dent_more(
+        mut effect: EffectNode,
+        parameter: &str,
+        value: PropertyValue,
+    ) -> EffectNode {
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Dent.property_path(parameter),
+                value,
+            })
+            .expect("authors dent parameter");
+        effect
+    }
+
+    #[test]
+    fn dent_defaults_compile_to_the_documented_operation() {
+        let effect = instantiate_effect_node(EffectType::Dent).expect("registered dent definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds dent graph");
+        let grade = dent_op(&graph).expect("dent op");
+        assert!((grade.size_fraction() - crate::DENT_DEFAULT_SIZE_FRACTION).abs() < 1.0e-6);
+        assert!((grade.strength() - crate::DENT_DEFAULT_STRENGTH).abs() < 1.0e-6);
+        assert_eq!(grade.centre(), [crate::DENT_DEFAULT_CENTRE_PIXELS; 2]);
+        assert_eq!(grade.kind(), crate::DentKind::Dent);
+        assert_eq!(grade.edge(), crate::DentEdge::Smooth);
+    }
+
+    #[test]
+    fn dent_zero_controls_compile_to_identity() {
+        for (parameter, value) in [("strength", 0.0_f32), ("size", 0.0_f32)] {
+            let effect = author_dent(parameter, PropertyValue::Float(value));
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("builds dent graph");
+            assert!(dent_op(&graph).is_none());
+        }
+    }
+
+    #[test]
+    fn dent_authored_state_reaches_the_operation() {
+        let effect = author_dent("size", PropertyValue::Float(0.75));
+        let effect = author_dent_more(effect, "strength", PropertyValue::Float(0.8));
+        let effect = author_dent_more(effect, "centre_x", PropertyValue::Float(40.0));
+        let effect = author_dent_more(effect, "centre_y", PropertyValue::Float(70.0));
+        let effect = author_dent_more(effect, "kind", PropertyValue::Enum("bulge".to_owned()));
+        let effect = author_dent_more(effect, "edge", PropertyValue::Enum("hard".to_owned()));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds dent graph");
+        let grade = dent_op(&graph).expect("dent op");
+        assert!((grade.size_fraction() - 0.75).abs() < 1.0e-6);
+        assert!((grade.strength() - 0.8).abs() < 1.0e-6);
+        assert_eq!(grade.centre(), [40.0, 70.0]);
+        assert_eq!(grade.kind(), crate::DentKind::Bulge);
+        assert_eq!(grade.edge(), crate::DentEdge::Hard);
+    }
+
+    #[test]
+    fn dent_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [("size", 1.5_f32), ("size", -0.5_f32), ("strength", 2.0_f32)] {
+            let mut effect =
+                instantiate_effect_node(EffectType::Dent).expect("registered dent definition");
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Dent.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect_err("rejects an out-of-range dent control");
+        }
+    }
+
+    #[test]
+    fn dent_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_dent("size", PropertyValue::Float(0.8));
+        let effect = author_dent_more(effect, "centre_y", PropertyValue::Float(-16.0));
+        let effect = author_dent_more(effect, "kind", PropertyValue::Enum("bulge".to_owned()));
+        let wire = serde_json::to_string(&effect).expect("serializes dent effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores dent effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored dent graph");
+        let grade = dent_op(&graph).expect("dent op");
+        assert!((grade.size_fraction() - 0.8).abs() < 1.0e-6);
+        assert_eq!(grade.centre()[1], -16.0);
+        assert_eq!(grade.kind(), crate::DentKind::Bulge);
     }
 
     fn twirl_op(graph: &EffectRenderGraph) -> Option<crate::TwirlGrade> {

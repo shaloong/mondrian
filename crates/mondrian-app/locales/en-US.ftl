@@ -2568,3 +2568,17 @@ parameter-mondrian-effect-builtin-channel-blur-red-blur-label = Red Blur
 parameter-mondrian-effect-channel-blur-direction-both = Horizontal and Vertical
 parameter-mondrian-effect-channel-blur-direction-horizontal = Horizontal
 parameter-mondrian-effect-channel-blur-direction-vertical = Vertical
+
+## Dent 凹痕
+effect-dent = Dent
+parameter-group-dent = Dent
+parameter-mondrian-effect-builtin-dent-kind-label = Dent Type
+parameter-mondrian-effect-dent-kind-dent = Pit
+parameter-mondrian-effect-dent-kind-bulge = Bump
+parameter-mondrian-effect-builtin-dent-centre-x-label = Position X
+parameter-mondrian-effect-builtin-dent-centre-y-label = Position Y
+parameter-mondrian-effect-builtin-dent-size-label = Size
+parameter-mondrian-effect-builtin-dent-strength-label = Strength
+parameter-mondrian-effect-builtin-dent-edge-label = Edge Handling
+parameter-mondrian-effect-dent-edge-smooth = Smooth
+parameter-mondrian-effect-dent-edge-hard = Hard

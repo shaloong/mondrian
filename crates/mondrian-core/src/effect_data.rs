@@ -123,6 +123,8 @@ pub enum EffectType {
     SpillSuppressor,
     /// Channel blur: blurs the red, green, blue and alpha channels independently.
     ChannelBlur,
+    /// Dent: pulls pixels towards (or pushes them away from) a control point.
+    Dent,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -214,6 +216,7 @@ impl EffectType {
             Self::Minimax => "builtin.minimax".to_string(),
             Self::SpillSuppressor => "builtin.spill_suppressor".to_string(),
             Self::ChannelBlur => "builtin.channel_blur".to_string(),
+            Self::Dent => "builtin.dent".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -301,6 +304,7 @@ impl EffectType {
             "builtin.minimax" => Self::Minimax,
             "builtin.spill_suppressor" => Self::SpillSuppressor,
             "builtin.channel_blur" => Self::ChannelBlur,
+            "builtin.dent" => Self::Dent,
             other => Self::External(other.to_string()),
         }
     }
@@ -388,6 +392,7 @@ impl EffectType {
             Self::Minimax => "最小/最大",
             Self::SpillSuppressor => "溢色抑制",
             Self::ChannelBlur => "通道模糊",
+            Self::Dent => "凹痕",
             Self::External(name) => name,
         }
     }
@@ -473,6 +478,7 @@ impl EffectType {
             Self::Minimax => vec!["通道"],
             Self::SpillSuppressor => vec!["抠像"],
             Self::ChannelBlur => vec!["颜色", "模糊与锐化"],
+            Self::Dent => vec!["变形"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -560,6 +566,7 @@ impl EffectType {
             Self::Minimax => "minimax".to_string(),
             Self::SpillSuppressor => "spill_suppressor".to_string(),
             Self::ChannelBlur => "channel_blur".to_string(),
+            Self::Dent => "dent".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -896,6 +903,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Minimax => Ok(()),
             Self::SpillSuppressor => Ok(()),
             Self::ChannelBlur => Ok(()),
+            Self::Dent => Ok(()),
         }
     }
 }

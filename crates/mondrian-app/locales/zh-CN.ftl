@@ -2500,3 +2500,17 @@ parameter-mondrian-effect-builtin-channel-blur-red-blur-label = 红色模糊度
 parameter-mondrian-effect-channel-blur-direction-both = 水平和垂直
 parameter-mondrian-effect-channel-blur-direction-horizontal = 水平
 parameter-mondrian-effect-channel-blur-direction-vertical = 垂直
+
+## Dent 凹痕
+effect-dent = 凹痕
+parameter-group-dent = 凹痕
+parameter-mondrian-effect-builtin-dent-kind-label = 凹痕类型
+parameter-mondrian-effect-dent-kind-dent = 凹陷
+parameter-mondrian-effect-dent-kind-bulge = 凸起
+parameter-mondrian-effect-builtin-dent-centre-x-label = 位置 X
+parameter-mondrian-effect-builtin-dent-centre-y-label = 位置 Y
+parameter-mondrian-effect-builtin-dent-size-label = 大小
+parameter-mondrian-effect-builtin-dent-strength-label = 强度
+parameter-mondrian-effect-builtin-dent-edge-label = 边缘处理
+parameter-mondrian-effect-dent-edge-smooth = 平滑
+parameter-mondrian-effect-dent-edge-hard = 硬边
