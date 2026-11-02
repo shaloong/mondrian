@@ -1101,6 +1101,11 @@ pub enum EffectRenderOp {
         /// Weight of the offset sample in `[0, 1]`.
         mix: f32,
     },
+    /// Channel blur: blurs the red, green, blue and alpha channels independently.
+    ChannelBlur {
+        /// Authored per-channel amounts, edge behaviour, and direction.
+        grade: crate::ChannelBlurGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1301,6 +1306,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::SpillSuppressor { grade } => {
                 formatter.debug_struct("SpillSuppressor").field("grade", grade).finish()
+            }
+            Self::ChannelBlur { grade } => {
+                formatter.debug_struct("ChannelBlur").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2045,6 +2053,10 @@ impl EffectRenderOp {
                 color.map(f32::to_bits).hash(state);
                 extra0.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::ChannelBlur { grade } => {
+                81u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2267,6 +2279,7 @@ impl EffectRenderOp {
             EffectRenderOp::ColorBalance { .. } => 1,
             EffectRenderOp::Minimax { .. } => 5,
             EffectRenderOp::SpillSuppressor { .. } => 2,
+            EffectRenderOp::ChannelBlur { .. } => 3,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2822,7 +2835,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 80] {
+fn builtin_effect_types() -> [EffectType; 81] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2904,6 +2917,7 @@ fn builtin_effect_types() -> [EffectType; 80] {
         EffectType::ColorBalance,
         EffectType::Minimax,
         EffectType::SpillSuppressor,
+        EffectType::ChannelBlur,
     ]
 }
 
@@ -8206,6 +8220,58 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 );
             }
         }
+        EffectType::ChannelBlur => {
+            for (parameter, name) in [
+                ("red_blur", "红色模糊度"),
+                ("green_blur", "绿色模糊度"),
+                ("blue_blur", "蓝色模糊度"),
+                ("alpha_blur", "Alpha 模糊度"),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "通道模糊",
+                    name,
+                    PropertyValue::Float(crate::CHANNEL_BLUR_DEFAULT_AMOUNT),
+                    Some(0.0),
+                    Some(f64::from(crate::CHANNEL_BLUR_MAX_RADIUS)),
+                    Some(1.0),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_behavior",
+                "通道模糊",
+                "边缘特性",
+                PropertyValue::Float(crate::CHANNEL_BLUR_DEFAULT_EDGE_BEHAVIOR),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "通道模糊",
+                "方向",
+                crate::ChannelBlurDirection::Both.as_key(),
+                crate::ChannelBlurDirection::ALL
+                    .iter()
+                    .map(|direction| {
+                        ParameterEnumOption::new(
+                            direction.as_key(),
+                            direction.label(),
+                            format!(
+                                "mondrian.effect.channel_blur.direction.{}",
+                                direction.as_key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8535,6 +8601,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Percent
         }
         (EffectType::Minimax, "radius") => ParameterUnit::Pixels,
+        (EffectType::ChannelBlur, "red_blur" | "green_blur" | "blue_blur" | "alpha_blur") => {
+            ParameterUnit::Pixels
+        }
         (
             EffectType::SpillSuppressor,
             "suppression"
@@ -8826,6 +8895,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::SpillSuppressor => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::ChannelBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // A blur window can be as wide as the frame, so the definition-level
+            // envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ColorOffset => EffectExecutionContract {
@@ -13064,6 +13140,68 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ChannelBlur => {
+            let red_id = builtin_parameter_id(effect_type, "red_blur");
+            let green_id = builtin_parameter_id(effect_type, "green_blur");
+            let blue_id = builtin_parameter_id(effect_type, "blue_blur");
+            let alpha_id = builtin_parameter_id(effect_type, "alpha_blur");
+            let edge_behavior_id = builtin_parameter_id(effect_type, "edge_behavior");
+            let direction_id = builtin_parameter_id(effect_type, "direction");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let red = effect.evaluate_f32_parameter(
+                    &red_id,
+                    context.time,
+                    crate::CHANNEL_BLUR_DEFAULT_AMOUNT,
+                );
+                let green = effect.evaluate_f32_parameter(
+                    &green_id,
+                    context.time,
+                    crate::CHANNEL_BLUR_DEFAULT_AMOUNT,
+                );
+                let blue = effect.evaluate_f32_parameter(
+                    &blue_id,
+                    context.time,
+                    crate::CHANNEL_BLUR_DEFAULT_AMOUNT,
+                );
+                let alpha = effect.evaluate_f32_parameter(
+                    &alpha_id,
+                    context.time,
+                    crate::CHANNEL_BLUR_DEFAULT_AMOUNT,
+                );
+                let edge_behavior = effect.evaluate_f32_parameter(
+                    &edge_behavior_id,
+                    context.time,
+                    crate::CHANNEL_BLUR_DEFAULT_EDGE_BEHAVIOR,
+                );
+                let direction = match effect.evaluate_parameter(&direction_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::ChannelBlurDirection::from_key(&key)
+                        .ok_or_else(|| {
+                        invalid(format!(
+                            "channel blur direction {key} is not a declared option"
+                        ))
+                    })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "channel blur direction must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::ChannelBlurDirection::Both,
+                };
+                let grade =
+                    crate::ChannelBlurGrade::new(red, green, blue, alpha, edge_behavior, direction)
+                        .map_err(|error| invalid(error.to_string()))?;
+                // Four zero radii are the identity, so no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ChannelBlur { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -13150,6 +13288,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ColorBalance => "颜色平衡",
         EffectType::Minimax => "最小/最大",
         EffectType::SpillSuppressor => "溢色抑制",
+        EffectType::ChannelBlur => "通道模糊",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -14464,6 +14603,7 @@ mod tests {
             EffectType::ColorBalance,
             EffectType::Minimax,
             EffectType::SpillSuppressor,
+            EffectType::ChannelBlur,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -22011,6 +22151,145 @@ mod tests {
         assert_eq!(grade.direction(), crate::MinimaxDirection::Vertical);
         assert!(!grade.dont_shrink_edges());
         assert_eq!(grade.gpu_controls(), ([3.0, 1.0, 1.0, 7.0], [0.0; 4]));
+    }
+
+    fn channel_blur_op(graph: &EffectRenderGraph) -> Option<crate::ChannelBlurGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ChannelBlur { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ChannelBlur { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_channel_blur(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ChannelBlur)
+            .expect("the channel blur effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ChannelBlur.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the channel blur parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn channel_blur_defaults_compile_to_identity() {
+        // Every radius defaults to zero, so the builder elides the node.
+        let effect = instantiate_effect_node(EffectType::ChannelBlur)
+            .expect("the channel blur effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity channel blur should compile");
+        assert_eq!(channel_blur_op(&graph), None);
+    }
+
+    #[test]
+    fn channel_blur_authored_configuration_reaches_the_operation() {
+        let effect = author_channel_blur(&[
+            ("red_blur", PropertyValue::Float(4.4)),
+            ("green_blur", PropertyValue::Float(0.0)),
+            ("blue_blur", PropertyValue::Float(2.0)),
+            ("alpha_blur", PropertyValue::Float(0.0)),
+            ("edge_behavior", PropertyValue::Float(0.0)),
+            ("direction", PropertyValue::Enum("vertical".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored channel blur should build");
+        let grade = channel_blur_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.amounts(), [4.4, 0.0, 2.0, 0.0]);
+        assert!(!grade.is_identity());
+        assert!(!grade.repeat_edge_pixels());
+        assert_eq!(grade.direction(), crate::ChannelBlurDirection::Vertical);
+        // The horizontal axis rides as 0 and the vertical axis as 1; a
+        // two-axis blur records the horizontal pass first.
+        assert_eq!(
+            grade.gpu_controls(),
+            ([4.4, 0.0, 2.0, 0.0], [0.0, 1.0, 0.0, 0.0])
+        );
+        // Radii round to whole pixels and clamp to the frame extent.
+        assert_eq!(grade.radii(64, 32), [4, 0, 2, 0]);
+        // The clamp is `max(width, height)`, the largest window a frame holds.
+        assert_eq!(grade.radii(2, 2), [2, 0, 2, 0]);
+    }
+
+    #[test]
+    fn channel_blur_axes_reach_the_operation() {
+        for (key, horizontal, vertical) in [
+            ("horizontal", true, false),
+            ("vertical", false, true),
+            ("both", true, true),
+        ] {
+            let effect = author_channel_blur(&[
+                ("red_blur", PropertyValue::Float(1.0)),
+                ("direction", PropertyValue::Enum(key.to_owned())),
+            ]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored channel blur should build");
+            let grade = channel_blur_op(&graph).expect("the authored graph emits a node");
+            let direction = grade.direction();
+            assert_eq!(direction.blurs_horizontal(), horizontal, "{key}");
+            assert_eq!(direction.blurs_vertical(), vertical, "{key}");
+        }
+    }
+
+    #[test]
+    fn channel_blur_menu_out_of_range_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::ChannelBlur)
+            .expect("the channel blur effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ChannelBlur.property_path("direction"),
+                value: PropertyValue::Enum("diagonal".to_owned()),
+            })
+            .expect_err("an undeclared menu option must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("diagonal") || rendered.contains("option"),
+            "{rendered}"
+        );
+
+        let mut effect = instantiate_effect_node(EffectType::ChannelBlur)
+            .expect("the channel blur effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ChannelBlur.property_path("red_blur"),
+                value: PropertyValue::Float(crate::CHANNEL_BLUR_MAX_RADIUS as f32 + 1.0),
+            })
+            .expect_err("a radius past the authored range must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside"), "{rendered}");
+    }
+
+    #[test]
+    fn channel_blur_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_channel_blur(&[
+            ("red_blur", PropertyValue::Float(6.0)),
+            ("blue_blur", PropertyValue::Float(0.5)),
+            ("edge_behavior", PropertyValue::Float(1.0)),
+            ("direction", PropertyValue::Enum("horizontal".to_owned())),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the channel blur node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the channel blur node");
+        assert_eq!(restored.effect_type, EffectType::ChannelBlur);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored channel blur node");
+        let grade = channel_blur_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.amounts(), [6.0, 0.0, 0.5, 0.0]);
+        assert!(grade.repeat_edge_pixels());
+        assert_eq!(grade.direction(), crate::ChannelBlurDirection::Horizontal);
+        assert_eq!(
+            grade.gpu_controls(),
+            ([6.0, 0.0, 0.5, 0.0], [1.0, 0.0, 0.0, 0.0])
+        );
     }
 
     fn spill_suppressor_op(graph: &EffectRenderGraph) -> Option<crate::SpillSuppressorGrade> {

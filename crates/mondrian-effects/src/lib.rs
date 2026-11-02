@@ -21,6 +21,7 @@ pub mod black_white;
 pub mod box_blur;
 pub mod brightness_contrast;
 pub mod bulge;
+pub mod channel_blur;
 pub mod channel_mixer;
 pub mod choker;
 pub mod chroma_key;
@@ -145,6 +146,10 @@ pub use broadcast_safe::{
     broadcast_safe_frame_f32, BroadcastLocale, BroadcastSafeError, BroadcastSafeGrade,
     BroadcastSafeMode, BROADCAST_SAFE_LOCALE_COUNT, BROADCAST_SAFE_MAX_IRE, BROADCAST_SAFE_MIN_IRE,
     BROADCAST_SAFE_MODE_COUNT,
+};
+pub use channel_blur::{
+    channel_blur_frame_f32, ChannelBlurDirection, ChannelBlurError, ChannelBlurGrade,
+    CHANNEL_BLUR_DEFAULT_AMOUNT, CHANNEL_BLUR_DEFAULT_EDGE_BEHAVIOR, CHANNEL_BLUR_MAX_RADIUS,
 };
 pub use chroma_key::{ChromaKeyError, PreparedChromaKey};
 pub use color_curves::{

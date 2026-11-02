@@ -121,6 +121,8 @@ pub enum EffectType {
     Minimax,
     /// Spill suppressor: neutralises the backdrop colour that bounced onto the subject.
     SpillSuppressor,
+    /// Channel blur: blurs the red, green, blue and alpha channels independently.
+    ChannelBlur,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -211,6 +213,7 @@ impl EffectType {
             Self::ColorBalance => "builtin.color_balance".to_string(),
             Self::Minimax => "builtin.minimax".to_string(),
             Self::SpillSuppressor => "builtin.spill_suppressor".to_string(),
+            Self::ChannelBlur => "builtin.channel_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -297,6 +300,7 @@ impl EffectType {
             "builtin.color_balance" => Self::ColorBalance,
             "builtin.minimax" => Self::Minimax,
             "builtin.spill_suppressor" => Self::SpillSuppressor,
+            "builtin.channel_blur" => Self::ChannelBlur,
             other => Self::External(other.to_string()),
         }
     }
@@ -383,6 +387,7 @@ impl EffectType {
             Self::ColorBalance => "颜色平衡",
             Self::Minimax => "最小/最大",
             Self::SpillSuppressor => "溢色抑制",
+            Self::ChannelBlur => "通道模糊",
             Self::External(name) => name,
         }
     }
@@ -467,6 +472,7 @@ impl EffectType {
             Self::ColorBalance => vec!["颜色", "调色"],
             Self::Minimax => vec!["通道"],
             Self::SpillSuppressor => vec!["抠像"],
+            Self::ChannelBlur => vec!["颜色", "模糊与锐化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -553,6 +559,7 @@ impl EffectType {
             Self::ColorBalance => "color_balance".to_string(),
             Self::Minimax => "minimax".to_string(),
             Self::SpillSuppressor => "spill_suppressor".to_string(),
+            Self::ChannelBlur => "channel_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -888,6 +895,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ColorBalance => Ok(()),
             Self::Minimax => Ok(()),
             Self::SpillSuppressor => Ok(()),
+            Self::ChannelBlur => Ok(()),
         }
     }
 }

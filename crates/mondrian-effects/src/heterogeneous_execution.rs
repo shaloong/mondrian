@@ -2773,6 +2773,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::ColorBalance { .. } => 79,
         EffectRenderOp::Minimax { .. } => 80,
         EffectRenderOp::SpillSuppressor { .. } => 81,
+        EffectRenderOp::ChannelBlur { .. } => 82,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4856,6 +4857,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::ColorBalance { .. }
             | crate::EffectRenderOp::Minimax { .. }
             | crate::EffectRenderOp::SpillSuppressor { .. }
+            | crate::EffectRenderOp::ChannelBlur { .. }
             | crate::EffectRenderOp::ColorOffset { .. }
             | crate::EffectRenderOp::Convolution { .. }
             | crate::EffectRenderOp::Offset { .. }

@@ -2834,6 +2834,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Choker { .. } => "choker",
         crate::EffectRenderOp::Minimax { .. } => "minimax",
         crate::EffectRenderOp::SpillSuppressor { .. } => "spill_suppressor",
+        crate::EffectRenderOp::ChannelBlur { .. } => "channel_blur",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",

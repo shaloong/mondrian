@@ -179,6 +179,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored channel phases and overflow mode.
         grade: crate::ColorOffsetGrade,
     },
+    ChannelBlur {
+        /// Authored per-channel amounts, edge behaviour, and direction.
+        grade: crate::ChannelBlurGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -216,6 +220,7 @@ impl EffectGpuSpatialPass {
             Self::Split { .. } => "split",
             Self::LinearColorKey { .. } => "linear_color_key",
             Self::ColorOffset { .. } => "color_offset",
+            Self::ChannelBlur { .. } => "channel_blur",
         }
     }
 
@@ -268,6 +273,8 @@ impl EffectGpuSpatialPass {
             Self::Split { .. } => u32::MAX,
             Self::LinearColorKey { .. } => 0,
             Self::ColorOffset { grade } => grade.halo_pixels(),
+            // The blur window can be as wide as the frame.
+            Self::ChannelBlur { .. } => u32::MAX,
         }
     }
 
@@ -313,6 +320,8 @@ impl EffectGpuSpatialPass {
             Self::Split { .. } => u32::MAX,
             Self::LinearColorKey { .. } => 0,
             Self::ColorOffset { grade } => grade.halo_pixels(),
+            // The blur window can be as wide as the frame.
+            Self::ChannelBlur { .. } => u32::MAX,
         }
     }
 }
@@ -618,6 +627,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::ColorOffset { grade } => {
             Some(EffectGpuSpatialPass::ColorOffset { grade: *grade })
         }
+        EffectRenderOp::ChannelBlur { grade } => {
+            Some(EffectGpuSpatialPass::ChannelBlur { grade: *grade })
+        }
         _ => None,
     }
 }
@@ -842,6 +854,39 @@ mod tests {
             .expect("minimax emits a spatial stage");
         assert_eq!(pass.name(), "minimax");
         // The window is bounded only by the frame, so no local halo applies.
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+    }
+
+    #[test]
+    fn channel_blur_lowers_to_a_full_frame_spatial_stage() {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(invert());
+        builder.append_unary(EffectRenderOp::ChannelBlur {
+            grade: crate::ChannelBlurGrade::new(
+                2.0,
+                4.0,
+                6.0,
+                8.0,
+                1.0,
+                crate::ChannelBlurDirection::Both,
+            )
+            .expect("valid channel blur"),
+        });
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("channel blur pipeline");
+
+        assert_eq!(pipeline.spatial_stage_count(), 1);
+        let pass = pipeline
+            .stages()
+            .iter()
+            .find_map(|stage| match stage {
+                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::PointOps { .. } => None,
+            })
+            .expect("channel blur emits a spatial stage");
+        assert_eq!(pass.name(), "channel_blur");
+        // The blur window can be as wide as the frame, so no local halo applies.
         assert_eq!(pass.horizontal_halo(), u32::MAX);
         assert_eq!(pass.vertical_halo(), u32::MAX);
     }

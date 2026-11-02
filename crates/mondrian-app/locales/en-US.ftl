@@ -2555,3 +2555,16 @@ parameter-mondrian-effect-builtin-spill-suppressor-suppression-label = Suppressi
 parameter-mondrian-effect-builtin-spill-suppressor-tolerance-label = Tolerance
 parameter-mondrian-effect-spill-suppressor-method-color-only = Colour Only
 parameter-mondrian-effect-spill-suppressor-method-final-result = Final Result
+
+## Channel Blur 通道模糊
+effect-channel-blur = Channel Blur
+parameter-group-channel-blur = Channel Blur
+parameter-mondrian-effect-builtin-channel-blur-alpha-blur-label = Alpha Blur
+parameter-mondrian-effect-builtin-channel-blur-blue-blur-label = Blue Blur
+parameter-mondrian-effect-builtin-channel-blur-direction-label = Direction
+parameter-mondrian-effect-builtin-channel-blur-edge-behavior-label = Edge Behavior
+parameter-mondrian-effect-builtin-channel-blur-green-blur-label = Green Blur
+parameter-mondrian-effect-builtin-channel-blur-red-blur-label = Red Blur
+parameter-mondrian-effect-channel-blur-direction-both = Horizontal and Vertical
+parameter-mondrian-effect-channel-blur-direction-horizontal = Horizontal
+parameter-mondrian-effect-channel-blur-direction-vertical = Vertical
