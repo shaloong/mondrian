@@ -119,6 +119,8 @@ pub enum EffectType {
     ColorBalance,
     /// Minimax: morphology over each RGB channel and the alpha channel.
     Minimax,
+    /// Spill suppressor: neutralises the backdrop colour that bounced onto the subject.
+    SpillSuppressor,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -208,6 +210,7 @@ impl EffectType {
             Self::TestSignals => "builtin.test_signals".to_string(),
             Self::ColorBalance => "builtin.color_balance".to_string(),
             Self::Minimax => "builtin.minimax".to_string(),
+            Self::SpillSuppressor => "builtin.spill_suppressor".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -293,6 +296,7 @@ impl EffectType {
             "builtin.test_signals" => Self::TestSignals,
             "builtin.color_balance" => Self::ColorBalance,
             "builtin.minimax" => Self::Minimax,
+            "builtin.spill_suppressor" => Self::SpillSuppressor,
             other => Self::External(other.to_string()),
         }
     }
@@ -378,6 +382,7 @@ impl EffectType {
             Self::TestSignals => "彩条与测试信号",
             Self::ColorBalance => "颜色平衡",
             Self::Minimax => "最小/最大",
+            Self::SpillSuppressor => "溢色抑制",
             Self::External(name) => name,
         }
     }
@@ -461,6 +466,7 @@ impl EffectType {
             Self::TestSignals => vec!["生成器"],
             Self::ColorBalance => vec!["颜色", "调色"],
             Self::Minimax => vec!["通道"],
+            Self::SpillSuppressor => vec!["抠像"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -546,6 +552,7 @@ impl EffectType {
             Self::TestSignals => "test_signals".to_string(),
             Self::ColorBalance => "color_balance".to_string(),
             Self::Minimax => "minimax".to_string(),
+            Self::SpillSuppressor => "spill_suppressor".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -880,6 +887,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::TestSignals => Ok(()),
             Self::ColorBalance => Ok(()),
             Self::Minimax => Ok(()),
+            Self::SpillSuppressor => Ok(()),
         }
     }
 }

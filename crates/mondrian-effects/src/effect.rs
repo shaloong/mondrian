@@ -997,6 +997,10 @@ pub enum EffectRenderOp {
     Minimax {
         grade: crate::MinimaxGrade,
     },
+    /// Spill suppressor: neutralises the backdrop colour that bounced onto the subject.
+    SpillSuppressor {
+        grade: crate::SpillSuppressorGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1294,6 +1298,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Minimax { grade } => {
                 formatter.debug_struct("Minimax").field("grade", grade).finish()
+            }
+            Self::SpillSuppressor { grade } => {
+                formatter.debug_struct("SpillSuppressor").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2031,6 +2038,13 @@ impl EffectRenderOp {
                 79u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::SpillSuppressor { grade } => {
+                80u8.hash(state);
+                let (params, color, extra0) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                color.map(f32::to_bits).hash(state);
+                extra0.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2252,6 +2266,7 @@ impl EffectRenderOp {
             EffectRenderOp::TestSignals { .. } => 1,
             EffectRenderOp::ColorBalance { .. } => 1,
             EffectRenderOp::Minimax { .. } => 5,
+            EffectRenderOp::SpillSuppressor { .. } => 2,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2807,7 +2822,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 79] {
+fn builtin_effect_types() -> [EffectType; 80] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2888,6 +2903,7 @@ fn builtin_effect_types() -> [EffectType; 79] {
         EffectType::TestSignals,
         EffectType::ColorBalance,
         EffectType::Minimax,
+        EffectType::SpillSuppressor,
     ]
 }
 
@@ -8116,6 +8132,80 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::SpillSuppressor => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "method",
+                "溢色抑制",
+                "方法",
+                crate::SpillSuppressorMethod::FinalResult.as_key(),
+                crate::SpillSuppressorMethod::ALL
+                    .iter()
+                    .map(|method| {
+                        ParameterEnumOption::new(
+                            method.as_key(),
+                            method.label(),
+                            format!(
+                                "mondrian.effect.spill_suppressor.method.{}",
+                                method.as_key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "key_colour",
+                "溢色抑制",
+                "抠像颜色",
+                PropertyValue::Color(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            for (parameter, name, default) in [
+                ("suppression", "抑制", crate::SPILL_SUPPRESSOR_DEFAULT),
+                (
+                    "tolerance",
+                    "容差",
+                    crate::SPILL_SUPPRESSOR_DEFAULT_TOLERANCE,
+                ),
+                (
+                    "desaturation",
+                    "降低饱和度",
+                    crate::SPILL_SUPPRESSOR_DEFAULT_DESATURATION,
+                ),
+                (
+                    "spill_range",
+                    "溢出范围",
+                    crate::SPILL_SUPPRESSOR_DEFAULT_RANGE,
+                ),
+                (
+                    "colour_correction",
+                    "溢出颜色校正",
+                    crate::SPILL_SUPPRESSOR_DEFAULT_COLOUR_CORRECTION,
+                ),
+                (
+                    "luminance_correction",
+                    "亮度校正",
+                    crate::SPILL_SUPPRESSOR_DEFAULT_LUMINANCE_CORRECTION,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "溢色抑制",
+                    name,
+                    PropertyValue::Float(default),
+                    Some(f64::from(crate::SPILL_SUPPRESSOR_MIN_AMOUNT)),
+                    Some(f64::from(crate::SPILL_SUPPRESSOR_MAX_AMOUNT)),
+                    Some(1.0),
+                );
+            }
+        }
         EffectType::External(_) => {}
     }
 
@@ -8446,6 +8536,15 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         }
         (EffectType::Minimax, "radius") => ParameterUnit::Pixels,
         (
+            EffectType::SpillSuppressor,
+            "suppression"
+            | "tolerance"
+            | "desaturation"
+            | "spill_range"
+            | "colour_correction"
+            | "luminance_correction",
+        ) => ParameterUnit::Percent,
+        (
             EffectType::MatteRefine,
             "edge_detail" | "view_edge_region" | "view_map" | "more_motion_blur",
         ) => ParameterUnit::Normalized,
@@ -8723,6 +8822,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The morphology window can be as wide as the frame, so the
             // definition-level envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::SpillSuppressor => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::ColorOffset => EffectExecutionContract {
@@ -12875,6 +12978,92 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::SpillSuppressor => {
+            let method_id = builtin_parameter_id(effect_type, "method");
+            let suppression_id = builtin_parameter_id(effect_type, "suppression");
+            let key_id = builtin_parameter_id(effect_type, "key_colour");
+            let tolerance_id = builtin_parameter_id(effect_type, "tolerance");
+            let desaturation_id = builtin_parameter_id(effect_type, "desaturation");
+            let spill_range_id = builtin_parameter_id(effect_type, "spill_range");
+            let colour_correction_id = builtin_parameter_id(effect_type, "colour_correction");
+            let luminance_correction_id = builtin_parameter_id(effect_type, "luminance_correction");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let method = match effect.evaluate_parameter(&method_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::SpillSuppressorMethod::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "spill suppressor method {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "spill suppressor method must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::SpillSuppressorMethod::FinalResult,
+                };
+                let key = match effect.evaluate_parameter(&key_id, context.time) {
+                    Some(PropertyValue::Color(colour)) => [colour.r, colour.g, colour.b],
+                    Some(_) => {
+                        return Err(invalid(
+                            "spill suppressor key colour must be a colour".to_owned(),
+                        ));
+                    }
+                    None => [0.0, 1.0, 0.0],
+                };
+                let suppression = effect.evaluate_f32_parameter(
+                    &suppression_id,
+                    context.time,
+                    crate::SPILL_SUPPRESSOR_DEFAULT,
+                );
+                let tolerance = effect.evaluate_f32_parameter(
+                    &tolerance_id,
+                    context.time,
+                    crate::SPILL_SUPPRESSOR_DEFAULT_TOLERANCE,
+                );
+                let desaturation = effect.evaluate_f32_parameter(
+                    &desaturation_id,
+                    context.time,
+                    crate::SPILL_SUPPRESSOR_DEFAULT_DESATURATION,
+                );
+                let spill_range = effect.evaluate_f32_parameter(
+                    &spill_range_id,
+                    context.time,
+                    crate::SPILL_SUPPRESSOR_DEFAULT_RANGE,
+                );
+                let colour_correction = effect.evaluate_f32_parameter(
+                    &colour_correction_id,
+                    context.time,
+                    crate::SPILL_SUPPRESSOR_DEFAULT_COLOUR_CORRECTION,
+                );
+                let luminance_correction = effect.evaluate_f32_parameter(
+                    &luminance_correction_id,
+                    context.time,
+                    crate::SPILL_SUPPRESSOR_DEFAULT_LUMINANCE_CORRECTION,
+                );
+                let grade = crate::SpillSuppressorGrade::new(
+                    method,
+                    suppression,
+                    key,
+                    tolerance,
+                    desaturation,
+                    spill_range,
+                    colour_correction,
+                    luminance_correction,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // Zero suppression is the identity, so no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::SpillSuppressor { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -12960,6 +13149,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::TestSignals => "彩条与测试信号",
         EffectType::ColorBalance => "颜色平衡",
         EffectType::Minimax => "最小/最大",
+        EffectType::SpillSuppressor => "溢色抑制",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -14273,6 +14463,7 @@ mod tests {
             EffectType::TestSignals,
             EffectType::ColorBalance,
             EffectType::Minimax,
+            EffectType::SpillSuppressor,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -21820,6 +22011,181 @@ mod tests {
         assert_eq!(grade.direction(), crate::MinimaxDirection::Vertical);
         assert!(!grade.dont_shrink_edges());
         assert_eq!(grade.gpu_controls(), ([3.0, 1.0, 1.0, 7.0], [0.0; 4]));
+    }
+
+    fn spill_suppressor_op(graph: &EffectRenderGraph) -> Option<crate::SpillSuppressorGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::SpillSuppressor { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::SpillSuppressor { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_spill_suppressor(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::SpillSuppressor)
+            .expect("the spill suppressor effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::SpillSuppressor.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the spill suppressor parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn spill_suppressor_defaults_reach_the_operation() {
+        // Full suppression against a green key is the documented default, so the
+        // default effect is not an identity and must emit a node.
+        let effect = instantiate_effect_node(EffectType::SpillSuppressor)
+            .expect("the spill suppressor effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default spill suppressor should compile");
+        let grade = spill_suppressor_op(&graph).expect("the default grade emits a node");
+        assert_eq!(grade.method(), crate::SpillSuppressorMethod::FinalResult);
+        assert_eq!(grade.suppression(), crate::SPILL_SUPPRESSOR_DEFAULT);
+        assert_eq!(grade.key(), [0.0, 1.0, 0.0]);
+        assert_eq!(grade.tolerance(), crate::SPILL_SUPPRESSOR_DEFAULT_TOLERANCE);
+        assert_eq!(
+            grade.desaturation(),
+            crate::SPILL_SUPPRESSOR_DEFAULT_DESATURATION
+        );
+        assert_eq!(grade.range(), crate::SPILL_SUPPRESSOR_DEFAULT_RANGE);
+        assert_eq!(
+            grade.colour_correction(),
+            crate::SPILL_SUPPRESSOR_DEFAULT_COLOUR_CORRECTION
+        );
+        assert_eq!(
+            grade.luminance_correction(),
+            crate::SPILL_SUPPRESSOR_DEFAULT_LUMINANCE_CORRECTION
+        );
+        assert!(!grade.is_identity());
+        // The green key leaves green dominant, so the host pins channel 1.
+        assert_eq!(
+            grade.gpu_controls(),
+            (
+                [1.0, 0.5, 0.5, 0.5],
+                [0.0, 1.0, 0.0, 0.5],
+                [0.0, 0.0, 1.0, 0.0]
+            )
+        );
+    }
+
+    #[test]
+    fn spill_suppressor_zero_suppression_is_elided_from_the_graph() {
+        // Zero suppression is the documented identity: no node is appended.
+        let effect = author_spill_suppressor(&[("suppression", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity spill suppressor should compile");
+        assert_eq!(spill_suppressor_op(&graph), None);
+    }
+
+    #[test]
+    fn spill_suppressor_authored_configuration_reaches_the_operation() {
+        let effect = author_spill_suppressor(&[
+            ("method", PropertyValue::Enum("color_only".to_owned())),
+            ("suppression", PropertyValue::Float(60.0)),
+            (
+                "key_colour",
+                PropertyValue::Color(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }),
+            ),
+            ("tolerance", PropertyValue::Float(0.0)),
+            ("desaturation", PropertyValue::Float(40.0)),
+            ("spill_range", PropertyValue::Float(75.0)),
+            ("colour_correction", PropertyValue::Float(25.0)),
+            ("luminance_correction", PropertyValue::Float(100.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored spill suppressor should build");
+        let grade = spill_suppressor_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.method(), crate::SpillSuppressorMethod::ColorOnly);
+        assert_eq!(grade.suppression(), 60.0);
+        assert_eq!(grade.key(), [0.0, 0.0, 1.0]);
+        assert_eq!(grade.tolerance(), 0.0);
+        assert_eq!(grade.desaturation(), 40.0);
+        assert_eq!(grade.range(), 75.0);
+        assert_eq!(grade.colour_correction(), 25.0);
+        assert_eq!(grade.luminance_correction(), 100.0);
+        // The blue key pins channel 2 and the menu rides as 0-based 1.
+        assert_eq!(
+            grade.gpu_controls(),
+            (
+                [0.6, 0.0, 0.4, 0.75],
+                [0.0, 0.0, 1.0, 0.25],
+                [1.0, 1.0, 2.0, 0.0]
+            )
+        );
+    }
+
+    #[test]
+    fn spill_suppressor_menu_out_of_range_is_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::SpillSuppressor)
+            .expect("the spill suppressor effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::SpillSuppressor.property_path("method"),
+                value: PropertyValue::Enum("not_a_method".to_owned()),
+            })
+            .expect_err("an undeclared menu option must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("not_a_method") || rendered.contains("option"),
+            "{rendered}"
+        );
+
+        let mut effect = instantiate_effect_node(EffectType::SpillSuppressor)
+            .expect("the spill suppressor effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::SpillSuppressor.property_path("suppression"),
+                value: PropertyValue::Float(crate::SPILL_SUPPRESSOR_MAX_AMOUNT + 1.0),
+            })
+            .expect_err("suppression past the authored range must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside [0, 100]"), "{rendered}");
+    }
+
+    #[test]
+    fn spill_suppressor_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_spill_suppressor(&[
+            ("method", PropertyValue::Enum("color_only".to_owned())),
+            ("suppression", PropertyValue::Float(60.0)),
+            (
+                "key_colour",
+                PropertyValue::Color(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            ),
+            ("tolerance", PropertyValue::Float(0.0)),
+            ("luminance_correction", PropertyValue::Float(100.0)),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the spill suppressor node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the spill suppressor node");
+        assert_eq!(restored.effect_type, EffectType::SpillSuppressor);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored spill suppressor node");
+        let grade = spill_suppressor_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.method(), crate::SpillSuppressorMethod::ColorOnly);
+        assert_eq!(grade.key(), [1.0, 0.0, 0.0]);
+        assert_eq!(grade.luminance_correction(), 100.0);
+        // The red key pins channel 0.
+        assert_eq!(
+            grade.gpu_controls(),
+            (
+                [0.6, 0.0, 0.5, 0.5],
+                [1.0, 0.0, 0.0, 0.5],
+                [1.0, 1.0, 0.0, 0.0]
+            )
+        );
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {

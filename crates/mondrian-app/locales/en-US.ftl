@@ -2541,3 +2541,17 @@ parameter-mondrian-effect-minimax-operation-maximum = Maximum
 parameter-mondrian-effect-minimax-operation-maximum-then-minimum = Maximum then Minimum
 parameter-mondrian-effect-minimax-operation-minimum = Minimum
 parameter-mondrian-effect-minimax-operation-minimum-then-maximum = Minimum then Maximum
+
+## Spill Suppressor 溢色抑制
+effect-spill-suppressor = Spill Suppressor
+parameter-group-spill-suppressor = Spill Suppressor
+parameter-mondrian-effect-builtin-spill-suppressor-colour-correction-label = Colour Correction
+parameter-mondrian-effect-builtin-spill-suppressor-desaturation-label = Desaturation
+parameter-mondrian-effect-builtin-spill-suppressor-key-colour-label = Key Colour
+parameter-mondrian-effect-builtin-spill-suppressor-luminance-correction-label = Luminance Correction
+parameter-mondrian-effect-builtin-spill-suppressor-method-label = Method
+parameter-mondrian-effect-builtin-spill-suppressor-spill-range-label = Spill Range
+parameter-mondrian-effect-builtin-spill-suppressor-suppression-label = Suppression
+parameter-mondrian-effect-builtin-spill-suppressor-tolerance-label = Tolerance
+parameter-mondrian-effect-spill-suppressor-method-color-only = Colour Only
+parameter-mondrian-effect-spill-suppressor-method-final-result = Final Result

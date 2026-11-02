@@ -45,6 +45,7 @@ pub mod radial_blur;
 pub(crate) mod resample;
 pub mod ripple;
 pub mod spherize;
+pub mod spill_suppressor;
 pub mod split;
 pub mod threshold;
 pub mod tint;
@@ -362,6 +363,13 @@ pub use scatter::{
 pub use spherize::{
     spherize_frame_f32, SpherizeError, SpherizeGrade, SPHERIZE_MAX_RADIUS_PIXELS,
     SPHERIZE_MIN_RADIUS_PIXELS,
+};
+pub use spill_suppressor::{
+    spill_suppressor_frame_f32, SpillSuppressorError, SpillSuppressorGrade, SpillSuppressorMethod,
+    SPILL_SUPPRESSOR_DEFAULT, SPILL_SUPPRESSOR_DEFAULT_COLOUR_CORRECTION,
+    SPILL_SUPPRESSOR_DEFAULT_DESATURATION, SPILL_SUPPRESSOR_DEFAULT_LUMINANCE_CORRECTION,
+    SPILL_SUPPRESSOR_DEFAULT_RANGE, SPILL_SUPPRESSOR_DEFAULT_TOLERANCE,
+    SPILL_SUPPRESSOR_MAX_AMOUNT, SPILL_SUPPRESSOR_METHOD_COUNT, SPILL_SUPPRESSOR_MIN_AMOUNT,
 };
 pub use split::{
     split_frame_f32, SplitError, SplitGrade, SPLIT_MAX_COORDINATE, SPLIT_MAX_PIXELS,

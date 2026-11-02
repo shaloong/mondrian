@@ -2473,3 +2473,17 @@ parameter-mondrian-effect-minimax-operation-maximum = 最大
 parameter-mondrian-effect-minimax-operation-maximum-then-minimum = 先最大后最小
 parameter-mondrian-effect-minimax-operation-minimum = 最小
 parameter-mondrian-effect-minimax-operation-minimum-then-maximum = 先最小后最大
+
+## Spill Suppressor 溢色抑制
+effect-spill-suppressor = 溢色抑制
+parameter-group-spill-suppressor = 溢色抑制
+parameter-mondrian-effect-builtin-spill-suppressor-colour-correction-label = 溢出颜色校正
+parameter-mondrian-effect-builtin-spill-suppressor-desaturation-label = 降低饱和度
+parameter-mondrian-effect-builtin-spill-suppressor-key-colour-label = 抠像颜色
+parameter-mondrian-effect-builtin-spill-suppressor-luminance-correction-label = 亮度校正
+parameter-mondrian-effect-builtin-spill-suppressor-method-label = 方法
+parameter-mondrian-effect-builtin-spill-suppressor-spill-range-label = 溢出范围
+parameter-mondrian-effect-builtin-spill-suppressor-suppression-label = 抑制
+parameter-mondrian-effect-builtin-spill-suppressor-tolerance-label = 容差
+parameter-mondrian-effect-spill-suppressor-method-color-only = 仅颜色
+parameter-mondrian-effect-spill-suppressor-method-final-result = 最终结果
