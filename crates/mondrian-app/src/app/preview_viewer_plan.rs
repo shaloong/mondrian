@@ -15,7 +15,8 @@ use mondrian_core::WorkingColorSpace;
 use mondrian_effects::{identity_compiled_effect_graph, CompiledEffectGraph, EffectFrameExtent};
 use mondrian_playback::FramePresentationQuality;
 use mondrian_renderer::{
-    CpuColorFrame, GpuCompositingBlockerReason, HeterogeneousCpuPrefixBatchError,
+    choose_spatial_chain_for_plan, gpu_spatial_chain_plan, CpuColorFrame,
+    GpuCompositingBlockerReason, GpuRoute, HeterogeneousCpuPrefixBatchError,
     HeterogeneousCpuPrefixBatchGrant, HeterogeneousCpuPrefixBatchItem,
     HeterogeneousCpuPrefixBatchRequest, HeterogeneousGpuContinuationBinding,
     HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant,
@@ -461,6 +462,7 @@ pub(crate) fn gpu_layer_for_cached_working(
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
+            spatial_plan: None,
             frame_seed: 0,
         },
     )))
@@ -666,6 +668,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                 blend_mode,
                 transform,
                 effect_plan,
+                spatial_plan: None,
                 frame_seed,
             });
         }
@@ -706,6 +709,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
             blend_mode,
             transform,
             effect_plan: identity_effect_plan,
+            spatial_plan: None,
             frame_seed,
         })
     }
@@ -751,6 +755,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
             blend_mode: layer.blend_mode,
             transform: layer.transform,
             effect_plan: identity_effect_plan,
+            spatial_plan: None,
             frame_seed: layer.frame_seed,
         })
     }
@@ -876,9 +881,40 @@ fn gpu_media_source(
     {
         return Err(GpuCompositingBlockerReason::UnsupportedTransform);
     }
-    let effect_plan = scratch
-        .get_or_lower_effect_gpu_plan(effect_graph)
+    let route = scratch
+        .get_or_lower_effect_gpu_route(effect_graph)
         .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    let (effect_plan, spatial_plan) = match route {
+        GpuRoute::Point(effect_plan) => (effect_plan, None),
+        GpuRoute::Spatial(pipeline) => {
+            // The chain runs on this layer's own decode raster, so the plan is
+            // cut against the source extent rather than the canvas extent.
+            let (source_width, source_height) = (frame.width(), frame.height());
+            let plan = gpu_spatial_chain_plan(&pipeline, source_width, source_height);
+            let source_on_gpu = frame.gpu_source().is_some() || frame.native_source().is_some();
+            let preference = scratch.spatial_chain_preference();
+            let choice = choose_spatial_chain_for_plan(
+                plan.as_ref(),
+                source_width,
+                source_height,
+                source_on_gpu,
+                preference,
+            );
+            // The estimate and the plan are per-extent, so they are recomputed
+            // every frame; only the lowering above is cached. A refused plan or
+            // a CPU-favouring estimate falls back to the whole CPU path.
+            scratch.record_spatial_chain_choice(&choice);
+            if !choice.use_gpu {
+                return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+            }
+            let identity = identity_compiled_effect_graph()
+                .ok_or(GpuCompositingBlockerReason::EffectRequiresCpu)?;
+            let identity_plan = scratch
+                .get_or_lower_effect_gpu_plan(&identity)
+                .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+            (identity_plan, Some(pipeline))
+        }
+    };
     let (native_source, transform) = native_source_for_projected_transform(frame, transform);
     Ok(ViewerGpuSourceLayer::Media {
         frame: frame.working_payload(),
@@ -891,6 +927,7 @@ fn gpu_media_source(
         blend_mode,
         transform,
         effect_plan,
+        spatial_plan,
         frame_seed,
     })
 }
@@ -1573,5 +1610,141 @@ mod heterogeneous_tests {
                 if matches!(transition.left, ViewerGpuTransitionInput::Source(_))
                     && matches!(transition.right, ViewerGpuTransitionInput::Transparent)
         ));
+    }
+
+    /// One-effect graph with the author values the test needs.
+    fn single_effect_graph(effect: EffectType, values: &[(&str, f32)]) -> Arc<CompiledEffectGraph> {
+        let mutations: Vec<PropertyMutation> = values
+            .iter()
+            .map(|(parameter, value)| PropertyMutation::SetStaticValue {
+                path: effect.property_path(parameter),
+                value: PropertyValue::Float(*value),
+            })
+            .collect();
+        let mut node = EffectNode::with_defaults(effect);
+        for mutation in mutations {
+            node.apply_property_mutation(mutation).expect("set author value");
+        }
+        PreparedEffectProgram::prepare(&[node], &[], WORKING_SPACE)
+            .expect("prepare single-effect program")
+            .evaluate(TimelineTime::ZERO)
+            .expect("compile single-effect graph")
+    }
+
+    fn media_at(
+        graph: Arc<CompiledEffectGraph>,
+        width: u32,
+        height: u32,
+        identity_salt: u64,
+    ) -> ResolvedPreviewElement {
+        let mut identity =
+            PreviewSemanticIdentityBuilder::new(b"mondrian.preview.spatial-chain-lowering-test.v1");
+        identity_salt.hash(&mut identity);
+        let frame = MediaPreviewFrame::from_working(
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width,
+                height,
+                color_space: WORKING_SPACE,
+                data: vec![[0.2, 0.4, 0.6, 1.0]; (width * height) as usize],
+            }),
+            mondrian_core::Resolution { width, height },
+            identity.finish_identity(),
+            FramePresentationQuality::Ready,
+            PreviewDecodeExecutionSummary::default(),
+        );
+        ResolvedPreviewElement::Media {
+            frame,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: graph,
+            prepared_effect_route: None,
+            frame_seed: identity_salt as i64,
+        }
+    }
+
+    fn source_layer(layers: &[ViewerGpuExecutionLayer]) -> &ViewerGpuSourceLayer {
+        match &layers[0] {
+            ViewerGpuExecutionLayer::Source(source) => source,
+            _ => panic!("expected one source layer"),
+        }
+    }
+
+    #[test]
+    fn a_twirl_layer_composites_on_the_gpu() {
+        let graph = single_effect_graph(EffectType::Twirl, &[("angle", 45.0)]);
+        let resolved = [media_at(Arc::clone(&graph), 640, 360, 1)];
+        let mut scratch = TimelineCompositeScratch::default();
+        let layers =
+            gpu_composite_layers_for_resolved_with_session(&resolved, WORKING_SPACE, &mut scratch)
+                .expect("a Twirl layer is admitted on the GPU");
+        let ViewerGpuSourceLayer::Media { effect_plan, spatial_plan, .. } = source_layer(&layers)
+        else {
+            panic!("expected a media layer");
+        };
+        assert!(
+            effect_plan.is_identity(),
+            "the chain replaces the fused point plan"
+        );
+        let spatial_plan = spatial_plan.as_ref().expect("the layer carries a spatial chain");
+        assert!(spatial_plan.spatial_stage_count() >= 1);
+        let diagnostics = scratch.spatial_chain_choice_diagnostics();
+        assert_eq!(diagnostics.gpu_choices, 1);
+        assert_eq!(diagnostics.cpu_choices, 0);
+    }
+
+    #[test]
+    fn a_gaussian_blur_layer_still_falls_back_to_the_cpu() {
+        let graph = single_effect_graph(EffectType::GaussianBlur, &[("radius", 12.0)]);
+        let resolved = [media_at(graph, 640, 360, 2)];
+        let blocked = match gpu_composite_layers_for_resolved(&resolved, WORKING_SPACE) {
+            Ok(_) => panic!("a Gaussian Blur layer is not admitted on the GPU"),
+            Err(blocker) => blocker,
+        };
+        assert_eq!(blocked, GpuCompositingBlockerReason::EffectRequiresCpu);
+    }
+
+    #[test]
+    fn a_point_only_layer_keeps_the_existing_fused_path() {
+        let graph = single_effect_graph(EffectType::BasicCorrection, &[("exposure", 0.25)]);
+        let resolved = [media_at(graph, 64, 64, 3)];
+        let mut scratch = TimelineCompositeScratch::default();
+        let layers =
+            gpu_composite_layers_for_resolved_with_session(&resolved, WORKING_SPACE, &mut scratch)
+                .expect("a point-only layer stays on the fused path");
+        let ViewerGpuSourceLayer::Media { effect_plan, spatial_plan, .. } = source_layer(&layers)
+        else {
+            panic!("expected a media layer");
+        };
+        assert!(!effect_plan.is_identity());
+        assert!(
+            spatial_plan.is_none(),
+            "a fused point graph never lowers a chain"
+        );
+        assert!(scratch.spatial_chain_choice_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn a_spatial_layer_with_a_cpu_only_node_stays_whole_on_the_cpu() {
+        let mut twirl = EffectNode::with_defaults(EffectType::Twirl);
+        twirl
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Twirl.property_path("angle"),
+                value: PropertyValue::Float(45.0),
+            })
+            .expect("set Twirl angle");
+        let blur = EffectNode::with_defaults(EffectType::GaussianBlur);
+        let graph = PreparedEffectProgram::prepare(&[twirl, blur], &[], WORKING_SPACE)
+            .expect("prepare mixed program")
+            .evaluate(TimelineTime::ZERO)
+            .expect("compile mixed program");
+        let resolved = [media_at(graph, 640, 360, 4)];
+        let blocked = match gpu_composite_layers_for_resolved(&resolved, WORKING_SPACE) {
+            Ok(_) => panic!("a chain with a CPU-only node is not admitted on the GPU"),
+            Err(blocker) => blocker,
+        };
+        assert_eq!(blocked, GpuCompositingBlockerReason::EffectRequiresCpu);
     }
 }
