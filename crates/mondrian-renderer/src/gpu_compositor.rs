@@ -1826,6 +1826,79 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 }
             }
             pixel = vec4<f32>(balanced, pixel.a);
+        } else if (effect.header.x == 33u) {
+            // `SpillSuppressorGrade`: params is [suppression, tolerance,
+            // desaturation, spill range] and colour is [key r, key g, key b,
+            // colour correction], each over 100 except the key. extra0 is
+            // [luminance correction, method, dominant channel, 0]; the host
+            // already resolved the key's dominant channel (red before green
+            // before blue on ties), so the shader never re-derives it. The
+            // order is fixed: despill, then desaturate, then luminance
+            // correction, and the 仅颜色 method stops after the despill.
+            let source_luma = dot(pixel.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let dominant = i32(effect.extra0.z);
+            let key_max = select(
+                select(effect.color.z, effect.color.y, dominant == 1),
+                effect.color.x,
+                dominant == 0,
+            );
+            // The two non-dominant channels reduce to their larger member,
+            // selected without dynamic vector indexing.
+            let peer = select(
+                select(
+                    max(pixel.r, pixel.g),
+                    max(pixel.r, pixel.b),
+                    dominant == 1,
+                ),
+                max(pixel.g, pixel.b),
+                dominant == 0,
+            );
+            let dominant_value = select(
+                select(pixel.b, pixel.g, dominant == 1),
+                pixel.r,
+                dominant == 0,
+            );
+            let spill = clamp(
+                (dominant_value - peer) / max(dominant_value, 0.0001),
+                0.0,
+                1.0,
+            );
+            let pixel_max = max(max(pixel.r, pixel.g), pixel.b);
+            let pixel_chroma = pixel.rgb / max(pixel_max, 0.0001);
+            let key_chroma = vec3<f32>(effect.color.x, effect.color.y, effect.color.z)
+                / max(key_max, 0.0001);
+            let distance = length(pixel_chroma - key_chroma) * 0.5773503;
+            let softness = max(effect.params.w * 0.5, 0.0001);
+            let edge = clamp((distance - effect.params.y) / softness, 0.0, 1.0);
+            let gate = 1.0 - edge * edge * (3.0 - 2.0 * edge);
+            let weight = clamp(spill * gate, 0.0, 1.0) * effect.params.x;
+            var corrected = vec3<f32>(
+                select(
+                    pixel.r,
+                    pixel.r + (peer - pixel.r) * weight * effect.color.w,
+                    dominant == 0,
+                ),
+                select(
+                    pixel.g,
+                    pixel.g + (peer - pixel.g) * weight * effect.color.w,
+                    dominant == 1,
+                ),
+                select(
+                    pixel.b,
+                    pixel.b + (peer - pixel.b) * weight * effect.color.w,
+                    dominant == 2,
+                ),
+            );
+            if (effect.extra0.y < 0.5) {
+                let grey = dot(corrected, vec3<f32>(0.2126, 0.7152, 0.0722));
+                corrected += (vec3<f32>(grey) - corrected) * weight * effect.params.z;
+                let corrected_luma = dot(corrected, vec3<f32>(0.2126, 0.7152, 0.0722));
+                if (corrected_luma > 0.000001) {
+                    corrected *= 1.0
+                        + (source_luma / corrected_luma - 1.0) * effect.extra0.x;
+                }
+            }
+            pixel = vec4<f32>(clamp(corrected, vec3<f32>(0.0), vec3<f32>(1.0)), pixel.a);
         }
     }
     return pixel;
@@ -5056,6 +5129,16 @@ fn effect_uniforms(
                 let (params, color, extra0) = grade.gpu_controls();
                 GpuEffectUniform {
                     header: [32, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::SpillSuppressor { grade } => {
+                let (params, color, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [33, 0, 0, 0],
                     params,
                     color,
                     extra0,
@@ -8902,6 +8985,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_spill_suppressor_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            SpillSuppressorGrade, SpillSuppressorMethod,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU spill suppressor parity test: no GPU adapter available");
+            return;
+        };
+        let width = 11_u32;
+        let height = 9_u32;
+        // A three-colour frame: every pixel is dominated by green, blue or red,
+        // so each key finds spill to remove, plus the three primary colours at
+        // full strength and one transparent and one semi-transparent pixel. The
+        // alpha passthrough and the zero-coverage early return both have to
+        // match the CPU kernel.
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for index in 0..width * height {
+            let t = (index % 7) as f32 / 6.0;
+            let ramp = |base: f32| (base + 0.3 * t).min(0.85);
+            let pixel = match index % 4 {
+                0 => [ramp(0.1), ramp(0.55), ramp(0.1)],
+                1 => [ramp(0.1), ramp(0.1), ramp(0.55)],
+                2 => [ramp(0.55), ramp(0.1), ramp(0.1)],
+                _ => [ramp(0.4), ramp(0.45), ramp(0.4)],
+            };
+            data.push([pixel[0], pixel[1], pixel[2], 1.0]);
+        }
+        data[0] = [0.0, 0.0, 0.0, 0.0];
+        data[1] = [1.0, 0.0, 0.0, 1.0];
+        data[2] = [0.0, 1.0, 0.0, 1.0];
+        data[3] = [0.0, 0.0, 1.0, 1.0];
+        data[4] = [1.0, 0.2, 0.2, 1.0];
+        data[5] = [0.2, 1.0, 0.2, 1.0];
+        data[6] = [0.2, 0.2, 1.0, 1.0];
+        data[7][3] = 0.25;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for grade in [
+            // Green key, final result at full suppression: despill, then
+            // desaturate, with the luminance correction left at zero.
+            SpillSuppressorGrade::new(
+                SpillSuppressorMethod::FinalResult,
+                100.0,
+                [0.0, 1.0, 0.0],
+                50.0,
+                50.0,
+                50.0,
+                50.0,
+                0.0,
+            )
+            .expect("valid green key grade"),
+            // Blue key, colour only at 60 percent: the shader has to skip the
+            // desaturation and the luminance correction as well.
+            SpillSuppressorGrade::new(
+                SpillSuppressorMethod::ColorOnly,
+                60.0,
+                [0.0, 0.0, 1.0],
+                50.0,
+                50.0,
+                50.0,
+                50.0,
+                0.0,
+            )
+            .expect("valid blue key grade"),
+            // Red key with a zero tolerance and a full luminance correction:
+            // only pixels that sit on the key's chroma may move, and the source
+            // luma has to come back afterwards.
+            SpillSuppressorGrade::new(
+                SpillSuppressorMethod::FinalResult,
+                100.0,
+                [1.0, 0.0, 0.0],
+                0.0,
+                50.0,
+                50.0,
+                50.0,
+                100.0,
+            )
+            .expect("valid red key grade"),
+        ] {
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::SpillSuppressor { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(width, height),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let expected_pixels: Vec<[f32; 4]> = expected.pixels().to_vec();
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected_pixels,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU spill suppressor accuracy budget exceeded for {grade:?}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_noise_matches_the_cpu_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
             compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
@@ -9350,7 +9578,8 @@ mod tests {
             BlackAndWhiteGrade, BroadcastLocale, BroadcastSafeGrade, BroadcastSafeMode,
             ChannelMixerGrade, ChannelSource, ColorBalanceGrade, EffectGraphBuilderState,
             EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels, LeaveColorGrade,
-            LeaveColorMatch, ShiftChannelsGrade, TestSignalsGrade, TestSignalsPattern,
+            LeaveColorMatch, ShiftChannelsGrade, SpillSuppressorGrade, SpillSuppressorMethod,
+            TestSignalsGrade, TestSignalsPattern,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -9459,8 +9688,21 @@ mod tests {
             )
             .expect("valid color balance grade"),
         });
-        // The generator runs last, so its frame replaces whatever the eleven
-        // colour ops produced; the chain still has to fuse all twelve ops.
+        builder.append_unary(EffectRenderOp::SpillSuppressor {
+            grade: SpillSuppressorGrade::new(
+                SpillSuppressorMethod::FinalResult,
+                100.0,
+                [0.0, 1.0, 0.0],
+                50.0,
+                50.0,
+                50.0,
+                50.0,
+                0.0,
+            )
+            .expect("valid spill suppressor grade"),
+        });
+        // The generator runs last, so its frame replaces whatever the twelve
+        // colour ops produced; the chain still has to fuse all thirteen ops.
         builder.append_unary(EffectRenderOp::TestSignals {
             grade: TestSignalsGrade::new(TestSignalsPattern::Grayscale, 100.0, true, true)
                 .expect("valid test signals grade"),
@@ -9468,7 +9710,7 @@ mod tests {
         let graph = compile_reference_render_graph(builder.finish()).expect("valid built-in graph");
         let plan =
             lower_effect_graph_to_gpu_plan(&graph).expect("supported built-in point effects");
-        assert_eq!(plan.operations().len(), 12);
+        assert_eq!(plan.operations().len(), 13);
 
         let expected = apply_compiled_effect_graph_rgba_f32(
             mondrian_effects::EffectFloatFrameView::new(
@@ -9502,7 +9744,7 @@ mod tests {
             WorkingColorSpace::LinearRec709,
         );
         assert_eq!(diagnostics.execution.fused_layer_passes, 1);
-        assert_eq!(diagnostics.execution.fused_point_operations, 12);
+        assert_eq!(diagnostics.execution.fused_point_operations, 13);
         let report = compare_linear_rgba(
             expected.pixels(),
             &actual,
