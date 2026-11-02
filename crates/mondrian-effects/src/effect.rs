@@ -989,6 +989,10 @@ pub enum EffectRenderOp {
     TestSignals {
         grade: crate::TestSignalsGrade,
     },
+    /// Color balance: shifts the shadow, midtone, and highlight colours apart.
+    ColorBalance {
+        grade: crate::ColorBalanceGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1280,6 +1284,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::TestSignals { grade } => {
                 formatter.debug_struct("TestSignals").field("grade", grade).finish()
+            }
+            Self::ColorBalance { grade } => {
+                formatter.debug_struct("ColorBalance").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2006,6 +2013,13 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra0.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::ColorBalance { grade } => {
+                78u8.hash(state);
+                let (params, color, extra0) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                color.map(f32::to_bits).hash(state);
+                extra0.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2225,6 +2239,7 @@ impl EffectRenderOp {
             EffectRenderOp::BroadcastSafe { .. } => 1,
             EffectRenderOp::Choker { .. } => 2,
             EffectRenderOp::TestSignals { .. } => 1,
+            EffectRenderOp::ColorBalance { .. } => 1,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2780,7 +2795,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 77] {
+fn builtin_effect_types() -> [EffectType; 78] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2859,6 +2874,7 @@ fn builtin_effect_types() -> [EffectType; 77] {
         EffectType::BroadcastSafe,
         EffectType::Choker,
         EffectType::TestSignals,
+        EffectType::ColorBalance,
     ]
 }
 
@@ -7973,6 +7989,42 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::ColorBalance => {
+            for (parameter, name) in [
+                ("shadow_red", "阴影红色平衡"),
+                ("shadow_green", "阴影绿色平衡"),
+                ("shadow_blue", "阴影蓝色平衡"),
+                ("midtone_red", "中间调红色平衡"),
+                ("midtone_green", "中间调绿色平衡"),
+                ("midtone_blue", "中间调蓝色平衡"),
+                ("highlight_red", "高光红色平衡"),
+                ("highlight_green", "高光绿色平衡"),
+                ("highlight_blue", "高光蓝色平衡"),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "颜色平衡",
+                    name,
+                    PropertyValue::Float(crate::COLOR_BALANCE_DEFAULT_BALANCE),
+                    Some(f64::from(crate::COLOR_BALANCE_MIN_BALANCE)),
+                    Some(f64::from(crate::COLOR_BALANCE_MAX_BALANCE)),
+                    Some(1.0),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "preserve_luminosity",
+                "颜色平衡",
+                "保持发光度",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8296,6 +8348,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         }
         (EffectType::MatteRefine, "shutter_angle_degrees") => ParameterUnit::Degrees,
         (EffectType::Choker, "choke") => ParameterUnit::Pixels,
+        (EffectType::ColorBalance, "shadow_red" | "shadow_green" | "shadow_blue")
+        | (EffectType::ColorBalance, "midtone_red" | "midtone_green" | "midtone_blue")
+        | (EffectType::ColorBalance, "highlight_red" | "highlight_green" | "highlight_blue") => {
+            ParameterUnit::Percent
+        }
         (
             EffectType::MatteRefine,
             "edge_detail" | "view_edge_region" | "view_map" | "more_motion_blur",
@@ -8562,6 +8619,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::TestSignals => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::ColorBalance => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -12592,6 +12653,58 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ColorBalance => {
+            let shadow_red_id = builtin_parameter_id(effect_type, "shadow_red");
+            let shadow_green_id = builtin_parameter_id(effect_type, "shadow_green");
+            let shadow_blue_id = builtin_parameter_id(effect_type, "shadow_blue");
+            let midtone_red_id = builtin_parameter_id(effect_type, "midtone_red");
+            let midtone_green_id = builtin_parameter_id(effect_type, "midtone_green");
+            let midtone_blue_id = builtin_parameter_id(effect_type, "midtone_blue");
+            let highlight_red_id = builtin_parameter_id(effect_type, "highlight_red");
+            let highlight_green_id = builtin_parameter_id(effect_type, "highlight_green");
+            let highlight_blue_id = builtin_parameter_id(effect_type, "highlight_blue");
+            let preserve_luminosity_id = builtin_parameter_id(effect_type, "preserve_luminosity");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let default = crate::COLOR_BALANCE_DEFAULT_BALANCE;
+                let shadow = [
+                    effect.evaluate_f32_parameter(&shadow_red_id, context.time, default),
+                    effect.evaluate_f32_parameter(&shadow_green_id, context.time, default),
+                    effect.evaluate_f32_parameter(&shadow_blue_id, context.time, default),
+                ];
+                let midtone = [
+                    effect.evaluate_f32_parameter(&midtone_red_id, context.time, default),
+                    effect.evaluate_f32_parameter(&midtone_green_id, context.time, default),
+                    effect.evaluate_f32_parameter(&midtone_blue_id, context.time, default),
+                ];
+                let highlight = [
+                    effect.evaluate_f32_parameter(&highlight_red_id, context.time, default),
+                    effect.evaluate_f32_parameter(&highlight_green_id, context.time, default),
+                    effect.evaluate_f32_parameter(&highlight_blue_id, context.time, default),
+                ];
+                let preserve_luminosity =
+                    match effect.evaluate_parameter(&preserve_luminosity_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => value,
+                        Some(_) => {
+                            return Err(invalid(
+                                "color balance preserve luminosity must be a switch".to_owned(),
+                            ));
+                        }
+                        None => false,
+                    };
+                let grade =
+                    crate::ColorBalanceGrade::new(shadow, midtone, highlight, preserve_luminosity)
+                        .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ColorBalance { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -12675,6 +12788,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BroadcastSafe => "广播安全",
         EffectType::Choker => "阻塞收缩",
         EffectType::TestSignals => "彩条与测试信号",
+        EffectType::ColorBalance => "颜色平衡",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -13986,6 +14100,7 @@ mod tests {
             EffectType::BroadcastSafe,
             EffectType::Choker,
             EffectType::TestSignals,
+            EffectType::ColorBalance,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -21214,6 +21329,120 @@ mod tests {
             .expect_err("an out-of-range intensity must be rejected");
         let rendered = format!("{error:?}");
         assert!(rendered.contains("outside [0, 100]"), "{rendered}");
+    }
+
+    fn color_balance_op(graph: &EffectRenderGraph) -> Option<crate::ColorBalanceGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ColorBalance { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ColorBalance { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_color_balance(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ColorBalance)
+            .expect("the color balance effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ColorBalance.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the color balance parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn color_balance_defaults_are_elided_from_the_graph() {
+        // Every balance starts at zero and the switch is off, which is the
+        // documented identity: there is nothing for the renderer to run.
+        let effect = instantiate_effect_node(EffectType::ColorBalance)
+            .expect("the color balance effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default color balance should compile");
+        assert_eq!(color_balance_op(&graph), None);
+    }
+
+    #[test]
+    fn color_balance_preserve_luminosity_alone_is_elided_from_the_graph() {
+        // The switch only rescales the shades the balances already produced, so
+        // on its own it must stay an identity instead of emitting a no-op op.
+        let effect = author_color_balance(&[("preserve_luminosity", PropertyValue::Bool(true))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the preserve-only color balance should compile");
+        assert_eq!(color_balance_op(&graph), None);
+    }
+
+    #[test]
+    fn color_balance_authored_configuration_reaches_the_operation() {
+        let effect = author_color_balance(&[
+            ("shadow_red", PropertyValue::Float(100.0)),
+            ("midtone_green", PropertyValue::Float(-50.0)),
+            ("highlight_blue", PropertyValue::Float(25.0)),
+            ("preserve_luminosity", PropertyValue::Bool(true)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = color_balance_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.shadow(), [100.0, 0.0, 0.0]);
+        assert_eq!(grade.midtone(), [0.0, -50.0, 0.0]);
+        assert_eq!(grade.highlight(), [0.0, 0.0, 25.0]);
+        assert!(grade.preserve_luminosity());
+        assert!(!grade.is_identity());
+        // The fused point uniform carries the nine balances verbatim and the
+        // switch as an extra flag.
+        assert_eq!(
+            grade.gpu_controls(),
+            (
+                [100.0, 0.0, 0.0, 0.0],
+                [-50.0, 0.0, 0.0, 0.0],
+                [25.0, 1.0, 0.0, 0.0]
+            )
+        );
+    }
+
+    #[test]
+    fn color_balance_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_color_balance(&[
+            ("shadow_blue", PropertyValue::Float(-35.0)),
+            ("midtone_red", PropertyValue::Float(20.0)),
+            ("highlight_green", PropertyValue::Float(60.0)),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the color balance node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the color balance node");
+        assert_eq!(restored.effect_type, EffectType::ColorBalance);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored color balance node");
+        let grade = color_balance_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.shadow(), [0.0, 0.0, -35.0]);
+        assert_eq!(grade.midtone(), [20.0, 0.0, 0.0]);
+        assert_eq!(grade.highlight(), [0.0, 60.0, 0.0]);
+        assert!(!grade.preserve_luminosity());
+    }
+
+    #[test]
+    fn color_balance_out_of_range_amount_is_rejected_at_authoring() {
+        for amount in [-101.0, 101.0] {
+            let mut effect = instantiate_effect_node(EffectType::ColorBalance)
+                .expect("the color balance effect should instantiate");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ColorBalance.property_path("shadow_red"),
+                    value: PropertyValue::Float(amount),
+                })
+                .expect_err("an out-of-range balance must be rejected");
+            let rendered = format!("{error:?}");
+            assert!(rendered.contains("outside [-100, 100]"), "{rendered}");
+        }
     }
 
     fn choker_op(graph: &EffectRenderGraph) -> Option<crate::ChokerGrade> {

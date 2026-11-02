@@ -2437,3 +2437,17 @@ parameter-mondrian-effect-test-signals-pattern-concentric-rings = 同心圆
 parameter-mondrian-effect-test-signals-pattern-grayscale = 灰阶
 parameter-mondrian-effect-test-signals-pattern-hdr-staircase = HDR 阶梯
 parameter-mondrian-effect-test-signals-pattern-zone-plate = 分辨率图
+
+## Color Balance 颜色平衡
+effect-color-balance = 颜色平衡
+parameter-group-color-balance = 颜色平衡
+parameter-mondrian-effect-builtin-color-balance-highlight-blue-label = 高光蓝色平衡
+parameter-mondrian-effect-builtin-color-balance-highlight-green-label = 高光绿色平衡
+parameter-mondrian-effect-builtin-color-balance-highlight-red-label = 高光红色平衡
+parameter-mondrian-effect-builtin-color-balance-midtone-blue-label = 中间调蓝色平衡
+parameter-mondrian-effect-builtin-color-balance-midtone-green-label = 中间调绿色平衡
+parameter-mondrian-effect-builtin-color-balance-midtone-red-label = 中间调红色平衡
+parameter-mondrian-effect-builtin-color-balance-preserve-luminosity-label = 保持发光度
+parameter-mondrian-effect-builtin-color-balance-shadow-blue-label = 阴影蓝色平衡
+parameter-mondrian-effect-builtin-color-balance-shadow-green-label = 阴影绿色平衡
+parameter-mondrian-effect-builtin-color-balance-shadow-red-label = 阴影红色平衡

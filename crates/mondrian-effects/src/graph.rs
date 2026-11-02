@@ -1849,6 +1849,10 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float
         },
+        EffectRenderOp::ColorBalance { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_float
+        },
         EffectRenderOp::Choker { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,

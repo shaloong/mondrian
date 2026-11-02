@@ -24,6 +24,7 @@ pub mod bulge;
 pub mod channel_mixer;
 pub mod choker;
 pub mod chroma_key;
+pub mod color_balance;
 pub mod color_curves;
 pub mod color_emboss;
 pub mod color_offset;
@@ -422,6 +423,10 @@ pub use channel_mixer::{
 pub use choker::{
     choker_frame_f32, ChokerError, ChokerGrade, CHOKER_AUTHOR_MAX_CHOKE_PIXELS,
     CHOKER_DEFAULT_CHOKE_PIXELS,
+};
+pub use color_balance::{
+    color_balance_frame_f32, ColorBalanceError, ColorBalanceGrade, COLOR_BALANCE_DEFAULT_BALANCE,
+    COLOR_BALANCE_MAX_BALANCE, COLOR_BALANCE_MIN_BALANCE,
 };
 pub use directional_blur::{
     directional_blur_step, directional_blur_taps, DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS,

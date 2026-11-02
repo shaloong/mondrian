@@ -342,6 +342,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "马赛克" => Some("parameter-group-mosaic"),
         "高光恢复" => Some("parameter-group-highlight-recovery"),
         "黑白" => Some("parameter-group-black-and-white"),
+        "颜色平衡" => Some("parameter-group-color-balance"),
         _ => None,
     }
 }

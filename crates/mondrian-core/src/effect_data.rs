@@ -115,6 +115,8 @@ pub enum EffectType {
     Choker,
     /// Test signals: generates a calibration frame from pixel position alone.
     TestSignals,
+    /// Color balance: shifts the shadow, midtone, and highlight colours apart.
+    ColorBalance,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -202,6 +204,7 @@ impl EffectType {
             Self::BroadcastSafe => "builtin.broadcast_safe".to_string(),
             Self::Choker => "builtin.choker".to_string(),
             Self::TestSignals => "builtin.test_signals".to_string(),
+            Self::ColorBalance => "builtin.color_balance".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -285,6 +288,7 @@ impl EffectType {
             "builtin.broadcast_safe" => Self::BroadcastSafe,
             "builtin.choker" => Self::Choker,
             "builtin.test_signals" => Self::TestSignals,
+            "builtin.color_balance" => Self::ColorBalance,
             other => Self::External(other.to_string()),
         }
     }
@@ -368,6 +372,7 @@ impl EffectType {
             Self::BroadcastSafe => "广播安全",
             Self::Choker => "阻塞收缩",
             Self::TestSignals => "彩条与测试信号",
+            Self::ColorBalance => "颜色平衡",
             Self::External(name) => name,
         }
     }
@@ -449,6 +454,7 @@ impl EffectType {
             Self::BroadcastSafe => vec!["颜色"],
             Self::Choker => vec!["抠像"],
             Self::TestSignals => vec!["生成器"],
+            Self::ColorBalance => vec!["颜色", "调色"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -532,6 +538,7 @@ impl EffectType {
             Self::BroadcastSafe => "broadcast_safe".to_string(),
             Self::Choker => "choker".to_string(),
             Self::TestSignals => "test_signals".to_string(),
+            Self::ColorBalance => "color_balance".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -864,6 +871,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::BroadcastSafe => Ok(()),
             Self::Choker => Ok(()),
             Self::TestSignals => Ok(()),
+            Self::ColorBalance => Ok(()),
         }
     }
 }

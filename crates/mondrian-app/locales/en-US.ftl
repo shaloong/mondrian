@@ -2505,3 +2505,17 @@ parameter-mondrian-effect-test-signals-pattern-concentric-rings = Concentric Rin
 parameter-mondrian-effect-test-signals-pattern-grayscale = Grayscale
 parameter-mondrian-effect-test-signals-pattern-hdr-staircase = HDR Staircase
 parameter-mondrian-effect-test-signals-pattern-zone-plate = Resolution Chart
+
+## Color Balance 颜色平衡
+effect-color-balance = Color Balance
+parameter-group-color-balance = Color Balance
+parameter-mondrian-effect-builtin-color-balance-highlight-blue-label = Highlight Blue Balance
+parameter-mondrian-effect-builtin-color-balance-highlight-green-label = Highlight Green Balance
+parameter-mondrian-effect-builtin-color-balance-highlight-red-label = Highlight Red Balance
+parameter-mondrian-effect-builtin-color-balance-midtone-blue-label = Midtone Blue Balance
+parameter-mondrian-effect-builtin-color-balance-midtone-green-label = Midtone Green Balance
+parameter-mondrian-effect-builtin-color-balance-midtone-red-label = Midtone Red Balance
+parameter-mondrian-effect-builtin-color-balance-preserve-luminosity-label = Preserve Luminosity
+parameter-mondrian-effect-builtin-color-balance-shadow-blue-label = Shadow Blue Balance
+parameter-mondrian-effect-builtin-color-balance-shadow-green-label = Shadow Green Balance
+parameter-mondrian-effect-builtin-color-balance-shadow-red-label = Shadow Red Balance
