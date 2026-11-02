@@ -545,6 +545,7 @@ impl GpuVisualFrameExecutor {
                     working_color_space: request.working_color_space,
                     layers: &layers,
                 },
+                &[],
                 request.color_engine,
                 RenderColorTransformGpuOptions::default(),
             )
@@ -699,6 +700,7 @@ impl GpuVisualFrameExecutor {
                 working_color_space: request.working_color_space,
                 layers: std::slice::from_ref(&source_composite_layer),
             },
+            &[],
         )?;
         compositing_diagnostics.accumulate(materialized.diagnostics);
         let effect = runtime
@@ -772,6 +774,7 @@ impl GpuVisualFrameExecutor {
                 working_color_space: request.working_color_space,
                 layers: &layers,
             },
+            &[],
         )?;
         compositing_diagnostics.accumulate(frame.diagnostics);
         Ok(frame.output)

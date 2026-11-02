@@ -214,7 +214,36 @@ pub struct TimelineCompositeScratch {
     effect_execution: EffectExecutionSession,
     color_execution: crate::RenderCpuColorExecutionSession,
     cpu_working_set_grant: TimelineCpuWorkingSetGrant,
+    effect_gpu_routes: std::collections::HashMap<usize, EffectGpuRouteEntry>,
+    spatial_chain_preference: Option<crate::SpatialChainPreference>,
+    spatial_chain_choices: crate::SpatialChainChoiceDiagnostics,
 }
+
+/// Cached GPU execution route for one compiled effect graph.
+///
+/// The fused point plan is preferred; a spatial chain is admitted only when the
+/// point path refused the graph and the driver accepted the lowered chain.
+#[derive(Clone)]
+pub enum GpuRoute {
+    /// The graph lowers to the existing fused point plan.
+    Point(Arc<CompiledEffectGpuPlan>),
+    /// The graph needs the per-layer spatial chain driver.
+    Spatial(Arc<mondrian_effects::CompiledEffectGpuPipeline>),
+}
+
+struct EffectGpuRouteEntry {
+    /// Kept alive as a `Weak` so the allocation cannot be reused by a different
+    /// graph while this entry is cached: the pointer key stays unique even if
+    /// the caller drops its graph and compiles another one.
+    graph: std::sync::Weak<CompiledEffectGraph>,
+    route: GpuRoute,
+}
+
+/// Upper bound on cached per-graph GPU routes.
+///
+/// The cache exists to keep per-frame admission flat; it is cleared wholesale
+/// once a project touches more distinct graphs than this.
+const EFFECT_GPU_ROUTE_CACHE_LIMIT: usize = 32;
 
 impl TimelineCompositeScratch {
     /// Reconfigure this Preview/Export owner's bounded CPU visual worker pool.
@@ -543,6 +572,68 @@ impl TimelineCompositeScratch {
         self.effect_execution.get_or_lower_gpu_plan(graph)
     }
 
+    /// Two-level GPU admission for one compiled effect graph.
+    ///
+    /// Tries the fused point plan first, which is the existing fast path for
+    /// every graph the fused renderer supports. Only when that refuses the
+    /// graph does this lower a spatial chain and cache the route, so a graph
+    /// that needs per-layer spatial passes costs one lowering per graph rather
+    /// than one per frame. A graph that neither path supports keeps failing
+    /// closed with the point path's blocker.
+    ///
+    /// Routes are keyed by the graph's `Arc` pointer, and each entry holds a
+    /// `Weak` to the graph so a recycled allocation can never serve a stale
+    /// route.
+    pub fn get_or_lower_effect_gpu_route(
+        &mut self,
+        graph: &Arc<CompiledEffectGraph>,
+    ) -> Result<GpuRoute, EffectGpuPlanBlocker> {
+        let key = Arc::as_ptr(graph) as usize;
+        if let Some(entry) = self.effect_gpu_routes.get(&key) {
+            if std::ptr::eq(entry.graph.as_ptr(), Arc::as_ptr(graph)) {
+                return Ok(entry.route.clone());
+            }
+            self.effect_gpu_routes.remove(&key);
+        }
+        let route = match self.effect_execution.get_or_lower_gpu_plan(graph) {
+            Ok(plan) => GpuRoute::Point(plan),
+            Err(_) => {
+                let pipeline =
+                    Arc::new(mondrian_effects::lower_effect_graph_to_gpu_pipeline(graph)?);
+                GpuRoute::Spatial(pipeline)
+            }
+        };
+        if self.effect_gpu_routes.len() >= EFFECT_GPU_ROUTE_CACHE_LIMIT {
+            self.effect_gpu_routes.clear();
+        }
+        self.effect_gpu_routes.insert(
+            key,
+            EffectGpuRouteEntry { graph: Arc::downgrade(graph), route: route.clone() },
+        );
+        Ok(route)
+    }
+
+    /// The process-wide spatial-chain preference, read from the environment
+    /// once per owner.
+    pub fn spatial_chain_preference(&mut self) -> crate::SpatialChainPreference {
+        *self
+            .spatial_chain_preference
+            .get_or_insert_with(crate::SpatialChainPreference::from_env)
+    }
+
+    /// Record one admission decision for the spatial-chain diagnostics counters.
+    pub fn record_spatial_chain_choice(&mut self, choice: &crate::SpatialChainChoice) {
+        self.spatial_chain_choices.record(choice);
+    }
+
+    /// Cumulative GPU-versus-CPU admission evidence for this owner.
+    ///
+    /// The compositor only ever sees layers that reached it on the GPU, so the
+    /// decision counters live here, next to the scratch that made the choice.
+    pub fn spatial_chain_choice_diagnostics(&self) -> crate::SpatialChainChoiceDiagnostics {
+        self.spatial_chain_choices
+    }
+
     fn retained_scratch_bytes(&self) -> u64 {
         self.retained_scratch_capacities().into_iter().fold(0_u64, u64::saturating_add)
     }
@@ -571,6 +662,7 @@ impl TimelineCompositeScratch {
         self.solid_fill_f32 = Vec::new();
         self.transition_left_f32 = Vec::new();
         self.transition_right_f32 = Vec::new();
+        self.effect_gpu_routes = std::collections::HashMap::new();
     }
 
     fn prepare_cpu_working_set(

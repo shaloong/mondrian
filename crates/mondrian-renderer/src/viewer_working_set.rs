@@ -1247,6 +1247,7 @@ mod tests {
                         blend_mode: BlendMode::Normal,
                         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                         effect_plan: Arc::clone(&effect_plan),
+                        spatial_plan: None,
                         frame_seed: 0,
                     },
                 ))];
@@ -1418,6 +1419,7 @@ mod tests {
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: Arc::clone(&effect_plan),
+                spatial_plan: None,
                 frame_seed: 0,
             })),
             ViewerGpuExecutionLayer::Source(Box::new(ViewerGpuSourceLayer::Media {
@@ -1431,6 +1433,7 @@ mod tests {
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan,
+                spatial_plan: None,
                 frame_seed: 0,
             })),
         ];

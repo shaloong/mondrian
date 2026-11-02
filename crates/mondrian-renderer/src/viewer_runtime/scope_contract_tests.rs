@@ -50,6 +50,7 @@ fn gradient_layer() -> ViewerGpuExecutionLayer {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_plan: Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity")),
+        spatial_plan: None,
         frame_seed: 0,
     }))
 }

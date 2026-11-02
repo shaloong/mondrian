@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use mondrian_core::{types::BlendMode, ColorMatrixCoefficients, ColorSpace};
-use mondrian_effects::{CompiledEffectGpuPlan, PreparedHeterogeneousCpuCompletion};
+use mondrian_effects::{
+    CompiledEffectGpuPipeline, CompiledEffectGpuPlan, PreparedHeterogeneousCpuCompletion,
+};
 use mondrian_media::{
     CpuYuvFrame, DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
@@ -81,6 +83,13 @@ pub enum ViewerGpuSourceLayer {
         transform: [f32; 6],
         /// Working-space GPU effect plan.
         effect_plan: Arc<CompiledEffectGpuPlan>,
+        /// Admitted whole-graph spatial chain for this layer, when the caller
+        /// chose the GPU over the CPU fallback.
+        ///
+        /// Exclusive with a non-identity `effect_plan`: the driver records the
+        /// whole chain, including any point stages it lowered, so the compositor
+        /// rejects a layer that carries both.
+        spatial_plan: Option<Arc<CompiledEffectGpuPipeline>>,
         /// Timeline seed for temporal effects.
         frame_seed: i64,
     },

@@ -1137,6 +1137,7 @@ fn create_spatially_varying_4k_working_frame(
                 working_color_space: WorkingColorSpace::LinearRec2020,
                 layers: std::slice::from_ref(&layer),
             },
+            &[],
         )
         .context("record spatially varying 4K working frame")?;
     let submission = context.queue.submit(std::iter::once(encoder.finish()));

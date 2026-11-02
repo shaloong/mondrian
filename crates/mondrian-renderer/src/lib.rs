@@ -26,6 +26,12 @@ mod display_matte;
 pub mod spatial_driver;
 mod spatial_pass_gpu;
 pub use display_matte::GpuDisplayCalibrationBackdrop;
+pub use spatial_driver::{
+    choose_spatial_chain, choose_spatial_chain_for_plan, gpu_spatial_chain_plan,
+    GpuSpatialChainBlocker, GpuSpatialChainPlan, GpuSpatialScratchPool,
+    GpuSpatialScratchPoolDiagnostics, GpuSpatialStagePlan, SpatialChainChoice,
+    SpatialChainChoiceDiagnostics, SpatialChainChoiceReason, SpatialChainPreference,
+};
 pub mod gpu_command;
 pub mod gpu_completion_wake;
 pub mod gpu_composite_execution;
@@ -207,8 +213,9 @@ pub use gpu_composite_execution::{
 };
 pub use gpu_compositor::{
     evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,
-    GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositingBlockerReason,
-    GpuCompositingCapability, GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
+    GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositeSpatialLayer,
+    GpuCompositeSpatialRequest, GpuCompositingBlockerReason, GpuCompositingCapability,
+    GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
     GpuCompositorUniformArenaDiagnostics, GpuFrameCompositor, GpuPointEffectRecord,
     GpuSolidSourceRecord,
 };
@@ -387,7 +394,7 @@ pub use timeline_composite::{
     composite_timeline_elements_color_frame_with_diagnostics,
     composite_timeline_elements_color_frame_with_inputs, composite_timeline_elements_into,
     estimate_timeline_cpu_working_set, is_identity_transform, quantize_transform_signature,
-    TimelineAdjustmentLayer, TimelineCompositeBackground, TimelineCompositeColorPath,
+    GpuRoute, TimelineAdjustmentLayer, TimelineCompositeBackground, TimelineCompositeColorPath,
     TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement, TimelineCompositeError,
     TimelineCompositeExecutionDiagnostics, TimelineCompositeFrame,

@@ -22,6 +22,13 @@ use mondrian_effects::{
 use crate::product_gpu_working_texture_format;
 use crate::spatial_pass_gpu::{EffectSpatialGpu, EffectSpatialGpuError};
 
+pub mod cost;
+
+pub use cost::{
+    choose_spatial_chain, choose_spatial_chain_for_plan, SpatialChainChoice,
+    SpatialChainChoiceDiagnostics, SpatialChainChoiceReason, SpatialChainPreference,
+};
+
 /// Retained scratch-texture byte budget for one compositor pool (512 MiB).
 pub const GPU_SPATIAL_SCRATCH_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 

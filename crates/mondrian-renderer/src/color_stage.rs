@@ -14,13 +14,13 @@ use crate::{
     GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
     GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError,
     GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest,
-    GpuCompositingDiagnostics, GpuFrameCompositor, GpuSolidSourceRecord, LinearFloatSource,
-    OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError,
-    OcioGpuWgpuBackendObjectRuntime, OcioGpuWgpuBackendObjectRuntimeDiagnostics,
-    OcioGpuWgpuBackendPrepError, OcioGpuWgpuBackendPrepRuntime,
-    OcioGpuWgpuBackendPrepRuntimeDiagnostics, OcioGpuWgpuBindGroupLayoutDescriptorPlan,
-    OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
-    OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
+    GpuCompositeSpatialLayer, GpuCompositeSpatialRequest, GpuCompositingDiagnostics,
+    GpuFrameCompositor, GpuSolidSourceRecord, LinearFloatSource, OcioGpuShaderCache,
+    OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
+    OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
+    OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
+    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat,
+    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
     OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindingPlan,
     RenderColorTransform, RenderColorTransformError, RenderColorTransformGpuOptions,
     RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
@@ -34,6 +34,7 @@ use mondrian_core::{
     OcioColorSpaceIdentity, OutputTransformIntent, OutputTransformIntentResolutionError,
     WorkingColorSpace,
 };
+use mondrian_effects::CompiledEffectGpuPipeline;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -1097,6 +1098,13 @@ impl RenderGpuOutputBoundaryRuntime {
     /// The returned GPU working frame can be passed directly to
     /// [`Self::record_wgpu_output_boundary_gpu_frame_owned_backend`], avoiding
     /// the legacy CPU working-frame composite before preview output.
+    ///
+    /// `spatial_plans` is parallel to `request.layers`: entry `i` is the
+    /// admitted spatial chain the compositor must run on layer `i`'s own raster,
+    /// or `None` for a layer that composites exactly as before. An empty slice
+    /// means "no layer carries a chain", which is the plain [`Self::record_wgpu_working_composite`]
+    /// path.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_wgpu_working_composite(
         &mut self,
         compositor: &GpuFrameCompositor,
@@ -1104,16 +1112,42 @@ impl RenderGpuOutputBoundaryRuntime {
         queue: &wgpu::Queue,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: GpuCompositeRequest<'_>,
+        spatial_plans: &[Option<&CompiledEffectGpuPipeline>],
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         let Self { frame_ids, frame_table, resource_pool, .. } = self;
-        compositor.record(
+        if !spatial_plans.iter().any(Option::is_some) {
+            return compositor.record(
+                device,
+                queue,
+                encoder,
+                frame_ids,
+                frame_table,
+                Some(resource_pool),
+                request,
+            );
+        }
+        let layers = request
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| GpuCompositeSpatialLayer {
+                layer: *layer,
+                spatial_plan: spatial_plans.get(index).copied().flatten(),
+            })
+            .collect::<Vec<_>>();
+        compositor.record_with_spatial_effect_chains(
             device,
             queue,
             encoder,
             frame_ids,
             frame_table,
             Some(resource_pool),
-            request,
+            GpuCompositeSpatialRequest {
+                width: request.width,
+                height: request.height,
+                working_color_space: request.working_color_space,
+                layers: &layers,
+            },
         )
     }
 
@@ -1408,6 +1442,10 @@ impl RenderGpuOutputBoundaryRuntime {
     /// adjustment's authored opacity/blend mode, and reused as the next base.
     /// External-domain media and solids must already be materialized as GPU
     /// working frames by the source scheduler.
+    ///
+    /// `spatial_plans` is parallel to `request.layers`; see
+    /// [`Self::record_wgpu_working_composite`]. Segments cut the layer slice, so
+    /// they cut the plan slice at exactly the same indices.
     #[allow(clippy::too_many_arguments)]
     pub fn record_wgpu_composite_graph(
         &mut self,
@@ -1416,6 +1454,7 @@ impl RenderGpuOutputBoundaryRuntime {
         queue: &wgpu::Queue,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: GpuCompositeRequest<'_>,
+        spatial_plans: &[Option<&CompiledEffectGpuPipeline>],
         engine: ColorEngine,
         gpu_options: RenderColorTransformGpuOptions,
     ) -> Result<RenderGpuCompositeGraphRecord, RenderGpuCompositeGraphRecordError> {
@@ -1449,6 +1488,7 @@ impl RenderGpuOutputBoundaryRuntime {
                 request.working_color_space,
                 current.as_ref(),
                 &request.layers[segment_start..index],
+                spatial_plans.get(segment_start..index).unwrap_or(&[]),
             )?;
             compositing_diagnostics.accumulate(lower.diagnostics);
             let base = lower.output;
@@ -1507,6 +1547,7 @@ impl RenderGpuOutputBoundaryRuntime {
             request.working_color_space,
             current.as_ref(),
             &request.layers[segment_start..],
+            spatial_plans.get(segment_start..).unwrap_or(&[]),
         )?;
         compositing_diagnostics.accumulate(final_segment.diagnostics);
         Ok(RenderGpuCompositeGraphRecord {
@@ -1529,9 +1570,12 @@ impl RenderGpuOutputBoundaryRuntime {
         working_color_space: WorkingColorSpace,
         base: Option<&GpuColorFrameHandle>,
         layers: &[GpuCompositeLayer<'_>],
+        spatial_plans: &[Option<&CompiledEffectGpuPipeline>],
     ) -> Result<GpuCompositeRecord, RenderGpuCompositeGraphRecordError> {
         let mut scheduled =
             Vec::with_capacity(layers.len().saturating_add(usize::from(base.is_some())));
+        let mut scheduled_spatial =
+            Vec::with_capacity(spatial_plans.len().saturating_add(usize::from(base.is_some())));
         if let Some(base) = base {
             scheduled.push(GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(base),
@@ -1543,8 +1587,12 @@ impl RenderGpuOutputBoundaryRuntime {
                 effect_plan: None,
                 frame_seed: 0,
             });
+            // The accumulator base is a plain working frame, never an effect
+            // layer, so it can never carry a chain.
+            scheduled_spatial.push(None);
         }
         scheduled.extend_from_slice(layers);
+        scheduled_spatial.extend_from_slice(spatial_plans);
         self.record_wgpu_working_composite(
             compositor,
             device,
@@ -1556,6 +1604,7 @@ impl RenderGpuOutputBoundaryRuntime {
                 working_color_space,
                 layers: &scheduled,
             },
+            &scheduled_spatial,
         )
         .map_err(RenderGpuCompositeGraphRecordError::Composite)
     }
@@ -6961,6 +7010,7 @@ mod tests {
                         working_color_space: WorkingColorSpace::LinearRec709,
                         layers: &layers,
                     },
+                    &[],
                 )
                 .expect("GPU input output should feed GPU compositor");
             context.queue.submit(std::iter::once(encoder.finish()));
@@ -7030,6 +7080,7 @@ mod tests {
                         working_color_space: WorkingColorSpace::LinearRec709,
                         layers: std::slice::from_ref(&layer),
                     },
+                    &[],
                 )
                 .expect("GPU solid composite should record");
             assert_eq!(
@@ -7062,6 +7113,7 @@ mod tests {
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: std::slice::from_ref(&fallback_layer),
                 },
+                &[],
             )
             .expect("non-Normal composite should retain the ping-pong fallback");
         assert_eq!(
@@ -9399,6 +9451,7 @@ mod tests {
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &layers,
                 },
+                &[],
                 engine,
                 RenderColorTransformGpuOptions::default(),
             )
@@ -10105,6 +10158,7 @@ mod tests {
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &layers,
                 },
+                &[],
                 ColorEngine::mondrian_standard(),
                 RenderColorTransformGpuOptions::default(),
             )

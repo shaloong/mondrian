@@ -50,7 +50,7 @@ use crate::{
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
 use mondrian_core::{ProgramScopesTap, WorkingColorSpace};
-use mondrian_effects::EffectColorDomain;
+use mondrian_effects::{CompiledEffectGpuPipeline, EffectColorDomain};
 use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
 
 /// Device calibration bound to an opaque presentation backdrop. Program Output
@@ -1018,7 +1018,8 @@ impl ViewerGpuExecutionRuntime {
             queue,
             encoder,
         )?;
-        let gpu_layers = composite_layers(&prepared_layers, &prepared.gpu_input_handles);
+        let (gpu_layers, gpu_spatial_plans) =
+            composite_layers(&prepared_layers, &prepared.gpu_input_handles);
         let composite = color_output
             .record_wgpu_composite_graph(
                 &self.working_compositor,
@@ -1031,6 +1032,7 @@ impl ViewerGpuExecutionRuntime {
                     working_color_space: request.working_color_space,
                     layers: &gpu_layers,
                 },
+                &gpu_spatial_plans,
                 request.program_output_boundary.engine().clone(),
                 RenderColorTransformGpuOptions::default(),
             )
@@ -2054,6 +2056,11 @@ struct PreparedCompositeLayer<'a> {
     blend_policy: mondrian_effects::EffectPassBlendPolicy,
     transform: [f32; 6],
     effect_plan: Option<&'a mondrian_effects::CompiledEffectGpuPlan>,
+    /// Admitted whole-graph spatial chain this layer runs on its own raster.
+    ///
+    /// Exclusive with a non-identity `effect_plan`; see
+    /// [`crate::ViewerGpuSourceLayer::Media`].
+    spatial_plan: Option<&'a mondrian_effects::CompiledEffectGpuPipeline>,
     frame_seed: i64,
 }
 
@@ -2136,6 +2143,7 @@ fn prepare_composite<'a>(
                     blend_policy: *blend_policy,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     effect_plan: Some(effect_plan),
+                    spatial_plan: None,
                     frame_seed: *frame_seed,
                 }));
             }
@@ -2265,6 +2273,7 @@ fn prepare_source_layer<'a>(
             blend_mode,
             transform,
             effect_plan,
+            spatial_plan,
             frame_seed,
         } => {
             prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
@@ -2341,6 +2350,7 @@ fn prepare_source_layer<'a>(
                     blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(*blend_mode),
                     transform: *transform,
                     effect_plan: None,
+                    spatial_plan: None,
                     frame_seed: *frame_seed,
                 });
             }
@@ -2469,10 +2479,22 @@ fn prepare_source_layer<'a>(
                     }
                 }
             };
-            let (source, effect_plan) = if effect_plan.processing_domain()
-                == EffectColorDomain::SceneLinearRgb
-            {
-                (source, Some(effect_plan.as_ref()))
+            // Admission already refused anything the compositor could not run,
+            // so a chain that is not a scene-linear chain with real stages is
+            // dropped here instead of being recorded unsupported.
+            let spatial_plan = spatial_plan
+                .as_deref()
+                .filter(|plan| !plan.is_identity())
+                .filter(|plan| plan.processing_domain() == EffectColorDomain::SceneLinearRgb)
+                // The numeric DataTexture bypass is a different pass entirely and
+                // the compositor refuses a chain on it.
+                .filter(|_| !*is_data_texture);
+            let (source, effect_plan, spatial_plan) = if let Some(spatial_plan) = spatial_plan {
+                // The chain records the whole graph, including its point stages,
+                // so attaching a point plan as well would double-apply the graph.
+                (source, None, Some(spatial_plan))
+            } else if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb {
+                (source, Some(effect_plan.as_ref()), None)
             } else {
                 let input = match source {
                     PreparedCompositeLayerSource::GpuFrame(index) => {
@@ -2513,6 +2535,7 @@ fn prepare_source_layer<'a>(
                                     working_color_space: request.working_color_space,
                                     layers: std::slice::from_ref(&layer),
                                 },
+                                &[],
                             )
                             .map_err(|error| {
                                 ViewerGpuExecutionError::EffectDomain(format!(
@@ -2541,7 +2564,7 @@ fn prepare_source_layer<'a>(
                     queue,
                     encoder,
                 )?;
-                (PreparedCompositeLayerSource::GpuFrame(index), None)
+                (PreparedCompositeLayerSource::GpuFrame(index), None, None)
             };
             Ok(PreparedCompositeLayer {
                 source,
@@ -2549,6 +2572,7 @@ fn prepare_source_layer<'a>(
                 blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(*blend_mode),
                 transform: *transform,
                 effect_plan,
+                spatial_plan,
                 frame_seed: *frame_seed,
             })
         }
@@ -2563,6 +2587,7 @@ fn prepare_source_layer<'a>(
                     blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(layer.blend_mode),
                     transform: layer.transform,
                     effect_plan: Some(effect_plan),
+                    spatial_plan: None,
                     frame_seed: layer.frame_seed,
                 })
             } else {
@@ -2600,6 +2625,7 @@ fn prepare_source_layer<'a>(
                     blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(layer.blend_mode),
                     transform: layer.transform,
                     effect_plan: None,
+                    spatial_plan: None,
                     frame_seed: layer.frame_seed,
                 })
             }
@@ -2799,6 +2825,9 @@ fn materialize_transition_source<'a>(
         return Ok(None);
     };
     let gpu_layer = composite_layer(&layer, &prepared.gpu_input_handles);
+    // The endpoint keeps its chain: materializing the endpoint is that layer's
+    // own composite, so dropping the plan here would drop the effect.
+    let spatial_plans = [layer.spatial_plan];
     let record = runtime
         .record_wgpu_working_composite(
             compositor,
@@ -2811,6 +2840,7 @@ fn materialize_transition_source<'a>(
                 working_color_space: request.working_color_space,
                 layers: std::slice::from_ref(&gpu_layer),
             },
+            &spatial_plans,
         )
         .map_err(|error| ViewerGpuExecutionError::Transition(Box::new(error)))?;
     diagnostics.accumulate(record.diagnostics);
@@ -2830,6 +2860,7 @@ fn push_prepared_gpu_layer<'a>(
         blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_plan: None,
+        spatial_plan: None,
         frame_seed: 0,
     }
 }
@@ -2957,11 +2988,22 @@ fn record_gpu_input_layer(
     )
 }
 
+/// Flattens prepared layers into the compositor request plus the parallel
+/// spatial-chain slice that request indexes with the same positions.
 fn composite_layers<'a>(
     layers: &'a [PreparedCompositeLayer<'a>],
     gpu_input_handles: &'a [GpuColorFrameHandle],
-) -> Vec<GpuCompositeLayer<'a>> {
-    layers.iter().map(|layer| composite_layer(layer, gpu_input_handles)).collect()
+) -> (
+    Vec<GpuCompositeLayer<'a>>,
+    Vec<Option<&'a CompiledEffectGpuPipeline>>,
+) {
+    let mut gpu_layers = Vec::with_capacity(layers.len());
+    let mut spatial_plans = Vec::with_capacity(layers.len());
+    for layer in layers {
+        gpu_layers.push(composite_layer(layer, gpu_input_handles));
+        spatial_plans.push(layer.spatial_plan);
+    }
+    (gpu_layers, spatial_plans)
 }
 
 fn composite_layer<'a>(
@@ -3739,6 +3781,7 @@ mod tests {
                     blend_mode: BlendMode::Normal,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     effect_plan: Arc::clone(&identity_plan),
+                    spatial_plan: None,
                     frame_seed: 9,
                 }))
             })
@@ -4424,6 +4467,7 @@ mod tests {
                     blend_mode: BlendMode::Normal,
                     transform: [0.5, 0.0, 1.0, 0.0, 0.5, 1.0],
                     effect_plan: Arc::clone(&effect_plan),
+                    spatial_plan: None,
                     frame_seed: timeline_frame,
                 }));
             let mut encoder =
@@ -4515,6 +4559,7 @@ mod tests {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
+            spatial_plan: None,
             frame_seed: 9,
         }));
         let output_boundary = RenderOutputColorBoundary::display(
@@ -4611,6 +4656,7 @@ mod tests {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
+            spatial_plan: None,
             frame_seed: 9,
         }));
         let output_boundary = RenderOutputColorBoundary::display(
@@ -5025,6 +5071,7 @@ mod tests {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: identity_plan,
+            spatial_plan: None,
             frame_seed: FRAME_SEED,
         }));
         let output_boundary = RenderOutputColorBoundary::display(
@@ -5161,6 +5208,7 @@ mod tests {
             effect_plan: Arc::new(
                 lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"),
             ),
+            spatial_plan: None,
             frame_seed: 0,
         }));
         let boundary = RenderOutputColorBoundary::from_intent(

@@ -2577,6 +2577,20 @@ pub struct GpuCompositingDiagnostics {
     /// Peak scratch bytes one composite asked the spatial pool to retain.
     #[serde(default)]
     pub spatial_scratch_bytes_peak: u64,
+    /// Layers this composite recorded through an admitted spatial chain, i.e.
+    /// the layers whose cost estimate chose the GPU and which then reached the
+    /// compositor.
+    #[serde(default)]
+    pub spatial_chain_gpu_choices: u64,
+    /// Layers a caller kept on the CPU because its cost estimate chose the CPU.
+    ///
+    /// The compositor never observes those layers, so this counter is filled by
+    /// the owner that made the choice.
+    #[serde(default)]
+    pub spatial_chain_cpu_choices: u64,
+    /// Estimated microseconds saved by those choices, summed over both sides.
+    #[serde(default)]
+    pub spatial_chain_estimated_savings_us: u64,
     /// Exact spatial execution evidence for GPU layer passes.
     #[serde(default)]
     pub execution: GpuCompositeExecutionDiagnostics,
@@ -2619,6 +2633,13 @@ impl GpuCompositingDiagnostics {
             self.spatial_scratch_textures_peak.max(other.spatial_scratch_textures_peak);
         self.spatial_scratch_bytes_peak =
             self.spatial_scratch_bytes_peak.max(other.spatial_scratch_bytes_peak);
+        self.spatial_chain_gpu_choices =
+            self.spatial_chain_gpu_choices.saturating_add(other.spatial_chain_gpu_choices);
+        self.spatial_chain_cpu_choices =
+            self.spatial_chain_cpu_choices.saturating_add(other.spatial_chain_cpu_choices);
+        self.spatial_chain_estimated_savings_us = self
+            .spatial_chain_estimated_savings_us
+            .saturating_add(other.spatial_chain_estimated_savings_us);
         self.execution.accumulate(other.execution);
         if self.first_blocker.is_none() {
             self.first_blocker = other.first_blocker;
@@ -3479,6 +3500,7 @@ impl GpuFrameCompositor {
         let mut spatial_point_stages = 0_u64;
         let mut spatial_scratch_textures_peak = 0_u32;
         let mut spatial_scratch_bytes_peak = 0_u64;
+        let mut spatial_chain_gpu_choices = 0_u64;
         for (pass_index, layer_execution) in execution.layers.iter().enumerate() {
             let index = layer_execution.input_index;
             let layer = &request.layers[index];
@@ -3614,6 +3636,7 @@ impl GpuFrameCompositor {
                     table.get(&chain_output).map_err(GpuCompositeError::ResourceTable)?.resource(),
                 );
                 spatial_effect_layers = spatial_effect_layers.saturating_add(1);
+                spatial_chain_gpu_choices = spatial_chain_gpu_choices.saturating_add(1);
                 spatial_effect_passes =
                     spatial_effect_passes.saturating_add(u64::from(chain.spatial_passes));
                 spatial_point_stages =
@@ -3761,6 +3784,7 @@ impl GpuFrameCompositor {
         diagnostics.spatial_point_stages = spatial_point_stages;
         diagnostics.spatial_scratch_textures_peak = spatial_scratch_textures_peak;
         diagnostics.spatial_scratch_bytes_peak = spatial_scratch_bytes_peak;
+        diagnostics.spatial_chain_gpu_choices = spatial_chain_gpu_choices;
         if opaque_normal_accumulator {
             diagnostics.opaque_normal_single_accumulator_composites = 1;
             diagnostics.avoided_accumulator_sample_pixels = execution.diagnostics.shaded_pixels;

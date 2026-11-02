@@ -75,6 +75,7 @@ fn layer(frame: CpuYuvFrame) -> ViewerGpuExecutionLayer {
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_plan,
+        spatial_plan: None,
         frame_seed: 0,
     }))
 }
