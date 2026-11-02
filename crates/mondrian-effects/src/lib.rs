@@ -56,6 +56,7 @@ pub mod transform;
 pub mod tritone;
 pub mod twirl;
 pub mod vibrance;
+pub mod warp;
 pub mod wave_warp;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
@@ -433,6 +434,11 @@ pub use unsharp_mask::{
     UNSHARP_MASK_AUTHOR_MIN_RADIUS_PIXELS,
 };
 pub use vibrance::{vibrance_frame_f32, VibranceError, VibranceGrade};
+pub use warp::{
+    warp_frame_f32, WarpAxis, WarpError, WarpGrade, WarpStyle, WARP_DEFAULT_AXIS,
+    WARP_DEFAULT_BEND, WARP_DEFAULT_DISTORTION, WARP_DEFAULT_STYLE, WARP_IDENTITY_EPSILON,
+    WARP_MAX_BEND, WARP_MAX_DISTORTION, WARP_MIN_BEND, WARP_MIN_DISTORTION,
+};
 
 pub use processor_question::{
     EffectProcessorGuiActionFeedback, EffectProcessorGuiActionReceipt, EffectProcessorGuiAdmission,

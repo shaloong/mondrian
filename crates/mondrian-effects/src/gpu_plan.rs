@@ -1006,6 +1006,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Twirl { .. } => "twirl",
         EffectRenderOp::Spherize { .. } => "spherize",
         EffectRenderOp::Dent { .. } => "dent",
+        EffectRenderOp::Warp { .. } => "warp",
         EffectRenderOp::Noise { .. } => "noise",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",

@@ -1064,6 +1064,11 @@ pub enum EffectRenderOp {
     Dent {
         grade: crate::DentGrade,
     },
+    /// Warp: bends the layer along an arc and optionally distorts it across
+    /// and along that arc (DST-14).
+    Warp {
+        grade: crate::WarpGrade,
+    },
     /// Film-style grain keyed off the integer pixel position (FLM-02).
     Noise {
         grade: crate::NoiseGrade,
@@ -1353,6 +1358,7 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("Spherize").field("grade", grade).finish()
             }
             Self::Dent { grade } => formatter.debug_struct("Dent").field("grade", grade).finish(),
+            Self::Warp { grade } => formatter.debug_struct("Warp").field("grade", grade).finish(),
             Self::Noise { grade } => formatter.debug_struct("Noise").field("grade", grade).finish(),
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
@@ -2127,6 +2133,13 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::Warp { grade } => {
+                84u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                for value in params.into_iter().chain(extra) {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -2323,6 +2336,7 @@ impl EffectRenderOp {
             EffectRenderOp::Noise { .. } => 1,
             EffectRenderOp::Spherize { .. } => 3,
             EffectRenderOp::Dent { .. } => 3,
+            EffectRenderOp::Warp { .. } => 3,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2865,7 +2879,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 83] {
+fn builtin_effect_types() -> [EffectType; 84] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2950,6 +2964,7 @@ fn builtin_effect_types() -> [EffectType; 83] {
         EffectType::SpillSuppressor,
         EffectType::ChannelBlur,
         EffectType::Dent,
+        EffectType::Warp,
     ]
 }
 
@@ -8481,6 +8496,79 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Warp => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "style",
+                "弯曲",
+                "变形样式",
+                crate::WarpStyle::Arc.as_key(),
+                crate::WarpStyle::ALL
+                    .iter()
+                    .map(|style| {
+                        let key = style.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            style.label(),
+                            format!("mondrian.effect.warp.style.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "axis",
+                "弯曲",
+                "变形轴",
+                crate::WarpAxis::Horizontal.as_key(),
+                crate::WarpAxis::ALL
+                    .iter()
+                    .map(|axis| {
+                        let key = axis.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            axis.label(),
+                            format!("mondrian.effect.warp.axis.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "bend",
+                "弯曲",
+                "弯曲",
+                PropertyValue::Float(crate::WARP_DEFAULT_BEND),
+                Some(f64::from(crate::WARP_MIN_BEND)),
+                Some(f64::from(crate::WARP_MAX_BEND)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "horizontal_distortion",
+                "弯曲",
+                "水平扭曲",
+                PropertyValue::Float(crate::WARP_DEFAULT_DISTORTION),
+                Some(f64::from(crate::WARP_MIN_DISTORTION)),
+                Some(f64::from(crate::WARP_MAX_DISTORTION)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "vertical_distortion",
+                "弯曲",
+                "垂直扭曲",
+                PropertyValue::Float(crate::WARP_DEFAULT_DISTORTION),
+                Some(f64::from(crate::WARP_MIN_DISTORTION)),
+                Some(f64::from(crate::WARP_MAX_DISTORTION)),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8758,6 +8846,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Spherize, "centre_y") => ParameterUnit::Pixels,
         (EffectType::Dent, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Dent, "size" | "strength") => ParameterUnit::Normalized,
+        (EffectType::Warp, "bend" | "horizontal_distortion" | "vertical_distortion") => {
+            ParameterUnit::Percent
+        }
         (
             EffectType::ChangeToColor,
             "hue" | "lightness" | "saturation" | "softness" | "view_matte",
@@ -9191,6 +9282,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Dent => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Warp => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -13570,6 +13666,68 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Warp => {
+            let style_id = builtin_parameter_id(effect_type, "style");
+            let axis_id = builtin_parameter_id(effect_type, "axis");
+            let bend_id = builtin_parameter_id(effect_type, "bend");
+            let horizontal_distortion_id =
+                builtin_parameter_id(effect_type, "horizontal_distortion");
+            let vertical_distortion_id = builtin_parameter_id(effect_type, "vertical_distortion");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let style = match effect.evaluate_parameter(&style_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::WarpStyle::from_key(&key).ok_or_else(|| {
+                            invalid(format!("warp style {key} is not a declared option"))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid("warp style must be an enumeration".to_owned()));
+                    }
+                    None => crate::WARP_DEFAULT_STYLE,
+                };
+                let axis = match effect.evaluate_parameter(&axis_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::WarpAxis::from_key(&key).ok_or_else(|| {
+                            invalid(format!("warp axis {key} is not a declared option"))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid("warp axis must be an enumeration".to_owned()));
+                    }
+                    None => crate::WARP_DEFAULT_AXIS,
+                };
+                let bend =
+                    effect.evaluate_f32_parameter(&bend_id, context.time, crate::WARP_DEFAULT_BEND);
+                let horizontal_distortion = effect.evaluate_f32_parameter(
+                    &horizontal_distortion_id,
+                    context.time,
+                    crate::WARP_DEFAULT_DISTORTION,
+                );
+                let vertical_distortion = effect.evaluate_f32_parameter(
+                    &vertical_distortion_id,
+                    context.time,
+                    crate::WARP_DEFAULT_DISTORTION,
+                );
+                let grade = crate::WarpGrade::new(
+                    bend,
+                    horizontal_distortion,
+                    vertical_distortion,
+                    style,
+                    axis,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // Zero controls are the identity, so no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Warp { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -13658,6 +13816,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::SpillSuppressor => "溢色抑制",
         EffectType::ChannelBlur => "通道模糊",
         EffectType::Dent => "凹痕",
+        EffectType::Warp => "弯曲",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -14975,6 +15134,7 @@ mod tests {
             EffectType::SpillSuppressor,
             EffectType::ChannelBlur,
             EffectType::Dent,
+            EffectType::Warp,
             EffectType::ChangeToColor,
         ]
         .into_iter()
@@ -18829,6 +18989,114 @@ mod tests {
         assert!((grade.size_fraction() - 0.8).abs() < 1.0e-6);
         assert_eq!(grade.centre()[1], -16.0);
         assert_eq!(grade.kind(), crate::DentKind::Bulge);
+    }
+
+    fn warp_op(graph: &EffectRenderGraph) -> Option<crate::WarpGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Warp { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_warp(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Warp).expect("registered warp definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Warp.property_path(parameter),
+                value,
+            })
+            .expect("authors warp parameter");
+        effect
+    }
+
+    fn author_warp_more(
+        mut effect: EffectNode,
+        parameter: &str,
+        value: PropertyValue,
+    ) -> EffectNode {
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Warp.property_path(parameter),
+                value,
+            })
+            .expect("authors warp parameter");
+        effect
+    }
+
+    #[test]
+    fn warp_defaults_compile_to_the_documented_operation() {
+        let effect = instantiate_effect_node(EffectType::Warp).expect("registered warp definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds warp graph");
+        let grade = warp_op(&graph).expect("warp op");
+        assert!((grade.bend() - crate::WARP_DEFAULT_BEND).abs() < 1.0e-6);
+        assert!((grade.horizontal_distortion() - crate::WARP_DEFAULT_DISTORTION).abs() < 1.0e-6);
+        assert!((grade.vertical_distortion() - crate::WARP_DEFAULT_DISTORTION).abs() < 1.0e-6);
+        assert_eq!(grade.style(), crate::WarpStyle::Arc);
+        assert_eq!(grade.axis(), crate::WarpAxis::Horizontal);
+    }
+
+    #[test]
+    fn warp_zero_controls_compile_to_identity() {
+        let effect = author_warp("bend", PropertyValue::Float(0.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds warp graph");
+        assert!(warp_op(&graph).is_none());
+    }
+
+    #[test]
+    fn warp_authored_state_reaches_the_operation() {
+        let effect = author_warp("bend", PropertyValue::Float(-80.0));
+        let effect = author_warp_more(effect, "horizontal_distortion", PropertyValue::Float(-40.0));
+        let effect = author_warp_more(effect, "vertical_distortion", PropertyValue::Float(25.0));
+        let effect = author_warp_more(effect, "style", PropertyValue::Enum("wave".to_owned()));
+        let effect = author_warp_more(effect, "axis", PropertyValue::Enum("vertical".to_owned()));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds warp graph");
+        let grade = warp_op(&graph).expect("warp op");
+        assert!((grade.bend() + 80.0).abs() < 1.0e-6);
+        assert!((grade.horizontal_distortion() + 40.0).abs() < 1.0e-6);
+        assert!((grade.vertical_distortion() - 25.0).abs() < 1.0e-6);
+        assert_eq!(grade.style(), crate::WarpStyle::Wave);
+        assert_eq!(grade.axis(), crate::WarpAxis::Vertical);
+    }
+
+    #[test]
+    fn warp_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("bend", 100.5_f32),
+            ("bend", -100.5_f32),
+            ("horizontal_distortion", 120.0_f32),
+            ("vertical_distortion", -120.0_f32),
+        ] {
+            let mut effect =
+                instantiate_effect_node(EffectType::Warp).expect("registered warp definition");
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Warp.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect_err("rejects an out-of-range warp control");
+        }
+    }
+
+    #[test]
+    fn warp_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_warp("bend", PropertyValue::Float(75.0));
+        let effect = author_warp_more(effect, "style", PropertyValue::Enum("flag".to_owned()));
+        let effect = author_warp_more(effect, "axis", PropertyValue::Enum("vertical".to_owned()));
+        let wire = serde_json::to_string(&effect).expect("serializes warp effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores warp effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored warp graph");
+        let grade = warp_op(&graph).expect("warp op");
+        assert!((grade.bend() - 75.0).abs() < 1.0e-6);
+        assert_eq!(grade.style(), crate::WarpStyle::Flag);
+        assert_eq!(grade.axis(), crate::WarpAxis::Vertical);
     }
 
     fn twirl_op(graph: &EffectRenderGraph) -> Option<crate::TwirlGrade> {

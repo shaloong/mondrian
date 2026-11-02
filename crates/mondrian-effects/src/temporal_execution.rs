@@ -2850,6 +2850,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Twirl { .. } => "twirl",
         crate::EffectRenderOp::Spherize { .. } => "spherize",
         crate::EffectRenderOp::Dent { .. } => "dent",
+        crate::EffectRenderOp::Warp { .. } => "warp",
         crate::EffectRenderOp::Noise { .. } => "noise",
         crate::EffectRenderOp::MotionTile { .. } => "motion_tile",
         crate::EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",

@@ -92,6 +92,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored dent parameters.
         grade: crate::DentGrade,
     },
+    /// Arc bend with separable along-axis and across-axis distortion.
+    Warp {
+        /// Authored warp parameters.
+        grade: crate::WarpGrade,
+    },
     /// Arbitrary three by three convolution.
     Convolution {
         /// Authored convolution parameters.
@@ -204,6 +209,7 @@ impl EffectGpuSpatialPass {
             Self::Twirl { .. } => "twirl",
             Self::Spherize { .. } => "spherize",
             Self::Dent { .. } => "dent",
+            Self::Warp { .. } => "warp",
             Self::Convolution { .. } => "convolution",
             Self::Mirror { .. } => "mirror",
             Self::PolarCoordinates { .. } => "polar_coordinates",
@@ -258,6 +264,7 @@ impl EffectGpuSpatialPass {
             | Self::Twirl { .. }
             | Self::Spherize { .. }
             | Self::Dent { .. }
+            | Self::Warp { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             // A flare reads only the pixel it writes, so it needs no neighbour.
@@ -307,6 +314,7 @@ impl EffectGpuSpatialPass {
             | Self::Twirl { .. }
             | Self::Spherize { .. }
             | Self::Dent { .. }
+            | Self::Warp { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             Self::LensDistortion { .. } => u32::MAX,
@@ -589,6 +597,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::Spherize { grade: *grade })
         }
         EffectRenderOp::Dent { grade } => Some(EffectGpuSpatialPass::Dent { grade: *grade }),
+        EffectRenderOp::Warp { grade } => Some(EffectGpuSpatialPass::Warp { grade: *grade }),
         EffectRenderOp::Convolution { grade } => {
             Some(EffectGpuSpatialPass::Convolution { grade: *grade })
         }
@@ -928,6 +937,38 @@ mod tests {
             .expect("dent emits a spatial stage");
         assert_eq!(pass.name(), "dent");
         // The remap kernel reads anywhere in the frame, so no local halo bounds it.
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+    }
+
+    #[test]
+    fn warp_lowers_to_a_full_frame_spatial_stage() {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(invert());
+        builder.append_unary(EffectRenderOp::Warp {
+            grade: crate::WarpGrade::new(
+                50.0,
+                0.0,
+                0.0,
+                crate::WarpStyle::Arc,
+                crate::WarpAxis::Horizontal,
+            )
+            .expect("valid warp"),
+        });
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("warp pipeline");
+
+        assert_eq!(pipeline.spatial_stage_count(), 1);
+        let pass = pipeline
+            .stages()
+            .iter()
+            .find_map(|stage| match stage {
+                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::PointOps { .. } => None,
+            })
+            .expect("warp emits a spatial stage");
+        assert_eq!(pass.name(), "warp");
+        // The arc displacement can reach six half-frames, so no local halo bounds it.
         assert_eq!(pass.horizontal_halo(), u32::MAX);
         assert_eq!(pass.vertical_halo(), u32::MAX);
     }
