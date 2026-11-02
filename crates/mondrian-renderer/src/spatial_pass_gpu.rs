@@ -75,6 +75,7 @@ pub(crate) struct EffectSpatialGpu {
     matte_refine_smooth: wgpu::RenderPipeline,
     matte_refine_feather: wgpu::RenderPipeline,
     matte_refine_composite: wgpu::RenderPipeline,
+    choker_composite: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -1157,6 +1158,38 @@ impl EffectSpatialGpu {
                 multiview_mask: None,
                 cache: None,
             });
+        // The choker composite keeps the source colour verbatim and swaps in the
+        // morphed alpha: no view map, no contrast, no premultiply in the shader.
+        let choker_composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.choker-composite"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_choker_composite"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         // Fractal noise needs twenty-six scalars, so the shared uniform struct is
         // too small: the stage gets its own shader module, bind group layout, and
         // uniform payload instead of a sixth `extra` vector.
@@ -1260,6 +1293,7 @@ impl EffectSpatialGpu {
             matte_refine_smooth,
             matte_refine_feather,
             matte_refine_composite,
+            choker_composite,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -1775,6 +1809,9 @@ impl EffectSpatialGpu {
             // feathers it, and composites. Every stage is optional and the two
             // views fold into the composite, so the count follows the grade.
             EffectGpuSpatialPass::MatteRefine { grade } => Ok(grade.pass_count()),
+            // The choker runs one horizontal and one vertical morphology pass;
+            // the composite reuses the texture the horizontal pass wrote.
+            EffectGpuSpatialPass::Choker { .. } => Ok(2),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -2133,6 +2170,9 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::MatteRefine { grade } => {
                 return self
                     .record_matte_refine(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::Choker { grade } => {
+                return self.record_choker(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -3279,6 +3319,89 @@ impl EffectSpatialGpu {
             &composite,
         );
         Ok(scratch[0].clone())
+    }
+
+    /// Records the choker morphology chain.
+    ///
+    /// `scratch[1]` receives the horizontal min/max of the frame alpha,
+    /// `scratch[0]` the vertical pass over that intermediate, which is the matte
+    /// plane the composite reads. The composite keeps the source colour and only
+    /// replaces the alpha, so it writes back into `scratch[1]`.
+    fn record_choker(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::ChokerGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if scratch.len() < 2 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "choker_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        // `[radius, dilate, 0, 0]`; the axis and the "read the frame alpha" flag
+        // are per pass, because only the horizontal pass starts from the frame.
+        let (stage, extra) = grade.gpu_controls();
+        let no_extra = [0.0_f32; 4];
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let horizontal = SpatialPassUniform {
+            size,
+            params: [stage[0], 0.0, stage[1], 1.0],
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let horizontal_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.keylight_erode,
+            &source_view,
+            &horizontal_view,
+            &horizontal,
+        );
+
+        let vertical = SpatialPassUniform {
+            size,
+            params: [stage[0], 1.0, stage[1], 0.0],
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let matte_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.keylight_erode,
+            &horizontal_view,
+            &matte_view,
+            &vertical,
+        );
+
+        let composite = SpatialPassUniform {
+            size,
+            params: no_extra,
+            extra: no_extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let auxiliary_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        let destination_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.choker_composite,
+            &source_view,
+            &auxiliary_view,
+            &destination_view,
+            &composite,
+        );
+        Ok(scratch[1].clone())
     }
 
     /// Records one matte filter pass and advances the matte ping-pong.
@@ -5270,6 +5393,18 @@ fn fs_keylight_composite(@builtin(position) position: vec4<f32>) -> @location(0)
     return vec4<f32>(colour, alpha);
 }
 
+// The choker composite keeps the source colour verbatim and swaps in the alpha
+// the morphology passes produced. The matte plane replicates the coverage into
+// every channel, so `.x` is the alpha and there is no view map or contrast: a
+// fully transparent source pixel still receives the dilated coverage.
+@fragment
+fn fs_choker_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped_from(original_texture, pixel);
+    let matte = load_clamped_from(auxiliary_texture, pixel).x;
+    return vec4<f32>(source.rgb, matte);
+}
+
 // The matte refine composite writes the (optionally cleaned) source colour with
 // the refined matte as alpha. `params` carries
 // `[view_map, view_edge_region, contrast, read_frame_alpha]`; the map view wins
@@ -6401,6 +6536,9 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             180.0, // shutter angle degrees
         )
         .expect("valid matte refine grade");
+        // Erode the chain alpha by 2.5 px: two morphology passes plus the
+        // composite, which fits the two scratch textures the stage is sized for.
+        let choker = mondrian_effects::ChokerGrade::new(2.5).expect("valid choker grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -6421,6 +6559,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::FractalNoise { grade: fractal_noise },
             mondrian_effects::EffectGpuSpatialPass::Keylight { grade: keylight },
             mondrian_effects::EffectGpuSpatialPass::MatteRefine { grade: matte_refine },
+            mondrian_effects::EffectGpuSpatialPass::Choker { grade: choker },
         ];
 
         let mut cpu = pixels.clone();
@@ -6510,6 +6649,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             &matte_refine,
+        ));
+        assert!(mondrian_effects::choker_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &choker,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -8022,6 +8167,117 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gpu_choker_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU choker parity test: no GPU adapter available");
+            return;
+        };
+        let width = 11_u32;
+        let height = 9_u32;
+        let centre_x = 5.0_f32;
+        let centre_y = 4.0_f32;
+        // Three rings: an opaque core, a soft semi-transparent band, and a fully
+        // transparent surround. Every zero-coverage pixel is pure black, so the
+        // alpha morphology never has to invent a colour for a transparent pixel.
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 0.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let dx = x as f32 - centre_x;
+                let dy = y as f32 - centre_y;
+                let distance = (dx * dx + dy * dy).sqrt();
+                let pixel = if distance <= 2.0 {
+                    [0.2, 0.5, 0.8, 1.0]
+                } else if distance <= 3.5 {
+                    [0.1, 0.35, 0.55, (3.5 - distance) / 1.5]
+                } else {
+                    [0.0, 0.0, 0.0, 0.0]
+                };
+                pixels[y * width as usize + x] = pixel;
+            }
+        }
+        let cases = [
+            (
+                "erode",
+                mondrian_effects::ChokerGrade::new(3.0).expect("valid erode grade"),
+            ),
+            (
+                "dilate",
+                mondrian_effects::ChokerGrade::new(-4.0).expect("valid dilate grade"),
+            ),
+        ];
+        for (index, (label, grade)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::choker_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let pool = scratch(&context, width, height, 2);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.choker-encoder"),
+                });
+            let pass = mondrian_effects::EffectGpuSpatialPass::Choker { grade: *grade };
+            assert_eq!(
+                EffectSpatialGpu::texture_pass_count(&pass).expect("supported pass"),
+                2
+            );
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool,
+                    width,
+                    height,
+                )
+                .expect("recorded choker");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "choker case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+
+        // The chain needs two rasters: the matte plane and the composite target.
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let single = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.choker-geometry-encoder"),
+        });
+        let grade = mondrian_effects::ChokerGrade::new(2.0).expect("valid choker grade");
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &mondrian_effects::EffectGpuSpatialPass::Choker { grade },
+                &source,
+                &single,
+                width,
+                height,
+            )
+            .expect_err("a single scratch texture cannot run the choker chain");
+        assert!(
+            matches!(
+                error,
+                EffectSpatialGpuError::UnsupportedPass("choker_scratch_geometry")
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
