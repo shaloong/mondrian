@@ -1204,6 +1204,104 @@ fn leave_color_hue(colour: vec3<f32>) -> f32 {
     return ((colour.r - colour.g) / delta + 4.0) / 6.0;
 }
 
+fn change_to_color_chroma_limit(colour: vec3<f32>) -> f32 {
+    // The same `max(r, g, b, 1e-4)` normaliser the CPU kernel divides by, so a
+    // black sample cannot produce a division by zero.
+    return max(max(colour.r, colour.g), max(colour.b, 0.0001));
+}
+
+fn change_to_color_normalised_chroma(colour: vec3<f32>) -> vec3<f32> {
+    return colour / vec3<f32>(change_to_color_chroma_limit(colour));
+}
+
+fn change_to_color_hue(colour: vec3<f32>) -> f32 {
+    // Copied from `leave_color_hue` on purpose: the two point effects must agree
+    // at the red boundary, and sharing the helper would tie two independently
+    // authored readings together.
+    let maximum = max(colour.r, max(colour.g, colour.b));
+    let minimum = min(colour.r, min(colour.g, colour.b));
+    let delta = maximum - minimum;
+    if (delta == 0.0) {
+        return 0.0;
+    }
+    if (maximum == colour.r) {
+        let sector = (colour.g - colour.b) / delta;
+        if (sector < 0.0) {
+            return (sector + 6.0) / 6.0;
+        }
+        return sector / 6.0;
+    }
+    if (maximum == colour.g) {
+        return ((colour.b - colour.r) / delta + 2.0) / 6.0;
+    }
+    return ((colour.r - colour.g) / delta + 4.0) / 6.0;
+}
+
+fn change_to_color_saturation(colour: vec3<f32>) -> f32 {
+    let maximum = max(colour.r, max(colour.g, colour.b));
+    let minimum = min(colour.r, min(colour.g, colour.b));
+    return (maximum - minimum) / max(maximum, 0.0001);
+}
+
+fn change_to_color_lightness(colour: vec3<f32>) -> f32 {
+    return max(colour.r, max(colour.g, colour.b));
+}
+
+fn change_to_color_wrap(value: f32) -> f32 {
+    // Shortest signed arc: `x - floor(x + 0.5)` lands in `-0.5..=0.5`.
+    return value - floor(value + 0.5);
+}
+
+fn change_to_color_fract(value: f32) -> f32 {
+    return value - floor(value);
+}
+
+fn change_to_color_hsv_to_rgb(hue: f32, saturation: f32, lightness: f32) -> vec3<f32> {
+    // The same six sectors `hsv_channel` spells as a match, unrolled into the
+    // five constant comparisons the shader is allowed to use.
+    if (saturation <= 0.0) {
+        return vec3<f32>(lightness);
+    }
+    let sextant = change_to_color_fract(hue) * 6.0;
+    let chroma = lightness * saturation;
+    let x = chroma * (1.0 - abs(sextant - 2.0 * floor(sextant * 0.5) - 1.0));
+    // Sectors 0 and 1 rise from red to yellow and yellow to green; sectors 2
+    // and 3 fall from green to cyan and cyan to blue. Each adjacent pair is one
+    // select over the same two candidates. `select(f, t, cond)` takes `t` when
+    // the condition holds, so the operands are ordered "later sector first".
+    let rising = select(
+        vec3<f32>(x, chroma, 0.0),
+        vec3<f32>(chroma, x, 0.0),
+        sextant < 1.0,
+    );
+    let falling = select(
+        vec3<f32>(0.0, x, chroma),
+        vec3<f32>(0.0, chroma, x),
+        sextant < 3.0,
+    );
+    // The low half spans sectors 0..3, the high half 4..5.
+    let low = select(falling, rising, sextant < 2.0);
+    let high = select(
+        vec3<f32>(chroma, 0.0, x),
+        vec3<f32>(x, 0.0, chroma),
+        sextant < 5.0,
+    );
+    let base = select(high, low, sextant < 4.0);
+    return base + vec3<f32>(lightness - chroma);
+}
+
+fn change_to_color_weight(colour: vec3<f32>, effect: EffectUniform) -> f32 {
+    // `d = ||ĉ − k̂|| / √3` against the chroma-normalised source, then the
+    // Hermite ramp from one at the source to zero past the authored softness.
+    let sample = change_to_color_normalised_chroma(colour);
+    let source = change_to_color_normalised_chroma(effect.extra0.xyz);
+    let difference = sample - source;
+    let distance = sqrt(dot(difference, difference)) * 0.5773503;
+    let edge = max(effect.params.w, 0.0) + 0.0001;
+    let t = clamp(distance / edge, 0.0, 1.0);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+}
+
 fn effects_author_coverage() -> bool {
     // A pixel without coverage is invisible, so every grade could skip it — and
     // that is exactly what this early return does. The exception is a chain that
@@ -1899,6 +1997,56 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 }
             }
             pixel = vec4<f32>(clamp(corrected, vec3<f32>(0.0), vec3<f32>(1.0)), pixel.a);
+        } else if (effect.header.x == 34u) {
+            // `ChangeToColorGrade`: params is [hue amount, lightness amount,
+            // saturation amount, softness], colour is [to r, to g, to b, 0], and
+            // extra0 is [from r, from g, from b, 0]; extra1.x is the correction
+            // matte view. header.y is the change bitfield (bit0 hue, bit1
+            // lightness, bit2 saturation) and header.z selects the absolute
+            // change-by. The order is fixed: match against the chroma-normalised
+            // source, shift the selected HSV components, then mix the matte view.
+            if (pixel.a > 0.0) {
+                let w = change_to_color_weight(pixel.rgb, effect);
+                // A zero weight still shows the matte: the viewer asked to see
+                // the correction, and the correction of an unmatched sample is
+                // black.
+                if (w > 0.0 || effect.extra1.x > 0.0) {
+                    let h0 = change_to_color_hue(pixel.rgb);
+                    let s0 = change_to_color_saturation(pixel.rgb);
+                    let v0 = change_to_color_lightness(pixel.rgb);
+                    let kh = change_to_color_hue(effect.extra0.xyz);
+                    let ks = change_to_color_saturation(effect.extra0.xyz);
+                    let kv = change_to_color_lightness(effect.extra0.xyz);
+                    let th = change_to_color_hue(effect.color.xyz);
+                    let ts = change_to_color_saturation(effect.color.xyz);
+                    let tv = change_to_color_lightness(effect.color.xyz);
+                    let absolute = effect.header.z != 0u;
+                    let dh = select(
+                        change_to_color_wrap(th - kh),
+                        change_to_color_wrap(th - h0),
+                        absolute,
+                    );
+                    let ds = select(ts - ks, ts - s0, absolute);
+                    let dv = select(tv - kv, tv - v0, absolute);
+                    // channel_scale is ordered like params.xyz: hue, then
+                    // lightness, then saturation; the bitfield is expanded with
+                    // select because the shader has no dynamic vector indexing.
+                    // (`enable` is a WGSL directive keyword, so it cannot name a
+                    // value here.)
+                    let channel_scale = vec3<f32>(
+                        select(0.0, 1.0, (effect.header.y & 1u) != 0u),
+                        select(0.0, 1.0, (effect.header.y & 2u) != 0u),
+                        select(0.0, 1.0, (effect.header.y & 4u) != 0u),
+                    );
+                    let a = w * effect.params.xyz * channel_scale;
+                    let h1 = change_to_color_fract(h0 + a.x * dh);
+                    let s1 = s0 + a.z * ds;
+                    let v1 = v0 + a.y * dv;
+                    let shifted = change_to_color_hsv_to_rgb(h1, s1, v1);
+                    let mixed = mix(shifted, vec3<f32>(w), effect.extra1.x);
+                    pixel = vec4<f32>(clamp(mixed, vec3<f32>(0.0), vec3<f32>(1.0)), pixel.a);
+                }
+            }
         }
     }
     return pixel;
@@ -5143,6 +5291,16 @@ fn effect_uniforms(
                     color,
                     extra0,
                     extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::ChangeToColor { grade } => {
+                let (params, color) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [34, grade.change_flags(), grade.change_by_index(), 0],
+                    params,
+                    color,
+                    extra0: grade.gpu_source(),
+                    extra1: [grade.gpu_view(), 0.0, 0.0, 0.0],
                 }
             }
             EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
@@ -8660,6 +8818,228 @@ mod tests {
         }
     }
 
+    #[test]
+    fn change_to_color_uniforms_pack_the_authored_slots() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, ChangeToColorBy,
+            ChangeToColorChange, ChangeToColorGrade, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        // The documented frame-1 configuration: red source, green target, hue
+        // only, relative change-by, hard edge, no matte view.
+        let grade = ChangeToColorGrade::new(
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            ChangeToColorChange::Hue,
+            ChangeToColorBy::Relative,
+            1.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        )
+        .expect("valid change to color grade");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ChangeToColor { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        let uniforms = effect_uniforms(Some(&plan), None).expect("uniforms");
+        assert_eq!(uniforms[0].header, [34, 1, 0, 0]);
+        assert_eq!(uniforms[0].params, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(uniforms[0].color, [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(uniforms[0].extra0, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(uniforms[0].extra1, [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[tokio::test]
+    async fn gpu_change_to_color_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ChangeToColorBy, ChangeToColorChange,
+            ChangeToColorGrade, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU change to color parity test: no GPU adapter available");
+            return;
+        };
+        // One authored configuration per case. The first four pixels carry the
+        // documented reading; every other pixel keeps `[0.2, 0.4, 0.6, 1.0]`,
+        // which is far enough from the red source (`d = 0.79`) to take a zero
+        // weight in all three cases.
+        struct Case {
+            from: [f32; 3],
+            to: [f32; 3],
+            change: ChangeToColorChange,
+            by: ChangeToColorBy,
+            amounts: [f32; 3],
+            softness: f32,
+            view: f32,
+            authored: [[f32; 4]; 4],
+            expected: [[f32; 4]; 4],
+        }
+        let cases = [
+            // An exact match is replaced by the target hue; the target colour
+            // itself, a grey and the unfilled pixels keep their value.
+            Case {
+                from: [1.0, 0.0, 0.0],
+                to: [0.0, 1.0, 0.0],
+                change: ChangeToColorChange::Hue,
+                by: ChangeToColorBy::Relative,
+                amounts: [1.0, 1.0, 1.0],
+                softness: 0.0,
+                view: 0.0,
+                authored: [
+                    [1.0, 0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.0, 1.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                    [0.5, 0.5, 0.5, 1.0],
+                ],
+                expected: [
+                    [0.0, 1.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.0, 1.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                    [0.5, 0.5, 0.5, 1.0],
+                ],
+            },
+            // Absolute change-by moves every matched sample to the target HSV:
+            // `(0.5, 0, 0)` is `(0, 1, 0.5)` in HSV, and the absolute deltas
+            // `(1/12 - 0, 1 - 1, 1 - 0.5)` land on `(1, 0.5, 0)`.
+            Case {
+                from: [1.0, 0.0, 0.0],
+                to: [1.0, 0.5, 0.0],
+                change: ChangeToColorChange::HueLightnessSaturation,
+                by: ChangeToColorBy::Absolute,
+                amounts: [1.0, 1.0, 1.0],
+                softness: 0.0,
+                view: 0.0,
+                authored: [
+                    [1.0, 0.0, 0.0, 1.0],
+                    [0.5, 0.0, 0.0, 1.0],
+                    [0.0, 1.0, 1.0, 1.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ],
+                expected: [
+                    [1.0, 0.5, 0.0, 1.0],
+                    [1.0, 0.5, 0.0, 1.0],
+                    [0.0, 1.0, 1.0, 1.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ],
+            },
+            // The matte view replaces the corrected colour by the weight, and a
+            // zero weight is black rather than a skipped pixel: `d = 0.25` with
+            // softness 0.5 halves the ramp, and the cyan sample is black.
+            Case {
+                from: [1.0, 0.0, 0.0],
+                to: [0.0, 1.0, 0.0],
+                change: ChangeToColorChange::Hue,
+                by: ChangeToColorBy::Relative,
+                amounts: [1.0, 1.0, 1.0],
+                softness: 0.5,
+                view: 1.0,
+                authored: [
+                    [1.0, 0.0, 0.0, 1.0],
+                    [1.0, 0.433013, 0.0, 1.0],
+                    [0.0, 1.0, 1.0, 1.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ],
+                expected: [
+                    [1.0, 1.0, 1.0, 1.0],
+                    [0.5001, 0.5001, 0.5001, 1.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ],
+            },
+        ];
+        for case in cases {
+            let mut data = vec![[0.2_f32, 0.4, 0.6, 1.0]; 20];
+            data[..4].copy_from_slice(&case.authored);
+            let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width: 5,
+                height: 4,
+                color_space: WorkingColorSpace::LinearRec709,
+                data,
+            });
+            let grade = ChangeToColorGrade::new(
+                case.from,
+                case.to,
+                case.change,
+                case.by,
+                case.amounts[0],
+                case.amounts[1],
+                case.amounts[2],
+                case.softness,
+                case.view,
+            )
+            .expect("valid change to color grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::ChangeToColor { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(5, 4),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            for (index, want) in case.expected.iter().enumerate() {
+                let got = expected.pixels()[index];
+                for channel in 0..4 {
+                    // The compositor discards the rgb of a zero-coverage layer,
+                    // so the reference itself must already read all zero there.
+                    assert!(
+                        (got[channel] - want[channel]).abs() <= 1.0e-3,
+                        "reference pixel {index} channel {channel}: got {got:?}, want {want:?}"
+                    );
+                }
+            }
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                5,
+                4,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU change to color accuracy budget exceeded for {grade:?}: {report:#?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn gpu_broadcast_safe_matches_the_cpu_kernel() {
         use crate::color_accuracy::{
@@ -9576,10 +9956,11 @@ mod tests {
             apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
             lower_effect_graph_to_gpu_plan, ArithmeticGrade, ArithmeticOperator,
             BlackAndWhiteGrade, BroadcastLocale, BroadcastSafeGrade, BroadcastSafeMode,
-            ChannelMixerGrade, ChannelSource, ColorBalanceGrade, EffectGraphBuilderState,
-            EffectRenderOp, HueBand, HueSaturationGrade, InvertChannels, LeaveColorGrade,
-            LeaveColorMatch, ShiftChannelsGrade, SpillSuppressorGrade, SpillSuppressorMethod,
-            TestSignalsGrade, TestSignalsPattern,
+            ChangeToColorBy, ChangeToColorChange, ChangeToColorGrade, ChannelMixerGrade,
+            ChannelSource, ColorBalanceGrade, EffectGraphBuilderState, EffectRenderOp, HueBand,
+            HueSaturationGrade, InvertChannels, LeaveColorGrade, LeaveColorMatch,
+            ShiftChannelsGrade, SpillSuppressorGrade, SpillSuppressorMethod, TestSignalsGrade,
+            TestSignalsPattern,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -9671,6 +10052,20 @@ mod tests {
             grade: LeaveColorGrade::new(100.0, [0.25, 0.5, 0.75], 25.0, 20.0, LeaveColorMatch::Hue)
                 .expect("valid leave color grade"),
         });
+        builder.append_unary(EffectRenderOp::ChangeToColor {
+            grade: ChangeToColorGrade::new(
+                [0.25, 0.5, 0.75],
+                [0.75, 0.5, 0.25],
+                ChangeToColorChange::HueSaturation,
+                ChangeToColorBy::Relative,
+                1.0,
+                1.0,
+                1.0,
+                0.5,
+                0.0,
+            )
+            .expect("valid change to color grade"),
+        });
         builder.append_unary(EffectRenderOp::BroadcastSafe {
             grade: BroadcastSafeGrade::new(
                 BroadcastLocale::Ntsc,
@@ -9701,8 +10096,8 @@ mod tests {
             )
             .expect("valid spill suppressor grade"),
         });
-        // The generator runs last, so its frame replaces whatever the twelve
-        // colour ops produced; the chain still has to fuse all thirteen ops.
+        // The generator runs last, so its frame replaces whatever the thirteen
+        // colour ops produced; the chain still has to fuse all fourteen ops.
         builder.append_unary(EffectRenderOp::TestSignals {
             grade: TestSignalsGrade::new(TestSignalsPattern::Grayscale, 100.0, true, true)
                 .expect("valid test signals grade"),
@@ -9710,7 +10105,7 @@ mod tests {
         let graph = compile_reference_render_graph(builder.finish()).expect("valid built-in graph");
         let plan =
             lower_effect_graph_to_gpu_plan(&graph).expect("supported built-in point effects");
-        assert_eq!(plan.operations().len(), 13);
+        assert_eq!(plan.operations().len(), 14);
 
         let expected = apply_compiled_effect_graph_rgba_f32(
             mondrian_effects::EffectFloatFrameView::new(
@@ -9744,7 +10139,7 @@ mod tests {
             WorkingColorSpace::LinearRec709,
         );
         assert_eq!(diagnostics.execution.fused_layer_passes, 1);
-        assert_eq!(diagnostics.execution.fused_point_operations, 13);
+        assert_eq!(diagnostics.execution.fused_point_operations, 14);
         let report = compare_linear_rgba(
             expected.pixels(),
             &actual,
