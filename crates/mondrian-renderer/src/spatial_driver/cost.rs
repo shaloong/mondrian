@@ -362,6 +362,8 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "convolution" | "glow" | "matte_refine" | "deband" => 0.9,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
+        // Wire removal reads up to two bilinear taps and writes one pixel.
+        "wire_removal" => 0.6,
         _ => GPU_DEFAULT_NS_PER_PX,
     }
 }
@@ -377,6 +379,8 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "directional_blur" | "convolution" | "glow" | "fractal_noise" | "deband" => 3.0,
         "twirl" | "spherize" | "dent" | "polar_coordinates" | "lens_distortion" => 2.0,
         "warp" => 2.0,
+        // Up to two bilinear taps averaged behind a per-row band test.
+        "wire_removal" => 2.0,
         "radial_blur" | "turbulent_displace" | "keylight" | "matte_refine" => 4.0,
         "minimax" | "choker" | "find_edges" | "emboss" | "color_emboss" => 2.5,
         _ => 2.0,

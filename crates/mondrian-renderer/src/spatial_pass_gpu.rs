@@ -52,6 +52,7 @@ pub(crate) struct EffectSpatialGpu {
     dent: wgpu::RenderPipeline,
     warp: wgpu::RenderPipeline,
     grid_warp: wgpu::RenderPipeline,
+    wire_removal: wgpu::RenderPipeline,
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
@@ -465,6 +466,36 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_grid_warp"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let wire_removal = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.wire-removal"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_wire_removal"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -1428,6 +1459,7 @@ impl EffectSpatialGpu {
             dent,
             warp,
             grid_warp,
+            wire_removal,
             mirror,
             polar_coordinates,
             lens_distortion,
@@ -1948,6 +1980,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Dent { .. }
             | EffectGpuSpatialPass::Warp { .. }
             | EffectGpuSpatialPass::GridWarp { .. }
+            | EffectGpuSpatialPass::WireRemoval { .. }
             | EffectGpuSpatialPass::Convolution { .. }
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
@@ -2138,6 +2171,20 @@ impl EffectSpatialGpu {
                 ))?;
                 let (params, extra) = grade.gpu_controls(width as usize, height as usize);
                 return self.record_grid_warp(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::WireRemoval { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_wire_removal(
                     device,
                     encoder,
                     params,
@@ -2748,6 +2795,42 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.grid_warp,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+    /// Records wire removal: clones pixels from a parallel displacement across
+    /// the authored line.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_wire_removal(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.wire_removal,
             &input_view,
             &output_view,
             &uniform,
@@ -4982,6 +5065,48 @@ fn fs_split(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let shift = select(-half, half, signed >= 0.0);
     let sampled = pixel - normal * shift;
     return unpremultiply(sample_bilinear_premultiplied(sampled.x, sampled.y));
+}
+
+/// Wire removal: clones from a parallel displacement across the authored line.
+@fragment
+fn fs_wire_removal(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = position.xy - vec2<f32>(0.5);
+    let a = vec2<f32>(uniforms.params.x, uniforms.params.y);
+    let line = vec2<f32>(
+        uniforms.params.z - uniforms.params.x,
+        uniforms.params.w - uniforms.params.y,
+    );
+    let line_length = max(length(line), 1.0e-6);
+    let tangent = line / line_length;
+    let normal = vec2<f32>(-tangent.y, tangent.x);
+    let thickness = uniforms.extra.x;
+    let signed = dot(pixel - a, normal);
+    if (abs(signed) > thickness * 0.5) {
+        return load_clamped(vec2<i32>(floor(pixel)));
+    }
+    let k = 2.0 * uniforms.extra.y - 1.0;
+    let direction = normalize(normal + tangent * k);
+    let displacement = thickness;
+    let style = u32(uniforms.extra.w + 0.5);
+    var clone = pixel + direction * displacement;
+    if (style == 1u) {
+        clone = pixel - direction * displacement;
+    }
+    if (style == 3u) {
+        let side = select(-1.0, 1.0, signed >= 0.0);
+        clone = pixel - side * direction * displacement;
+    }
+    let mirrored = pixel - 2.0 * signed * normal;
+    let aim = mix(clone, mirrored, uniforms.extra.z);
+    if (style == 2u) {
+        let other = pixel - direction * displacement;
+        let aim_b = mix(other, mirrored, uniforms.extra.z);
+        return unpremultiply(
+            0.5 * (sample_bilinear_premultiplied(aim.x, aim.y)
+                 + sample_bilinear_premultiplied(aim_b.x, aim_b.y)),
+        );
+    }
+    return unpremultiply(sample_bilinear_premultiplied(aim.x, aim.y));
 }
 
 /// Bulge: magnifies an elliptical region of the frame.
@@ -7299,6 +7424,16 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         .expect("valid warp grade");
         let grid_warp =
             mondrian_effects::GridWarpGrade::new(6, 5, 8).expect("valid grid warp grade");
+        let wire_removal = mondrian_effects::WireRemovalGrade::new(
+            [7.5, 6.5],
+            [7.5, 2.5],
+            mondrian_effects::RemovalStyle::Both,
+            2.0,
+            0.5,
+            0.25,
+            0,
+        )
+        .expect("valid wire removal grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -7310,6 +7445,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
             mondrian_effects::EffectGpuSpatialPass::Warp { grade: warp },
             mondrian_effects::EffectGpuSpatialPass::GridWarp { grade: grid_warp },
+            mondrian_effects::EffectGpuSpatialPass::WireRemoval { grade: wire_removal },
             mondrian_effects::EffectGpuSpatialPass::Dent { grade: dent },
             mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
             mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
@@ -7328,7 +7464,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 20, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 21, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::box_blur_frame_f32(
@@ -7363,6 +7499,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             grid_warp,
+        ));
+        assert!(mondrian_effects::wire_removal_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            wire_removal,
         ));
         assert!(mondrian_effects::dent_frame_f32(
             &mut cpu,
@@ -10383,6 +10525,149 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 error,
                 EffectSpatialGpuError::UnsupportedPass("grid_warp_scratch_geometry")
             ),
+            "unexpected error: {error:?}"
+        );
+    }
+    #[test]
+    fn gpu_wire_removal_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU wire removal parity test: no GPU adapter available");
+            return;
+        };
+        let width = 15_u32;
+        let height = 11_u32;
+        let cases = [
+            (
+                "both",
+                [7.5_f32, 5.5],
+                [7.5, 1.5],
+                mondrian_effects::RemovalStyle::Both,
+                2.0_f32,
+                0.5_f32,
+                0.25_f32,
+            ),
+            (
+                "left",
+                [4.5, 5.5],
+                [10.5, 5.5],
+                mondrian_effects::RemovalStyle::Left,
+                2.0,
+                0.0,
+                0.0,
+            ),
+            (
+                "right",
+                [4.5, 5.5],
+                [10.5, 5.5],
+                mondrian_effects::RemovalStyle::Right,
+                3.0,
+                1.0,
+                0.5,
+            ),
+            (
+                "cross",
+                [7.5, 2.5],
+                [7.5, 8.5],
+                mondrian_effects::RemovalStyle::Cross,
+                3.0,
+                0.3,
+                0.75,
+            ),
+        ];
+        for (label, point_a, point_b, style, thickness, slope, mirror_blend) in cases {
+            let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let value = 0.04 * (x + 2 * y) as f32;
+                    pixels[y * width as usize + x] = [value, 0.5 - value * 0.4, value * 1.5, 1.0];
+                }
+            }
+            pixels[24] = [0.0, 0.0, 0.0, 0.0];
+            let grade = mondrian_effects::WireRemovalGrade::new(
+                point_a,
+                point_b,
+                style,
+                thickness,
+                slope,
+                mirror_blend,
+                0,
+            )
+            .expect("wire removal grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::wire_removal_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.wire-removal-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_wire_removal(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded wire removal");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "wire removal {label} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+
+        // One pass needs exactly one scratch raster.
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(
+            &context,
+            &vec![[0.0_f32; 4]; (width * height) as usize],
+            width,
+            height,
+        );
+        let none = scratch(&context, width, height, 0);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.wire-removal-geometry-encoder"),
+        });
+        let grade = mondrian_effects::WireRemovalGrade::new(
+            [7.5, 5.5],
+            [7.5, 1.5],
+            mondrian_effects::RemovalStyle::Both,
+            2.0,
+            0.5,
+            0.25,
+            0,
+        )
+        .expect("valid wire removal grade");
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &mondrian_effects::EffectGpuSpatialPass::WireRemoval { grade },
+                &source,
+                &none,
+                width,
+                height,
+            )
+            .expect_err("a missing scratch texture cannot run wire removal");
+        assert!(
+            matches!(error, EffectSpatialGpuError::EmptyFrame),
             "unexpected error: {error:?}"
         );
     }
