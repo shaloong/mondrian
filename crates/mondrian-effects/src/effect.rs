@@ -1074,6 +1074,11 @@ pub enum EffectRenderOp {
     GridWarp {
         grade: crate::GridWarpGrade,
     },
+    /// Wire removal: clones pixels from a parallel displacement across an
+    /// authored line (RES-07).
+    WireRemoval {
+        grade: crate::WireRemovalGrade,
+    },
     /// Film-style grain keyed off the integer pixel position (FLM-02).
     Noise {
         grade: crate::NoiseGrade,
@@ -1366,6 +1371,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Warp { grade } => formatter.debug_struct("Warp").field("grade", grade).finish(),
             Self::GridWarp { grade } => {
                 formatter.debug_struct("GridWarp").field("grade", grade).finish()
+            }
+            Self::WireRemoval { grade } => {
+                formatter.debug_struct("WireRemoval").field("grade", grade).finish()
             }
             Self::Noise { grade } => formatter.debug_struct("Noise").field("grade", grade).finish(),
             Self::ColorEmboss { grade } => {
@@ -2154,6 +2162,13 @@ impl EffectRenderOp {
                 grade.rows().hash(state);
                 grade.quality().hash(state);
             }
+            EffectRenderOp::WireRemoval { grade } => {
+                86u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                for value in params.into_iter().chain(extra) {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -2352,6 +2367,7 @@ impl EffectRenderOp {
             EffectRenderOp::Dent { .. } => 3,
             EffectRenderOp::Warp { .. } => 3,
             EffectRenderOp::GridWarp { .. } => 3,
+            EffectRenderOp::WireRemoval { .. } => 4,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2894,7 +2910,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 85] {
+fn builtin_effect_types() -> [EffectType; 86] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2981,6 +2997,7 @@ fn builtin_effect_types() -> [EffectType; 85] {
         EffectType::Dent,
         EffectType::Warp,
         EffectType::GridWarp,
+        EffectType::WireRemoval,
     ]
 }
 
@@ -8626,6 +8643,91 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::WireRemoval => {
+            for (parameter, name, default) in [
+                ("point_a_x", "起点 A X", 128.0),
+                ("point_a_y", "起点 A Y", 192.0),
+                ("point_b_x", "终点 B X", 128.0),
+                ("point_b_y", "终点 B Y", 64.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "祛线",
+                    name,
+                    PropertyValue::Float(default),
+                    Some(f64::from(-crate::WIRE_REMOVAL_MAX_COORDINATE)),
+                    Some(f64::from(crate::WIRE_REMOVAL_MAX_COORDINATE)),
+                    Some(1.0),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "removal_style",
+                "祛线",
+                "祛除方式",
+                crate::RemovalStyle::Both.as_key(),
+                crate::RemovalStyle::ALL
+                    .into_iter()
+                    .map(|style| {
+                        ParameterEnumOption::new(
+                            style.as_key(),
+                            style.label(),
+                            format!(
+                                "mondrian.effect.wire_removal.removal_style.{}",
+                                style.as_key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "thickness",
+                "祛线",
+                "线宽",
+                PropertyValue::Float(2.0),
+                Some(0.0),
+                Some(f64::from(crate::WIRE_REMOVAL_MAX_THICKNESS)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "slope",
+                "祛线",
+                "斜率",
+                PropertyValue::Float(0.5),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mirror_blend",
+                "祛线",
+                "镜像混合",
+                PropertyValue::Float(0.25),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "frame_offset",
+                "祛线",
+                "帧偏移（暂未实现）",
+                PropertyValue::Float(5.0),
+                Some(f64::from(-crate::WIRE_REMOVAL_MAX_FRAME_OFFSET)),
+                Some(f64::from(crate::WIRE_REMOVAL_MAX_FRAME_OFFSET)),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8862,6 +8964,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Split, "point_a_x" | "point_a_y" | "point_b_x" | "point_b_y" | "split") => {
             ParameterUnit::Pixels
         }
+        (
+            EffectType::WireRemoval,
+            "point_a_x" | "point_a_y" | "point_b_x" | "point_b_y" | "thickness",
+        ) => ParameterUnit::Pixels,
+        (EffectType::WireRemoval, "mirror_blend") => ParameterUnit::Normalized,
         (EffectType::Ramp, "start" | "end") => ParameterUnit::Pixels,
         (EffectType::ColorOffset, "red_phase" | "green_phase" | "blue_phase") => {
             ParameterUnit::Pixels
@@ -9349,6 +9456,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::GridWarp => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::WireRemoval => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -13832,6 +13944,77 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::WireRemoval => {
+            let point_a_x_id = builtin_parameter_id(effect_type, "point_a_x");
+            let point_a_y_id = builtin_parameter_id(effect_type, "point_a_y");
+            let point_b_x_id = builtin_parameter_id(effect_type, "point_b_x");
+            let point_b_y_id = builtin_parameter_id(effect_type, "point_b_y");
+            let style_id = builtin_parameter_id(effect_type, "removal_style");
+            let thickness_id = builtin_parameter_id(effect_type, "thickness");
+            let slope_id = builtin_parameter_id(effect_type, "slope");
+            let mirror_blend_id = builtin_parameter_id(effect_type, "mirror_blend");
+            let frame_offset_id = builtin_parameter_id(effect_type, "frame_offset");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let point_a = [
+                    effect.evaluate_f32_parameter(&point_a_x_id, context.time, 128.0),
+                    effect.evaluate_f32_parameter(&point_a_y_id, context.time, 192.0),
+                ];
+                let point_b = [
+                    effect.evaluate_f32_parameter(&point_b_x_id, context.time, 128.0),
+                    effect.evaluate_f32_parameter(&point_b_y_id, context.time, 64.0),
+                ];
+                let style = match effect.evaluate_parameter(&style_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::RemovalStyle::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("wire removal style {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "wire removal style must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::RemovalStyle::Both,
+                };
+                let thickness = effect.evaluate_f32_parameter(&thickness_id, context.time, 2.0);
+                let slope = effect.evaluate_f32_parameter(&slope_id, context.time, 0.5);
+                let mirror_blend =
+                    effect.evaluate_f32_parameter(&mirror_blend_id, context.time, 0.25);
+                let frame_offset =
+                    effect.evaluate_f32_parameter(&frame_offset_id, context.time, 5.0);
+                if !frame_offset.is_finite() {
+                    return Err(invalid(
+                        "wire removal frame offset must be finite".to_owned(),
+                    ));
+                }
+                let frame_offset = frame_offset.round();
+                if frame_offset < -(crate::WIRE_REMOVAL_MAX_FRAME_OFFSET as f32)
+                    || frame_offset > crate::WIRE_REMOVAL_MAX_FRAME_OFFSET as f32
+                {
+                    return Err(invalid(
+                        "wire removal frame offset is outside the declared range".to_owned(),
+                    ));
+                }
+                let grade = crate::WireRemovalGrade::new(
+                    point_a,
+                    point_b,
+                    style,
+                    thickness,
+                    slope,
+                    mirror_blend,
+                    frame_offset as i32,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::WireRemoval { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -13922,6 +14105,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Dent => "凹痕",
         EffectType::Warp => "弯曲",
         EffectType::GridWarp => "网格变形",
+        EffectType::WireRemoval => "祛线",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -15241,6 +15425,7 @@ mod tests {
             EffectType::Dent,
             EffectType::Warp,
             EffectType::GridWarp,
+            EffectType::WireRemoval,
             EffectType::ChangeToColor,
         ]
         .into_iter()
@@ -19309,6 +19494,170 @@ mod tests {
         assert_eq!(grade.rows(), 4);
         assert_eq!(grade.columns(), 6);
         assert_eq!(grade.quality(), 7);
+    }
+
+    fn wire_removal_op(graph: &EffectRenderGraph) -> Option<crate::WireRemovalGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::WireRemoval { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_wire_removal(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::WireRemoval)
+            .expect("registered wire removal definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::WireRemoval.property_path(parameter),
+                value,
+            })
+            .expect("authors wire removal parameter");
+        effect
+    }
+
+    fn author_wire_removal_more(
+        mut effect: EffectNode,
+        parameter: &str,
+        value: PropertyValue,
+    ) -> EffectNode {
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::WireRemoval.property_path(parameter),
+                value,
+            })
+            .expect("authors wire removal parameter");
+        effect
+    }
+
+    #[test]
+    fn wire_removal_defaults_compile_to_the_documented_operation() {
+        let effect = instantiate_effect_node(EffectType::WireRemoval)
+            .expect("registered wire removal definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds wire removal graph");
+        let grade = wire_removal_op(&graph).expect("wire removal op");
+        assert_eq!(grade.point_a(), [128.0, 192.0]);
+        assert_eq!(grade.point_b(), [128.0, 64.0]);
+        assert_eq!(grade.style(), crate::RemovalStyle::Both);
+        assert_eq!(grade.thickness(), 2.0);
+        assert_eq!(grade.slope(), 0.5);
+        assert_eq!(grade.mirror_blend(), 0.25);
+        assert_eq!(grade.frame_offset(), 5);
+    }
+
+    #[test]
+    fn wire_removal_author_values_reach_the_operation() {
+        let effect = author_wire_removal("point_a_x", PropertyValue::Float(20.0));
+        let effect = author_wire_removal_more(effect, "point_a_y", PropertyValue::Float(30.0));
+        let effect = author_wire_removal_more(effect, "point_b_x", PropertyValue::Float(200.0));
+        let effect = author_wire_removal_more(effect, "point_b_y", PropertyValue::Float(40.0));
+        let effect = author_wire_removal_more(
+            effect,
+            "removal_style",
+            PropertyValue::Enum("cross".to_owned()),
+        );
+        let effect = author_wire_removal_more(effect, "thickness", PropertyValue::Float(7.5));
+        let effect = author_wire_removal_more(effect, "slope", PropertyValue::Float(0.25));
+        let effect = author_wire_removal_more(effect, "mirror_blend", PropertyValue::Float(0.6));
+        let effect = author_wire_removal_more(effect, "frame_offset", PropertyValue::Float(-12.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds wire removal graph");
+        let grade = wire_removal_op(&graph).expect("wire removal op");
+        assert_eq!(grade.point_a(), [20.0, 30.0]);
+        assert_eq!(grade.point_b(), [200.0, 40.0]);
+        assert_eq!(grade.style(), crate::RemovalStyle::Cross);
+        assert_eq!(grade.thickness(), 7.5);
+        assert_eq!(grade.slope(), 0.25);
+        assert_eq!(grade.mirror_blend(), 0.6);
+        assert_eq!(grade.frame_offset(), -12);
+    }
+
+    #[test]
+    fn wire_removal_offers_the_four_documented_styles() {
+        let menus: Vec<i64> =
+            crate::RemovalStyle::ALL.into_iter().map(crate::RemovalStyle::as_menu).collect();
+        assert_eq!(menus, vec![1, 2, 3, 4]);
+        for style in crate::RemovalStyle::ALL {
+            let effect = author_wire_removal(
+                "removal_style",
+                PropertyValue::Enum(style.as_key().to_owned()),
+            );
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("builds wire removal graph");
+            let grade = wire_removal_op(&graph).expect("wire removal op");
+            assert_eq!(grade.style(), style);
+        }
+    }
+
+    #[test]
+    fn wire_removal_identity_geometry_compiles_to_identity() {
+        let effect = author_wire_removal("point_b_y", PropertyValue::Float(192.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds degenerate wire removal graph");
+        assert!(wire_removal_op(&graph).is_none());
+
+        let effect = author_wire_removal("thickness", PropertyValue::Float(0.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds zero thickness wire removal graph");
+        assert!(wire_removal_op(&graph).is_none());
+    }
+
+    #[test]
+    fn wire_removal_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("point_a_x", PropertyValue::Float(1_000_001.0)),
+            ("point_a_y", PropertyValue::Float(-1_000_001.0)),
+            ("thickness", PropertyValue::Float(101.0)),
+            ("thickness", PropertyValue::Float(-1.0)),
+            ("slope", PropertyValue::Float(1.5)),
+            ("slope", PropertyValue::Float(-0.1)),
+            ("mirror_blend", PropertyValue::Float(1.5)),
+            ("frame_offset", PropertyValue::Float(121.0)),
+            ("frame_offset", PropertyValue::Float(-121.0)),
+            ("removal_style", PropertyValue::Enum("sideways".to_owned())),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::WireRemoval)
+                .expect("registered wire removal definition");
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::WireRemoval.property_path(parameter),
+                    value,
+                })
+                .expect_err("rejects an out-of-range wire removal control");
+        }
+    }
+
+    #[test]
+    fn wire_removal_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_wire_removal("point_a_x", PropertyValue::Float(64.0));
+        let effect = author_wire_removal_more(effect, "point_a_y", PropertyValue::Float(32.0));
+        let effect = author_wire_removal_more(effect, "point_b_x", PropertyValue::Float(64.0));
+        let effect = author_wire_removal_more(effect, "point_b_y", PropertyValue::Float(96.0));
+        let effect = author_wire_removal_more(
+            effect,
+            "removal_style",
+            PropertyValue::Enum("right".to_owned()),
+        );
+        let effect = author_wire_removal_more(effect, "thickness", PropertyValue::Float(4.0));
+        let effect = author_wire_removal_more(effect, "slope", PropertyValue::Float(0.75));
+        let effect = author_wire_removal_more(effect, "mirror_blend", PropertyValue::Float(0.5));
+        let effect = author_wire_removal_more(effect, "frame_offset", PropertyValue::Float(14.0));
+        let wire = serde_json::to_string(&effect).expect("serializes wire removal effect");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restores wire removal effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored wire removal graph");
+        let grade = wire_removal_op(&graph).expect("wire removal op");
+        assert_eq!(grade.point_a(), [64.0, 32.0]);
+        assert_eq!(grade.point_b(), [64.0, 96.0]);
+        assert_eq!(grade.style(), crate::RemovalStyle::Right);
+        assert_eq!(grade.thickness(), 4.0);
+        assert_eq!(grade.slope(), 0.75);
+        assert_eq!(grade.mirror_blend(), 0.5);
+        assert_eq!(grade.frame_offset(), 14);
     }
 
     fn twirl_op(graph: &EffectRenderGraph) -> Option<crate::TwirlGrade> {

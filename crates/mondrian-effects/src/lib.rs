@@ -58,6 +58,7 @@ pub mod twirl;
 pub mod vibrance;
 pub mod warp;
 pub mod wave_warp;
+pub mod wire_removal;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
 pub mod execution_contract;
@@ -556,4 +557,8 @@ pub use wave_warp::{
     WAVE_WARP_MAX_HEIGHT, WAVE_WARP_MAX_PHASE_DEGREES, WAVE_WARP_MAX_SPEED, WAVE_WARP_MAX_WIDTH,
     WAVE_WARP_MIN_HEIGHT, WAVE_WARP_MIN_WIDTH, WAVE_WARP_PIN_COUNT, WAVE_WARP_PIN_MARGIN,
     WAVE_WARP_QUALITY_COUNT, WAVE_WARP_TYPE_COUNT,
+};
+pub use wire_removal::{
+    wire_removal_frame_f32, RemovalStyle, WireRemovalError, WireRemovalGrade,
+    WIRE_REMOVAL_MAX_COORDINATE, WIRE_REMOVAL_MAX_FRAME_OFFSET, WIRE_REMOVAL_MAX_THICKNESS,
 };

@@ -131,6 +131,8 @@ pub enum EffectType {
     Warp,
     /// Grid warp: displaces a checkerboard of cell corners along the cell diagonals.
     GridWarp,
+    /// Wire removal: clones pixels from a parallel displacement across an authored line.
+    WireRemoval,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -226,6 +228,7 @@ impl EffectType {
             Self::ChangeToColor => "builtin.change_to_color".to_string(),
             Self::Warp => "builtin.warp".to_string(),
             Self::GridWarp => "builtin.grid_warp".to_string(),
+            Self::WireRemoval => "builtin.wire_removal".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -317,6 +320,7 @@ impl EffectType {
             "builtin.change_to_color" => Self::ChangeToColor,
             "builtin.warp" => Self::Warp,
             "builtin.grid_warp" => Self::GridWarp,
+            "builtin.wire_removal" => Self::WireRemoval,
             other => Self::External(other.to_string()),
         }
     }
@@ -408,6 +412,7 @@ impl EffectType {
             Self::ChangeToColor => "定向改色",
             Self::Warp => "弯曲",
             Self::GridWarp => "网格变形",
+            Self::WireRemoval => "祛线",
             Self::External(name) => name,
         }
     }
@@ -497,6 +502,7 @@ impl EffectType {
             Self::ChangeToColor => vec!["颜色", "调色"],
             Self::Warp => vec!["变形"],
             Self::GridWarp => vec!["变形"],
+            Self::WireRemoval => vec!["修复"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -588,6 +594,7 @@ impl EffectType {
             Self::ChangeToColor => "change_to_color".to_string(),
             Self::Warp => "warp".to_string(),
             Self::GridWarp => "grid_warp".to_string(),
+            Self::WireRemoval => "wire_removal".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -928,6 +935,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ChangeToColor => Ok(()),
             Self::Warp => Ok(()),
             Self::GridWarp => Ok(()),
+            Self::WireRemoval => Ok(()),
         }
     }
 }

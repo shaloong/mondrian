@@ -464,6 +464,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::WireRemoval { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "wire_removal",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Twirl { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "twirl",
@@ -1030,6 +1036,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Dent { .. } => 0,
         EffectRenderOp::Warp { .. } => 1,
         EffectRenderOp::GridWarp { .. } => 1,
+        EffectRenderOp::WireRemoval { .. } => 1,
         EffectRenderOp::Noise { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
         EffectRenderOp::Scatter { .. } => 0,
@@ -1566,6 +1573,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             *grade,
             checkpoint,
         ),
+        EffectRenderOp::WireRemoval { grade } => {
+            crate::wire_removal::apply_wire_removal_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *grade,
+                checkpoint,
+            )
+        }
         EffectRenderOp::Twirl { grade } => crate::twirl::apply_twirl_f32_controlled(
             working,
             region.width as usize,

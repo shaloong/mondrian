@@ -102,6 +102,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored grid warp parameters.
         grade: crate::GridWarpGrade,
     },
+    /// Parallel displacement clone across an authored line.
+    WireRemoval {
+        /// Authored wire removal line and controls.
+        grade: crate::WireRemovalGrade,
+    },
     /// Arbitrary three by three convolution.
     Convolution {
         /// Authored convolution parameters.
@@ -216,6 +221,7 @@ impl EffectGpuSpatialPass {
             Self::Dent { .. } => "dent",
             Self::Warp { .. } => "warp",
             Self::GridWarp { .. } => "grid_warp",
+            Self::WireRemoval { .. } => "wire_removal",
             Self::Convolution { .. } => "convolution",
             Self::Mirror { .. } => "mirror",
             Self::PolarCoordinates { .. } => "polar_coordinates",
@@ -272,6 +278,7 @@ impl EffectGpuSpatialPass {
             | Self::Dent { .. }
             | Self::Warp { .. }
             | Self::GridWarp { .. }
+            | Self::WireRemoval { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             // A flare reads only the pixel it writes, so it needs no neighbour.
@@ -323,6 +330,7 @@ impl EffectGpuSpatialPass {
             | Self::Dent { .. }
             | Self::Warp { .. }
             | Self::GridWarp { .. }
+            | Self::WireRemoval { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             Self::LensDistortion { .. } => u32::MAX,
@@ -608,6 +616,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Warp { grade } => Some(EffectGpuSpatialPass::Warp { grade: *grade }),
         EffectRenderOp::GridWarp { grade } => {
             Some(EffectGpuSpatialPass::GridWarp { grade: *grade })
+        }
+        EffectRenderOp::WireRemoval { grade } => {
+            Some(EffectGpuSpatialPass::WireRemoval { grade: *grade })
         }
         EffectRenderOp::Convolution { grade } => {
             Some(EffectGpuSpatialPass::Convolution { grade: *grade })
