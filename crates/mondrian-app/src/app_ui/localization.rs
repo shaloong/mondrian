@@ -327,6 +327,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "通道" => Some("parameter-group-channel"),
         "通道混合器" => Some("parameter-group-channel-mixer"),
         "遮罩精修" => Some("parameter-group-matte-refine"),
+        "阻塞收缩" => Some("parameter-group-choker"),
         "钝化蒙版" => Some("parameter-group-unsharp-mask"),
         "锐化" => Some("parameter-group-sharpen"),
         "镜像" => Some("parameter-group-mirror"),

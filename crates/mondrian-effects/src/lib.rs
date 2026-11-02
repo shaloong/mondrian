@@ -22,6 +22,7 @@ pub mod box_blur;
 pub mod brightness_contrast;
 pub mod bulge;
 pub mod channel_mixer;
+pub mod choker;
 pub mod chroma_key;
 pub mod color_curves;
 pub mod color_emboss;
@@ -416,6 +417,10 @@ mod image_scale_admission_tests;
 pub use channel_mixer::{
     ChannelMixerError, ChannelMixerGrade, CHANNEL_MIXER_WEIGHT_COUNT, CHANNEL_MIXER_WEIGHT_MAX,
     CHANNEL_MIXER_WEIGHT_MIN,
+};
+pub use choker::{
+    choker_frame_f32, ChokerError, ChokerGrade, CHOKER_AUTHOR_MAX_CHOKE_PIXELS,
+    CHOKER_DEFAULT_CHOKE_PIXELS,
 };
 pub use directional_blur::{
     directional_blur_step, directional_blur_taps, DIRECTIONAL_BLUR_AUTHOR_MAX_LENGTH_PIXELS,

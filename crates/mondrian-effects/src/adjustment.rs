@@ -356,6 +356,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Choker { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "choker",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LensDistortion { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "lens_distortion",
@@ -934,6 +940,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Arithmetic { .. } => 0,
         EffectRenderOp::LeaveColor { .. } => 0,
         EffectRenderOp::BroadcastSafe { .. } => 0,
+        // One matte plane plus the separable intermediate: the design budgets
+        // two frames of scratch for the alpha morphology.
+        EffectRenderOp::Choker { .. } => 2,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
@@ -1365,6 +1374,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::BroadcastSafe { grade } => {
             crate::broadcast_safe::apply_broadcast_safe_f32_controlled(working, grade, checkpoint)?;
+            Ok(true)
+        }
+        EffectRenderOp::Choker { grade } => {
+            crate::choker::apply_choker_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
             Ok(true)
         }
         EffectRenderOp::LensDistortion { grade } => {

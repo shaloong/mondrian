@@ -2768,6 +2768,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Arithmetic { .. } => 74,
         EffectRenderOp::LeaveColor { .. } => 75,
         EffectRenderOp::BroadcastSafe { .. } => 76,
+        EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4846,6 +4847,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Arithmetic { .. }
             | crate::EffectRenderOp::LeaveColor { .. }
             | crate::EffectRenderOp::BroadcastSafe { .. }
+            | crate::EffectRenderOp::Choker { .. }
             | crate::EffectRenderOp::ColorOffset { .. }
             | crate::EffectRenderOp::Convolution { .. }
             | crate::EffectRenderOp::Offset { .. }

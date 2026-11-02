@@ -2417,6 +2417,11 @@ parameter-mondrian-effect-builtin-black-and-white-tint-amount-label = Tint Amoun
 parameter-mondrian-effect-builtin-black-and-white-tint-color-label = Tint Color
 parameter-mondrian-effect-builtin-black-and-white-yellow-label = Yellows
 
+## Choker 阻塞收缩
+effect-choker = Choker
+parameter-group-choker = Choker
+parameter-mondrian-effect-builtin-choker-choke-label = Choke Matte
+
 ## Refine Matte 遮罩精修
 effect-matte-refine = Refine Matte
 parameter-group-matte-refine = Refine Matte

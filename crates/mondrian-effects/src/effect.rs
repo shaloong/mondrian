@@ -981,6 +981,10 @@ pub enum EffectRenderOp {
     BroadcastSafe {
         grade: crate::BroadcastSafeGrade,
     },
+    /// Choker: erodes or dilates the frame alpha and leaves the colour untouched.
+    Choker {
+        grade: crate::ChokerGrade,
+    },
     /// Lens distortion: removes (or adds) the projection of a camera lens.
     LensDistortion {
         grade: crate::LensDistortionGrade,
@@ -1266,6 +1270,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::BroadcastSafe { grade } => {
                 formatter.debug_struct("BroadcastSafe").field("grade", grade).finish()
+            }
+            Self::Choker { grade } => {
+                formatter.debug_struct("Choker").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -1982,6 +1989,10 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra0.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Choker { grade } => {
+                76u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2199,6 +2210,7 @@ impl EffectRenderOp {
             EffectRenderOp::Arithmetic { .. } => 1,
             EffectRenderOp::LeaveColor { .. } => 2,
             EffectRenderOp::BroadcastSafe { .. } => 1,
+            EffectRenderOp::Choker { .. } => 2,
             EffectRenderOp::LensDistortion { .. } => 4,
             EffectRenderOp::LensFlare { .. } => 4,
             EffectRenderOp::Bulge { .. } => 4,
@@ -2754,7 +2766,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 75] {
+fn builtin_effect_types() -> [EffectType; 76] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2831,6 +2843,7 @@ fn builtin_effect_types() -> [EffectType; 75] {
         EffectType::Arithmetic,
         EffectType::LeaveColor,
         EffectType::BroadcastSafe,
+        EffectType::Choker,
     ]
 }
 
@@ -7879,6 +7892,19 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Choker => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "choke",
+                "阻塞收缩",
+                "阻塞遮罩",
+                PropertyValue::Float(crate::CHOKER_DEFAULT_CHOKE_PIXELS),
+                Some(-f64::from(crate::CHOKER_AUTHOR_MAX_CHOKE_PIXELS)),
+                Some(f64::from(crate::CHOKER_AUTHOR_MAX_CHOKE_PIXELS)),
+                Some(0.1),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -8201,6 +8227,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Percent
         }
         (EffectType::MatteRefine, "shutter_angle_degrees") => ParameterUnit::Degrees,
+        (EffectType::Choker, "choke") => ParameterUnit::Pixels,
         (
             EffectType::MatteRefine,
             "edge_detail" | "view_edge_region" | "view_map" | "more_motion_blur",
@@ -8457,6 +8484,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::BroadcastSafe => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Choker => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The alpha morphology reads the whole frame, so the definition-level
+            // envelope cannot narrow the input to a pixel-local tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ColorOffset => EffectExecutionContract {
@@ -12406,6 +12440,28 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Choker => {
+            let choke_id = builtin_parameter_id(effect_type, "choke");
+            Some(Arc::new(move |effect, context, graph| {
+                let choke = effect.evaluate_f32_parameter(
+                    &choke_id,
+                    context.time,
+                    crate::CHOKER_DEFAULT_CHOKE_PIXELS,
+                );
+                let Ok(grade) = crate::ChokerGrade::new(choke) else {
+                    return Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: "choker choke is outside the authored -100..=100 pixel range"
+                            .to_owned(),
+                    });
+                };
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Choker { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -12487,6 +12543,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Arithmetic => "算术",
         EffectType::LeaveColor => "保留颜色",
         EffectType::BroadcastSafe => "广播安全",
+        EffectType::Choker => "阻塞收缩",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -13796,6 +13853,7 @@ mod tests {
             EffectType::Arithmetic,
             EffectType::LeaveColor,
             EffectType::BroadcastSafe,
+            EffectType::Choker,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -20916,6 +20974,93 @@ mod tests {
         assert_eq!(grade.mode(), crate::BroadcastSafeMode::ClampRgb);
         assert_eq!(grade.ire(), 120.0);
         assert_eq!(grade.limit(), 1.2);
+    }
+
+    fn choker_op(graph: &EffectRenderGraph) -> Option<crate::ChokerGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Choker { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Choker { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_choker(choke: f32) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Choker)
+            .expect("the choker effect should instantiate");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Choker.property_path("choke"),
+                value: PropertyValue::Float(choke),
+            })
+            .expect("the choker amount should be assignable");
+        effect
+    }
+
+    #[test]
+    fn choker_defaults_are_elided_from_the_graph() {
+        // A zero choke is the documented identity, so the builder must not emit
+        // an operation at all: there is nothing for the renderer to run.
+        let effect = instantiate_effect_node(EffectType::Choker)
+            .expect("the choker effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default choker should compile");
+        assert_eq!(choker_op(&graph), None);
+    }
+
+    #[test]
+    fn choker_authored_amount_reaches_the_operation() {
+        let eroded = author_choker(3.5);
+        let graph = build_effect_render_graph(&[eroded], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored choker should build");
+        let grade = choker_op(&graph).expect("a non-zero amount emits a node");
+        assert_eq!(grade.choke(), 3.5);
+        assert_eq!(grade.radius(), 4);
+        assert!(!grade.dilates());
+        // The stage uniform is [radius, mode, 0, 0] with mode 0 for the min
+        // filter and 1 for the max filter.
+        assert_eq!(grade.gpu_controls(), ([4.0, 0.0, 0.0, 0.0], [0.0; 4]));
+
+        let dilated = author_choker(-4.0);
+        let graph = build_effect_render_graph(&[dilated], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored dilation should build");
+        let grade = choker_op(&graph).expect("a non-zero amount emits a node");
+        assert_eq!(grade.choke(), -4.0);
+        assert!(grade.dilates());
+        assert_eq!(grade.gpu_controls(), ([4.0, 1.0, 0.0, 0.0], [0.0; 4]));
+    }
+
+    #[test]
+    fn choker_out_of_range_amount_is_rejected_at_authoring() {
+        for choke in [100.1, -100.1] {
+            let mut effect = instantiate_effect_node(EffectType::Choker)
+                .expect("the choker effect should instantiate");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Choker.property_path("choke"),
+                    value: PropertyValue::Float(choke),
+                })
+                .expect_err("an out-of-range choke must be rejected");
+            let rendered = format!("{error:?}");
+            assert!(rendered.contains("outside [-100, 100]"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn choker_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_choker(-6.0);
+        let wire = serde_json::to_string(&effect).expect("serialize the choker node");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restore the choker node");
+        assert_eq!(restored.effect_type, EffectType::Choker);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored choker node");
+        let grade = choker_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.choke(), -6.0);
+        assert!(grade.dilates());
+        assert_eq!(grade.radius(), 6);
     }
 
     fn lens_distortion_op(graph: &EffectRenderGraph) -> Option<crate::LensDistortionGrade> {

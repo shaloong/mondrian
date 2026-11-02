@@ -111,6 +111,8 @@ pub enum EffectType {
     LeaveColor,
     /// Broadcast safe: pulls the signal back inside the authored IRE amplitude.
     BroadcastSafe,
+    /// Choker: erodes or dilates the frame alpha without touching the colour.
+    Choker,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -196,6 +198,7 @@ impl EffectType {
             Self::Arithmetic => "builtin.arithmetic".to_string(),
             Self::LeaveColor => "builtin.leave_color".to_string(),
             Self::BroadcastSafe => "builtin.broadcast_safe".to_string(),
+            Self::Choker => "builtin.choker".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -277,6 +280,7 @@ impl EffectType {
             "builtin.arithmetic" => Self::Arithmetic,
             "builtin.leave_color" => Self::LeaveColor,
             "builtin.broadcast_safe" => Self::BroadcastSafe,
+            "builtin.choker" => Self::Choker,
             other => Self::External(other.to_string()),
         }
     }
@@ -358,6 +362,7 @@ impl EffectType {
             Self::Arithmetic => "算术",
             Self::LeaveColor => "保留颜色",
             Self::BroadcastSafe => "广播安全",
+            Self::Choker => "阻塞收缩",
             Self::External(name) => name,
         }
     }
@@ -437,6 +442,7 @@ impl EffectType {
             Self::Arithmetic => vec!["通道"],
             Self::LeaveColor => vec!["颜色"],
             Self::BroadcastSafe => vec!["颜色"],
+            Self::Choker => vec!["抠像"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -518,6 +524,7 @@ impl EffectType {
             Self::Arithmetic => "arithmetic".to_string(),
             Self::LeaveColor => "leave_color".to_string(),
             Self::BroadcastSafe => "broadcast_safe".to_string(),
+            Self::Choker => "choker".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -848,6 +855,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Arithmetic => Ok(()),
             Self::LeaveColor => Ok(()),
             Self::BroadcastSafe => Ok(()),
+            Self::Choker => Ok(()),
         }
     }
 }

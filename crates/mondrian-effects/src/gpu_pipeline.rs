@@ -163,6 +163,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored matte cleanup, smoothing, morphology, feather, and views.
         grade: crate::MatteRefineGrade,
     },
+    Choker {
+        /// Authored alpha erosion (positive) or dilation (negative) radius.
+        grade: crate::ChokerGrade,
+    },
     LensFlare {
         /// Authored flare parameters.
         grade: crate::LensFlareGrade,
@@ -201,6 +205,7 @@ impl EffectGpuSpatialPass {
             Self::FractalNoise { .. } => "fractal_noise",
             Self::Keylight { .. } => "keylight",
             Self::MatteRefine { .. } => "matte_refine",
+            Self::Choker { .. } => "choker",
             Self::LensFlare { .. } => "lens_flare",
             Self::Bulge { .. } => "bulge",
             Self::Split { .. } => "split",
@@ -251,6 +256,7 @@ impl EffectGpuSpatialPass {
             Self::FractalNoise { .. } => u32::MAX,
             Self::Keylight { .. } => u32::MAX,
             Self::MatteRefine { .. } => u32::MAX,
+            Self::Choker { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -294,6 +300,7 @@ impl EffectGpuSpatialPass {
             Self::FractalNoise { .. } => u32::MAX,
             Self::Keylight { .. } => u32::MAX,
             Self::MatteRefine { .. } => u32::MAX,
+            Self::Choker { .. } => u32::MAX,
             Self::LensFlare { .. } => 0,
             Self::Bulge { .. } => u32::MAX,
             Self::Split { .. } => u32::MAX,
@@ -592,6 +599,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::MatteRefine { grade } => {
             Some(EffectGpuSpatialPass::MatteRefine { grade: *grade })
         }
+        EffectRenderOp::Choker { grade } => Some(EffectGpuSpatialPass::Choker { grade: *grade }),
         EffectRenderOp::LensFlare { grade } => {
             Some(EffectGpuSpatialPass::LensFlare { grade: *grade })
         }
@@ -773,6 +781,31 @@ mod tests {
             assert_eq!(pass.vertical_halo(), u32::MAX);
         }
     }
+    #[test]
+    fn choker_lowers_to_a_full_frame_spatial_stage() {
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(invert());
+        builder.append_unary(EffectRenderOp::Choker {
+            grade: crate::ChokerGrade::new(2.5).expect("valid choker"),
+        });
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("choker pipeline");
+
+        assert_eq!(pipeline.spatial_stage_count(), 1);
+        let pass = pipeline
+            .stages()
+            .iter()
+            .find_map(|stage| match stage {
+                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::PointOps { .. } => None,
+            })
+            .expect("choker emits a spatial stage");
+        assert_eq!(pass.name(), "choker");
+        // Alpha morphology reads the whole frame, so no local halo bounds it.
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+    }
+
     #[test]
     fn spatial_halo_reports_the_kernel_reach() {
         let pass = EffectGpuSpatialPass::BoxBlur {

@@ -952,6 +952,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::FractalNoise { .. } => "fractal_noise",
         EffectRenderOp::Keylight { .. } => "keylight",
         EffectRenderOp::MatteRefine { .. } => "matte_refine",
+        EffectRenderOp::Choker { .. } => "choker",
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::Arithmetic { .. } => "arithmetic",
         EffectRenderOp::LeaveColor { .. } => "leave_color",
