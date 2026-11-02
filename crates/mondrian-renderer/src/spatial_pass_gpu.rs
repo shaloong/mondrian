@@ -50,6 +50,7 @@ pub(crate) struct EffectSpatialGpu {
     twirl: wgpu::RenderPipeline,
     spherize: wgpu::RenderPipeline,
     dent: wgpu::RenderPipeline,
+    warp: wgpu::RenderPipeline,
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
@@ -403,6 +404,36 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_dent"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let warp = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.warp"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_warp"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -1364,6 +1395,7 @@ impl EffectSpatialGpu {
             twirl,
             spherize,
             dent,
+            warp,
             mirror,
             polar_coordinates,
             lens_distortion,
@@ -1882,6 +1914,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Twirl { .. }
             | EffectGpuSpatialPass::Spherize { .. }
             | EffectGpuSpatialPass::Dent { .. }
+            | EffectGpuSpatialPass::Warp { .. }
             | EffectGpuSpatialPass::Convolution { .. }
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
@@ -2042,6 +2075,20 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_dent(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Warp { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra) = grade.gpu_controls();
+                return self.record_warp(
                     device,
                     encoder,
                     params,
@@ -2572,6 +2619,46 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.dent,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+    /// Records the arc warp.
+    ///
+    /// `params` carries `[bend, horizontal_distortion, vertical_distortion,
+    /// style]` and `extra` carries `[axis, 0, 0, 0]`. The inverse mapping
+    /// mirrors the CPU kernel step for step, so the two produce the same
+    /// sample position for the same authored controls.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_warp(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.warp,
             &input_view,
             &output_view,
             &uniform,
@@ -4493,6 +4580,101 @@ fn fs_dent(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let direction = select(-1.0, 1.0, uniforms.extra.x < 0.5);
     let scale = 1.0 + direction * uniforms.params.w * falloff;
     let sample = centre + delta * scale;
+    return unpremultiply(sample_bilinear_premultiplied(sample.x, sample.y));
+}
+
+/// Arc profile of one warp style as a cubic in the across-axis coordinate.
+///
+/// `shape = (1 - v^2) * (n0 + v * (n1 + v * n2))`, matching the CPU table.
+fn warp_coefficients(style: u32) -> vec3<f32> {
+    switch style {
+        case 0u: {
+            return vec3<f32>(1.0, 0.0, 0.0);
+        }
+        case 1u: {
+            return vec3<f32>(0.84375, -0.84375, 0.0);
+        }
+        case 2u: {
+            return vec3<f32>(0.84375, 0.84375, 0.0);
+        }
+        case 3u: {
+            return vec3<f32>(1.0, 0.0, 1.0);
+        }
+        case 4u: {
+            return vec3<f32>(1.0, 0.0, 0.5);
+        }
+        case 5u: {
+            return vec3<f32>(0.8969201, -0.8969201, -0.8969201);
+        }
+        case 6u: {
+            return vec3<f32>(0.8969201, 0.8969201, -0.8969201);
+        }
+        case 7u: {
+            return vec3<f32>(0.0, 2.5980762, 0.0);
+        }
+        case 8u: {
+            return vec3<f32>(1.0, 0.0, -3.0);
+        }
+        case 9u: {
+            return vec3<f32>(0.8802741, -0.6602056, 0.2200685);
+        }
+        case 10u: {
+            return vec3<f32>(0.8802741, 0.6602056, 0.2200685);
+        }
+        case 11u: {
+            return vec3<f32>(0.8888889, 0.0, 1.7777778);
+        }
+        case 12u: {
+            return vec3<f32>(0.9807181, 0.2451795, 0.2451795);
+        }
+        case 13u: {
+            return vec3<f32>(1.0, 0.0, -2.0);
+        }
+        case 14u: {
+            return vec3<f32>(0.4825708, 1.9302833, -0.4825708);
+        }
+        default: {
+            return vec3<f32>(0.0, 0.0, 0.0);
+        }
+    }
+}
+
+@fragment
+fn fs_warp(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    if (uniforms.size.x < 2.0 || uniforms.size.y < 2.0) {
+        return load_clamped(pixel);
+    }
+    if (abs(uniforms.params.x) <= 1.0e-6
+        && abs(uniforms.params.y) <= 1.0e-6
+        && abs(uniforms.params.z) <= 1.0e-6) {
+        return load_clamped(pixel);
+    }
+    let cx = (uniforms.size.x - 1.0) * 0.5;
+    let cy = (uniforms.size.y - 1.0) * 0.5;
+    let swap = uniforms.extra.x >= 0.5;
+    let p = vec2<f32>(pixel);
+    let s = select(p.y, p.x, swap);
+    let t = select(p.x, p.y, swap);
+    let cs = select(cy, cx, swap);
+    let ct = select(cx, cy, swap);
+    let hs = cs;
+    let ht = ct;
+    if (hs <= 0.0 || ht <= 0.0) {
+        return load_clamped(pixel);
+    }
+    let kt = select(uniforms.params.y, uniforms.params.z, swap);
+    let ks = select(uniforms.params.z, uniforms.params.y, swap);
+    let vs = (s - cs) / hs;
+    let gt = 1.0 + (kt / 100.0) * 0.5 * (1.0 - vs * vs);
+    let t1 = ct + (t - ct) * gt;
+    let vt = (t1 - ct) / ht;
+    let gs = 1.0 + (ks / 100.0) * 0.5 * (1.0 - vt * vt);
+    let c = warp_coefficients(u32(uniforms.params.w));
+    let w = 1.0 - vt * vt;
+    let shape = w * (c.x + vt * (c.y + vt * c.z));
+    let s1 = cs + (s - cs) * gs - ((uniforms.params.x / 100.0) * hs) * shape;
+    let sample = select(vec2<f32>(t1, s1), vec2<f32>(s1, t1), swap);
     return unpremultiply(sample_bilinear_premultiplied(sample.x, sample.y));
 }
 fn sample_nearest_premultiplied(x: f32, y: f32) -> vec4<f32> {
@@ -6961,6 +7143,17 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::ChannelBlurDirection::Both,
         )
         .expect("valid channel blur grade");
+        // Bend the frame along an arc before the dent pulls it towards its
+        // centre, so the chain also covers the warp remap and the scratch reuse
+        // between two adjacent full-frame spatial passes.
+        let warp = mondrian_effects::WarpGrade::new(
+            60.0,
+            30.0,
+            -25.0,
+            mondrian_effects::WarpStyle::Arc,
+            mondrian_effects::WarpAxis::Horizontal,
+        )
+        .expect("valid warp grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -6970,6 +7163,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             },
             mondrian_effects::EffectGpuSpatialPass::Twirl { grade: twirl },
             mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
+            mondrian_effects::EffectGpuSpatialPass::Warp { grade: warp },
             mondrian_effects::EffectGpuSpatialPass::Dent { grade: dent },
             mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
             mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
@@ -6986,6 +7180,9 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Minimax { grade: minimax },
             mondrian_effects::EffectGpuSpatialPass::ChannelBlur { grade: channel_blur },
         ];
+        // One stage per spatial pass the renderer can lower, so a new pass has to
+        // extend this chain as well as the dispatch arms.
+        assert_eq!(passes.len(), 19, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::box_blur_frame_f32(
@@ -7008,6 +7205,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             spherize,
+        ));
+        assert!(mondrian_effects::warp_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            warp,
         ));
         assert!(mondrian_effects::dent_frame_f32(
             &mut cpu,
@@ -9820,6 +10023,123 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     assert!(
                         difference <= 1.0e-4,
                         "size {size} strength {strength} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn gpu_warp_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU warp parity test: no GPU adapter available");
+            return;
+        };
+        let cases = [
+            (
+                13_u32,
+                11_u32,
+                0_usize,
+                100.0_f32,
+                0.0_f32,
+                0.0_f32,
+                mondrian_effects::WarpStyle::Arc,
+                mondrian_effects::WarpAxis::Horizontal,
+            ),
+            (
+                13_u32,
+                11_u32,
+                65_usize,
+                -50.0_f32,
+                100.0_f32,
+                0.0_f32,
+                mondrian_effects::WarpStyle::Flag,
+                mondrian_effects::WarpAxis::Vertical,
+            ),
+            (
+                16_u32,
+                9_u32,
+                0_usize,
+                100.0_f32,
+                0.0_f32,
+                100.0_f32,
+                mondrian_effects::WarpStyle::ShellUpper,
+                mondrian_effects::WarpAxis::Horizontal,
+            ),
+        ];
+        for (
+            width,
+            height,
+            zero_coverage,
+            bend,
+            horizontal_distortion,
+            vertical_distortion,
+            style,
+            axis,
+        ) in cases
+        {
+            let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let value = 0.05 * (x + 2 * y) as f32;
+                    pixels[y * width as usize + x] = [value, 0.45 - value * 0.3, value * 1.6, 1.0];
+                }
+            }
+            // The rim pixel is fixed by the mapping and samples its own texel
+            // with a zero fraction, so both sides return the texel unchanged.
+            pixels[zero_coverage] = [0.0, 0.0, 0.0, 0.0];
+            let grade = mondrian_effects::WarpGrade::new(
+                bend,
+                horizontal_distortion,
+                vertical_distortion,
+                style,
+                axis,
+            )
+            .expect("warp grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::warp_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            assert_eq!(
+                cpu[zero_coverage],
+                [0.0, 0.0, 0.0, 0.0],
+                "cpu zero-coverage pixel {zero_coverage} must stay transparent",
+            );
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.warp-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls();
+            let output = executor
+                .record_warp(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded warp");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            assert_eq!(
+                gpu[zero_coverage],
+                [0.0, 0.0, 0.0, 0.0],
+                "gpu zero-coverage pixel {zero_coverage} must stay transparent",
+            );
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "style {style:?} axis {axis:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }

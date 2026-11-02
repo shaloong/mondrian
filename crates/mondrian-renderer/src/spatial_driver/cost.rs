@@ -360,6 +360,8 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "box_blur" | "channel_blur" => 0.5,
         // Neighbourhood kernels and whole-chain morphology jobs cost more.
         "convolution" | "glow" | "matte_refine" | "deband" => 0.9,
+        // The arc remap is a four-tap bilinear read and one write.
+        "warp" => 0.6,
         _ => GPU_DEFAULT_NS_PER_PX,
     }
 }
@@ -374,6 +376,7 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "channel_blur" => 3.0,
         "directional_blur" | "convolution" | "glow" | "fractal_noise" | "deband" => 3.0,
         "twirl" | "spherize" | "dent" | "polar_coordinates" | "lens_distortion" => 2.0,
+        "warp" => 2.0,
         "radial_blur" | "turbulent_displace" | "keylight" | "matte_refine" => 4.0,
         "minimax" | "choker" | "find_edges" | "emboss" | "color_emboss" => 2.5,
         _ => 2.0,
