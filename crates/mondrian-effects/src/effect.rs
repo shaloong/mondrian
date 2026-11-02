@@ -977,6 +977,10 @@ pub enum EffectRenderOp {
     LeaveColor {
         grade: crate::LeaveColorGrade,
     },
+    /// Change to colour: moves one authored colour family towards another.
+    ChangeToColor {
+        grade: crate::ChangeToColorGrade,
+    },
     /// Broadcast safe: pulls the signal back inside the authored IRE amplitude.
     BroadcastSafe {
         grade: crate::BroadcastSafeGrade,
@@ -1293,6 +1297,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::LeaveColor { grade } => {
                 formatter.debug_struct("LeaveColor").field("grade", grade).finish()
+            }
+            Self::ChangeToColor { grade } => {
+                formatter.debug_struct("ChangeToColor").field("grade", grade).finish()
             }
             Self::BroadcastSafe { grade } => {
                 formatter.debug_struct("BroadcastSafe").field("grade", grade).finish()
@@ -2025,6 +2032,14 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 color.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::ChangeToColor { grade } => {
+                83u8.hash(state);
+                let (params, color) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                color.map(f32::to_bits).hash(state);
+                grade.gpu_source().map(f32::to_bits).hash(state);
+                grade.gpu_view().to_bits().hash(state);
+            }
             EffectRenderOp::BroadcastSafe { grade } => {
                 75u8.hash(state);
                 let (params, extra0) = grade.gpu_controls();
@@ -2286,6 +2301,7 @@ impl EffectRenderOp {
             EffectRenderOp::MatteRefine { .. } => 6,
             EffectRenderOp::Arithmetic { .. } => 1,
             EffectRenderOp::LeaveColor { .. } => 2,
+            EffectRenderOp::ChangeToColor { .. } => 2,
             EffectRenderOp::BroadcastSafe { .. } => 1,
             EffectRenderOp::Choker { .. } => 2,
             EffectRenderOp::TestSignals { .. } => 1,
@@ -2849,7 +2865,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 82] {
+fn builtin_effect_types() -> [EffectType; 83] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2925,6 +2941,7 @@ fn builtin_effect_types() -> [EffectType; 82] {
         EffectType::Echo,
         EffectType::Arithmetic,
         EffectType::LeaveColor,
+        EffectType::ChangeToColor,
         EffectType::BroadcastSafe,
         EffectType::Choker,
         EffectType::TestSignals,
@@ -7932,6 +7949,99 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::ChangeToColor => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "from",
+                "定向改色",
+                "自",
+                PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "to",
+                "定向改色",
+                "至",
+                PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "change",
+                "定向改色",
+                "更改",
+                crate::ChangeToColorChange::Hue.as_key(),
+                crate::ChangeToColorChange::ALL
+                    .into_iter()
+                    .map(|change| {
+                        ParameterEnumOption::new(
+                            change.as_key(),
+                            change.label(),
+                            format!("mondrian.effect.change_to_color.change.{}", change.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "change_by",
+                "定向改色",
+                "更改方式",
+                crate::ChangeToColorBy::Relative.as_key(),
+                crate::ChangeToColorBy::ALL
+                    .into_iter()
+                    .map(|by| {
+                        ParameterEnumOption::new(
+                            by.as_key(),
+                            by.label(),
+                            format!("mondrian.effect.change_to_color.change_by.{}", by.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            for (parameter, name, default) in [
+                ("hue", "色相", 0.1_f32),
+                ("lightness", "亮度", 1.0),
+                ("saturation", "饱和度", 1.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "定向改色",
+                    name,
+                    PropertyValue::Float(default),
+                    Some(f64::from(crate::CHANGE_TO_COLOR_MIN_AMOUNT)),
+                    Some(f64::from(crate::CHANGE_TO_COLOR_MAX_AMOUNT)),
+                    Some(0.01),
+                );
+            }
+            for (parameter, name, default) in [
+                ("softness", "柔和度", 0.5_f32),
+                ("view_matte", "查看校正遮罩", 0.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "定向改色",
+                    name,
+                    PropertyValue::Float(default),
+                    Some(f64::from(crate::CHANGE_TO_COLOR_MIN_UNIT)),
+                    Some(f64::from(crate::CHANGE_TO_COLOR_MAX_UNIT)),
+                    Some(0.01),
+                );
+            }
+        }
         EffectType::BroadcastSafe => {
             define_builtin_enum_property(
                 &mut properties,
@@ -8648,6 +8758,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Spherize, "centre_y") => ParameterUnit::Pixels,
         (EffectType::Dent, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Dent, "size" | "strength") => ParameterUnit::Normalized,
+        (
+            EffectType::ChangeToColor,
+            "hue" | "lightness" | "saturation" | "softness" | "view_matte",
+        ) => ParameterUnit::Normalized,
         (EffectType::Noise, "amount") => ParameterUnit::Percent,
         (EffectType::Bevel, "thickness") => ParameterUnit::Pixels,
         (EffectType::Bevel, "angle") => ParameterUnit::Degrees,
@@ -8965,6 +9079,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::LeaveColor => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::ChangeToColor => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -12909,6 +13027,86 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ChangeToColor => {
+            let from_id = builtin_parameter_id(effect_type, "from");
+            let to_id = builtin_parameter_id(effect_type, "to");
+            let change_id = builtin_parameter_id(effect_type, "change");
+            let by_id = builtin_parameter_id(effect_type, "change_by");
+            let hue_id = builtin_parameter_id(effect_type, "hue");
+            let lightness_id = builtin_parameter_id(effect_type, "lightness");
+            let saturation_id = builtin_parameter_id(effect_type, "saturation");
+            let softness_id = builtin_parameter_id(effect_type, "softness");
+            let view_id = builtin_parameter_id(effect_type, "view_matte");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let from = match effect.evaluate_parameter(&from_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(_) => {
+                        return Err(invalid(
+                            "change to color source must be a colour".to_owned(),
+                        ));
+                    }
+                    None => [1.0, 1.0, 1.0],
+                };
+                let to = match effect.evaluate_parameter(&to_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(_) => {
+                        return Err(invalid(
+                            "change to color target must be a colour".to_owned(),
+                        ));
+                    }
+                    None => [1.0, 1.0, 1.0],
+                };
+                let change = match effect.evaluate_parameter(&change_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::ChangeToColorChange::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "change to color change {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "change to color change must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::ChangeToColorChange::Hue,
+                };
+                let by = match effect.evaluate_parameter(&by_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::ChangeToColorBy::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "change to color change by {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "change to color change by must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::ChangeToColorBy::Relative,
+                };
+                let grade = crate::ChangeToColorGrade::new(
+                    from,
+                    to,
+                    change,
+                    by,
+                    effect.evaluate_f32_parameter(&hue_id, context.time, 0.1),
+                    effect.evaluate_f32_parameter(&lightness_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&saturation_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&softness_id, context.time, 0.5),
+                    effect.evaluate_f32_parameter(&view_id, context.time, 0.0),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ChangeToColor { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::BroadcastSafe => {
             let locale_id = builtin_parameter_id(effect_type, "locale");
             let mode_id = builtin_parameter_id(effect_type, "mode");
@@ -13460,6 +13658,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::SpillSuppressor => "溢色抑制",
         EffectType::ChannelBlur => "通道模糊",
         EffectType::Dent => "凹痕",
+        EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -14776,6 +14975,7 @@ mod tests {
             EffectType::SpillSuppressor,
             EffectType::ChannelBlur,
             EffectType::Dent,
+            EffectType::ChangeToColor,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -21881,6 +22081,192 @@ mod tests {
         assert_eq!(grade.tolerance(), 5.0);
         assert_eq!(grade.softness(), 40.0);
         assert_eq!(grade.match_mode(), crate::LeaveColorMatch::Rgb);
+    }
+
+    fn change_to_color_op(graph: &EffectRenderGraph) -> Option<crate::ChangeToColorGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ChangeToColor { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ChangeToColor { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_change_to_color(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ChangeToColor)
+            .expect("the change to color effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ChangeToColor.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the change to color parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn a_default_change_to_color_node_does_not_append_an_op() {
+        // The documented default pairs an equal source and target with the
+        // relative change-by, which shifts every sample by zero: the builder must
+        // elide the operation instead of emitting a no-op.
+        let effect = instantiate_effect_node(EffectType::ChangeToColor)
+            .expect("the change to color effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default change to color should compile");
+        assert!(
+            !graph.nodes.iter().any(|node| matches!(
+                &node.kind,
+                EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::ChangeToColor { .. }, .. }
+                    | EffectGraphNodeKind::DomainEffect {
+                        op: EffectRenderOp::ChangeToColor { .. },
+                        ..
+                    }
+            )),
+            "the default state must be elided"
+        );
+    }
+
+    #[test]
+    fn the_graph_builder_maps_every_parameter() {
+        let effect = author_change_to_color(&[
+            (
+                "from",
+                PropertyValue::Color(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            ),
+            (
+                "to",
+                PropertyValue::Color(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }),
+            ),
+            (
+                "change",
+                PropertyValue::Enum("hue_lightness_saturation".to_string()),
+            ),
+            ("change_by", PropertyValue::Enum("relative".to_string())),
+            ("hue", PropertyValue::Float(0.5)),
+            ("lightness", PropertyValue::Float(0.75)),
+            ("saturation", PropertyValue::Float(1.25)),
+            ("softness", PropertyValue::Float(0.25)),
+            ("view_matte", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored change to color should build");
+        let grade = change_to_color_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.from(), [1.0, 0.0, 0.0]);
+        assert_eq!(grade.to(), [0.0, 1.0, 0.0]);
+        assert_eq!(
+            grade.change(),
+            crate::ChangeToColorChange::HueLightnessSaturation
+        );
+        assert_eq!(grade.change_by(), crate::ChangeToColorBy::Relative);
+        assert_eq!(grade.hue(), 0.5);
+        assert_eq!(grade.lightness(), 0.75);
+        assert_eq!(grade.saturation(), 1.25);
+        assert_eq!(grade.softness(), 0.25);
+        assert_eq!(grade.view_matte(), 0.0);
+        let (params, color) = grade.gpu_controls();
+        assert_eq!(params, [0.5, 0.75, 1.25, 0.25]);
+        assert_eq!(color, [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(grade.gpu_source(), [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(grade.gpu_view(), 0.0);
+        assert_eq!(grade.change_flags(), 0b111);
+        assert_eq!(grade.change_by_index(), 0);
+    }
+
+    #[test]
+    fn an_invalid_parameter_value_is_an_invalid_author_state() {
+        let mut effect = instantiate_effect_node(EffectType::ChangeToColor)
+            .expect("the change to color effect should instantiate");
+        // The built-in numeric contract declares `ParameterInvalidValuePolicy::Reject`
+        // with the same soft and hard range, so the authoring interface refuses
+        // an out-of-range amount instead of storing it. Serialized author state —
+        // a project file written by an older build — is the remaining route into
+        // the graph builder, and the builder must reject it rather than clamping.
+        assert!(effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ChangeToColor.property_path("hue"),
+                value: PropertyValue::Float(2.5),
+            })
+            .is_err());
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize change to color");
+        overwrite_static_value(
+            &mut document,
+            "change_to_color.hue",
+            serde_json::json!({"Float": 2.5}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen change to color");
+        let error = compile_clip_effect_graph(&[tampered], &[], tt(0), TEST_WORKING_SPACE)
+            .expect_err("an out-of-range amount is an invalid author state");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+    }
+
+    /// Replace one serialized property's static value, leaving its descriptor intact.
+    fn overwrite_static_value(
+        value: &mut serde_json::Value,
+        parameter_path_suffix: &str,
+        replacement: serde_json::Value,
+    ) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let matches_parameter = object
+                    .get("descriptor")
+                    .and_then(|descriptor| descriptor.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|path| path.ends_with(parameter_path_suffix));
+                if matches_parameter && object.contains_key("static_value") {
+                    object.insert("static_value".to_owned(), replacement);
+                    return;
+                }
+                for nested in object.values_mut() {
+                    overwrite_static_value(nested, parameter_path_suffix, replacement.clone());
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for nested in items {
+                    overwrite_static_value(nested, parameter_path_suffix, replacement.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn the_effect_declares_pixel_local_roi() {
+        // The effect is pixel local: a full-frame declaration would raise
+        // `RoiTooOptimistic` against the operation's own requirement.
+        let definition =
+            effect_definition(&EffectType::ChangeToColor).expect("change to color definition");
+        assert_eq!(
+            definition.execution_contract().roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal
+        );
+        let effect = author_change_to_color(&[
+            (
+                "from",
+                PropertyValue::Color(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            ),
+            (
+                "to",
+                PropertyValue::Color(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }),
+            ),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a non-identity change to color compiles within the pixel-local contract");
+        assert!(change_to_color_op(&graph).is_some());
     }
 
     fn broadcast_safe_op(graph: &EffectRenderGraph) -> Option<crate::BroadcastSafeGrade> {

@@ -2346,6 +2346,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::Arithmetic { .. } => "arithmetic",
         EffectRenderOp::LeaveColor { .. } => "leave_color",
+        EffectRenderOp::ChangeToColor { .. } => "change_to_color",
         EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
         EffectRenderOp::TestSignals { .. } => "test_signals",
         EffectRenderOp::ColorBalance { .. } => "color_balance",

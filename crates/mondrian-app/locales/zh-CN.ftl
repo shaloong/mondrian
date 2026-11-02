@@ -2410,6 +2410,25 @@ parameter-mondrian-effect-builtin-leave-color-tolerance-label = 容差
 parameter-mondrian-effect-leave-color-match-hue = 使用色相
 parameter-mondrian-effect-leave-color-match-rgb = 使用 RGB
 
+## Change to Color 定向改色
+effect-change-to-color = 定向改色
+parameter-group-change-to-color = 定向改色
+parameter-mondrian-effect-builtin-change-to-color-change-by-label = 更改方式
+parameter-mondrian-effect-builtin-change-to-color-change-label = 更改
+parameter-mondrian-effect-builtin-change-to-color-from-label = 自
+parameter-mondrian-effect-builtin-change-to-color-hue-label = 色相
+parameter-mondrian-effect-builtin-change-to-color-lightness-label = 亮度
+parameter-mondrian-effect-builtin-change-to-color-saturation-label = 饱和度
+parameter-mondrian-effect-builtin-change-to-color-softness-label = 柔和度
+parameter-mondrian-effect-builtin-change-to-color-to-label = 至
+parameter-mondrian-effect-builtin-change-to-color-view-matte-label = 查看校正遮罩
+parameter-mondrian-effect-change-to-color-change-by-absolute = 替换为至色
+parameter-mondrian-effect-change-to-color-change-by-relative = 相对偏移
+parameter-mondrian-effect-change-to-color-change-hue = 色相
+parameter-mondrian-effect-change-to-color-change-hue-lightness = 色相与亮度
+parameter-mondrian-effect-change-to-color-change-hue-lightness-saturation = 色相、亮度与饱和度
+parameter-mondrian-effect-change-to-color-change-hue-saturation = 色相与饱和度
+
 ## Broadcast Safe 广播安全
 effect-broadcast-safe = 广播安全
 parameter-group-broadcast-safe = 广播安全

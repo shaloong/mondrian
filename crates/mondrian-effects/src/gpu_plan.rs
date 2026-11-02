@@ -144,6 +144,10 @@ pub enum EffectGpuPointOp {
     LeaveColor {
         grade: crate::LeaveColorGrade,
     },
+    /// Change to colour: moves one authored colour family towards another.
+    ChangeToColor {
+        grade: crate::ChangeToColorGrade,
+    },
     /// Broadcast safe: pulls the signal back inside the authored IRE amplitude.
     BroadcastSafe {
         grade: crate::BroadcastSafeGrade,
@@ -869,6 +873,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::Ramp { grade } => Ok(EffectGpuPointOp::Ramp { grade: *grade }),
         EffectRenderOp::Arithmetic { grade } => Ok(EffectGpuPointOp::Arithmetic { grade: *grade }),
         EffectRenderOp::LeaveColor { grade } => Ok(EffectGpuPointOp::LeaveColor { grade: *grade }),
+        EffectRenderOp::ChangeToColor { grade } => {
+            Ok(EffectGpuPointOp::ChangeToColor { grade: *grade })
+        }
         EffectRenderOp::BroadcastSafe { grade } => {
             Ok(EffectGpuPointOp::BroadcastSafe { grade: *grade })
         }
@@ -979,6 +986,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Ramp { .. } => "ramp",
         EffectRenderOp::Arithmetic { .. } => "arithmetic",
         EffectRenderOp::LeaveColor { .. } => "leave_color",
+        EffectRenderOp::ChangeToColor { .. } => "change_to_color",
         EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
         EffectRenderOp::TestSignals { .. } => "test_signals",
         EffectRenderOp::ColorBalance { .. } => "color_balance",

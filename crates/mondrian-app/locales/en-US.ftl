@@ -2478,6 +2478,25 @@ parameter-mondrian-effect-builtin-leave-color-tolerance-label = Tolerance
 parameter-mondrian-effect-leave-color-match-hue = Use Hue
 parameter-mondrian-effect-leave-color-match-rgb = Use RGB
 
+## Change to Color 定向改色
+effect-change-to-color = Change to Color
+parameter-group-change-to-color = Change to Color
+parameter-mondrian-effect-builtin-change-to-color-change-by-label = Change By
+parameter-mondrian-effect-builtin-change-to-color-change-label = Change
+parameter-mondrian-effect-builtin-change-to-color-from-label = From
+parameter-mondrian-effect-builtin-change-to-color-hue-label = Hue
+parameter-mondrian-effect-builtin-change-to-color-lightness-label = Lightness
+parameter-mondrian-effect-builtin-change-to-color-saturation-label = Saturation
+parameter-mondrian-effect-builtin-change-to-color-softness-label = Softness
+parameter-mondrian-effect-builtin-change-to-color-to-label = To
+parameter-mondrian-effect-builtin-change-to-color-view-matte-label = View Correction Mask
+parameter-mondrian-effect-change-to-color-change-by-absolute = Replace with To Colour
+parameter-mondrian-effect-change-to-color-change-by-relative = Relative Offset
+parameter-mondrian-effect-change-to-color-change-hue = Hue
+parameter-mondrian-effect-change-to-color-change-hue-lightness = Hue & Lightness
+parameter-mondrian-effect-change-to-color-change-hue-lightness-saturation = Hue, Lightness & Saturation
+parameter-mondrian-effect-change-to-color-change-hue-saturation = Hue & Saturation
+
 ## Broadcast Safe 广播安全
 effect-broadcast-safe = Broadcast Safe
 parameter-group-broadcast-safe = Broadcast Safe

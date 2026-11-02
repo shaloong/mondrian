@@ -125,6 +125,8 @@ pub enum EffectType {
     ChannelBlur,
     /// Dent: pulls pixels towards (or pushes them away from) a control point.
     Dent,
+    /// Change to colour: moves one authored colour family towards another.
+    ChangeToColor,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -217,6 +219,7 @@ impl EffectType {
             Self::SpillSuppressor => "builtin.spill_suppressor".to_string(),
             Self::ChannelBlur => "builtin.channel_blur".to_string(),
             Self::Dent => "builtin.dent".to_string(),
+            Self::ChangeToColor => "builtin.change_to_color".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -305,6 +308,7 @@ impl EffectType {
             "builtin.spill_suppressor" => Self::SpillSuppressor,
             "builtin.channel_blur" => Self::ChannelBlur,
             "builtin.dent" => Self::Dent,
+            "builtin.change_to_color" => Self::ChangeToColor,
             other => Self::External(other.to_string()),
         }
     }
@@ -393,6 +397,7 @@ impl EffectType {
             Self::SpillSuppressor => "溢色抑制",
             Self::ChannelBlur => "通道模糊",
             Self::Dent => "凹痕",
+            Self::ChangeToColor => "定向改色",
             Self::External(name) => name,
         }
     }
@@ -479,6 +484,7 @@ impl EffectType {
             Self::SpillSuppressor => vec!["抠像"],
             Self::ChannelBlur => vec!["颜色", "模糊与锐化"],
             Self::Dent => vec!["变形"],
+            Self::ChangeToColor => vec!["颜色", "调色"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -567,6 +573,7 @@ impl EffectType {
             Self::SpillSuppressor => "spill_suppressor".to_string(),
             Self::ChannelBlur => "channel_blur".to_string(),
             Self::Dent => "dent".to_string(),
+            Self::ChangeToColor => "change_to_color".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -904,6 +911,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::SpillSuppressor => Ok(()),
             Self::ChannelBlur => Ok(()),
             Self::Dent => Ok(()),
+            Self::ChangeToColor => Ok(()),
         }
     }
 }

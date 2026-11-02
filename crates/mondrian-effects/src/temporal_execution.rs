@@ -2828,6 +2828,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Ramp { .. } => "ramp",
         crate::EffectRenderOp::Arithmetic { .. } => "arithmetic",
         crate::EffectRenderOp::LeaveColor { .. } => "leave_color",
+        crate::EffectRenderOp::ChangeToColor { .. } => "change_to_color",
         crate::EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
         crate::EffectRenderOp::TestSignals { .. } => "test_signals",
         crate::EffectRenderOp::ColorBalance { .. } => "color_balance",

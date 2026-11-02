@@ -350,6 +350,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::ChangeToColor { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "change_to_color",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::BroadcastSafe { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "broadcast_safe",
@@ -975,6 +981,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Ramp { .. } => 0,
         EffectRenderOp::Arithmetic { .. } => 0,
         EffectRenderOp::LeaveColor { .. } => 0,
+        EffectRenderOp::ChangeToColor { .. } => 0,
         EffectRenderOp::BroadcastSafe { .. } => 0,
         EffectRenderOp::TestSignals { .. } => 0,
         EffectRenderOp::ColorBalance { .. } => 0,
@@ -1416,6 +1423,12 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::LeaveColor { grade } => {
             crate::leave_color::apply_leave_color_f32_controlled(working, grade, checkpoint)?;
+            Ok(true)
+        }
+        EffectRenderOp::ChangeToColor { grade } => {
+            crate::change_to_color::apply_change_to_color_f32_controlled(
+                working, grade, checkpoint,
+            )?;
             Ok(true)
         }
         EffectRenderOp::BroadcastSafe { grade } => {
