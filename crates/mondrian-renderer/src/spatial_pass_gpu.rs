@@ -51,6 +51,7 @@ pub(crate) struct EffectSpatialGpu {
     spherize: wgpu::RenderPipeline,
     dent: wgpu::RenderPipeline,
     warp: wgpu::RenderPipeline,
+    grid_warp: wgpu::RenderPipeline,
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
@@ -434,6 +435,36 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_warp"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let grid_warp = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.grid-warp"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_grid_warp"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -1396,6 +1427,7 @@ impl EffectSpatialGpu {
             spherize,
             dent,
             warp,
+            grid_warp,
             mirror,
             polar_coordinates,
             lens_distortion,
@@ -1915,6 +1947,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Spherize { .. }
             | EffectGpuSpatialPass::Dent { .. }
             | EffectGpuSpatialPass::Warp { .. }
+            | EffectGpuSpatialPass::GridWarp { .. }
             | EffectGpuSpatialPass::Convolution { .. }
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
@@ -2089,6 +2122,22 @@ impl EffectSpatialGpu {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let (params, extra) = grade.gpu_controls();
                 return self.record_warp(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::GridWarp { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::UnsupportedPass(
+                    "grid_warp_scratch_geometry",
+                ))?;
+                let (params, extra) = grade.gpu_controls(width as usize, height as usize);
+                return self.record_grid_warp(
                     device,
                     encoder,
                     params,
@@ -2659,6 +2708,46 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.warp,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+    /// Records the checkerboard grid warp.
+    ///
+    /// `params` carries `[cell_width, cell_height, blend, amplitude_ratio]`
+    /// and `extra` carries `[cells_x, cells_y, 0, 0]`. The shader repeats the
+    /// CPU mapping expression for expression, so both produce the same sample
+    /// position for the same authored controls.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_grid_warp(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.grid_warp,
             &input_view,
             &output_view,
             &uniform,
@@ -4676,6 +4765,60 @@ fn fs_warp(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let s1 = cs + (s - cs) * gs - ((uniforms.params.x / 100.0) * hs) * shape;
     let sample = select(vec2<f32>(t1, s1), vec2<f32>(s1, t1), swap);
     return unpremultiply(sample_bilinear_premultiplied(sample.x, sample.y));
+}
+/// Smooths the per-cell blend between the two neighbouring corner offsets.
+fn grid_warp_blend(z: f32, alpha: f32) -> f32 {
+    let z2 = z * z;
+    return (1.0 - alpha) * z + alpha * (3.0 * z2 - 2.0 * z2 * z);
+}
+
+/// Checkerboard displacement of one cell corner, pinned on the outer ring.
+fn grid_warp_vertex_displacement(
+    i: i32,
+    j: i32,
+    nx: i32,
+    ny: i32,
+    amplitude: f32,
+) -> vec2<f32> {
+    if (i == 0 || j == 0 || i == nx || j == ny) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    let sign = select(1.0, -1.0, ((i + j) & 1) == 1);
+    return vec2<f32>(amplitude * sign, -amplitude * sign);
+}
+
+@fragment
+fn fs_grid_warp(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let cell_w = uniforms.params.x;
+    let cell_h = uniforms.params.y;
+    let nx = i32(uniforms.extra.x);
+    let ny = i32(uniforms.extra.y);
+    if (cell_w <= 0.0 || cell_h <= 0.0 || nx < 1 || ny < 1) {
+        return load_clamped(vec2<i32>(floor(position.xy)));
+    }
+    let u = position.x / cell_w;
+    let v = position.y / cell_h;
+    let k = clamp(floor(u), 0.0, f32(nx) - 1.0);
+    let l = clamp(floor(v), 0.0, f32(ny) - 1.0);
+    let s = u - k;
+    let t = v - l;
+    let alpha = uniforms.params.z;
+    let ws = grid_warp_blend(s, alpha);
+    let wt = grid_warp_blend(t, alpha);
+    let w0s = 1.0 - ws;
+    let w1s = ws;
+    let w0t = 1.0 - wt;
+    let w1t = wt;
+    let i0 = i32(k);
+    let j0 = i32(l);
+    let amplitude = uniforms.params.w * min(cell_w, cell_h);
+    let d00 = grid_warp_vertex_displacement(i0, j0, nx, ny, amplitude);
+    let d10 = grid_warp_vertex_displacement(i0 + 1, j0, nx, ny, amplitude);
+    let d01 = grid_warp_vertex_displacement(i0, j0 + 1, nx, ny, amplitude);
+    let d11 = grid_warp_vertex_displacement(i0 + 1, j0 + 1, nx, ny, amplitude);
+    let disp = w0s * w0t * d00 + w1s * w0t * d10 + w0s * w1t * d01 + w1s * w1t * d11;
+    let q = position.xy + disp;
+    return unpremultiply(sample_bilinear_premultiplied(q.x - 0.5, q.y - 0.5));
 }
 fn sample_nearest_premultiplied(x: f32, y: f32) -> vec4<f32> {
     let limit = uniforms.size.xy - vec2<f32>(1.0);
@@ -7154,6 +7297,8 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::WarpAxis::Horizontal,
         )
         .expect("valid warp grade");
+        let grid_warp =
+            mondrian_effects::GridWarpGrade::new(6, 5, 8).expect("valid grid warp grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -7164,6 +7309,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Twirl { grade: twirl },
             mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
             mondrian_effects::EffectGpuSpatialPass::Warp { grade: warp },
+            mondrian_effects::EffectGpuSpatialPass::GridWarp { grade: grid_warp },
             mondrian_effects::EffectGpuSpatialPass::Dent { grade: dent },
             mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
             mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
@@ -7182,7 +7328,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 19, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 20, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::box_blur_frame_f32(
@@ -7211,6 +7357,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             warp,
+        ));
+        assert!(mondrian_effects::grid_warp_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            grid_warp,
         ));
         assert!(mondrian_effects::dent_frame_f32(
             &mut cpu,
@@ -10144,6 +10296,95 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 }
             }
         }
+    }
+    #[test]
+    fn gpu_grid_warp_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU grid warp parity test: no GPU adapter available");
+            return;
+        };
+        let cases = [
+            (13_u32, 11_u32, 7_u32, 7_u32, 1_u32, "default"),
+            (13_u32, 11_u32, 31_u32, 31_u32, 10_u32, "extreme"),
+            (16_u32, 9_u32, 3_u32, 9_u32, 5_u32, "asymmetric"),
+        ];
+        for (width, height, columns, rows, quality, label) in cases {
+            let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let value = 0.05 * (x + 2 * y) as f32;
+                    pixels[y * width as usize + x] = [value, 0.45 - value * 0.3, value * 1.6, 1.0];
+                }
+            }
+            pixels[24] = [0.0, 0.0, 0.0, 0.0];
+            let grade = mondrian_effects::GridWarpGrade::new(columns, rows, quality)
+                .expect("grid warp grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::grid_warp_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.grid-warp-encoder"),
+                });
+            let (params, extra) = grade.gpu_controls(width as usize, height as usize);
+            let output = executor
+                .record_grid_warp(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded grid warp");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "grid warp {label} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+
+        // One pass needs exactly one scratch raster.
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &vec![[0.0_f32; 4]; 13 * 11], 13, 11);
+        let none = scratch(&context, 13, 11, 0);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.grid-warp-geometry-encoder"),
+        });
+        let grade = mondrian_effects::GridWarpGrade::new(7, 7, 1).expect("valid grid warp grade");
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &mondrian_effects::EffectGpuSpatialPass::GridWarp { grade },
+                &source,
+                &none,
+                13,
+                11,
+            )
+            .expect_err("a missing scratch texture cannot run the grid warp");
+        assert!(
+            matches!(
+                error,
+                EffectSpatialGpuError::UnsupportedPass("grid_warp_scratch_geometry")
+            ),
+            "unexpected error: {error:?}"
+        );
     }
     #[test]
     fn gpu_twirl_matches_the_cpu_kernel() {
