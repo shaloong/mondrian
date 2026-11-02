@@ -77,6 +77,7 @@ pub(crate) struct EffectSpatialGpu {
     matte_refine_composite: wgpu::RenderPipeline,
     choker_composite: wgpu::RenderPipeline,
     minimax: wgpu::RenderPipeline,
+    channel_blur: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -1223,6 +1224,38 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Channel blur runs one separable box-blur step per pass and writes
+        // straight into the scratch ping-pong: no separate composite stage.
+        let channel_blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.channel-blur"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_channel_blur"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         // Fractal noise needs twenty-six scalars, so the shared uniform struct is
         // too small: the stage gets its own shader module, bind group layout, and
         // uniform payload instead of a sixth `extra` vector.
@@ -1328,6 +1361,7 @@ impl EffectSpatialGpu {
             matte_refine_composite,
             choker_composite,
             minimax,
+            channel_blur,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -1849,6 +1883,10 @@ impl EffectSpatialGpu {
             // The chain is one pass per operation step and axis: 1, 2 or 4.
             // `record_minimax` executes exactly the same table.
             EffectGpuSpatialPass::Minimax { grade } => Ok(grade.pass_count()),
+            EffectGpuSpatialPass::ChannelBlur { grade } => {
+                Ok(u32::from(grade.direction().blurs_horizontal())
+                    + u32::from(grade.direction().blurs_vertical()))
+            }
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -2214,6 +2252,10 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Minimax { grade } => {
                 return self
                     .record_minimax(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::ChannelBlur { grade } => {
+                return self
+                    .record_channel_blur(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -3508,6 +3550,75 @@ impl EffectSpatialGpu {
         Ok(scratch[passes.len() - 1].clone())
     }
 
+    /// Records the channel blur chain: one separable box-blur step per axis.
+    ///
+    /// The pass count is `1` for a single axis and `2` for both, and always
+    /// matches [`EffectSpatialGpu::texture_pass_count`]. The horizontal pass
+    /// reads the original texture and writes `scratch[0]`; the vertical pass
+    /// reads `scratch[0]` and writes `scratch[1]`. Radii are rounded and clamped
+    /// to the frame extent here so the shader sees the same integers as
+    /// [`mondrian_effects::ChannelBlurGrade::radii`].
+    fn record_channel_blur(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::ChannelBlurGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        let direction = grade.direction();
+        let axes = [direction.blurs_horizontal(), direction.blurs_vertical()];
+        let pass_count = axes.iter().filter(|blurs| **blurs).count();
+        if pass_count == 0 {
+            return Err(EffectSpatialGpuError::UnsupportedPass("channel_blur_axis"));
+        }
+        if scratch.len() < pass_count {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "channel_blur_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        let radii = grade.radii(width as usize, height as usize);
+        let params = [
+            radii[0] as f32,
+            radii[1] as f32,
+            radii[2] as f32,
+            radii[3] as f32,
+        ];
+        let repeat_edge = f32::from(u8::from(grade.repeat_edge_pixels()));
+        let mut written = 0;
+        for (axis, blurs) in axes.iter().enumerate() {
+            if !blurs {
+                continue;
+            }
+            let uniform = SpatialPassUniform {
+                size,
+                params,
+                extra: [repeat_edge, axis as f32, 0.0, 0.0],
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            let input_view = if written == 0 {
+                source.create_view(&wgpu::TextureViewDescriptor::default())
+            } else {
+                scratch[written - 1].create_view(&wgpu::TextureViewDescriptor::default())
+            };
+            let output_view = scratch[written].create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_pass(
+                device,
+                encoder,
+                &self.channel_blur,
+                &input_view,
+                &output_view,
+                &uniform,
+            );
+            written += 1;
+        }
+        Ok(scratch[written - 1].clone())
+    }
+
     /// Records one matte filter pass and advances the matte ping-pong.
     ///
     /// The first matte pass binds the frame and asks the shader for the frame
@@ -4050,6 +4161,31 @@ fn fs_minimax(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> 
         }
     }
     return value;
+}
+
+// The channel blur pass is one separable box blur over red, green, blue and
+// alpha independently. `params` holds the four rounded radii in pixels and
+// `extra` is `[repeat_edge, axis, 0, 0]` with axis 0 horizontal / 1 vertical.
+// One traversal serves every channel: a tap joins a channel's window when its
+// offset is inside that channel's radius, and the divisor stays `2r + 1` even
+// when the tap falls outside the frame, so the transparent-edge mode darkens
+// the border instead of renormalising it.
+@fragment
+fn fs_channel_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let radii = vec4<i32>(round(uniforms.params));
+    let horizontal = uniforms.extra.y < 0.5;
+    let repeat_edge = uniforms.extra.x >= 0.5;
+    let axis_step = select(vec2<i32>(0, 1), vec2<i32>(1, 0), horizontal);
+    let max_radius = max(max(radii.x, radii.y), max(radii.z, radii.w));
+    var sums = vec4<f32>(0.0);
+    for (var offset = -max_radius; offset <= max_radius; offset = offset + 1) {
+        let tap = load_window(pixel + axis_step * offset, repeat_edge);
+        let away = vec4<f32>(abs(f32(offset)));
+        let inside = select(vec4<f32>(0.0), vec4<f32>(1.0), away <= vec4<f32>(radii));
+        sums = sums + select(vec4<f32>(0.0), tap, inside > vec4<f32>(0.5));
+    }
+    return sums / (2.0 * vec4<f32>(radii) + vec4<f32>(1.0));
 }
 
 fn sobel_magnitude(pixel: vec2<i32>) -> f32 {
@@ -6696,6 +6832,18 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             1.0,
         )
         .expect("valid minimax grade");
+        // Blur every channel by a different amount with transparent edges: the
+        // stage runs a horizontal and a vertical pass, so the two-pass scratch
+        // ping-pong and the per-channel radii are both exercised in the chain.
+        let channel_blur = mondrian_effects::ChannelBlurGrade::new(
+            1.0,
+            2.0,
+            0.0,
+            3.0,
+            0.0,
+            mondrian_effects::ChannelBlurDirection::Both,
+        )
+        .expect("valid channel blur grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
@@ -6718,6 +6866,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::MatteRefine { grade: matte_refine },
             mondrian_effects::EffectGpuSpatialPass::Choker { grade: choker },
             mondrian_effects::EffectGpuSpatialPass::Minimax { grade: minimax },
+            mondrian_effects::EffectGpuSpatialPass::ChannelBlur { grade: channel_blur },
         ];
 
         let mut cpu = pixels.clone();
@@ -6820,13 +6969,20 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             height as usize,
             &minimax,
         ));
+        assert!(mondrian_effects::channel_blur_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &channel_blur,
+        ));
 
         let executor = EffectSpatialGpu::new(&context.device);
         let original = upload(&context, &pixels, width, height);
         // Seven rotating scratch textures keep every stage's destination out of
         // its own source, which wgpu rejects as conflicting texture usage, and
-        // give the three-pass deband chain, the six-pass glow chain, and the
-        // four-pass minimax chain their intermediates.
+        // give the three-pass deband chain, the six-pass glow chain, the
+        // four-pass minimax chain, and the two-pass channel blur chain their
+        // intermediates.
         let pool: Vec<wgpu::Texture> =
             (0..7).map(|_| scratch(&context, width, height, 1).remove(0)).collect();
         let mut current: Option<usize> = None;
@@ -8596,6 +8752,208 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             matches!(
                 error,
                 EffectSpatialGpuError::UnsupportedPass("minimax_scratch_geometry")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn gpu_channel_blur_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU channel blur parity test: no GPU adapter available");
+            return;
+        };
+        let width = 11_u32;
+        let height = 9_u32;
+        // A deterministic ramp with a zero-coverage corner and a semi-transparent
+        // band: every channel varies, so per-channel radii and the alpha chain
+        // both differ from the source in observable places.
+        let mut pixels = vec![[0.0_f32; 4]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let phase = 5 * x + 7 * y;
+                pixels[y * width as usize + x] = [
+                    (phase % 9) as f32 / 8.0,
+                    (phase % 6) as f32 / 5.0,
+                    (phase % 12) as f32 / 11.0,
+                    (phase % 4) as f32 / 3.0,
+                ];
+            }
+        }
+        pixels[0] = [0.0, 0.0, 0.0, 0.0];
+        for x in 0..width as usize {
+            pixels[3 * width as usize + x][3] = 0.25;
+        }
+        let build = |red, green, blue, alpha, edge_behavior, direction| {
+            mondrian_effects::ChannelBlurGrade::new(
+                red,
+                green,
+                blue,
+                alpha,
+                edge_behavior,
+                direction,
+            )
+            .expect("valid channel blur grade")
+        };
+        let cases = [
+            (
+                "rgb 2/4/6 alpha 8 both repeat edge",
+                build(
+                    2.0,
+                    4.0,
+                    6.0,
+                    8.0,
+                    1.0,
+                    mondrian_effects::ChannelBlurDirection::Both,
+                ),
+                2_u32,
+            ),
+            (
+                "alpha 3 horizontal",
+                build(
+                    0.0,
+                    0.0,
+                    0.0,
+                    3.0,
+                    1.0,
+                    mondrian_effects::ChannelBlurDirection::Horizontal,
+                ),
+                1_u32,
+            ),
+        ];
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let pool = scratch(&context, width, height, 2);
+        for (index, (label, grade, expected_passes)) in cases.iter().enumerate() {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::channel_blur_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let pass = mondrian_effects::EffectGpuSpatialPass::ChannelBlur { grade: *grade };
+            assert_eq!(
+                EffectSpatialGpu::texture_pass_count(&pass).expect("supported pass"),
+                *expected_passes,
+                "case {index} ({label}) pass count"
+            );
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.channel-blur-encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool[..*expected_passes as usize],
+                    width,
+                    height,
+                )
+                .expect("recorded channel blur");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "channel blur case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+
+        // An 8x6 frame with radii past the frame extent and transparent edges:
+        // the pass rounds each amount, clamps it to `max(width, height)`, and the
+        // corner pixels darken because out-of-window taps still divide.
+        let small_width = 8_u32;
+        let small_height = 6_u32;
+        let mut small = vec![[0.0_f32; 4]; (small_width * small_height) as usize];
+        for y in 0..small_height as usize {
+            for x in 0..small_width as usize {
+                let phase = 3 * x + 5 * y;
+                small[y * small_width as usize + x] = [
+                    (phase % 7) as f32 / 6.0,
+                    (phase % 5) as f32 / 4.0,
+                    (phase % 3) as f32 / 2.0,
+                    (phase % 8) as f32 / 7.0,
+                ];
+            }
+        }
+        let clamp_grade = build(
+            12.0,
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            mondrian_effects::ChannelBlurDirection::Both,
+        );
+        let mut cpu = small.clone();
+        assert!(mondrian_effects::channel_blur_frame_f32(
+            &mut cpu,
+            small_width as usize,
+            small_height as usize,
+            &clamp_grade,
+        ));
+        let source = upload(&context, &small, small_width, small_height);
+        let pool = scratch(&context, small_width, small_height, 2);
+        let pass = mondrian_effects::EffectGpuSpatialPass::ChannelBlur { grade: clamp_grade };
+        assert_eq!(
+            EffectSpatialGpu::texture_pass_count(&pass).expect("supported pass"),
+            2,
+            "clamped case pass count"
+        );
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.channel-blur-clamp-encoder"),
+        });
+        let output = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &source,
+                &pool,
+                small_width,
+                small_height,
+            )
+            .expect("recorded clamped channel blur");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, small_width, small_height);
+        for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+            for channel in 0..4 {
+                let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                assert!(
+                    difference <= 1.0e-4,
+                    "channel blur clamp pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+            }
+        }
+
+        // A two-axis blur needs two rasters, and one must be refused with the
+        // documented geometry error instead of silently clamping.
+        let source = upload(&context, &small, small_width, small_height);
+        let short = scratch(&context, small_width, small_height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.channel-blur-geometry-encoder"),
+        });
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &source,
+                &short,
+                small_width,
+                small_height,
+            )
+            .expect_err("one scratch texture cannot run the two-axis blur");
+        assert!(
+            matches!(
+                error,
+                EffectSpatialGpuError::UnsupportedPass("channel_blur_scratch_geometry")
             ),
             "unexpected error: {error:?}"
         );
