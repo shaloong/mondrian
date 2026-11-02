@@ -1216,8 +1216,133 @@ fn effects_author_coverage() -> bool {
         if (index >= uniforms.effect_count) { break; }
         let effect = uniforms.effects[index];
         if (effect.header.x == 26u && effect.extra0.y > 4.5) { return true; }
+        // A generated test signal replaces the pixel outright, coverage
+        // included, so an empty input pixel must not skip it.
+        if (effect.header.x == 31u) { return true; }
     }
     return false;
+}
+
+fn test_signals_column(column: u32, width: u32, count: u32) -> u32 {
+    if (width == 0u) { return 0u; }
+    return min((column * count) / width, count - 1u);
+}
+
+// The seven 75% SMPTE bars: white, yellow, cyan, green, magenta, red, blue.
+fn test_signals_bar(index: u32) -> vec3<f32> {
+    if (index == 0u) { return vec3<f32>(0.75); }
+    if (index == 1u) { return vec3<f32>(0.75, 0.75, 0.0); }
+    if (index == 2u) { return vec3<f32>(0.0, 0.75, 0.75); }
+    if (index == 3u) { return vec3<f32>(0.0, 0.75, 0.0); }
+    if (index == 4u) { return vec3<f32>(0.75, 0.0, 0.75); }
+    if (index == 5u) { return vec3<f32>(0.75, 0.0, 0.0); }
+    return vec3<f32>(0.0, 0.0, 0.75);
+}
+
+// The reverse bars of the lower third: blue, black, magenta, black, cyan,
+// black, white.
+fn test_signals_reverse_bar(index: u32) -> vec3<f32> {
+    if (index == 0u) { return vec3<f32>(0.0, 0.0, 0.75); }
+    if (index == 2u) { return vec3<f32>(0.75, 0.0, 0.75); }
+    if (index == 4u) { return vec3<f32>(0.0, 0.75, 0.75); }
+    if (index == 6u) { return vec3<f32>(0.75); }
+    return vec3<f32>(0.0);
+}
+
+fn test_signals_radius_squared(column: u32, row: u32, width: u32, height: u32) -> f32 {
+    let centre_x = (f32(width) - 1.0) * 0.5;
+    let centre_y = (f32(height) - 1.0) * 0.5;
+    let dx = f32(column) - centre_x;
+    let dy = f32(row) - centre_y;
+    return dx * dx + dy * dy;
+}
+
+fn test_signals_abs_diff(a: u32, b: u32) -> u32 {
+    if (a >= b) { return a - b; }
+    return b - a;
+}
+
+fn test_signals_pattern(pattern: u32, column: u32, row: u32, width: u32, height: u32) -> vec3<f32> {
+    if (pattern == 0u) {
+        let band = (row * 3u) / height;
+        if (band < 2u) { return test_signals_bar(test_signals_column(column, width, 7u)); }
+        if (column * 2u < width) {
+            return test_signals_reverse_bar(test_signals_column(column * 2u, width, 7u));
+        }
+        let pluge_start = (width * 7u) / 8u;
+        if (width > pluge_start && column >= pluge_start) {
+            let step = test_signals_column(column - pluge_start, width - pluge_start, 3u);
+            if (step == 0u) { return vec3<f32>(-0.04); }
+            if (step == 1u) { return vec3<f32>(0.0); }
+            return vec3<f32>(0.04);
+        }
+        return vec3<f32>(0.0);
+    }
+    if (pattern == 1u) {
+        let level = f32(test_signals_column(column, width, 11u)) / 10.0;
+        return vec3<f32>(level);
+    }
+    if (pattern == 2u) {
+        let level = f32(test_signals_column(column, width, 16u)) / 15.0;
+        return vec3<f32>(level);
+    }
+    if (pattern == 3u) {
+        let cell = (column / 32u + row / 32u) % 2u;
+        if (cell == 0u) { return vec3<f32>(1.0); }
+        return vec3<f32>(0.0);
+    }
+    if (pattern == 4u) {
+        let radius = sqrt(test_signals_radius_squared(column, row, width, height));
+        let ring = u32(radius / 16.0);
+        if (ring % 2u == 0u) { return vec3<f32>(1.0); }
+        return vec3<f32>(0.0);
+    }
+    // The radial zone plate peaks at the centre, so its sine carries a
+    // quarter-turn phase.
+    let extent = min(f32(width), f32(height));
+    let wave_number = 6.283185307179586 / (8.0 * extent);
+    let value = 0.5 + 0.5 * sin(wave_number * test_signals_radius_squared(column, row, width, height) + 1.5707963267948966);
+    return vec3<f32>(value);
+}
+
+// The calibration marks: a 10% grid, a centre cross, and four corner ticks.
+fn test_signals_mark(column: u32, row: u32, width: u32, height: u32) -> bool {
+    if (width == 0u || height == 0u) { return false; }
+    let step_x = max((width + 9u) / 10u, 1u);
+    let step_y = max((height + 9u) / 10u, 1u);
+    if (column % step_x == 0u || row % step_y == 0u) { return true; }
+    let centre_x = (width - 1u) / 2u;
+    let centre_y = (height - 1u) / 2u;
+    let arm = max(min(width, height) / 10u, 1u);
+    if (column == centre_x && test_signals_abs_diff(row, centre_y) <= arm) { return true; }
+    if (row == centre_y && test_signals_abs_diff(column, centre_x) <= arm) { return true; }
+    let near_left = column < arm;
+    let near_right = column + arm >= width;
+    let near_top = row < arm;
+    let near_bottom = row + arm >= height;
+    return (near_top || near_bottom) && (near_left || near_right);
+}
+
+fn test_signals_safe_rect(column: u32, row: u32, width: u32, height: u32, scale: f32) -> bool {
+    if (width < 2u || height < 2u) { return false; }
+    let inset_x = f32(width) * (1.0 - scale) * 0.5;
+    let inset_y = f32(height) * (1.0 - scale) * 0.5;
+    let centre_x = f32(column) + 0.5;
+    let centre_y = f32(row) + 0.5;
+    let left = inset_x;
+    let right = f32(width) - inset_x;
+    let top = inset_y;
+    let bottom = f32(height) - inset_y;
+    let on_vertical = abs(centre_x - left) <= 0.75 || abs(centre_x - right) <= 0.75;
+    let on_horizontal = abs(centre_y - top) <= 0.75 || abs(centre_y - bottom) <= 0.75;
+    let inside_y = centre_y >= top - 0.75 && centre_y <= bottom + 0.75;
+    let inside_x = centre_x >= left - 0.75 && centre_x <= right + 0.75;
+    return (on_vertical && inside_y) || (on_horizontal && inside_x);
+}
+
+fn test_signals_safe_frame(column: u32, row: u32, width: u32, height: u32) -> bool {
+    return test_signals_safe_rect(column, row, width, height, 0.93)
+        || test_signals_safe_rect(column, row, width, height, 0.90);
 }
 
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
@@ -1648,7 +1773,34 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             let alpha =
                 shift_channels_source(pixel.rgb, pixel.a, (packed >> 12u) & 15u, coefficients);
             pixel = vec4<f32>(red, green, blue, alpha);
-
+        } else if (effect.header.x == 31u) {
+            // `TestSignalsGrade`: params is [pattern, intensity, labels,
+            // safety], extra0 is [width, height, 0, 0] and colour / extra1 are
+            // unused. The generator reads no source pixel, so alpha is 1.
+            let frame_width = u32(max(effect.extra0.x, 0.0));
+            let frame_height = u32(max(effect.extra0.y, 0.0));
+            if (frame_width >= 1u && frame_height >= 1u) {
+                let column = u32(max(position.x, 0.0));
+                let row = u32(max(position.y, 0.0));
+                var rgb = test_signals_pattern(
+                    u32(effect.params.x),
+                    column,
+                    row,
+                    frame_width,
+                    frame_height,
+                ) * effect.params.y;
+                // The marks and the safe frames are measurement overlays: they
+                // stay full white whatever the intensity is.
+                if (effect.params.z > 0.5
+                    && test_signals_mark(column, row, frame_width, frame_height)) {
+                    rgb = vec3<f32>(1.0);
+                }
+                if (effect.params.w > 0.5
+                    && test_signals_safe_frame(column, row, frame_width, frame_height)) {
+                    rgb = vec3<f32>(1.0);
+                }
+                pixel = vec4<f32>(rgb, 1.0);
+            }
         }
     }
     return pixel;
@@ -4021,6 +4173,19 @@ impl GpuFrameCompositor {
         let creative_lut_binding = self.creative_luts.prepare_plan(device, queue, effect_plan)?;
         uniforms.effect_count = effect_plan.map_or(0, |plan| plan.operations().len() as u32);
         uniforms.effects = effect_uniforms(effect_plan, Some(&creative_lut_binding))?;
+        // Test signals places its geometry from the frame extent, but
+        // `effect_uniforms` has no extent in scope. Stamp it here, where the
+        // composite path and `record_point_effect_pass` converge: the point
+        // uniform's `extra0` is `[width, height, 0, 0]` for that op, exactly
+        // as `TestSignalsGrade::gpu_controls` documents.
+        if let Some(plan) = effect_plan {
+            let source_extent = [uniforms.geometry[2], uniforms.geometry[3], 0.0, 0.0];
+            for (uniform, operation) in uniforms.effects.iter_mut().zip(plan.operations()) {
+                if matches!(operation, EffectGpuPointOp::TestSignals { .. }) {
+                    uniform.extra0 = source_extent;
+                }
+            }
+        }
         let (uniform_buffer, uniform_bind_group, uniform_offset) = {
             let mut arena = self.uniform_arena.lock();
             let slot = arena.next_slot;
@@ -4846,6 +5011,16 @@ fn effect_uniforms(
                 let (params, extra0) = grade.gpu_controls();
                 GpuEffectUniform {
                     header: [30, 0, 0, 0],
+                    params,
+                    color: [0.0; 4],
+                    extra0,
+                    extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::TestSignals { grade } => {
+                let (params, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [31, 0, 0, 0],
                     params,
                     color: [0.0; 4],
                     extra0,
@@ -8494,6 +8669,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_test_signals_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            TestSignalsGrade, TestSignalsPattern,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU test signals parity test: no GPU adapter available");
+            return;
+        };
+        // The cases avoid the bars pattern: its PLUGE strip is deliberately
+        // negative (-0.04) and the composite target clamps a negative coverage
+        // colour where the CPU reference keeps it. The remaining patterns are
+        // integer-exact bar and cell selection, so the two kernels must agree.
+        // Both extents are awkward multiples of the segment counts so the last
+        // segment eats the remainder.
+        for (width, height) in [(12_u32, 9_u32), (7, 5)] {
+            let data = vec![[0.5_f32, 0.5, 0.5, 1.0]; (width * height) as usize];
+            let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width,
+                height,
+                color_space: WorkingColorSpace::LinearRec709,
+                data,
+            });
+            for (pattern, intensity, display_labels, safe_frames) in [
+                (TestSignalsPattern::Grayscale, 100.0_f32, false, false),
+                (TestSignalsPattern::Grayscale, 100.0, true, false),
+                (TestSignalsPattern::HdrStaircase, 100.0, false, true),
+                (TestSignalsPattern::Checkerboard, 50.0, false, false),
+                (TestSignalsPattern::ZonePlate, 100.0, true, true),
+            ] {
+                let grade = TestSignalsGrade::new(pattern, intensity, display_labels, safe_frames)
+                    .expect("valid test signals grade");
+                let mut builder = EffectGraphBuilderState::new();
+                builder.append_unary(EffectRenderOp::TestSignals { grade });
+                let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+                let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+                assert_eq!(plan.operations().len(), 1);
+                let expected = apply_compiled_effect_graph_rgba_f32(
+                    mondrian_effects::EffectFloatFrameView::new(
+                        mondrian_effects::EffectFrameExtent::new(width, height),
+                        mondrian_effects::EffectValueFormat::new(
+                            mondrian_effects::EffectWorkingPrecision::Float32,
+                            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &frame.rgba_f32().data,
+                    ),
+                    &graph,
+                    0,
+                )
+                .expect("CPU float reference");
+                // The generator always emits alpha 1, so no expected pixel can be
+                // remapped to zero coverage here.
+                let expected_pixels: Vec<[f32; 4]> = expected.pixels().to_vec();
+                let layer = GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::CpuFrame(&frame),
+                    opacity: 1.0,
+                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: Some(&plan),
+                    frame_seed: 0,
+                };
+                let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                    &context,
+                    &[layer],
+                    width,
+                    height,
+                    WorkingColorSpace::LinearRec709,
+                );
+                assert_eq!(diagnostics.execution.fused_point_operations, 1);
+                let report = compare_linear_rgba(
+                    &expected_pixels,
+                    &actual,
+                    LinearRgbaAccuracyBudget {
+                        rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                        alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    },
+                )
+                .expect("comparable frames");
+                assert!(
+                    report.within_budget,
+                    "GPU test signals accuracy budget exceeded for {grade:?} at {width}x{height}: {report:#?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_noise_matches_the_cpu_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
             compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
@@ -8942,7 +9213,7 @@ mod tests {
             BlackAndWhiteGrade, BroadcastLocale, BroadcastSafeGrade, BroadcastSafeMode,
             ChannelMixerGrade, ChannelSource, EffectGraphBuilderState, EffectRenderOp, HueBand,
             HueSaturationGrade, InvertChannels, LeaveColorGrade, LeaveColorMatch,
-            ShiftChannelsGrade,
+            ShiftChannelsGrade, TestSignalsGrade, TestSignalsPattern,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -9042,10 +9313,16 @@ mod tests {
             )
             .expect("valid broadcast safe grade"),
         });
+        // The generator runs last, so its frame replaces whatever the ten
+        // colour ops produced; the chain still has to fuse all eleven ops.
+        builder.append_unary(EffectRenderOp::TestSignals {
+            grade: TestSignalsGrade::new(TestSignalsPattern::Grayscale, 100.0, true, true)
+                .expect("valid test signals grade"),
+        });
         let graph = compile_reference_render_graph(builder.finish()).expect("valid built-in graph");
         let plan =
             lower_effect_graph_to_gpu_plan(&graph).expect("supported built-in point effects");
-        assert_eq!(plan.operations().len(), 10);
+        assert_eq!(plan.operations().len(), 11);
 
         let expected = apply_compiled_effect_graph_rgba_f32(
             mondrian_effects::EffectFloatFrameView::new(
@@ -9079,7 +9356,7 @@ mod tests {
             WorkingColorSpace::LinearRec709,
         );
         assert_eq!(diagnostics.execution.fused_layer_passes, 1);
-        assert_eq!(diagnostics.execution.fused_point_operations, 10);
+        assert_eq!(diagnostics.execution.fused_point_operations, 11);
         let report = compare_linear_rgba(
             expected.pixels(),
             &actual,
