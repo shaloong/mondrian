@@ -279,6 +279,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "凸出" => Some("parameter-group-bulge"),
         "凹痕" => Some("parameter-group-dent"),
         "弯曲" => Some("parameter-group-warp"),
+        "网格变形" => Some("parameter-group-grid-warp"),
         "分形噪波" => Some("parameter-group-fractal-noise"),
         "分离" => Some("parameter-group-split"),
         "卷积核" => Some("parameter-group-convolution"),

@@ -71,6 +71,7 @@ pub mod glow;
 pub mod gpu_pipeline;
 pub mod gpu_plan;
 pub mod graph;
+pub mod grid_warp;
 pub mod hdr_grading;
 pub mod heterogeneous_execution;
 pub mod hsl;
@@ -281,6 +282,12 @@ pub use graph::{
     EffectDomainBlockerKind, EffectDomainTransition, EffectGraphBuilderState, EffectGraphNode,
     EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
     PreparedEffectGraphTopology,
+};
+pub use grid_warp::{
+    grid_warp_frame_f32, GridWarpError, GridWarpGrade, GRID_WARP_AMPLITUDE_RATIO,
+    GRID_WARP_DEFAULT_AXIS, GRID_WARP_DEFAULT_QUALITY, GRID_WARP_IDENTITY_MAX_AXIS,
+    GRID_WARP_MAX_AXIS, GRID_WARP_MAX_BLEND_SLOPE, GRID_WARP_MIN_AXIS, GRID_WARP_QUALITY_MAX,
+    GRID_WARP_QUALITY_MIN,
 };
 pub use hdr_grading::{
     HdrGradingAuthoring, HdrGradingError, HdrGradingZone, HdrZoneControl, PreparedHdrGrading,

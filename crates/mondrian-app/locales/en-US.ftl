@@ -2627,3 +2627,20 @@ parameter-mondrian-effect-warp-axis-vertical = Vertical
 parameter-mondrian-effect-builtin-warp-bend-label = Bend
 parameter-mondrian-effect-builtin-warp-horizontal-distortion-label = Horizontal Distortion
 parameter-mondrian-effect-builtin-warp-vertical-distortion-label = Vertical Distortion
+
+## Grid Warp 网格变形
+effect-grid-warp = Grid Warp
+parameter-group-grid-warp = Grid Warp
+parameter-mondrian-effect-builtin-grid-warp-row-count-label = Rows
+parameter-mondrian-effect-builtin-grid-warp-column-count-label = Columns
+parameter-mondrian-effect-builtin-grid-warp-quality-label = Quality
+parameter-mondrian-effect-grid-warp-quality-1 = 1
+parameter-mondrian-effect-grid-warp-quality-2 = 2
+parameter-mondrian-effect-grid-warp-quality-3 = 3
+parameter-mondrian-effect-grid-warp-quality-4 = 4
+parameter-mondrian-effect-grid-warp-quality-5 = 5
+parameter-mondrian-effect-grid-warp-quality-6 = 6
+parameter-mondrian-effect-grid-warp-quality-7 = 7
+parameter-mondrian-effect-grid-warp-quality-8 = 8
+parameter-mondrian-effect-grid-warp-quality-9 = 9
+parameter-mondrian-effect-grid-warp-quality-10 = 10

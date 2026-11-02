@@ -458,6 +458,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::GridWarp { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "grid_warp",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Twirl { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "twirl",
@@ -1023,6 +1029,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Spherize { .. } => 0,
         EffectRenderOp::Dent { .. } => 0,
         EffectRenderOp::Warp { .. } => 1,
+        EffectRenderOp::GridWarp { .. } => 1,
         EffectRenderOp::Noise { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
         EffectRenderOp::Scatter { .. } => 0,
@@ -1546,6 +1553,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             checkpoint,
         ),
         EffectRenderOp::Warp { grade } => crate::warp::apply_warp_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            *grade,
+            checkpoint,
+        ),
+        EffectRenderOp::GridWarp { grade } => crate::grid_warp::apply_grid_warp_f32_controlled(
             working,
             region.width as usize,
             region.height as usize,

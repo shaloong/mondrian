@@ -97,6 +97,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored warp parameters.
         grade: crate::WarpGrade,
     },
+    /// Checkerboard cell-corner displacement.
+    GridWarp {
+        /// Authored grid warp parameters.
+        grade: crate::GridWarpGrade,
+    },
     /// Arbitrary three by three convolution.
     Convolution {
         /// Authored convolution parameters.
@@ -210,6 +215,7 @@ impl EffectGpuSpatialPass {
             Self::Spherize { .. } => "spherize",
             Self::Dent { .. } => "dent",
             Self::Warp { .. } => "warp",
+            Self::GridWarp { .. } => "grid_warp",
             Self::Convolution { .. } => "convolution",
             Self::Mirror { .. } => "mirror",
             Self::PolarCoordinates { .. } => "polar_coordinates",
@@ -265,6 +271,7 @@ impl EffectGpuSpatialPass {
             | Self::Spherize { .. }
             | Self::Dent { .. }
             | Self::Warp { .. }
+            | Self::GridWarp { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             // A flare reads only the pixel it writes, so it needs no neighbour.
@@ -315,6 +322,7 @@ impl EffectGpuSpatialPass {
             | Self::Spherize { .. }
             | Self::Dent { .. }
             | Self::Warp { .. }
+            | Self::GridWarp { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
             Self::LensDistortion { .. } => u32::MAX,
@@ -598,6 +606,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::Dent { grade } => Some(EffectGpuSpatialPass::Dent { grade: *grade }),
         EffectRenderOp::Warp { grade } => Some(EffectGpuSpatialPass::Warp { grade: *grade }),
+        EffectRenderOp::GridWarp { grade } => {
+            Some(EffectGpuSpatialPass::GridWarp { grade: *grade })
+        }
         EffectRenderOp::Convolution { grade } => {
             Some(EffectGpuSpatialPass::Convolution { grade: *grade })
         }

@@ -129,6 +129,8 @@ pub enum EffectType {
     ChangeToColor,
     /// Warp: bends the layer along an arc.
     Warp,
+    /// Grid warp: displaces a checkerboard of cell corners along the cell diagonals.
+    GridWarp,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -223,6 +225,7 @@ impl EffectType {
             Self::Dent => "builtin.dent".to_string(),
             Self::ChangeToColor => "builtin.change_to_color".to_string(),
             Self::Warp => "builtin.warp".to_string(),
+            Self::GridWarp => "builtin.grid_warp".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -313,6 +316,7 @@ impl EffectType {
             "builtin.dent" => Self::Dent,
             "builtin.change_to_color" => Self::ChangeToColor,
             "builtin.warp" => Self::Warp,
+            "builtin.grid_warp" => Self::GridWarp,
             other => Self::External(other.to_string()),
         }
     }
@@ -403,6 +407,7 @@ impl EffectType {
             Self::Dent => "凹痕",
             Self::ChangeToColor => "定向改色",
             Self::Warp => "弯曲",
+            Self::GridWarp => "网格变形",
             Self::External(name) => name,
         }
     }
@@ -491,6 +496,7 @@ impl EffectType {
             Self::Dent => vec!["变形"],
             Self::ChangeToColor => vec!["颜色", "调色"],
             Self::Warp => vec!["变形"],
+            Self::GridWarp => vec!["变形"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -581,6 +587,7 @@ impl EffectType {
             Self::Dent => "dent".to_string(),
             Self::ChangeToColor => "change_to_color".to_string(),
             Self::Warp => "warp".to_string(),
+            Self::GridWarp => "grid_warp".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -920,6 +927,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Dent => Ok(()),
             Self::ChangeToColor => Ok(()),
             Self::Warp => Ok(()),
+            Self::GridWarp => Ok(()),
         }
     }
 }

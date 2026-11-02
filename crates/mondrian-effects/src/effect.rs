@@ -1069,6 +1069,11 @@ pub enum EffectRenderOp {
     Warp {
         grade: crate::WarpGrade,
     },
+    /// Grid warp: displaces a checkerboard of cell corners along the cell
+    /// diagonals (DST-09).
+    GridWarp {
+        grade: crate::GridWarpGrade,
+    },
     /// Film-style grain keyed off the integer pixel position (FLM-02).
     Noise {
         grade: crate::NoiseGrade,
@@ -1359,6 +1364,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Dent { grade } => formatter.debug_struct("Dent").field("grade", grade).finish(),
             Self::Warp { grade } => formatter.debug_struct("Warp").field("grade", grade).finish(),
+            Self::GridWarp { grade } => {
+                formatter.debug_struct("GridWarp").field("grade", grade).finish()
+            }
             Self::Noise { grade } => formatter.debug_struct("Noise").field("grade", grade).finish(),
             Self::ColorEmboss { grade } => {
                 formatter.debug_struct("ColorEmboss").field("grade", grade).finish()
@@ -2140,6 +2148,12 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::GridWarp { grade } => {
+                85u8.hash(state);
+                grade.columns().hash(state);
+                grade.rows().hash(state);
+                grade.quality().hash(state);
+            }
             EffectRenderOp::ColorEmboss { grade } => {
                 32u8.hash(state);
                 for value in grade.gpu_controls() {
@@ -2337,6 +2351,7 @@ impl EffectRenderOp {
             EffectRenderOp::Spherize { .. } => 3,
             EffectRenderOp::Dent { .. } => 3,
             EffectRenderOp::Warp { .. } => 3,
+            EffectRenderOp::GridWarp { .. } => 3,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2879,7 +2894,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 84] {
+fn builtin_effect_types() -> [EffectType; 85] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2965,6 +2980,7 @@ fn builtin_effect_types() -> [EffectType; 84] {
         EffectType::ChannelBlur,
         EffectType::Dent,
         EffectType::Warp,
+        EffectType::GridWarp,
     ]
 }
 
@@ -8569,6 +8585,47 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::GridWarp => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "row_count",
+                "网格变形",
+                "行数",
+                PropertyValue::Int(crate::GRID_WARP_DEFAULT_AXIS),
+                Some(crate::GRID_WARP_MIN_AXIS as f64),
+                Some(crate::GRID_WARP_MAX_AXIS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "column_count",
+                "网格变形",
+                "列数",
+                PropertyValue::Int(crate::GRID_WARP_DEFAULT_AXIS),
+                Some(crate::GRID_WARP_MIN_AXIS as f64),
+                Some(crate::GRID_WARP_MAX_AXIS as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "quality",
+                "网格变形",
+                "品质",
+                &crate::GRID_WARP_DEFAULT_QUALITY.to_string(),
+                (crate::GRID_WARP_QUALITY_MIN..=crate::GRID_WARP_QUALITY_MAX)
+                    .map(|quality| {
+                        ParameterEnumOption::new(
+                            quality.to_string(),
+                            quality.to_string(),
+                            format!("mondrian.effect.grid_warp.quality.{quality}"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -9287,6 +9344,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Warp => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::GridWarp => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -13728,6 +13790,48 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::GridWarp => {
+            let row_count_id = builtin_parameter_id(effect_type, "row_count");
+            let column_count_id = builtin_parameter_id(effect_type, "column_count");
+            let quality_id = builtin_parameter_id(effect_type, "quality");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let read_axis =
+                    |id: &ParameterId, name: &str| -> Result<u32, EffectGraphBuildError> {
+                        match effect.evaluate_parameter(id, context.time) {
+                            Some(PropertyValue::Int(value)) => u32::try_from(value)
+                                .map_err(|_| invalid(format!("{name} must be a positive integer"))),
+                            Some(_) => Err(invalid(format!("{name} must be an integer"))),
+                            None => Ok(crate::GRID_WARP_DEFAULT_AXIS as u32),
+                        }
+                    };
+                let quality = match effect.evaluate_parameter(&quality_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => key.parse::<u32>().map_err(|_| {
+                        invalid(format!("grid warp quality {key} is not a declared option"))
+                    })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "grid warp quality must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::GRID_WARP_DEFAULT_QUALITY,
+                };
+                let columns = read_axis(&column_count_id, "grid warp column count")?;
+                let rows = read_axis(&row_count_id, "grid warp row count")?;
+                let grade = crate::GridWarpGrade::new(columns, rows, quality)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // Two-or-fewer cells on either axis are the identity, so no
+                // node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::GridWarp { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -13817,6 +13921,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChannelBlur => "通道模糊",
         EffectType::Dent => "凹痕",
         EffectType::Warp => "弯曲",
+        EffectType::GridWarp => "网格变形",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -15135,6 +15240,7 @@ mod tests {
             EffectType::ChannelBlur,
             EffectType::Dent,
             EffectType::Warp,
+            EffectType::GridWarp,
             EffectType::ChangeToColor,
         ]
         .into_iter()
@@ -19097,6 +19203,112 @@ mod tests {
         assert!((grade.bend() - 75.0).abs() < 1.0e-6);
         assert_eq!(grade.style(), crate::WarpStyle::Flag);
         assert_eq!(grade.axis(), crate::WarpAxis::Vertical);
+    }
+
+    fn grid_warp_op(graph: &EffectRenderGraph) -> Option<crate::GridWarpGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::GridWarp { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_grid_warp(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::GridWarp).expect("registered grid warp definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::GridWarp.property_path(parameter),
+                value,
+            })
+            .expect("authors grid warp parameter");
+        effect
+    }
+
+    fn author_grid_warp_more(
+        mut effect: EffectNode,
+        parameter: &str,
+        value: PropertyValue,
+    ) -> EffectNode {
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::GridWarp.property_path(parameter),
+                value,
+            })
+            .expect("authors grid warp parameter");
+        effect
+    }
+
+    #[test]
+    fn grid_warp_defaults_compile_to_the_documented_operation() {
+        let effect =
+            instantiate_effect_node(EffectType::GridWarp).expect("registered grid warp definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds grid warp graph");
+        let grade = grid_warp_op(&graph).expect("grid warp op");
+        assert_eq!(grade.columns(), crate::GRID_WARP_DEFAULT_AXIS as u32);
+        assert_eq!(grade.rows(), crate::GRID_WARP_DEFAULT_AXIS as u32);
+        assert_eq!(grade.quality(), crate::GRID_WARP_DEFAULT_QUALITY);
+    }
+
+    #[test]
+    fn grid_warp_identity_axes_compile_to_identity() {
+        let effect = author_grid_warp("row_count", PropertyValue::Int(2));
+        let effect = author_grid_warp_more(effect, "column_count", PropertyValue::Int(2));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds identity grid warp graph");
+        assert!(grid_warp_op(&graph).is_none());
+    }
+
+    #[test]
+    fn grid_warp_authored_state_reaches_the_operation() {
+        let effect = author_grid_warp("row_count", PropertyValue::Int(5));
+        let effect = author_grid_warp_more(effect, "column_count", PropertyValue::Int(9));
+        let effect = author_grid_warp_more(effect, "quality", PropertyValue::Enum("10".to_owned()));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds grid warp graph");
+        let grade = grid_warp_op(&graph).expect("grid warp op");
+        assert_eq!(grade.rows(), 5);
+        assert_eq!(grade.columns(), 9);
+        assert_eq!(grade.quality(), 10);
+    }
+
+    #[test]
+    fn grid_warp_rejects_author_values_outside_the_declared_ranges() {
+        for (parameter, value) in [
+            ("row_count", PropertyValue::Int(0)),
+            ("row_count", PropertyValue::Int(32)),
+            ("column_count", PropertyValue::Int(0)),
+            ("column_count", PropertyValue::Int(32)),
+            ("quality", PropertyValue::Enum("0".to_owned())),
+            ("quality", PropertyValue::Enum("11".to_owned())),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::GridWarp)
+                .expect("registered grid warp definition");
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::GridWarp.property_path(parameter),
+                    value,
+                })
+                .expect_err("rejects an out-of-range grid warp control");
+        }
+    }
+
+    #[test]
+    fn grid_warp_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_grid_warp("row_count", PropertyValue::Int(4));
+        let effect = author_grid_warp_more(effect, "column_count", PropertyValue::Int(6));
+        let effect = author_grid_warp_more(effect, "quality", PropertyValue::Enum("7".to_owned()));
+        let wire = serde_json::to_string(&effect).expect("serializes grid warp effect");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restores grid warp effect");
+        assert_eq!(restored, effect);
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("builds restored grid warp graph");
+        let grade = grid_warp_op(&graph).expect("grid warp op");
+        assert_eq!(grade.rows(), 4);
+        assert_eq!(grade.columns(), 6);
+        assert_eq!(grade.quality(), 7);
     }
 
     fn twirl_op(graph: &EffectRenderGraph) -> Option<crate::TwirlGrade> {

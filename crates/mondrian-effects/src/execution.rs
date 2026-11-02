@@ -2369,6 +2369,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Spherize { .. } => "spherize",
         EffectRenderOp::Dent { .. } => "dent",
         EffectRenderOp::Warp { .. } => "warp",
+        EffectRenderOp::GridWarp { .. } => "grid_warp",
         EffectRenderOp::Noise { .. } => "noise",
         EffectRenderOp::MotionTile { .. } => "motion_tile",
         EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",
