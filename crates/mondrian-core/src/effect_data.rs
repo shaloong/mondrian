@@ -143,6 +143,8 @@ pub enum EffectType {
     RoughenEdges,
     /// Eyedropper fill: floods the layer with a statistic of one sample window.
     EyedropperFill,
+    /// Checkerboard: paints a pixel-local checker grid with feathered edges.
+    Checkerboard,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -244,6 +246,7 @@ impl EffectType {
             Self::SelectiveColor => "builtin.selective_color".to_string(),
             Self::RoughenEdges => "builtin.roughen_edges".to_string(),
             Self::EyedropperFill => "builtin.eyedropper_fill".to_string(),
+            Self::Checkerboard => "builtin.checkerboard".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -341,6 +344,7 @@ impl EffectType {
             "builtin.selective_color" => Self::SelectiveColor,
             "builtin.roughen_edges" => Self::RoughenEdges,
             "builtin.eyedropper_fill" => Self::EyedropperFill,
+            "builtin.checkerboard" => Self::Checkerboard,
             other => Self::External(other.to_string()),
         }
     }
@@ -438,6 +442,7 @@ impl EffectType {
             Self::SelectiveColor => "可选颜色",
             Self::RoughenEdges => "粗糙边缘",
             Self::EyedropperFill => "吸管填充",
+            Self::Checkerboard => "棋盘",
             Self::External(name) => name,
         }
     }
@@ -533,6 +538,7 @@ impl EffectType {
             Self::SelectiveColor => vec!["颜色", "调色"],
             Self::RoughenEdges => vec!["风格化"],
             Self::EyedropperFill => vec!["生成器"],
+            Self::Checkerboard => vec!["生成器"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -630,6 +636,7 @@ impl EffectType {
             Self::SelectiveColor => "selective_color".to_string(),
             Self::RoughenEdges => "roughen_edges".to_string(),
             Self::EyedropperFill => "eyedropper_fill".to_string(),
+            Self::Checkerboard => "checkerboard".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -976,6 +983,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::SelectiveColor => Ok(()),
             Self::RoughenEdges => Ok(()),
             Self::EyedropperFill => Ok(()),
+            Self::Checkerboard => Ok(()),
         }
     }
 }

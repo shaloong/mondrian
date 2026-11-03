@@ -2784,6 +2784,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::SelectiveColor { .. } => 90,
         EffectRenderOp::RoughenEdges { .. } => 91,
         EffectRenderOp::EyedropperFill { .. } => 92,
+        EffectRenderOp::Checkerboard { .. } => 93,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4866,6 +4867,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Choker { .. }
             | crate::EffectRenderOp::TestSignals { .. }
             | crate::EffectRenderOp::FourColorGradient { .. }
+            | crate::EffectRenderOp::Checkerboard { .. }
             | crate::EffectRenderOp::ColorBalance { .. }
             | crate::EffectRenderOp::Minimax { .. }
             | crate::EffectRenderOp::SpillSuppressor { .. }

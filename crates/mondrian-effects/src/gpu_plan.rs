@@ -160,6 +160,10 @@ pub enum EffectGpuPointOp {
     FourColorGradient {
         grade: crate::FourColorGradientGrade,
     },
+    /// Checkerboard: paints a pixel-local checker grid with feathered edges.
+    Checkerboard {
+        grade: crate::CheckerboardGrade,
+    },
     /// Color balance: shifts the shadow, midtone, and highlight colours apart.
     ColorBalance {
         grade: crate::ColorBalanceGrade,
@@ -889,6 +893,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::FourColorGradient { grade } => {
             Ok(EffectGpuPointOp::FourColorGradient { grade: *grade })
         }
+        EffectRenderOp::Checkerboard { grade } => {
+            Ok(EffectGpuPointOp::Checkerboard { grade: *grade })
+        }
         EffectRenderOp::ColorBalance { grade } => {
             Ok(EffectGpuPointOp::ColorBalance { grade: *grade })
         }
@@ -997,6 +1004,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
         EffectRenderOp::TestSignals { .. } => "test_signals",
         EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
+        EffectRenderOp::Checkerboard { .. } => "checkerboard",
         EffectRenderOp::ColorBalance { .. } => "color_balance",
         EffectRenderOp::SpillSuppressor { .. } => "spill_suppressor",
         EffectRenderOp::ChannelBlur { .. } => "channel_blur",

@@ -2832,6 +2832,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
         crate::EffectRenderOp::TestSignals { .. } => "test_signals",
         crate::EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
+        crate::EffectRenderOp::Checkerboard { .. } => "checkerboard",
         crate::EffectRenderOp::ColorBalance { .. } => "color_balance",
         crate::EffectRenderOp::Choker { .. } => "choker",
         crate::EffectRenderOp::Minimax { .. } => "minimax",

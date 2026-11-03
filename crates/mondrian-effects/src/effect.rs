@@ -1154,6 +1154,11 @@ pub enum EffectRenderOp {
         /// Authored sample point, radius, statistic and mix amount.
         grade: crate::EyedropperFillGrade,
     },
+    /// Checkerboard: paints a pixel-local checker grid with feathered edges.
+    Checkerboard {
+        /// Authored anchor, cell sizing, feathering, colour and blend mode.
+        grade: crate::CheckerboardGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1375,6 +1380,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::EyedropperFill { grade } => {
                 formatter.debug_struct("EyedropperFill").field("grade", grade).finish()
+            }
+            Self::Checkerboard { grade } => {
+                formatter.debug_struct("Checkerboard").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2165,6 +2173,17 @@ impl EffectRenderOp {
                 grade.blend_with_original().to_bits().hash(state);
                 grade.luminance_coefficients().map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Checkerboard { grade } => {
+                92u8.hash(state);
+                let (params, color, extra0) = grade.gpu_controls();
+                for cell in [params, color, extra0] {
+                    cell.map(f32::to_bits).hash(state);
+                }
+                // `size_from` and `blend_mode` live in the uniform header, not
+                // in `gpu_controls`, so the effect cache has to see them here.
+                grade.size_from().index().hash(state);
+                grade.blend_mode().hash(state);
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2445,6 +2464,7 @@ impl EffectRenderOp {
             EffectRenderOp::SelectiveColor { .. } => 2,
             EffectRenderOp::RoughenEdges { .. } => 4,
             EffectRenderOp::EyedropperFill { .. } => 5,
+            EffectRenderOp::Checkerboard { .. } => 1,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2987,7 +3007,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 91] {
+fn builtin_effect_types() -> [EffectType; 92] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3080,6 +3100,7 @@ fn builtin_effect_types() -> [EffectType; 91] {
         EffectType::RoughenEdges,
         EffectType::FourColorGradient,
         EffectType::EyedropperFill,
+        EffectType::Checkerboard,
     ]
 }
 
@@ -8946,6 +8967,144 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::Checkerboard => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "anchor",
+                "棋盘",
+                "锚点",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::CHECKERBOARD_DEFAULT_ANCHOR[0],
+                    crate::CHECKERBOARD_DEFAULT_ANCHOR[1],
+                )),
+                Some(-f64::from(crate::CHECKERBOARD_MAX_COORDINATE)),
+                Some(f64::from(crate::CHECKERBOARD_MAX_COORDINATE)),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "size_from",
+                "棋盘",
+                "大小依据",
+                crate::CHECKERBOARD_DEFAULT_SIZE_FROM.as_key(),
+                crate::CheckerboardSizeFrom::ALL
+                    .iter()
+                    .map(|mode| {
+                        let key = mode.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            mode.label(),
+                            format!("mondrian.effect.checkerboard.size_from.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "corner",
+                "棋盘",
+                "边角",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::CHECKERBOARD_DEFAULT_CORNER[0],
+                    crate::CHECKERBOARD_DEFAULT_CORNER[1],
+                )),
+                Some(-f64::from(crate::CHECKERBOARD_MAX_COORDINATE)),
+                Some(f64::from(crate::CHECKERBOARD_MAX_COORDINATE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "width",
+                "棋盘",
+                "宽度",
+                PropertyValue::Float(crate::CHECKERBOARD_DEFAULT_WIDTH),
+                Some(f64::from(crate::CHECKERBOARD_MIN_WIDTH)),
+                Some(f64::from(crate::CHECKERBOARD_MAX_WIDTH)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "height",
+                "棋盘",
+                "高度",
+                PropertyValue::Float(crate::CHECKERBOARD_DEFAULT_HEIGHT),
+                Some(f64::from(crate::CHECKERBOARD_MIN_WIDTH)),
+                Some(f64::from(crate::CHECKERBOARD_MAX_WIDTH)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather_width",
+                "棋盘",
+                "羽化·宽度",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(f64::from(crate::CHECKERBOARD_MAX_FEATHER)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather_height",
+                "棋盘",
+                "羽化·高度",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(f64::from(crate::CHECKERBOARD_MAX_FEATHER)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color",
+                "棋盘",
+                "颜色",
+                PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "棋盘",
+                "不透明度",
+                PropertyValue::Float(crate::CHECKERBOARD_DEFAULT_OPACITY),
+                Some(0.0),
+                Some(f64::from(crate::CHECKERBOARD_DEFAULT_OPACITY)),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "blend_mode",
+                "棋盘",
+                "混合模式",
+                "normal",
+                mondrian_core::display_labels::blend_mode_options()
+                    .iter()
+                    .filter_map(|option| {
+                        let mode = option.mode?;
+                        if matches!(mode, mondrian_core::BlendMode::Dissolve) {
+                            return None;
+                        }
+                        let key = crate::fractal_noise::blend_mode_key(mode);
+                        Some(ParameterEnumOption::new(
+                            key,
+                            option.label,
+                            format!("mondrian.effect.checkerboard.blend_mode.{key}"),
+                        ))
+                    })
+                    .collect(),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -9483,6 +9642,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         }
         (EffectType::FourColorGradient, "blend") => ParameterUnit::Pixels,
         (EffectType::FourColorGradient, "opacity") => ParameterUnit::Percent,
+        (
+            EffectType::Checkerboard,
+            "anchor" | "corner" | "width" | "height" | "feather_width" | "feather_height",
+        ) => ParameterUnit::Pixels,
+        (EffectType::Checkerboard, "opacity") => ParameterUnit::Percent,
         (EffectType::ColorOffset, "red_phase" | "green_phase" | "blue_phase") => {
             ParameterUnit::Pixels
         }
@@ -9871,6 +10035,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::FourColorGradient => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Checkerboard => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -14146,6 +14314,111 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Checkerboard => {
+            let anchor_id = builtin_parameter_id(effect_type, "anchor");
+            let size_from_id = builtin_parameter_id(effect_type, "size_from");
+            let corner_id = builtin_parameter_id(effect_type, "corner");
+            let width_id = builtin_parameter_id(effect_type, "width");
+            let height_id = builtin_parameter_id(effect_type, "height");
+            let feather_width_id = builtin_parameter_id(effect_type, "feather_width");
+            let feather_height_id = builtin_parameter_id(effect_type, "feather_height");
+            let colour_id = builtin_parameter_id(effect_type, "color");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let blend_mode_id = builtin_parameter_id(effect_type, "blend_mode");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let point = |parameter_id: &ParameterId,
+                             name: &str,
+                             fallback: [f32; 2]|
+                 -> Result<[f32; 2], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Vec2(point)) => Ok([point.x, point.y]),
+                        Some(PropertyValue::DoubleVec2(point)) => {
+                            Ok([point[0] as f32, point[1] as f32])
+                        }
+                        Some(_) => Err(invalid(format!("checkerboard {name} must be a point"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let size_from = match effect.evaluate_parameter(&size_from_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::CheckerboardSizeFrom::from_key(&key)
+                        .ok_or_else(|| {
+                        invalid(format!(
+                            "checkerboard size from {key} is not a declared option"
+                        ))
+                    })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "checkerboard size from must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::CHECKERBOARD_DEFAULT_SIZE_FROM,
+                };
+                let colour = match effect.evaluate_parameter(&colour_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(_) => {
+                        return Err(invalid("checkerboard colour must be a colour".to_owned()));
+                    }
+                    None => [1.0, 1.0, 1.0],
+                };
+                let blend_mode = match effect.evaluate_parameter(&blend_mode_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::fractal_noise::blend_mode_from_key(&key).ok_or_else(|| {
+                            invalid(format!(
+                                "checkerboard blend mode {key} is not a declared option"
+                            ))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid(
+                            "checkerboard blend mode must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => mondrian_core::BlendMode::Normal,
+                };
+                let width = effect.evaluate_f32_parameter(
+                    &width_id,
+                    context.time,
+                    crate::CHECKERBOARD_DEFAULT_WIDTH,
+                );
+                let height = effect.evaluate_f32_parameter(
+                    &height_id,
+                    context.time,
+                    crate::CHECKERBOARD_DEFAULT_HEIGHT,
+                );
+                if width < crate::CHECKERBOARD_MIN_WIDTH || height < crate::CHECKERBOARD_MIN_WIDTH {
+                    return Err(invalid(format!(
+                        "checkerboard width and height must be at least {} pixels",
+                        crate::CHECKERBOARD_MIN_WIDTH
+                    )));
+                }
+                let grade = crate::CheckerboardGrade::new(
+                    point(&anchor_id, "anchor", crate::CHECKERBOARD_DEFAULT_ANCHOR)?,
+                    size_from,
+                    point(&corner_id, "corner", crate::CHECKERBOARD_DEFAULT_CORNER)?,
+                    width,
+                    height,
+                    effect.evaluate_f32_parameter(&feather_width_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&feather_height_id, context.time, 0.0),
+                    colour,
+                    effect.evaluate_f32_parameter(
+                        &opacity_id,
+                        context.time,
+                        crate::CHECKERBOARD_DEFAULT_OPACITY,
+                    ),
+                    blend_mode,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Checkerboard { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorBalance => {
             let shadow_red_id = builtin_parameter_id(effect_type, "shadow_red");
             let shadow_green_id = builtin_parameter_id(effect_type, "shadow_green");
@@ -15010,6 +15283,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::SelectiveColor => "可选颜色",
         EffectType::RoughenEdges => "粗糙边缘",
         EffectType::EyedropperFill => "吸管填充",
+        EffectType::Checkerboard => "棋盘",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -16336,6 +16610,7 @@ mod tests {
             EffectType::ChangeToColor,
             EffectType::FourColorGradient,
             EffectType::EyedropperFill,
+            EffectType::Checkerboard,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -24441,6 +24716,147 @@ mod tests {
             EffectGraphBuildError::InvalidAuthorState { effect_key, .. }
                 if effect_key == "builtin.four_color_gradient"
         ));
+    }
+
+    fn checkerboard_op(graph: &EffectRenderGraph) -> Option<crate::CheckerboardGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Checkerboard { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Checkerboard { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_checkerboard(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Checkerboard)
+            .expect("the checkerboard effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Checkerboard.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the checkerboard parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn checkerboard_defaults_match_the_dump() {
+        let effect_type = EffectType::Checkerboard;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("anchor", "锚点", ParameterUnit::Pixels),
+            ("size_from", "大小依据", ParameterUnit::Unitless),
+            ("corner", "边角", ParameterUnit::Pixels),
+            ("width", "宽度", ParameterUnit::Pixels),
+            ("height", "高度", ParameterUnit::Pixels),
+            ("feather_width", "羽化·宽度", ParameterUnit::Pixels),
+            ("feather_height", "羽化·高度", ParameterUnit::Pixels),
+            ("color", "颜色", ParameterUnit::Unitless),
+            ("opacity", "不透明度", ParameterUnit::Percent),
+            ("blend_mode", "混合模式", ParameterUnit::Unitless),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("棋盘")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+
+        let effect = instantiate_effect_node(EffectType::Checkerboard)
+            .expect("the checkerboard effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default checkerboard should compile");
+        let grade = checkerboard_op(&graph).expect("the default parameters emit the generator");
+        assert_eq!(
+            grade.gpu_controls(),
+            (
+                [128.0, 128.0, 148.48, 148.48],
+                [1.0, 1.0, 1.0, 1.0],
+                [16.0, 8.0, 0.0, 0.0],
+            )
+        );
+        assert_eq!(grade.size_from(), crate::CheckerboardSizeFrom::WidthSlider);
+        assert_eq!(grade.blend_mode(), mondrian_core::BlendMode::Normal);
+    }
+
+    #[test]
+    fn checkerboard_builder_appends_the_generator() {
+        let effect = instantiate_effect_node(EffectType::Checkerboard)
+            .expect("the checkerboard effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default checkerboard should compile");
+        let mut effect_nodes = 0;
+        for node in &graph.nodes {
+            if let EffectGraphNodeKind::UnaryEffect { .. }
+            | EffectGraphNodeKind::DomainEffect { .. } = &node.kind
+            {
+                effect_nodes += 1;
+            }
+        }
+        assert_eq!(effect_nodes, 1);
+        let grade = checkerboard_op(&graph).expect("the default parameters emit the generator");
+        assert!(!grade.is_identity());
+        let compiled = crate::compile_reference_render_graph(graph).expect("compile the generator");
+        assert_eq!(
+            compiled.execution_envelope().aggregate().roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal
+        );
+
+        // Zero opacity is the identity, so the builder elides the operation
+        // instead of appending a no-op generator.
+        let effect = author_checkerboard(&[("opacity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("zero opacity compiles");
+        assert!(checkerboard_op(&graph).is_none());
+    }
+
+    #[test]
+    fn checkerboard_builder_rejects_bad_geometry() {
+        let effect = instantiate_effect_node(EffectType::Checkerboard)
+            .expect("the checkerboard effect should instantiate");
+        let effect_id = effect.id;
+
+        let mut document = serde_json::to_value(&effect).expect("serialize the checkerboard");
+        overwrite_static_value(
+            &mut document,
+            "checkerboard.width",
+            serde_json::json!({"Float": 0.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the checkerboard node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a zero cell width cannot be authored through the schema");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        // The parameter layer rejects the persisted value before the builder's
+        // own range guard runs, but both routes surface as an invalid author
+        // state rather than silently clamping the cell to a legal size.
+        assert!(
+            format!("{error:?}").contains("outside [1, 4000]"),
+            "{error:?}"
+        );
     }
 
     fn color_balance_op(graph: &EffectRenderGraph) -> Option<crate::ColorBalanceGrade> {

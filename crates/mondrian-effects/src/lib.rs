@@ -24,6 +24,7 @@ pub mod bulge;
 pub mod change_to_color;
 pub mod channel_blur;
 pub mod channel_mixer;
+pub mod checkerboard;
 pub mod choker;
 pub mod chroma_key;
 pub mod color_balance;
@@ -475,6 +476,14 @@ mod image_scale_admission_tests;
 pub use channel_mixer::{
     ChannelMixerError, ChannelMixerGrade, CHANNEL_MIXER_WEIGHT_COUNT, CHANNEL_MIXER_WEIGHT_MAX,
     CHANNEL_MIXER_WEIGHT_MIN,
+};
+pub use checkerboard::{
+    checkerboard_frame_f32, checkerboard_pixel, CheckerboardControls, CheckerboardError,
+    CheckerboardGrade, CheckerboardSizeFrom, CHECKERBOARD_DEFAULT_ANCHOR,
+    CHECKERBOARD_DEFAULT_CORNER, CHECKERBOARD_DEFAULT_HEIGHT, CHECKERBOARD_DEFAULT_OPACITY,
+    CHECKERBOARD_DEFAULT_SIZE_FROM, CHECKERBOARD_DEFAULT_WIDTH, CHECKERBOARD_DEGENERATE_CELL,
+    CHECKERBOARD_MAX_COORDINATE, CHECKERBOARD_MAX_FEATHER, CHECKERBOARD_MAX_WIDTH,
+    CHECKERBOARD_MIN_WIDTH,
 };
 pub use choker::{
     choker_frame_f32, ChokerError, ChokerGrade, CHOKER_AUTHOR_MAX_CHOKE_PIXELS,
