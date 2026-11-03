@@ -843,6 +843,36 @@ mod tests {
     }
 
     #[test]
+    fn eyedropper_fill_stays_cpu_only_and_has_no_spatial_pass() {
+        let grade = crate::EyedropperFillGrade::new(
+            [128.0, 128.0],
+            10.0,
+            crate::AverageMode::Mean,
+            false,
+            0.5,
+        )
+        .expect("valid eyedropper fill");
+        let op = EffectRenderOp::EyedropperFill { grade };
+        assert!(spatial_pass_for(&op).is_none());
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let error = lower_effect_graph_to_gpu_pipeline(&compile(builder))
+            .expect_err("eyedropper fill has no GPU math");
+
+        // Eyedropper fill is CPU-only by design (`.work/gen13-design.md`), so
+        // the pipeline rejects it at admission.
+        assert!(
+            matches!(
+                error,
+                EffectGpuPlanBlocker::NodeExecutionModeNotAdmitted { .. }
+                    | EffectGpuPlanBlocker::UnsupportedOperation { op: "eyedropper_fill", .. }
+            ),
+            "unexpected blocker: {error:?}"
+        );
+    }
+
+    #[test]
     fn remapping_kernels_lower_to_their_own_spatial_stages() {
         let mut builder = EffectGraphBuilderState::new();
         builder.append_unary(invert());

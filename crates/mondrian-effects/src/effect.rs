@@ -1149,6 +1149,11 @@ pub enum EffectRenderOp {
         /// Authored edge type, displacement, field shape and colouring.
         grade: crate::RoughenEdgesGrade,
     },
+    /// Eyedropper fill: floods the layer with a statistic of one sample window.
+    EyedropperFill {
+        /// Authored sample point, radius, statistic and mix amount.
+        grade: crate::EyedropperFillGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1367,6 +1372,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::RoughenEdges { grade } => {
                 formatter.debug_struct("RoughenEdges").field("grade", grade).finish()
+            }
+            Self::EyedropperFill { grade } => {
+                formatter.debug_struct("EyedropperFill").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2148,6 +2156,15 @@ impl EffectRenderOp {
                     cell.map(f32::to_bits).hash(state);
                 }
             }
+            EffectRenderOp::EyedropperFill { grade } => {
+                91u8.hash(state);
+                grade.sample().map(f32::to_bits).hash(state);
+                grade.radius().to_bits().hash(state);
+                grade.mode().as_u32().hash(state);
+                grade.preserve_alpha().hash(state);
+                grade.blend_with_original().to_bits().hash(state);
+                grade.luminance_coefficients().map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2427,6 +2444,7 @@ impl EffectRenderOp {
             EffectRenderOp::Median { .. } => 4,
             EffectRenderOp::SelectiveColor { .. } => 2,
             EffectRenderOp::RoughenEdges { .. } => 4,
+            EffectRenderOp::EyedropperFill { .. } => 5,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2969,7 +2987,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 90] {
+fn builtin_effect_types() -> [EffectType; 91] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3061,6 +3079,7 @@ fn builtin_effect_types() -> [EffectType; 90] {
         EffectType::SelectiveColor,
         EffectType::RoughenEdges,
         EffectType::FourColorGradient,
+        EffectType::EyedropperFill,
     ]
 }
 
@@ -8851,6 +8870,82 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::EyedropperFill => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sample_x",
+                "吸管填充",
+                "采样点 X",
+                PropertyValue::Float(128.0),
+                Some(-f64::from(crate::EYEDROPPER_MAX_COORDINATE)),
+                Some(f64::from(crate::EYEDROPPER_MAX_COORDINATE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sample_y",
+                "吸管填充",
+                "采样点 Y",
+                PropertyValue::Float(128.0),
+                Some(-f64::from(crate::EYEDROPPER_MAX_COORDINATE)),
+                Some(f64::from(crate::EYEDROPPER_MAX_COORDINATE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sample_radius",
+                "吸管填充",
+                "采样半径",
+                PropertyValue::Float(10.0),
+                Some(f64::from(crate::EYEDROPPER_MIN_RADIUS)),
+                Some(f64::from(crate::EYEDROPPER_MAX_RADIUS)),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "average_mode",
+                "吸管填充",
+                "平均像素颜色",
+                crate::AverageMode::Mean.as_key(),
+                crate::AverageMode::ALL
+                    .iter()
+                    .map(|mode| {
+                        let key = mode.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            mode.label(),
+                            format!("mondrian.effect.eyedropper_fill.average_mode.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "preserve_alpha",
+                "吸管填充",
+                "保持原始 Alpha",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "吸管填充",
+                "与原始图像混合",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -9376,6 +9471,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         ) => ParameterUnit::Pixels,
         (EffectType::WireRemoval, "mirror_blend") => ParameterUnit::Normalized,
         (EffectType::RoughenEdges, "border" | "offset") => ParameterUnit::Pixels,
+        (EffectType::EyedropperFill, "sample_x" | "sample_y" | "sample_radius") => {
+            ParameterUnit::Pixels
+        }
+        (EffectType::EyedropperFill, "blend_with_original") => ParameterUnit::Percent,
         (EffectType::RoughenEdges, "scale" | "stretch") => ParameterUnit::Percent,
         (EffectType::RoughenEdges, "evolution") => ParameterUnit::Degrees,
         (EffectType::Ramp, "start" | "end") => ParameterUnit::Pixels,
@@ -9901,6 +10000,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::RoughenEdges => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::EyedropperFill => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -14760,6 +14864,56 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::EyedropperFill => {
+            let sample_x_id = builtin_parameter_id(effect_type, "sample_x");
+            let sample_y_id = builtin_parameter_id(effect_type, "sample_y");
+            let sample_radius_id = builtin_parameter_id(effect_type, "sample_radius");
+            let average_mode_id = builtin_parameter_id(effect_type, "average_mode");
+            let preserve_alpha_id = builtin_parameter_id(effect_type, "preserve_alpha");
+            let blend_with_original_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let mode = match effect.evaluate_parameter(&average_mode_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => key,
+                    Some(_) => {
+                        return Err(invalid(
+                            "eyedropper fill average mode must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::AverageMode::Mean.as_key().to_owned(),
+                };
+                let preserve_alpha =
+                    match effect.evaluate_parameter(&preserve_alpha_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => value,
+                        Some(_) => {
+                            return Err(invalid(
+                                "eyedropper fill preserve alpha must be a boolean".to_owned(),
+                            ));
+                        }
+                        None => false,
+                    };
+                let grade = crate::EyedropperFillGrade::from_authored(
+                    [
+                        effect.evaluate_f32_parameter(&sample_x_id, context.time, 128.0),
+                        effect.evaluate_f32_parameter(&sample_y_id, context.time, 128.0),
+                    ],
+                    effect.evaluate_f32_parameter(&sample_radius_id, context.time, 10.0),
+                    &mode,
+                    preserve_alpha,
+                    effect.evaluate_f32_parameter(&blend_with_original_id, context.time, 0.0),
+                    context.working_color_space,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::EyedropperFill { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -14855,6 +15009,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Median => "中间值",
         EffectType::SelectiveColor => "可选颜色",
         EffectType::RoughenEdges => "粗糙边缘",
+        EffectType::EyedropperFill => "吸管填充",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -16180,6 +16335,7 @@ mod tests {
             EffectType::RoughenEdges,
             EffectType::ChangeToColor,
             EffectType::FourColorGradient,
+            EffectType::EyedropperFill,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -24595,6 +24751,168 @@ mod tests {
                 &error,
                 EffectGraphBuildError::InvalidAuthorState { effect_key, .. }
                     if effect_key == "builtin.roughen_edges"
+            ),
+            "{error:?}"
+        );
+    }
+
+    fn eyedropper_fill_op(graph: &EffectRenderGraph) -> Option<crate::EyedropperFillGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::EyedropperFill { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_eyedropper_fill(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::EyedropperFill)
+            .expect("registered eyedropper fill definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::EyedropperFill.property_path(parameter),
+                value,
+            })
+            .expect("authors eyedropper fill parameter");
+        effect
+    }
+
+    #[test]
+    fn eyedropper_fill_defaults_build_one_cpu_stage() {
+        let definition =
+            effect_definition(&EffectType::EyedropperFill).expect("eyedropper fill definition");
+        assert_eq!(
+            definition.default_properties().iter().count(),
+            6,
+            "the eyedropper fill schema keeps six parameters"
+        );
+        let mode_id = builtin_parameter_id(&EffectType::EyedropperFill, "average_mode");
+        let mode = definition
+            .default_properties()
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == &mode_id)
+            .expect("average mode property");
+        let keys: Vec<&str> = mode
+            .1
+            .descriptor
+            .schema
+            .enum_options
+            .iter()
+            .map(|option| option.key.as_str())
+            .collect();
+        assert_eq!(keys, ["mean", "median", "mode", "luminance"]);
+
+        let effect = instantiate_effect_node(EffectType::EyedropperFill)
+            .expect("registered eyedropper fill definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds eyedropper fill graph");
+        let stages = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.kind,
+                    EffectGraphNodeKind::UnaryEffect {
+                        op: EffectRenderOp::EyedropperFill { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(stages, 1);
+        let grade = eyedropper_fill_op(&graph).expect("eyedropper fill op");
+        assert_eq!(grade.sample(), [128.0, 128.0]);
+        assert_eq!(grade.radius(), 10.0);
+        assert_eq!(grade.mode(), crate::AverageMode::Mean);
+        assert!(!grade.preserve_alpha());
+        assert_eq!(grade.blend_with_original(), 0.0);
+        assert!(!grade.is_identity());
+        let op = graph
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. } => Some(op),
+                _ => None,
+            })
+            .expect("the graph keeps the authored operation");
+        assert!(crate::gpu_pipeline::spatial_pass_for(op).is_none());
+    }
+
+    #[test]
+    fn eyedropper_fill_with_full_blend_builds_no_stage() {
+        let effect = author_eyedropper_fill("blend_with_original", PropertyValue::Float(1.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds eyedropper fill graph");
+        assert!(eyedropper_fill_op(&graph).is_none());
+    }
+
+    #[test]
+    fn eyedropper_fill_samples_upstream_effects_in_a_chain() {
+        let first = instantiate_effect_node(EffectType::Invert).expect("registered Invert");
+        let second = instantiate_effect_node(EffectType::EyedropperFill)
+            .expect("registered eyedropper fill definition");
+        let graph = build_effect_render_graph(&[first, second], tt(0), TEST_WORKING_SPACE)
+            .expect("builds the effect chain");
+        assert!(eyedropper_fill_op(&graph).is_some());
+        // The eyedropper node samples the frame produced by the upstream invert.
+        let last = graph.nodes.last().expect("chain nodes");
+        assert!(matches!(
+            last.kind,
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::EyedropperFill { .. }, .. }
+        ));
+    }
+
+    #[test]
+    fn eyedropper_fill_tracks_a_keyframed_sample_point() {
+        let mut effect = instantiate_effect_node(EffectType::EyedropperFill)
+            .expect("registered eyedropper fill definition");
+        let path = EffectType::EyedropperFill.property_path("sample_x");
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: path.clone(),
+                keyframe: Keyframe::linear(tt(0), PropertyValue::Float(128.0)),
+            })
+            .expect("set the start keyframe");
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path,
+                keyframe: Keyframe::linear(tt(10), PropertyValue::Float(576.0)),
+            })
+            .expect("set the end keyframe");
+        let graph = build_effect_render_graph(&[effect], tt(5), TEST_WORKING_SPACE)
+            .expect("builds the keyframed eyedropper fill");
+        let grade = eyedropper_fill_op(&graph).expect("eyedropper fill op");
+        assert!(
+            (grade.sample()[0] - 352.0).abs() < 0.01,
+            "{}",
+            grade.sample()[0]
+        );
+        assert_eq!(grade.sample()[1], 128.0);
+    }
+
+    #[test]
+    fn eyedropper_fill_rejects_a_non_finite_parameter() {
+        let effect = instantiate_effect_node(EffectType::EyedropperFill)
+            .expect("registered eyedropper fill definition");
+        let mut document = serde_json::to_value(&effect).expect("serialize the eyedropper fill");
+        // Deserialization bypasses authoring validation, so an overflowing
+        // float reaches the builder as an infinity.
+        overwrite_static_value(
+            &mut document,
+            "eyedropper_fill.sample_x",
+            serde_json::json!({ "Float": 1.0e39 }),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("restore the tampered eyedropper fill");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a non-finite sample point must fail closed");
+        assert!(
+            matches!(
+                &error,
+                EffectGraphBuildError::InvalidAuthorState { effect_key, .. }
+                    if effect_key == "builtin.eyedropper_fill"
             ),
             "{error:?}"
         );

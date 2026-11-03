@@ -494,6 +494,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::EyedropperFill { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "eyedropper_fill",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Twirl { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "twirl",
@@ -1066,6 +1072,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::GridWarp { .. } => 1,
         EffectRenderOp::WireRemoval { .. } => 1,
         EffectRenderOp::RoughenEdges { .. } => 1,
+        EffectRenderOp::EyedropperFill { .. } => 0,
         EffectRenderOp::SelectiveColor { .. } => 0,
         EffectRenderOp::Noise { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
@@ -1650,6 +1657,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 region.width as usize,
                 region.height as usize,
                 grade,
+                checkpoint,
+            )
+        }
+        EffectRenderOp::EyedropperFill { grade } => {
+            crate::eyedropper_fill::apply_eyedropper_fill_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *grade,
                 checkpoint,
             )
         }

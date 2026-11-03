@@ -1736,6 +1736,13 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        // Eyedropper fill reads one sample window per output pixel, so it has no
+        // GPU implementation (see `.work/gen13-design.md`); the chain is CPU-only.
+        EffectRenderOp::EyedropperFill { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::Twirl { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: EffectRoiPropagation::FullFrame,

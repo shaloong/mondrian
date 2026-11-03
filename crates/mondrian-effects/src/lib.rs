@@ -69,6 +69,7 @@ mod execution_session;
 pub mod extension_contract;
 pub mod extension_sdk;
 pub mod extract;
+pub mod eyedropper_fill;
 pub mod gamut_mapping;
 pub mod glow;
 pub mod gpu_pipeline;
@@ -260,6 +261,10 @@ pub use extension_sdk::{EffectExtensionDefinitionBuilder, EffectGraphDsl};
 pub use extract::{
     extract_frame_f32, ExtractChannel, ExtractError, ExtractGrade, EXTRACT_AUTHOR_MAX_LEVEL,
     EXTRACT_CHANNEL_COUNT,
+};
+pub use eyedropper_fill::{
+    eyedropper_fill_frame_f32, AverageMode, EyedropperFillError, EyedropperFillGrade,
+    EYEDROPPER_MAX_COORDINATE, EYEDROPPER_MAX_RADIUS, EYEDROPPER_MIN_RADIUS,
 };
 pub use gamut_mapping::{GamutCompressionGrade, GamutMappingError, HighlightRecoveryGrade};
 pub use glow::{

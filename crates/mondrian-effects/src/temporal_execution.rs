@@ -2856,6 +2856,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::GridWarp { .. } => "grid_warp",
         crate::EffectRenderOp::WireRemoval { .. } => "wire_removal",
         crate::EffectRenderOp::RoughenEdges { .. } => "roughen_edges",
+        crate::EffectRenderOp::EyedropperFill { .. } => "eyedropper_fill",
         crate::EffectRenderOp::Noise { .. } => "noise",
         crate::EffectRenderOp::MotionTile { .. } => "motion_tile",
         crate::EffectRenderOp::Kaleidoscope { .. } => "kaleidoscope",

@@ -355,6 +355,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "通道模糊" => Some("parameter-group-channel-blur"),
         "可选颜色" => Some("parameter-group-selective-color"),
         "粗糙边缘" => Some("parameter-group-roughen-edges"),
+        "吸管填充" => Some("parameter-group-eyedropper-fill"),
         _ => None,
     }
 }
