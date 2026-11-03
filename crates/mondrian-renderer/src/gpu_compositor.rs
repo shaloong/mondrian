@@ -1347,6 +1347,9 @@ fn effects_author_coverage() -> bool {
         // coverage from the authored opacity, so a transparent source pixel
         // must still reach the blend.
         if (effect.header.x == 35u) { return true; }
+        // The checkerboard is a generator too, so a transparent source pixel
+        // must still reach the blend.
+        if (effect.header.x == 36u) { return true; }
     }
     return false;
 }
@@ -2077,6 +2080,45 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 vec4<f32>(gradient_saturated, opacity),
                 1.0,
                 u32(max(effect.extra3.w, 0.0) + 0.5),
+                index,
+            );
+        } else if (effect.header.x == 36u) {
+            // `CheckerboardGrade`: params is [anchor.x, anchor.y, corner.x,
+            // corner.y], colour is [rgb, opacity] and extra0 is [width, height,
+            // feather width, feather height]. header.y selects the cell size:
+            // 0 uses the corner delta, 1 uses the width on both axes and 2 uses
+            // the width and height sliders. The generator reads no source pixel:
+            // the parity of the integer cell decides the phase.
+            let centre = floor(max(position, vec2<f32>(0.0))) + vec2<f32>(0.5);
+            var cell = vec2<f32>(effect.extra0.x, effect.extra0.x);
+            if (effect.header.y == 0u) {
+                cell = abs(effect.params.zw - effect.params.xy);
+            } else if (effect.header.y == 2u) {
+                cell = effect.extra0.xy;
+            }
+            var coverage = 0.0;
+            if (cell.x > 0.001 && cell.y > 0.001) {
+                let offset = (centre - effect.params.xy) / cell;
+                let cell_index = floor(offset);
+                let parity = cell_index - 2.0 * floor(cell_index * 0.5);
+                let within = offset - cell_index;
+                let distance = min(within, vec2<f32>(1.0, 1.0) - within) * cell;
+                var ramp = vec2<f32>(1.0, 1.0);
+                if (effect.extra0.z > 0.0) {
+                    ramp.x = clamp(distance.x / (effect.extra0.z * 0.5), 0.0, 1.0);
+                }
+                if (effect.extra0.w > 0.0) {
+                    ramp.y = clamp(distance.y / (effect.extra0.w * 0.5), 0.0, 1.0);
+                }
+                let axis = vec2<f32>(0.5, 0.5) + (parity - vec2<f32>(0.5, 0.5)) * ramp;
+                coverage = axis.x * axis.y + (1.0 - axis.x) * (1.0 - axis.y);
+            }
+            let alpha = clamp(coverage * effect.color.w, 0.0, 1.0);
+            pixel = blend_straight_alpha(
+                pixel,
+                vec4<f32>(effect.color.xyz, alpha),
+                1.0,
+                effect.header.z,
                 index,
             );
         } else if (effect.header.x == 34u) {
@@ -5945,6 +5987,18 @@ fn effect_uniforms_for_ops(
                     extra1,
                     extra2,
                     extra3,
+                }
+            }
+            EffectGpuPointOp::Checkerboard { grade } => {
+                let (params, color, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [36, grade.size_from().index(), grade.blend_mode_index(), 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
@@ -10253,6 +10307,234 @@ mod tests {
             seen += 1;
         }
         assert_eq!(seen, 26, "the effect offers every legal blend mode");
+    }
+
+    /// Renders one checkerboard point op on the CPU reference and the fused GPU
+    /// pass, and returns both frames.
+    ///
+    /// Every caller pins a zero-coverage input pixel: the generator has to paint
+    /// it, which only happens because `effects_author_coverage` answers true for
+    /// kind 36.
+    fn checkerboard_parity_pixels(
+        context: &crate::GpuContext,
+        width: u32,
+        height: u32,
+        data: &[[f32; 4]],
+        grade: mondrian_effects::CheckerboardGrade,
+    ) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: data.to_vec(),
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Checkerboard { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            context,
+            &[layer],
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        (expected.pixels().to_vec(), actual)
+    }
+
+    #[tokio::test]
+    async fn gpu_checkerboard_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{CheckerboardGrade, CheckerboardSizeFrom};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU checkerboard parity test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for index in 0..width * height {
+            let channel = |offset: u32| ((index * (offset + 5)) % 23) as f32 / 23.0;
+            data.push([channel(0), channel(1), channel(2), 1.0]);
+        }
+        // One painted and one empty cell at a one-pixel cell size: (0, 0) is
+        // even/even and (1, 0) is odd/even. The empty pixel is transparent so a
+        // wrongly painted cell would show up as extra coverage.
+        data[1] = [0.0; 4];
+
+        let grade = CheckerboardGrade::new(
+            [0.0, 0.0],
+            CheckerboardSizeFrom::WidthSlider,
+            [0.0, 0.0],
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            [1.0, 1.0, 1.0],
+            100.0,
+            BlendMode::Normal,
+        )
+        .expect("valid checkerboard grade");
+        let (expected_pixels, actual) =
+            checkerboard_parity_pixels(&context, width, height, &data, grade);
+        // The generator authors coverage, so the transparent input pixel must
+        // come back painted rather than skipped.
+        assert_ne!(actual[0], [0.0; 4]);
+        assert_ne!(expected_pixels[0], [0.0; 4]);
+        // The odd cell keeps its empty input pixel untouched.
+        assert_eq!(actual[1], [0.0; 4]);
+        assert_eq!(expected_pixels[1], [0.0; 4]);
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU checkerboard accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_checkerboard_feather_and_blend_match_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{CheckerboardGrade, CheckerboardSizeFrom};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU checkerboard feather test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 13_u32;
+        // A half-transparent base exercises the straight-alpha blend path.
+        let data = vec![[0.2, 0.3, 0.4, 0.5]; (width * height) as usize];
+
+        let grade = CheckerboardGrade::new(
+            [0.0, 0.0],
+            CheckerboardSizeFrom::WidthHeightSliders,
+            [0.0, 0.0],
+            5.0,
+            5.0,
+            3.0,
+            3.0,
+            [1.0, 1.0, 1.0],
+            60.0,
+            BlendMode::Multiply,
+        )
+        .expect("valid checkerboard grade");
+        let (expected_pixels, actual) =
+            checkerboard_parity_pixels(&context, width, height, &data, grade);
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU checkerboard feather accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_checkerboard_paints_transparent_layers() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{CheckerboardGrade, CheckerboardSizeFrom};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU checkerboard coverage test: no GPU adapter available");
+            return;
+        };
+        let width = 5_u32;
+        let height = 5_u32;
+        // A fully transparent layer: without the author-coverage registration the
+        // fused pass would skip every pixel and return transparent black.
+        let data = vec![[0.0; 4]; (width * height) as usize];
+
+        let grade = CheckerboardGrade::new(
+            [128.0, 128.0],
+            CheckerboardSizeFrom::WidthSlider,
+            [148.48, 148.48],
+            16.0,
+            8.0,
+            0.0,
+            0.0,
+            [1.0, 1.0, 1.0],
+            100.0,
+            BlendMode::Normal,
+        )
+        .expect("valid checkerboard grade");
+        let (expected_pixels, actual) =
+            checkerboard_parity_pixels(&context, width, height, &data, grade);
+
+        for (index, pixel) in actual.iter().enumerate() {
+            assert_ne!(*pixel, [0.0; 4], "pixel {index} was skipped as empty");
+            assert!(
+                (pixel[3] - 1.0).abs() <= 1.0e-4,
+                "pixel {index} lost its coverage: {pixel:?}"
+            );
+        }
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU checkerboard coverage budget exceeded: {report:#?}"
+        );
     }
 
     #[tokio::test]
