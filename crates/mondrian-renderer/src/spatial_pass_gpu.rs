@@ -53,6 +53,7 @@ pub(crate) struct EffectSpatialGpu {
     warp: wgpu::RenderPipeline,
     grid_warp: wgpu::RenderPipeline,
     wire_removal: wgpu::RenderPipeline,
+    roughen_edges: wgpu::RenderPipeline,
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
@@ -499,6 +500,36 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_wire_removal"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let roughen_edges = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.roughen-edges"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_roughen_edges"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -1568,6 +1599,7 @@ impl EffectSpatialGpu {
             warp,
             grid_warp,
             wire_removal,
+            roughen_edges,
             mirror,
             polar_coordinates,
             lens_distortion,
@@ -2116,6 +2148,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Warp { .. }
             | EffectGpuSpatialPass::GridWarp { .. }
             | EffectGpuSpatialPass::WireRemoval { .. }
+            | EffectGpuSpatialPass::RoughenEdges { .. }
             | EffectGpuSpatialPass::Convolution { .. }
             | EffectGpuSpatialPass::Mirror { .. }
             | EffectGpuSpatialPass::PolarCoordinates { .. } => Ok(1),
@@ -2337,6 +2370,22 @@ impl EffectSpatialGpu {
                     encoder,
                     params,
                     extra,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::RoughenEdges { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra, extra1) = grade.gpu_controls();
+                return self.record_roughen_edges(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    grade.aces_controls(),
+                    extra1,
                     source,
                     destination,
                     width,
@@ -2994,6 +3043,44 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.wire_removal,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+    /// Records roughen edges: grows the silhouette along its own alpha gradient
+    /// and styles the new rim.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_roughen_edges(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        aces: [f32; 4],
+        extra1: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.roughen_edges,
             &input_view,
             &output_view,
             &uniform,
@@ -5426,6 +5513,127 @@ fn fs_wire_removal(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
         );
     }
     return unpremultiply(sample_bilinear_premultiplied(aim.x, aim.y));
+}
+
+// Roughen edges: grows the silhouette along its own alpha gradient and styles
+// the new rim. The field and coverage arithmetic follow
+// `mondrian_effects::roughen_edges` in the same f32 order.
+fn re_smoothstep01(value: f32) -> f32 {
+    let t = clamp(value, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/// One octave of the roughen edges value noise: the integer octave folds into
+/// the salt exactly like the CPU lattice.
+fn re_value_noise(x: f32, y: f32, z: i32, salt: u32) -> f32 {
+    let octave_salt = salt ^ (bitcast<u32>(z) * 0x27D4EB2Fu);
+    return turbulent_value_noise(x, y, octave_salt, false);
+}
+
+fn re_fbm(u: f32, v: f32, z: i32, complexity: u32, salt: u32) -> f32 {
+    var total = 0.0;
+    var total_weight = 0.0;
+    var amplitude = 1.0;
+    var frequency = 1.0;
+    for (var octave = 0u; octave < complexity; octave = octave + 1u) {
+        let index = f32(octave);
+        total = total
+            + amplitude
+                * re_value_noise(
+                    u * frequency + 17.0 * index,
+                    v * frequency + 31.0 * index,
+                    z,
+                    salt ^ (octave * 0x85EBCA6Bu),
+                );
+        total_weight = total_weight + amplitude;
+        amplitude = amplitude * 0.5;
+        frequency = frequency * 2.0;
+    }
+    return total / total_weight;
+}
+
+fn re_field(u: f32, v: f32, salt: u32, t: f32) -> f32 {
+    let z = floor(t);
+    let weight = t - z;
+    let blend = weight * weight * (3.0 - 2.0 * weight);
+    let base = i32(z);
+    let complexity = u32(uniforms.extra.w + 0.5);
+    let first = re_fbm(u, v, base, complexity, salt);
+    let second = re_fbm(u, v, base + 1, complexity, salt);
+    return (1.0 - blend) * first + blend * second;
+}
+
+@fragment
+fn fs_roughen_edges(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = position.xy - vec2<f32>(0.5);
+    let index = vec2<i32>(pixel);
+    let centre = load_clamped(index);
+    let border = uniforms.params.x;
+    if (border <= 0.0) {
+        return centre;
+    }
+    let left = load_clamped(index + vec2<i32>(-1, 0)).a;
+    let right = load_clamped(index + vec2<i32>(1, 0)).a;
+    let up = load_clamped(index + vec2<i32>(0, -1)).a;
+    let down = load_clamped(index + vec2<i32>(0, 1)).a;
+    let gradient_x = (right - left) * 0.5;
+    let gradient_y = (down - up) * 0.5;
+    let gradient = sqrt(gradient_x * gradient_x + gradient_y * gradient_y);
+    if (gradient <= 1.0e-6) {
+        return centre;
+    }
+
+    let feature = 100.0 * uniforms.params.w / 1000.0;
+    let stretch_x = max(1.0 + uniforms.extra.x / 100.0, 0.05);
+    let u = (pixel.x + uniforms.extra.y) / (feature * stretch_x);
+    let v = (pixel.y + uniforms.extra.z) / feature;
+    let salt = 0x8F3A2C17u ^ (u32(uniforms.aces.w + 0.5) * 0x9E3779B9u);
+    var t = uniforms.aces.x / 360.0;
+    if (uniforms.aces.y > 0.5) {
+        let cycle = uniforms.aces.z;
+        t = t - cycle * floor(t / cycle);
+    }
+
+    let field = re_field(u, v, salt, t);
+    let displacement = border * (1.0 + (0.5 * (field + 1.0) - 1.0) * uniforms.params.z);
+    let aim = vec2<f32>(
+        pixel.x + displacement * (gradient_x / gradient),
+        pixel.y + displacement * (gradient_y / gradient),
+    );
+    let sampled = sample_bilinear_premultiplied(aim.x, aim.y);
+    let sampled_alpha = sampled.a;
+
+    let sharpening = (uniforms.params.y - 1.0) / 9.0;
+    let strength = displacement / border;
+    let hardened = sampled_alpha
+        + sharpening * strength * (re_smoothstep01(sampled_alpha) - sampled_alpha);
+    let grown_alpha = max(centre.a, clamp(hardened, 0.0, 1.0));
+    let grown = clamp(grown_alpha - centre.a, 0.0, 1.0);
+
+    let menu = u32(uniforms.extra1.x + 0.5);
+    let base = (menu - 1u) / 2u;
+    var amount = grown;
+    if (base == 1u) {
+        let rust = re_value_noise(
+            u * 3.0 + 5.0,
+            v * 3.0 + 11.0,
+            i32(floor(t)),
+            salt ^ 0x51ED2701u,
+        );
+        amount = grown * (0.35 + 0.65 * (0.5 * (rust + 1.0)));
+    } else if (base == 2u) {
+        amount = floor(grown * 4.0 + 0.5) / 4.0;
+    } else if (base == 3u) {
+        amount = re_smoothstep01((grown - 0.35) / 0.30);
+    }
+
+    let final_alpha = clamp(centre.a + amount, 0.0, 1.0);
+    let own = sampled.rgb / max(sampled_alpha, 1.0e-6);
+    let fill = amount / max(final_alpha, 1.0e-6);
+    let tint = uniforms.extra1.yzw;
+    let aim_colour = select(own, tint, ((menu - 1u) % 2u) == 1u);
+    let blended = final_alpha * mix(own, aim_colour, fill);
+    return unpremultiply(vec4<f32>(blended, final_alpha));
 }
 
 /// Bulge: magnifies an elliptical region of the frame.
@@ -7930,6 +8138,22 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             0,
         )
         .expect("valid wire removal grade");
+        let roughen_edges = mondrian_effects::RoughenEdgesGrade::new(
+            2,
+            [0.6, 0.2, 0.0],
+            3.0,
+            1.5,
+            0.5,
+            100.0,
+            0.0,
+            [0.0, 0.0],
+            2,
+            90.0,
+            false,
+            1,
+            0,
+        )
+        .expect("valid roughen edges grade");
         // Take the exact window median with the alpha toggle off: the pass runs
         // first so every later stage consumes its quantised output, and radius 2
         // stays inside the GPU cap.
@@ -7958,6 +8182,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Warp { grade: warp },
             mondrian_effects::EffectGpuSpatialPass::GridWarp { grade: grid_warp },
             mondrian_effects::EffectGpuSpatialPass::WireRemoval { grade: wire_removal },
+            mondrian_effects::EffectGpuSpatialPass::RoughenEdges { grade: roughen_edges },
             mondrian_effects::EffectGpuSpatialPass::Dent { grade: dent },
             mondrian_effects::EffectGpuSpatialPass::Flip { grade: flip },
             mondrian_effects::EffectGpuSpatialPass::Ripple { grade: ripple },
@@ -7976,7 +8201,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 23, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 24, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::median_frame_f32(
@@ -8024,6 +8249,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             wire_removal,
+        ));
+        assert!(mondrian_effects::roughen_edges_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &roughen_edges,
         ));
         assert!(mondrian_effects::dent_frame_f32(
             &mut cpu,
@@ -11517,6 +11748,199 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             "unexpected error: {error:?}"
         );
     }
+    #[test]
+    fn gpu_roughen_edges_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU roughen edges parity test: no GPU adapter available");
+            return;
+        };
+        let check = |label: &str,
+                     pixels: &[[f32; 4]],
+                     width: u32,
+                     height: u32,
+                     grade: mondrian_effects::RoughenEdgesGrade| {
+            let mut cpu = pixels.to_vec();
+            assert!(mondrian_effects::roughen_edges_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                &grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.roughen-edges-encoder"),
+                });
+            let (params, extra, extra1) = grade.gpu_controls();
+            let output = executor
+                .record_roughen_edges(
+                    &context.device,
+                    &mut encoder,
+                    params,
+                    extra,
+                    grade.aces_controls(),
+                    extra1,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded roughen edges");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "roughen edges {label} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        };
+
+        // A hard edged block grows outward by the authored border.
+        let width = 6_u32;
+        let height = 5_u32;
+        let mut block = vec![[0.0_f32, 0.0, 0.0, 0.0]; (width * height) as usize];
+        for y in 1..4 {
+            for x in 1..4 {
+                block[(y * width + x) as usize] = [0.25, 0.5, 0.75, 1.0];
+            }
+        }
+        check(
+            "block",
+            &block,
+            width,
+            height,
+            mondrian_effects::RoughenEdgesGrade::new(
+                1,
+                [0.6, 0.2, 0.0],
+                2.0,
+                1.0,
+                0.0,
+                100.0,
+                0.0,
+                [0.0, 0.0],
+                2,
+                0.0,
+                false,
+                1,
+                0,
+            )
+            .expect("block roughen edges grade"),
+        );
+
+        // A soft alpha ramp exercises the fractal influence and the rusty tint.
+        let width = 7_u32;
+        let height = 4_u32;
+        let mut ramp = vec![[0.0_f32, 0.0, 0.0, 0.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let alpha = ((x + y) as f32 / 9.0).clamp(0.0, 1.0);
+                ramp[y * width as usize + x] = [0.4 * alpha, 0.2 * alpha, 0.1 * alpha, alpha];
+            }
+        }
+        check(
+            "ramp",
+            &ramp,
+            width,
+            height,
+            mondrian_effects::RoughenEdgesGrade::new(
+                4,
+                [0.6, 0.2, 0.0],
+                3.0,
+                1.4,
+                0.5,
+                100.0,
+                20.0,
+                [1.5, -2.0],
+                3,
+                1080.0,
+                true,
+                2,
+                7,
+            )
+            .expect("ramp roughen edges grade"),
+        );
+
+        // A lone opaque pixel exercises the cutout threshold and the evolution.
+        let width = 5_u32;
+        let height = 5_u32;
+        let mut dot = vec![[0.0_f32, 0.0, 0.0, 0.0]; (width * height) as usize];
+        dot[(2 * width + 2) as usize] = [0.3, 0.4, 0.5, 1.0];
+        check(
+            "dot",
+            &dot,
+            width,
+            height,
+            mondrian_effects::RoughenEdgesGrade::new(
+                7,
+                [0.6, 0.2, 0.0],
+                2.0,
+                1.0,
+                1.0,
+                100.0,
+                0.0,
+                [0.0, 0.0],
+                4,
+                90.0,
+                false,
+                1,
+                0,
+            )
+            .expect("dot roughen edges grade"),
+        );
+
+        // One pass needs exactly one scratch raster.
+        let executor = EffectSpatialGpu::new(&context.device);
+        let width = 6_u32;
+        let height = 5_u32;
+        let source = upload(
+            &context,
+            &vec![[0.0_f32; 4]; (width * height) as usize],
+            width,
+            height,
+        );
+        let none = scratch(&context, width, height, 0);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.roughen-edges-geometry-encoder"),
+        });
+        let grade = mondrian_effects::RoughenEdgesGrade::new(
+            1,
+            [0.6, 0.2, 0.0],
+            2.0,
+            1.0,
+            0.0,
+            100.0,
+            0.0,
+            [0.0, 0.0],
+            2,
+            0.0,
+            false,
+            1,
+            0,
+        )
+        .expect("valid roughen edges grade");
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &mondrian_effects::EffectGpuSpatialPass::RoughenEdges { grade },
+                &source,
+                &none,
+                width,
+                height,
+            )
+            .expect_err("a missing scratch texture cannot run roughen edges");
+        assert!(
+            matches!(error, EffectSpatialGpuError::EmptyFrame),
+            "unexpected error: {error:?}"
+        );
+    }
+
     #[test]
     fn gpu_twirl_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {
