@@ -85,10 +85,12 @@ pub(crate) struct EffectSpatialGpu {
     channel_blur: wgpu::RenderPipeline,
     median: wgpu::RenderPipeline,
     selective_color: wgpu::RenderPipeline,
+    stroke: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
     selective_color_bindings: wgpu::BindGroupLayout,
+    stroke_bindings: wgpu::BindGroupLayout,
 }
 
 impl EffectSpatialGpu {
@@ -1587,6 +1589,75 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // The stroke band reads a neighbourhood and carries a forty-eight byte
+        // payload that the shared uniform cannot hold, so the stage gets its own
+        // shader module, bind group layout, and pipeline.
+        let stroke_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.effect-spatial.stroke-shader"),
+            source: wgpu::ShaderSource::Wgsl(SPATIAL_STROKE_SHADER.into()),
+        });
+        let stroke_bindings = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mondrian.effect-spatial.stroke-bindings"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<StrokeUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let stroke_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mondrian.effect-spatial.stroke-layout"),
+            bind_group_layouts: &[Some(&stroke_bindings)],
+            immediate_size: 0,
+        });
+        let stroke = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.stroke"),
+            layout: Some(&stroke_layout),
+            vertex: wgpu::VertexState {
+                module: &stroke_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &stroke_shader,
+                entry_point: Some("fs_stroke"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -1632,10 +1703,12 @@ impl EffectSpatialGpu {
             channel_blur,
             median,
             selective_color,
+            stroke,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
             selective_color_bindings,
+            stroke_bindings,
         }
     }
 
@@ -2048,6 +2121,30 @@ impl EffectSpatialGpu {
         self.record_selective_color_pass(device, encoder, &input_view, &output_view, &uniform);
         Ok(destination.clone())
     }
+    /// Records the stroke pass.
+    ///
+    /// Every fragment resolves its own band, so one full-screen draw covers the
+    /// whole frame even though the kernel reads a neighbourhood.
+    pub(crate) fn record_stroke(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::StrokeGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let (control, color, geometry) = grade.gpu_controls();
+        let uniform = StrokeUniform { control, color, geometry };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_stroke_pass(device, encoder, &input_view, &output_view, &uniform);
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -2200,6 +2297,9 @@ impl EffectSpatialGpu {
             // The dedicated pass writes the whole frame in one full-screen
             // draw, so the scratch pool needs the source and the destination.
             EffectGpuSpatialPass::SelectiveColor { .. } => Ok(1),
+            // One draw resolves the whole band; only the source and the
+            // destination are needed.
+            EffectGpuSpatialPass::Stroke { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -2628,6 +2728,18 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::SelectiveColor { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return self.record_selective_color(
+                    device,
+                    encoder,
+                    *grade,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Stroke { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_stroke(
                     device,
                     encoder,
                     *grade,
@@ -3454,6 +3566,54 @@ impl EffectSpatialGpu {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.selective_color);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..4, 0..1);
+    }
+
+    fn record_stroke_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        uniforms: &StrokeUniform,
+    ) {
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mondrian.effect-spatial.stroke-uniforms"),
+            contents: bytemuck::bytes_of(uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian.effect-spatial.stroke-bind-group"),
+            layout: &self.stroke_bindings,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(input),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.effect-spatial.stroke-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.stroke);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
@@ -4481,6 +4641,22 @@ struct SelectiveColorUniform {
     control: [u32; 4],
     /// The nine folded CMYK delta rows, in range order.
     deltas: [[f32; 4]; 9],
+}
+/// The dedicated uniform payload of the stroke pass.
+///
+/// Forty-eight bytes: one style selector, the straight-alpha ink colour, and the
+/// brush geometry. Merged into [`SpatialPassUniform`] this would need three of
+/// its five cells, so the stage carries its own struct and bind group layout.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct StrokeUniform {
+    /// `x` is the paint style (1 on original, 2 on transparent, 3 reveal); the
+    /// rest is reserved.
+    control: [u32; 4],
+    /// The straight-alpha ink colour; `w` is the opacity.
+    color: [f32; 4],
+    /// `x` is the brush size and `y` the brush hardness; the rest is reserved.
+    geometry: [f32; 4],
 }
 const SPATIAL_EFFECT_SHADER: &str = r#"
 struct Uniforms {
@@ -7347,6 +7523,140 @@ fn fs_selective_color(@builtin(position) position: vec4<f32>) -> @location(0) ve
     return vec4<f32>(graded, source.a);
 }
 "#;
+
+/// The stroke pass.
+///
+/// The band is centred on the source alpha half-coverage contour, so the
+/// fragment scans eight rays for the crossing, bisects each bracket six times,
+/// and keeps the nearest hit. The arithmetic mirrors `mondrian_effects::stroke`
+/// statement for statement, in the same order, so the CPU and the GPU resolve
+/// the same band.
+const SPATIAL_STROKE_SHADER: &str = r#"
+struct StrokeUniform {
+    control: vec4<u32>,
+    color: vec4<f32>,
+    geometry: vec4<f32>,
+};
+
+@group(0) @binding(0) var st_src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> st: StrokeUniform;
+
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(-1.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    var out: VsOut;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    return out;
+}
+
+fn st_direction(index: i32) -> vec2<f32> {
+    var directions = array<vec2<f32>, 8>(
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.70710677, 0.70710677),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(-0.70710677, 0.70710677),
+        vec2<f32>(-1.0, 0.0),
+        vec2<f32>(-0.70710677, -0.70710677),
+        vec2<f32>(0.0, -1.0),
+        vec2<f32>(0.70710677, -0.70710677),
+    );
+    return directions[index];
+}
+
+fn st_offset(direction: vec2<f32>, step: f32) -> vec2<i32> {
+    let offset = floor(direction * step + vec2<f32>(0.5, 0.5));
+    return vec2<i32>(offset);
+}
+
+fn st_load(pixel: vec2<i32>) -> vec4<f32> {
+    let size = vec2<i32>(textureDimensions(st_src));
+    let clamped = clamp(pixel, vec2<i32>(0, 0), size - vec2<i32>(1, 1));
+    return textureLoad(st_src, clamped, 0);
+}
+
+fn st_edge_distance(base: vec2<i32>, centre: f32, limit: f32) -> f32 {
+    var best = limit * 4.0;
+    for (var index: i32 = 0; index < 8; index = index + 1) {
+        let direction = st_direction(index);
+        var step = 1.0;
+        var low = 0.0;
+        var high = 0.0;
+        var found = false;
+        loop {
+            let sample = st_load(base + st_offset(direction, step));
+            if ((sample.a - 0.5) * (centre - 0.5) <= 0.0) {
+                high = step;
+                found = true;
+                break;
+            }
+            low = step;
+            if (step > limit + 1.0) {
+                break;
+            }
+            step = step * 2.0;
+        }
+        if (!found) {
+            continue;
+        }
+        for (var bisection: i32 = 0; bisection < 6; bisection = bisection + 1) {
+            let middle = (low + high) * 0.5;
+            let sample = st_load(base + st_offset(direction, middle));
+            if ((sample.a - 0.5) * (centre - 0.5) <= 0.0) {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+        best = min(best, high);
+    }
+    return best;
+}
+
+@fragment
+fn fs_stroke(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let base = vec2<i32>(position.xy);
+    let source = st_load(base);
+    let brush = max(st.geometry.x, 0.0);
+    let opacity = clamp(st.color.w, 0.0, 1.0);
+    if (brush <= 0.0 || opacity <= 0.0) {
+        return source;
+    }
+    let radius = brush * 0.5;
+    let distance = st_edge_distance(base, source.a, radius + 1.0);
+    let hardness = clamp(st.geometry.y, 0.0, 0.95);
+    let soft = max(radius * (1.0 - hardness), 0.5);
+    let solid = max(radius - soft, 0.0);
+    var coverage = 0.0;
+    if (distance <= radius) {
+        coverage = 1.0 - clamp((distance - solid) / soft, 0.0, 1.0);
+    }
+    let stroke_alpha = coverage * opacity;
+    if (stroke_alpha <= 0.0) {
+        return source;
+    }
+    let colour = st.color.xyz;
+    if (st.control.x == 2u) {
+        return vec4<f32>(colour, stroke_alpha);
+    }
+    if (st.control.x == 3u) {
+        return vec4<f32>(source.rgb, source.a * stroke_alpha);
+    }
+    let source_weight = source.a * (1.0 - stroke_alpha);
+    let out_alpha = stroke_alpha + source_weight;
+    let premultiplied = colour * stroke_alpha + source.rgb * source_weight;
+    return vec4<f32>(premultiplied / out_alpha, out_alpha);
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7367,6 +7677,22 @@ mod tests {
         assert!(
             module.entry_points.iter().any(|entry| entry.name == "fs_median"),
             "the median fragment entry point must survive validation"
+        );
+    }
+
+    #[test]
+    fn spatial_stroke_shader_validates() {
+        let module = naga::front::wgsl::parse_str(SPATIAL_STROKE_SHADER)
+            .expect("spatial stroke shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("spatial stroke shader validates");
+        assert!(
+            module.entry_points.iter().any(|entry| entry.name == "fs_stroke"),
+            "the stroke fragment entry point must survive validation"
         );
     }
 
@@ -8168,9 +8494,20 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             [[40.0, 0.0, 0.0, 0.0]; 9],
         )
         .expect("valid selective colour grade");
+        // Follow it with a stroke band so the chain also proves the second
+        // dedicated uniform payload records beside the selective colour one.
+        let stroke = mondrian_effects::StrokeGrade::new(
+            mondrian_effects::StrokePaintStyle::OnOriginal,
+            [1.0, 0.5, 0.25],
+            3.0,
+            0.5,
+            0.8,
+        )
+        .expect("valid stroke grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::Median { grade: median },
             mondrian_effects::EffectGpuSpatialPass::SelectiveColor { grade: selective_color },
+            mondrian_effects::EffectGpuSpatialPass::Stroke { grade: stroke },
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
                 iterations: 1,
@@ -8201,7 +8538,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 24, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 25, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::median_frame_f32(
@@ -8210,6 +8547,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         assert!(mondrian_effects::selective_color_frame_f32(
             &mut cpu,
             &selective_color,
+        ));
+        assert!(mondrian_effects::stroke_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &stroke,
         ));
         assert!(mondrian_effects::box_blur_frame_f32(
             &mut cpu,
@@ -11743,6 +12086,181 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 4,
             )
             .expect_err("a missing scratch texture cannot run selective colour");
+        assert!(
+            matches!(error, EffectSpatialGpuError::EmptyFrame),
+            "unexpected error: {error:?}"
+        );
+    }
+    #[test]
+    fn gpu_stroke_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU stroke parity test: no GPU adapter available");
+            return;
+        };
+        // Frame one: a hard-edged rectangle matte, so every ray direction finds a
+        // crossing and the band wraps the whole contour.
+        let mut rectangle = Vec::new();
+        for y in 0..6_u32 {
+            for x in 0..8_u32 {
+                let inside = (1..=6).contains(&x) && (1..=4).contains(&y);
+                rectangle.push([0.3, 0.6, 0.9, if inside { 1.0 } else { 0.0 }]);
+            }
+        }
+        let rectangle_grade = mondrian_effects::StrokeGrade::new(
+            mondrian_effects::StrokePaintStyle::OnOriginal,
+            [1.0, 0.25, 0.0],
+            2.0,
+            0.75,
+            0.8,
+        )
+        .expect("valid rectangle stroke grade");
+
+        // Frame two: an analytic half plane with a four pixel linear ramp, the
+        // fixture the kernel distance tests use, painted on transparent.
+        let mut ramp = Vec::new();
+        for _ in 0..13 {
+            for x in 0..17_u32 {
+                let alpha = (0.5 + (8.0 - x as f32) / 4.0).clamp(0.0, 1.0);
+                ramp.push([0.9, 0.2, 0.1, alpha]);
+            }
+        }
+        let ramp_grade = mondrian_effects::StrokeGrade::new(
+            mondrian_effects::StrokePaintStyle::OnTransparent,
+            [0.2, 0.9, 0.3],
+            5.0,
+            0.0,
+            1.0,
+        )
+        .expect("valid ramp stroke grade");
+
+        // Frame three: an oblique triangle, so the diagonal rays and the
+        // eight-percent direction quantisation both run, revealing the source.
+        let mut triangle = Vec::new();
+        for y in 0..9_u32 {
+            for x in 0..32_u32 {
+                let inside = x as i32 >= 2 * y as i32 + 2 && x as i32 <= 22 - y as i32;
+                triangle.push([
+                    0.1 + 0.02 * x as f32,
+                    0.5,
+                    0.8 - 0.02 * y as f32,
+                    if inside { 1.0 } else { 0.0 },
+                ]);
+            }
+        }
+        let triangle_grade = mondrian_effects::StrokeGrade::new(
+            mondrian_effects::StrokePaintStyle::RevealOriginal,
+            [1.0, 1.0, 1.0],
+            3.0,
+            0.5,
+            0.9,
+        )
+        .expect("valid triangle stroke grade");
+
+        let cases = [
+            ("rectangle", 8_u32, 6_u32, rectangle, rectangle_grade),
+            ("ramp", 17, 13, ramp, ramp_grade),
+            ("triangle", 32, 9, triangle, triangle_grade),
+        ];
+        for (label, width, height, pixels, grade) in cases {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::stroke_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                &grade,
+            ));
+
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.stroke-encoder"),
+                });
+            let output = executor
+                .record_stroke(
+                    &context.device,
+                    &mut encoder,
+                    grade,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded stroke");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    // The shader mirrors the kernel statement for statement; the
+                    // only divergence left is fused multiply-add selection inside
+                    // the adapter's float units, so 1e-4 absolute covers the band
+                    // composite without hiding a formula change.
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "stroke {label} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+
+        // A fully transparent frame has no half-coverage contour, so all three
+        // paint styles must return it bit for bit.
+        let transparent = vec![[0.0_f32; 4]; 9 * 7];
+        for style in mondrian_effects::StrokePaintStyle::ALL {
+            let grade = mondrian_effects::StrokeGrade::new(style, [1.0, 0.5, 0.25], 4.0, 0.75, 1.0)
+                .expect("valid transparent stroke grade");
+            let mut cpu = transparent.clone();
+            assert!(mondrian_effects::stroke_frame_f32(&mut cpu, 9, 7, &grade));
+            assert_eq!(
+                cpu, transparent,
+                "the CPU must leave a transparent frame alone"
+            );
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &transparent, 9, 7);
+            let destination = scratch(&context, 9, 7, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.stroke-transparent-encoder"),
+                });
+            let output = executor
+                .record_stroke(
+                    &context.device,
+                    &mut encoder,
+                    grade,
+                    &source,
+                    &destination[0],
+                    9,
+                    7,
+                )
+                .expect("recorded transparent stroke");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, 9, 7);
+            assert_eq!(
+                gpu, transparent,
+                "the GPU must leave a transparent frame alone"
+            );
+        }
+
+        // One pass needs exactly one scratch raster.
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &vec![[0.0_f32; 4]; 20], 5, 4);
+        let none = scratch(&context, 5, 4, 0);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.stroke-geometry-encoder"),
+        });
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &mondrian_effects::EffectGpuSpatialPass::Stroke { grade: rectangle_grade },
+                &source,
+                &none,
+                5,
+                4,
+            )
+            .expect_err("a missing scratch texture cannot run a stroke");
         assert!(
             matches!(error, EffectSpatialGpuError::EmptyFrame),
             "unexpected error: {error:?}"

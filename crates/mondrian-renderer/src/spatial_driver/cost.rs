@@ -370,6 +370,9 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // Selective colour is one pass of arithmetic per pixel: ten uniform
         // cell reads and one write, with no neighbour taps.
         "selective_color" => 0.6,
+        // Stroke scans up to a hundred and twelve taps per pixel before the
+        // band composite, so it sits far above one-pass arithmetic.
+        "stroke" => 3.0,
         // The median gathers the whole window eight times over, so it costs more
         // than a separable blur pass despite the small GPU radius cap.
         "median" => 4.0,
@@ -394,6 +397,9 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "roughen_edges" => 4.0,
         // Nine weights, nine folded rows, and one CMYK round trip per pixel.
         "selective_color" => 2.0,
+        // Fifty-six to a hundred and twelve nearest-neighbour taps with a
+        // bracket decision per tap: the most expensive CPU kernel in the family.
+        "stroke" => 6.0,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
         "radial_blur" | "turbulent_displace" | "keylight" | "matte_refine" => 4.0,
