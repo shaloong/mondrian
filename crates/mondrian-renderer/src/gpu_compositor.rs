@@ -68,6 +68,8 @@ struct EffectUniform {
     color: vec4<f32>,
     extra0: vec4<f32>,
     extra1: vec4<f32>,
+    extra2: vec4<f32>,
+    extra3: vec4<f32>,
 };
 
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
@@ -3029,6 +3031,8 @@ struct GpuEffectUniform {
     color: [f32; 4],
     extra0: [f32; 4],
     extra1: [f32; 4],
+    extra2: [f32; 4],
+    extra3: [f32; 4],
 }
 
 impl GpuFrameCompositor {
@@ -5312,6 +5316,8 @@ fn qualifier_uniforms(
         color: [saturation[0], saturation[1], saturation[2], 0.0],
         extra0: [luminance[0], luminance[1], luminance[2], 0.0],
         extra1: [three_d[0], three_d[1], clean[0], clean[1]],
+        extra2: [0.0; 4],
+        extra3: [0.0; 4],
     };
     let coefficients = qualifier.luminance_coefficients();
     effects[1].params = [
@@ -5484,6 +5490,8 @@ fn effect_uniforms_for_ops(
                 ],
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
+                extra2: [0.0; 4],
+                extra3: [0.0; 4],
             },
             EffectGpuPointOp::WhiteBalance { grade } => {
                 let matrix = grade.matrix();
@@ -5493,6 +5501,8 @@ fn effect_uniforms_for_ops(
                     color: [matrix[1][0], matrix[1][1], matrix[1][2], 0.0],
                     extra0: [matrix[2][0], matrix[2][1], matrix[2][2], 0.0],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Primaries { grade } => {
@@ -5506,6 +5516,8 @@ fn effect_uniforms_for_ops(
                     color: [lift_delta[0], lift_delta[1], lift_delta[2], 0.0],
                     extra0: [inverse_gamma[0], inverse_gamma[1], inverse_gamma[2], 0.0],
                     extra1: [gain[0], gain[1], gain[2], 0.0],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::HdrGrading { grade } => {
@@ -5525,6 +5537,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::AscCdl { grade } => {
@@ -5537,6 +5551,8 @@ fn effect_uniforms_for_ops(
                     color: [offset[0], offset[1], offset[2], 0.0],
                     extra0: [power[0], power[1], power[2], 0.0],
                     extra1: [grade.saturation(), 0.0, 0.0, 0.0],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::GamutCompression { grade } => {
@@ -5552,6 +5568,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::HighlightRecovery { grade } => {
@@ -5562,6 +5580,8 @@ fn effect_uniforms_for_ops(
                     color: [luminance[0], luminance[1], luminance[2], 0.0],
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::ColorCurves { curves } => {
@@ -5594,6 +5614,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Vignette { intensity, feather } => GpuEffectUniform {
@@ -5602,6 +5624,8 @@ fn effect_uniforms_for_ops(
                 color: [0.0; 4],
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
+                extra2: [0.0; 4],
+                extra3: [0.0; 4],
             },
             EffectGpuPointOp::Grain { amount } => GpuEffectUniform {
                 header: [4, 0, 0, 0],
@@ -5609,6 +5633,8 @@ fn effect_uniforms_for_ops(
                 color: [0.0; 4],
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
+                extra2: [0.0; 4],
+                extra3: [0.0; 4],
             },
             EffectGpuPointOp::Crop { left, top, right, bottom } => GpuEffectUniform {
                 header: [5, 0, 0, 0],
@@ -5616,6 +5642,8 @@ fn effect_uniforms_for_ops(
                 color: [0.0; 4],
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
+                extra2: [0.0; 4],
+                extra3: [0.0; 4],
             },
             EffectGpuPointOp::Invert { color_mask, flags, blend_with_original } => {
                 GpuEffectUniform {
@@ -5624,6 +5652,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::HueSaturation { grade } => {
@@ -5634,6 +5664,8 @@ fn effect_uniforms_for_ops(
                     color: [controls[4], controls[5], controls[6], controls[7]],
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::BlackAndWhite { grade } => {
@@ -5644,6 +5676,8 @@ fn effect_uniforms_for_ops(
                     color: [controls[4], controls[5], controls[6], 0.0],
                     extra0: [controls[7], controls[8], controls[9], 0.0],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Threshold { level, luminance_coefficients } => GpuEffectUniform {
@@ -5657,6 +5691,8 @@ fn effect_uniforms_for_ops(
                 ],
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
+                extra2: [0.0; 4],
+                extra3: [0.0; 4],
             },
             EffectGpuPointOp::Posterize { levels } => GpuEffectUniform {
                 header: [19, 0, 0, 0],
@@ -5664,6 +5700,8 @@ fn effect_uniforms_for_ops(
                 color: [0.0; 4],
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
+                extra2: [0.0; 4],
+                extra3: [0.0; 4],
             },
             EffectGpuPointOp::Tint { grade } => {
                 let (params, color, extra0) = grade.gpu_controls();
@@ -5673,6 +5711,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Vibrance { grade } => {
@@ -5683,6 +5723,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Extract { grade } => {
@@ -5693,6 +5735,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::BrightnessContrast { grade } => {
@@ -5703,6 +5747,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Levels { grade } => {
@@ -5713,6 +5759,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Ramp { grade } => {
@@ -5723,6 +5771,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1,
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Arithmetic { grade } => {
@@ -5733,6 +5783,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::LeaveColor { grade } => {
@@ -5743,6 +5795,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::BroadcastSafe { grade } => {
@@ -5753,6 +5807,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::TestSignals { grade } => {
@@ -5763,6 +5819,8 @@ fn effect_uniforms_for_ops(
                     color: [0.0; 4],
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::ColorBalance { grade } => {
@@ -5773,6 +5831,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::SpillSuppressor { grade } => {
@@ -5783,6 +5843,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::ChangeToColor { grade } => {
@@ -5793,6 +5855,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0: grade.gpu_source(),
                     extra1: [grade.gpu_view(), 0.0, 0.0, 0.0],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
@@ -5801,6 +5865,8 @@ fn effect_uniforms_for_ops(
                 color: [0.0; 4],
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
+                extra2: [0.0; 4],
+                extra3: [0.0; 4],
             },
             EffectGpuPointOp::Tritone { grade } => {
                 let (params, color, extra0, extra1) = grade.gpu_controls();
@@ -5810,6 +5876,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1,
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::ChannelMixer { grade } => {
@@ -5820,6 +5888,8 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1,
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::ShiftChannels { grade } => GpuEffectUniform {
@@ -5831,6 +5901,8 @@ fn effect_uniforms_for_ops(
                 color: [0.0; 4],
                 extra0: [0.0; 4],
                 extra1: [0.0; 4],
+                extra2: [0.0; 4],
+                extra3: [0.0; 4],
             },
             EffectGpuPointOp::Lut3D { lut, intensity } => {
                 let effective_intensity = intensity.clamp(0.0, 1.0);
@@ -5856,6 +5928,8 @@ fn effect_uniforms_for_ops(
                     color: [lut.domain_max[0], lut.domain_max[1], lut.domain_max[2], 0.0],
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
         };
