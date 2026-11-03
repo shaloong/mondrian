@@ -1936,6 +1936,13 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        EffectRenderOp::Stroke { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The band is centred on a contour the kernel finds by scanning
+            // the whole frame, so the input tile cannot be narrowed.
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::LensDistortion { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: EffectRoiPropagation::FullFrame,

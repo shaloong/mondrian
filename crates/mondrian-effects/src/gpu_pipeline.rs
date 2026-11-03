@@ -216,6 +216,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored colour range, method, and the folded CMYK delta table.
         grade: crate::SelectiveColorGrade,
     },
+    Stroke {
+        /// Authored paint style, ink, brush profile, and opacity.
+        grade: crate::StrokeGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -261,6 +265,7 @@ impl EffectGpuSpatialPass {
             Self::ChannelBlur { .. } => "channel_blur",
             Self::Median { .. } => "median",
             Self::SelectiveColor { .. } => "selective_color",
+            Self::Stroke { .. } => "stroke",
         }
     }
 
@@ -326,6 +331,9 @@ impl EffectGpuSpatialPass {
             Self::Median { .. } => crate::median::MEDIAN_MAX_RADIUS,
             // The kernel is a per-pixel point that reads no neighbour.
             Self::SelectiveColor { .. } => 0,
+            // The band reaches at most half the brush plus the two-pixel
+            // sampling overshoot; the GPU gate caps the brush at 200.
+            Self::Stroke { grade } => stroke_halo(grade),
         }
     }
 
@@ -383,8 +391,18 @@ impl EffectGpuSpatialPass {
             Self::Median { .. } => crate::median::MEDIAN_MAX_RADIUS,
             // The kernel is a per-pixel point that reads no neighbour.
             Self::SelectiveColor { .. } => 0,
+            // Same reach as the horizontal halo.
+            Self::Stroke { grade } => stroke_halo(grade),
         }
     }
+}
+
+/// Reach of the stroke kernel in source pixels.
+///
+/// The band is centred on the contour and is at most `brush_size` wide, plus
+/// the two pixels the doubling search can overshoot the profile by.
+fn stroke_halo(grade: crate::StrokeGrade) -> u32 {
+    ((grade.brush_size() * 0.5).ceil() as u32 + 2).min(102)
 }
 
 /// One stage of the GPU pipeline, in graph order.
@@ -708,6 +726,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::SelectiveColor { grade } => {
             Some(EffectGpuSpatialPass::SelectiveColor { grade: *grade })
         }
+        EffectRenderOp::Stroke { grade } => Some(EffectGpuSpatialPass::Stroke { grade: *grade }),
         _ => None,
     }
 }

@@ -434,6 +434,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Stroke { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "stroke",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LensDistortion { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "lens_distortion",
@@ -1095,6 +1101,8 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::RoughenEdges { .. } => 1,
         EffectRenderOp::EyedropperFill { .. } => 0,
         EffectRenderOp::SelectiveColor { .. } => 0,
+        // The kernel snapshots the source frame before writing in place.
+        EffectRenderOp::Stroke { .. } => 1,
         EffectRenderOp::Noise { .. } => 0,
         EffectRenderOp::Mosaic { .. } => 0,
         EffectRenderOp::Scatter { .. } => 0,
@@ -1618,6 +1626,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::SelectiveColor { grade } => {
             crate::selective_color::apply_selective_color_f32_region_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::Stroke { grade } => {
+            crate::stroke::apply_stroke_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,

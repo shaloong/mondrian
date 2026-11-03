@@ -2787,6 +2787,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Checkerboard { .. } => 93,
         EffectRenderOp::Grid { .. } => 94,
         EffectRenderOp::CircleEllipse { .. } => 95,
+        EffectRenderOp::Stroke { .. } => 96,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4872,6 +4873,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Checkerboard { .. }
             | crate::EffectRenderOp::Grid { .. }
             | crate::EffectRenderOp::CircleEllipse { .. }
+            | crate::EffectRenderOp::Stroke { .. }
             | crate::EffectRenderOp::ColorBalance { .. }
             | crate::EffectRenderOp::Minimax { .. }
             | crate::EffectRenderOp::SpillSuppressor { .. }

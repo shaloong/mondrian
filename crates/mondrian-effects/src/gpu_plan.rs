@@ -1054,6 +1054,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::SelectiveColor { .. } => "selective_color",
+        EffectRenderOp::Stroke { .. } => "stroke",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut_3d",
         EffectRenderOp::Custom { .. } => "custom",

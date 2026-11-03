@@ -2872,6 +2872,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         crate::EffectRenderOp::Crop { .. } => "crop",
         crate::EffectRenderOp::SelectiveColor { .. } => "selective_color",
+        crate::EffectRenderOp::Stroke { .. } => "stroke",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         crate::EffectRenderOp::Lut3D { .. } => "lut3d",
         crate::EffectRenderOp::Custom { .. } => "custom",

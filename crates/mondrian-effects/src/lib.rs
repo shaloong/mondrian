@@ -54,6 +54,7 @@ pub mod roughen_edges;
 pub mod spherize;
 pub mod spill_suppressor;
 pub mod split;
+pub mod stroke;
 pub mod threshold;
 pub mod tint;
 pub mod transform;
@@ -432,6 +433,11 @@ pub use spill_suppressor::{
 pub use split::{
     split_frame_f32, SplitError, SplitGrade, SPLIT_MAX_COORDINATE, SPLIT_MAX_PIXELS,
     SPLIT_MIN_PIXELS,
+};
+pub use stroke::{
+    stroke_frame_f32, StrokeControls, StrokeError, StrokeGrade, StrokePaintStyle,
+    STROKE_DEFAULT_BRUSH_HARDNESS, STROKE_DEFAULT_BRUSH_SIZE, STROKE_DEFAULT_COLOR,
+    STROKE_DEFAULT_OPACITY, STROKE_MAX_BRUSH_HARDNESS, STROKE_MAX_BRUSH_SIZE,
 };
 pub use temporal_execution::{
     collect_temporal_frame_demands, prepare_temporal_frame_execution,

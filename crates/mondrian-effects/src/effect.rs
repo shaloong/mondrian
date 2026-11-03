@@ -1170,6 +1170,11 @@ pub enum EffectRenderOp {
         /// Authored centre, radius, edge, feathering, colour and blend mode.
         grade: crate::CircleEllipseGrade,
     },
+    /// Stroke: paints a closed band along the layer's alpha contour.
+    Stroke {
+        /// Authored ink, band width, profile, opacity and paint style.
+        grade: crate::StrokeGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1398,6 +1403,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Grid { grade } => formatter.debug_struct("Grid").field("grade", grade).finish(),
             Self::CircleEllipse { grade } => {
                 formatter.debug_struct("CircleEllipse").field("grade", grade).finish()
+            }
+            Self::Stroke { grade } => {
+                formatter.debug_struct("Stroke").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2223,6 +2231,14 @@ impl EffectRenderOp {
                 grade.blend_mode().hash(state);
                 grade.invert().hash(state);
             }
+            EffectRenderOp::Stroke { grade } => {
+                95u8.hash(state);
+                let (control, color, geometry) = grade.gpu_controls();
+                control.hash(state);
+                for cell in [color, geometry] {
+                    cell.map(f32::to_bits).hash(state);
+                }
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2506,6 +2522,7 @@ impl EffectRenderOp {
             EffectRenderOp::Checkerboard { .. } => 1,
             EffectRenderOp::Grid { .. } => 1,
             EffectRenderOp::CircleEllipse { .. } => 1,
+            EffectRenderOp::Stroke { .. } => 5,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -3048,7 +3065,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 94] {
+fn builtin_effect_types() -> [EffectType; 95] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3144,6 +3161,7 @@ fn builtin_effect_types() -> [EffectType; 94] {
         EffectType::Checkerboard,
         EffectType::Grid,
         EffectType::CircleEllipse,
+        EffectType::Stroke,
     ]
 }
 
@@ -9437,6 +9455,147 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Stroke => {
+            // Lazy parameter: the schema exposes it and the graph builder
+            // reads it, but it never reaches the grade, the uniform or the
+            // cache key.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "path",
+                "描边",
+                "路径",
+                PropertyValue::Float(0.0),
+                None,
+                None,
+                None,
+            );
+            // Lazy parameter: see `path`.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "all_masks",
+                "描边",
+                "所有蒙版",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            // Lazy parameter: see `path`.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sequential_stroke",
+                "描边",
+                "连续描边",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color",
+                "描边",
+                "颜色",
+                PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "brush_size",
+                "描边",
+                "画笔大小",
+                PropertyValue::Float(crate::STROKE_DEFAULT_BRUSH_SIZE),
+                Some(0.0),
+                Some(f64::from(crate::STROKE_MAX_BRUSH_SIZE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "brush_hardness",
+                "描边",
+                "画笔硬度",
+                PropertyValue::Float(crate::STROKE_DEFAULT_BRUSH_HARDNESS),
+                Some(0.0),
+                Some(f64::from(crate::STROKE_MAX_BRUSH_HARDNESS)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "描边",
+                "不透明度",
+                PropertyValue::Float(crate::STROKE_DEFAULT_OPACITY),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            // Lazy parameter: see `path`.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "start",
+                "描边",
+                "起点",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            // Lazy parameter: see `path`.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "end",
+                "描边",
+                "终点",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            // Lazy parameter: see `path`.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "spacing",
+                "描边",
+                "间距",
+                PropertyValue::Float(15.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "paint_style",
+                "描边",
+                "描边样式",
+                "on_original",
+                crate::StrokePaintStyle::ALL
+                    .iter()
+                    .map(|style| {
+                        ParameterEnumOption::new(
+                            style.key(),
+                            style.display_label(),
+                            format!(
+                                "mondrian.effect.stroke.paint_style.{}",
+                                style.label_suffix()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -10108,6 +10267,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             EffectType::MatteRefine,
             "edge_detail" | "view_edge_region" | "view_map" | "more_motion_blur",
         ) => ParameterUnit::Normalized,
+        (EffectType::Stroke, "brush_size") => ParameterUnit::Pixels,
+        (EffectType::Stroke, "brush_hardness" | "opacity") => ParameterUnit::Normalized,
+        (EffectType::Stroke, "start" | "end" | "spacing") => ParameterUnit::Percent,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -10391,6 +10553,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::CircleEllipse => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Stroke => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The band is centred on a contour the kernel has to find by
+            // scanning the whole frame, so the definition-level envelope
+            // cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ColorBalance => EffectExecutionContract {
@@ -14982,6 +15152,84 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Stroke => {
+            let path_id = builtin_parameter_id(effect_type, "path");
+            let all_masks_id = builtin_parameter_id(effect_type, "all_masks");
+            let sequential_stroke_id = builtin_parameter_id(effect_type, "sequential_stroke");
+            let colour_id = builtin_parameter_id(effect_type, "color");
+            let brush_size_id = builtin_parameter_id(effect_type, "brush_size");
+            let brush_hardness_id = builtin_parameter_id(effect_type, "brush_hardness");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let start_id = builtin_parameter_id(effect_type, "start");
+            let end_id = builtin_parameter_id(effect_type, "end");
+            let spacing_id = builtin_parameter_id(effect_type, "spacing");
+            let paint_style_id = builtin_parameter_id(effect_type, "paint_style");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                // Lazy path-layout parameters (design §0.8): evaluate them so
+                // animations on them stay well-formed, then drop them. They
+                // deliberately do not reach the grade, the uniform or the
+                // effect cache key.
+                for (parameter_id, fallback) in [
+                    (&path_id, 0.0),
+                    (&all_masks_id, 0.0),
+                    (&sequential_stroke_id, 1.0),
+                    (&start_id, 0.0),
+                    (&end_id, 100.0),
+                    (&spacing_id, 15.0),
+                ] {
+                    let value = effect.evaluate_f32_parameter(parameter_id, context.time, fallback);
+                    let _ = value;
+                }
+                let colour = match effect.evaluate_parameter(&colour_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(_) => {
+                        return Err(invalid("stroke colour must be a colour".to_owned()));
+                    }
+                    None => crate::STROKE_DEFAULT_COLOR,
+                };
+                let paint_style = match effect.evaluate_parameter(&paint_style_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::StrokePaintStyle::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("stroke paint style {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "stroke paint style must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::StrokePaintStyle::OnOriginal,
+                };
+                let grade = crate::StrokeGrade::new(
+                    paint_style,
+                    colour,
+                    effect.evaluate_f32_parameter(
+                        &brush_size_id,
+                        context.time,
+                        crate::STROKE_DEFAULT_BRUSH_SIZE,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &brush_hardness_id,
+                        context.time,
+                        crate::STROKE_DEFAULT_BRUSH_HARDNESS,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &opacity_id,
+                        context.time,
+                        crate::STROKE_DEFAULT_OPACITY,
+                    ),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Stroke { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorBalance => {
             let shadow_red_id = builtin_parameter_id(effect_type, "shadow_red");
             let shadow_green_id = builtin_parameter_id(effect_type, "shadow_green");
@@ -15849,6 +16097,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Checkerboard => "棋盘",
         EffectType::Grid => "网格",
         EffectType::CircleEllipse => "圆形与椭圆",
+        EffectType::Stroke => "描边",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -17178,6 +17427,7 @@ mod tests {
             EffectType::Checkerboard,
             EffectType::Grid,
             EffectType::CircleEllipse,
+            EffectType::Stroke,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -25740,6 +25990,200 @@ mod tests {
             circle_ellipse_op(&blended_graph).expect("the generator is still emitted");
         assert_eq!(blended_grade.gpu_controls(), default_grade.gpu_controls());
         assert_ne!(hash_of(blended_grade), hash_of(default_grade));
+    }
+
+    fn stroke_op(graph: &EffectRenderGraph) -> Option<crate::StrokeGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Stroke { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Stroke { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_stroke(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Stroke)
+            .expect("the stroke effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Stroke.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the stroke parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn stroke_defaults_match_the_dump() {
+        let effect_type = EffectType::Stroke;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("path", "路径", ParameterUnit::Unitless),
+            ("all_masks", "所有蒙版", ParameterUnit::Unitless),
+            ("sequential_stroke", "连续描边", ParameterUnit::Unitless),
+            ("color", "颜色", ParameterUnit::Unitless),
+            ("brush_size", "画笔大小", ParameterUnit::Pixels),
+            ("brush_hardness", "画笔硬度", ParameterUnit::Normalized),
+            ("opacity", "不透明度", ParameterUnit::Normalized),
+            ("start", "起点", ParameterUnit::Percent),
+            ("end", "终点", ParameterUnit::Percent),
+            ("spacing", "间距", ParameterUnit::Percent),
+            ("paint_style", "描边样式", ParameterUnit::Unitless),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("描边")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "stroke",
+            "the namespace is the FTL key stem"
+        );
+
+        let effect = instantiate_effect_node(EffectType::Stroke)
+            .expect("the stroke effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default stroke should compile");
+        let grade = stroke_op(&graph).expect("the default parameters emit the band");
+        assert_eq!(
+            grade.gpu_controls(),
+            ([1, 0, 0, 0], [1.0, 1.0, 1.0, 1.0], [2.0, 0.75, 0.0, 0.0])
+        );
+        assert_eq!(grade.paint_style(), crate::StrokePaintStyle::OnOriginal);
+        assert!(!grade.is_identity());
+        let compiled = crate::compile_reference_render_graph(graph).expect("compile the band");
+        // The contour search reads the whole frame, so the ROI is not pixel
+        // local even though the kernel writes in place.
+        assert_eq!(
+            compiled.execution_envelope().aggregate().roi_propagation,
+            crate::EffectRoiPropagation::FullFrame
+        );
+    }
+
+    #[test]
+    fn stroke_builder_appends_the_band() {
+        let effect = instantiate_effect_node(EffectType::Stroke)
+            .expect("the stroke effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default stroke should compile");
+        let mut effect_nodes = 0;
+        for node in &graph.nodes {
+            if let EffectGraphNodeKind::UnaryEffect { .. }
+            | EffectGraphNodeKind::DomainEffect { .. } = &node.kind
+            {
+                effect_nodes += 1;
+            }
+        }
+        assert_eq!(effect_nodes, 1);
+
+        // A zero brush and a zero opacity are the two documented identities.
+        let effect = author_stroke(&[("brush_size", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a zero brush compiles");
+        assert!(stroke_op(&graph).is_none());
+        let effect = author_stroke(&[("opacity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("zero opacity compiles");
+        assert!(stroke_op(&graph).is_none());
+
+        let effect = author_stroke(&[
+            ("brush_size", PropertyValue::Float(40.0)),
+            ("brush_hardness", PropertyValue::Float(0.0)),
+            (
+                "paint_style",
+                PropertyValue::Enum("reveal_original".to_owned()),
+            ),
+            (
+                "color",
+                PropertyValue::Color(Color { r: 0.0, g: 0.5, b: 1.0, a: 1.0 }),
+            ),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("an authored stroke compiles");
+        let grade = stroke_op(&graph).expect("the authored band is emitted");
+        assert_eq!(
+            grade.gpu_controls(),
+            ([3, 0, 0, 0], [0.0, 0.5, 1.0, 1.0], [40.0, 0.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn stroke_rejects_out_of_range_parameters() {
+        for (parameter, value) in [
+            ("brush_size", 201.0),
+            ("brush_hardness", 0.96),
+            ("opacity", 1.01),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::Stroke)
+                .expect("the stroke effect should instantiate");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Stroke.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect_err("the author value is outside the declared range");
+            assert!(
+                format!("{error:?}").contains("outside"),
+                "{parameter}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stroke_lazy_parameters_are_inert() {
+        use std::hash::Hasher as _;
+
+        let default_effect = author_stroke(&[]);
+        let default_graph = build_effect_render_graph(&[default_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default stroke should compile");
+        let default_grade =
+            stroke_op(&default_graph).expect("the default parameters emit the band");
+
+        // The six path-layout parameters are part of the schema so they show
+        // up in the UI and survive serialization, but they may change neither
+        // the uniform nor the effect cache key.
+        let lazy_effect = author_stroke(&[
+            ("path", PropertyValue::Float(9.0)),
+            ("all_masks", PropertyValue::Float(1.0)),
+            ("sequential_stroke", PropertyValue::Float(0.0)),
+            ("start", PropertyValue::Float(10.0)),
+            ("end", PropertyValue::Float(90.0)),
+            ("spacing", PropertyValue::Float(33.0)),
+        ]);
+        let lazy_graph = build_effect_render_graph(&[lazy_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the lazy parameters do not change the graph");
+        let lazy_grade = stroke_op(&lazy_graph).expect("the band is still emitted");
+        assert_eq!(lazy_grade.gpu_controls(), default_grade.gpu_controls());
+
+        let hash_of = |grade: crate::StrokeGrade| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            EffectRenderOp::Stroke { grade }.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash_of(lazy_grade), hash_of(default_grade));
+
+        // The same comparator does see a real edit.
+        let bigger_effect = author_stroke(&[("brush_size", PropertyValue::Float(40.0))]);
+        let bigger_graph = build_effect_render_graph(&[bigger_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a bigger band compiles");
+        let bigger_grade = stroke_op(&bigger_graph).expect("the band is still emitted");
+        assert_ne!(hash_of(bigger_grade), hash_of(default_grade));
     }
 
     fn color_balance_op(graph: &EffectRenderGraph) -> Option<crate::ColorBalanceGrade> {
