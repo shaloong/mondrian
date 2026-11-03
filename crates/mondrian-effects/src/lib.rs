@@ -108,6 +108,7 @@ pub mod lens_distortion;
 pub mod lens_flare;
 pub mod levels;
 pub mod linear_color_key;
+pub mod median;
 pub mod minimax;
 pub mod mirror;
 pub mod mosaic;
@@ -533,6 +534,11 @@ pub use matte_refine::{
     MATTE_REFINE_DEFAULT_SHUTTER_ANGLE_DEGREES, MATTE_REFINE_DEFAULT_SMOOTH_PIXELS,
     MATTE_REFINE_DEFAULT_TREMOR_AMOUNT, MATTE_REFINE_DEFAULT_TREMOR_REDUCTION,
     MATTE_REFINE_DEFAULT_VIEW_EDGE_REGION, MATTE_REFINE_DEFAULT_VIEW_MAP,
+};
+pub use median::{
+    median_frame_f32, MedianError, MedianGrade, MEDIAN_BIN_COUNT, MEDIAN_COARSE_BINS,
+    MEDIAN_DEFAULT_OPERATE_ON_ALPHA, MEDIAN_DEFAULT_RADIUS, MEDIAN_GPU_MAX_RADIUS,
+    MEDIAN_MAX_RADIUS,
 };
 pub use minimax::{
     apply_minimax_f32_controlled, minimax_frame_f32, MinimaxChannel, MinimaxDirection,

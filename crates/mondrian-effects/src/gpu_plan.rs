@@ -992,6 +992,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ColorBalance { .. } => "color_balance",
         EffectRenderOp::SpillSuppressor { .. } => "spill_suppressor",
         EffectRenderOp::ChannelBlur { .. } => "channel_blur",
+        EffectRenderOp::Median { .. } => "median",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

@@ -203,6 +203,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored per-channel amounts, edge behaviour, and direction.
         grade: crate::ChannelBlurGrade,
     },
+    Median {
+        /// Authored window radius and the alpha toggle.
+        grade: crate::MedianGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -245,6 +249,7 @@ impl EffectGpuSpatialPass {
             Self::LinearColorKey { .. } => "linear_color_key",
             Self::ColorOffset { .. } => "color_offset",
             Self::ChannelBlur { .. } => "channel_blur",
+            Self::Median { .. } => "median",
         }
     }
 
@@ -303,6 +308,9 @@ impl EffectGpuSpatialPass {
             Self::ColorOffset { grade } => grade.halo_pixels(),
             // The blur window can be as wide as the frame.
             Self::ChannelBlur { .. } => u32::MAX,
+            // The window reaches at most the largest authored radius, which the
+            // GPU gate already caps at three pixels.
+            Self::Median { .. } => crate::median::MEDIAN_MAX_RADIUS,
         }
     }
 
@@ -354,6 +362,8 @@ impl EffectGpuSpatialPass {
             Self::ColorOffset { grade } => grade.halo_pixels(),
             // The blur window can be as wide as the frame.
             Self::ChannelBlur { .. } => u32::MAX,
+            // Same reach as the horizontal halo.
+            Self::Median { .. } => crate::median::MEDIAN_MAX_RADIUS,
         }
     }
 }
@@ -670,6 +680,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::ChannelBlur { grade } => {
             Some(EffectGpuSpatialPass::ChannelBlur { grade: *grade })
         }
+        // Admission is deliberately radius-agnostic: the renderer rejects radii
+        // above the GPU cap while the chain is still being planned.
+        EffectRenderOp::Median { grade } => Some(EffectGpuSpatialPass::Median { grade: *grade }),
         _ => None,
     }
 }

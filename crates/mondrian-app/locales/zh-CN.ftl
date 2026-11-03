@@ -2534,6 +2534,12 @@ parameter-mondrian-effect-builtin-dent-edge-label = 边缘处理
 parameter-mondrian-effect-dent-edge-smooth = 平滑
 parameter-mondrian-effect-dent-edge-hard = 硬边
 
+## 中间值 Median
+effect-median = 中间值
+parameter-group-median = 中间值
+parameter-mondrian-effect-builtin-median-radius-label = 半径
+parameter-mondrian-effect-builtin-median-operate-on-alpha-label = 在 Alpha 通道上运算
+
 ## Warp 弯曲
 effect-warp = 弯曲
 parameter-group-warp = 弯曲

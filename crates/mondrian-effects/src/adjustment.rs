@@ -398,6 +398,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Median { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "median",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::LensDistortion { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "lens_distortion",
@@ -1013,6 +1019,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The kernel stages one source frame; a two-axis blur swaps the staged
         // copy with the destination, so one frame of scratch covers both axes.
         EffectRenderOp::ChannelBlur { .. } => 1,
+        // The median stages one source frame while the sliding histogram reads
+        // it, so a single pass needs one frame of scratch.
+        EffectRenderOp::Median { .. } => 1,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
@@ -1481,6 +1490,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 working,
                 region.width as usize,
                 region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::Median { grade } => {
+            crate::median::apply_median_f32_controlled(
+                working,
+                region.width,
+                region.height,
                 grade,
                 checkpoint,
             )?;

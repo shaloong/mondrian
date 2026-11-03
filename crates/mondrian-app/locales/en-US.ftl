@@ -2602,6 +2602,12 @@ parameter-mondrian-effect-builtin-dent-edge-label = Edge Handling
 parameter-mondrian-effect-dent-edge-smooth = Smooth
 parameter-mondrian-effect-dent-edge-hard = Hard
 
+## Median 中间值
+effect-median = Median
+parameter-group-median = Median
+parameter-mondrian-effect-builtin-median-radius-label = Radius
+parameter-mondrian-effect-builtin-median-operate-on-alpha-label = Operate on Alpha Channel
+
 ## Warp 弯曲
 effect-warp = Warp
 parameter-group-warp = Warp

@@ -133,6 +133,8 @@ pub enum EffectType {
     GridWarp,
     /// Wire removal: clones pixels from a parallel displacement across an authored line.
     WireRemoval,
+    /// Median: replaces every pixel with the per-channel median of its window.
+    Median,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -229,6 +231,7 @@ impl EffectType {
             Self::Warp => "builtin.warp".to_string(),
             Self::GridWarp => "builtin.grid_warp".to_string(),
             Self::WireRemoval => "builtin.wire_removal".to_string(),
+            Self::Median => "builtin.median".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -321,6 +324,7 @@ impl EffectType {
             "builtin.warp" => Self::Warp,
             "builtin.grid_warp" => Self::GridWarp,
             "builtin.wire_removal" => Self::WireRemoval,
+            "builtin.median" => Self::Median,
             other => Self::External(other.to_string()),
         }
     }
@@ -413,6 +417,7 @@ impl EffectType {
             Self::Warp => "弯曲",
             Self::GridWarp => "网格变形",
             Self::WireRemoval => "祛线",
+            Self::Median => "中间值",
             Self::External(name) => name,
         }
     }
@@ -503,6 +508,7 @@ impl EffectType {
             Self::Warp => vec!["变形"],
             Self::GridWarp => vec!["变形"],
             Self::WireRemoval => vec!["修复"],
+            Self::Median => vec!["颜色", "模糊与锐化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -595,6 +601,7 @@ impl EffectType {
             Self::Warp => "warp".to_string(),
             Self::GridWarp => "grid_warp".to_string(),
             Self::WireRemoval => "wire_removal".to_string(),
+            Self::Median => "median".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -936,6 +943,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Warp => Ok(()),
             Self::GridWarp => Ok(()),
             Self::WireRemoval => Ok(()),
+            Self::Median => Ok(()),
         }
     }
 }

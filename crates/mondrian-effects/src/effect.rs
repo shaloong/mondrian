@@ -1130,6 +1130,11 @@ pub enum EffectRenderOp {
         /// Authored per-channel amounts, edge behaviour, and direction.
         grade: crate::ChannelBlurGrade,
     },
+    /// Median: replaces every pixel with the per-channel median of its window.
+    Median {
+        /// Authored window radius and the alpha toggle.
+        grade: crate::MedianGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1336,6 +1341,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ChannelBlur { grade } => {
                 formatter.debug_struct("ChannelBlur").field("grade", grade).finish()
+            }
+            Self::Median { grade } => {
+                formatter.debug_struct("Median").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2100,6 +2108,10 @@ impl EffectRenderOp {
                 81u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::Median { grade } => {
+                87u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2368,6 +2380,7 @@ impl EffectRenderOp {
             EffectRenderOp::Warp { .. } => 3,
             EffectRenderOp::GridWarp { .. } => 3,
             EffectRenderOp::WireRemoval { .. } => 4,
+            EffectRenderOp::Median { .. } => 4,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2910,7 +2923,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 86] {
+fn builtin_effect_types() -> [EffectType; 87] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -2998,6 +3011,7 @@ fn builtin_effect_types() -> [EffectType; 86] {
         EffectType::Warp,
         EffectType::GridWarp,
         EffectType::WireRemoval,
+        EffectType::Median,
     ]
 }
 
@@ -8445,6 +8459,30 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Median => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "中间值",
+                "半径",
+                PropertyValue::Float(crate::MEDIAN_DEFAULT_RADIUS),
+                Some(0.0),
+                Some(f64::from(crate::MEDIAN_MAX_RADIUS)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "operate_on_alpha",
+                "中间值",
+                "在 Alpha 通道上运算",
+                PropertyValue::Float(crate::MEDIAN_DEFAULT_OPERATE_ON_ALPHA),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -9071,6 +9109,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Percent
         }
         (EffectType::Minimax, "radius") => ParameterUnit::Pixels,
+        (EffectType::Median, "radius") => ParameterUnit::Pixels,
         (EffectType::ChannelBlur, "red_blur" | "green_blur" | "blue_blur" | "alpha_blur") => {
             ParameterUnit::Pixels
         }
@@ -9375,6 +9414,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // A blur window can be as wide as the frame, so the definition-level
             // envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Median => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // A median window can be as wide as the frame, so the
+            // definition-level envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -13776,6 +13822,34 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Median => {
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let operate_on_alpha_id = builtin_parameter_id(effect_type, "operate_on_alpha");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let radius = effect.evaluate_f32_parameter(
+                    &radius_id,
+                    context.time,
+                    crate::MEDIAN_DEFAULT_RADIUS,
+                );
+                let operate_on_alpha = effect.evaluate_f32_parameter(
+                    &operate_on_alpha_id,
+                    context.time,
+                    crate::MEDIAN_DEFAULT_OPERATE_ON_ALPHA,
+                );
+                let grade = crate::MedianGrade::new(radius, operate_on_alpha)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // A zero radius is the identity, so no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Median { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Dent => {
             let kind_id = builtin_parameter_id(effect_type, "kind");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -14106,6 +14180,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Warp => "弯曲",
         EffectType::GridWarp => "网格变形",
         EffectType::WireRemoval => "祛线",
+        EffectType::Median => "中间值",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -15426,6 +15501,7 @@ mod tests {
             EffectType::Warp,
             EffectType::GridWarp,
             EffectType::WireRemoval,
+            EffectType::Median,
             EffectType::ChangeToColor,
         ]
         .into_iter()
@@ -23783,6 +23859,123 @@ mod tests {
             grade.gpu_controls(),
             ([6.0, 0.0, 0.5, 0.0], [1.0, 0.0, 0.0, 0.0])
         );
+    }
+
+    fn median_op(graph: &EffectRenderGraph) -> Option<crate::MedianGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Median { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Median { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_median(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Median)
+            .expect("the median effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Median.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the median parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn median_defaults_compile_to_identity() {
+        // A radius of zero is the identity, so the builder elides the node.
+        let effect = instantiate_effect_node(EffectType::Median)
+            .expect("the median effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity median should compile");
+        assert_eq!(median_op(&graph), None);
+    }
+
+    #[test]
+    fn median_authored_configuration_reaches_the_operation() {
+        let effect = author_median(&[
+            ("radius", PropertyValue::Float(2.0)),
+            ("operate_on_alpha", PropertyValue::Float(1.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored median should build");
+        let grade = median_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.radius(), 2.0);
+        assert!(grade.operates_on_alpha());
+        assert!(!grade.is_identity());
+        assert!(grade.gpu_supported());
+        assert_eq!(grade.radius_pixels(64, 32), 2);
+        assert_eq!(grade.gpu_controls(), ([2.0, 1.0, 0.0, 0.0], [0.0; 4]));
+    }
+
+    #[test]
+    fn median_out_of_range_parameters_are_rejected_at_authoring() {
+        let mut effect = instantiate_effect_node(EffectType::Median)
+            .expect("the median effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Median.property_path("radius"),
+                value: PropertyValue::Float(crate::MEDIAN_MAX_RADIUS as f32 + 1.0),
+            })
+            .expect_err("a radius past the authored range must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside"), "{rendered}");
+
+        let mut effect = instantiate_effect_node(EffectType::Median)
+            .expect("the median effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Median.property_path("operate_on_alpha"),
+                value: PropertyValue::Float(1.5),
+            })
+            .expect_err("an alpha toggle past the authored range must be rejected");
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("outside"), "{rendered}");
+    }
+
+    #[test]
+    fn median_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_median(&[
+            ("radius", PropertyValue::Float(5.0)),
+            ("operate_on_alpha", PropertyValue::Float(0.0)),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the median node");
+        let restored: EffectNode = serde_json::from_str(&wire).expect("restore the median node");
+        assert_eq!(restored.effect_type, EffectType::Median);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored median node");
+        let grade = median_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.radius(), 5.0);
+        assert!(!grade.operates_on_alpha());
+        // Past the GPU admission gate, so the layer would fall back to the CPU.
+        assert!(!grade.gpu_supported());
+    }
+
+    #[test]
+    fn median_instantiated_node_round_trips_through_the_graph() {
+        let effect = instantiate_effect_node(EffectType::Median)
+            .expect("the median effect should instantiate");
+        let wire = serde_json::to_string(&effect).expect("serialize the default median node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the default median node");
+        assert_eq!(restored, effect);
+        assert_eq!(restored.effect_type, EffectType::Median);
+        for parameter in ["radius", "operate_on_alpha"] {
+            let property = restored
+                .properties
+                .property(&EffectType::Median.property_path(parameter))
+                .expect("the instantiated node declares the parameter");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(0.0));
+        }
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the default median should compile");
+        assert_eq!(median_op(&graph), None);
     }
 
     fn spill_suppressor_op(graph: &EffectRenderGraph) -> Option<crate::SpillSuppressorGrade> {

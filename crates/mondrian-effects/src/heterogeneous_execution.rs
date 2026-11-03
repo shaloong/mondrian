@@ -2779,6 +2779,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Warp { .. } => 85,
         EffectRenderOp::GridWarp { .. } => 86,
         EffectRenderOp::WireRemoval { .. } => 87,
+        EffectRenderOp::Median { .. } => 88,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4874,6 +4875,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Warp { .. }
             | crate::EffectRenderOp::GridWarp { .. }
             | crate::EffectRenderOp::WireRemoval { .. }
+            | crate::EffectRenderOp::Median { .. }
             | crate::EffectRenderOp::BrushStrokes { .. }
             | crate::EffectRenderOp::ColorEmboss { .. }
             | crate::EffectRenderOp::Emboss { .. }
