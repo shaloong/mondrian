@@ -122,6 +122,7 @@ pub mod posterize;
 pub mod qualifier;
 pub mod ramp;
 pub mod scatter;
+pub mod selective_color;
 pub mod shift_channels;
 pub(crate) mod straight_alpha;
 pub mod temporal_execution;
@@ -389,6 +390,11 @@ pub use ramp::{
 };
 pub use scatter::{
     scatter_frame_f32, ScatterError, ScatterGrade, SCATTER_MAX_AMOUNT_PIXELS, SCATTER_MAX_COPIES,
+};
+pub use selective_color::{
+    selective_color_frame_f32, SelectiveColorError, SelectiveColorGrade, SelectiveColorMethod,
+    SelectiveColorRange, CHROMA_GATE_END, CHROMA_GATE_START, LUMA_PIVOT, MIN_MAX_CHANNEL,
+    SELECTIVE_COLOR_SLIDER_MAX, SELECTIVE_COLOR_SLIDER_MIN, TENT_HALF_WIDTH_DEGREES,
 };
 pub use spherize::{
     spherize_frame_f32, SpherizeError, SpherizeGrade, SPHERIZE_MAX_RADIUS_PIXELS,

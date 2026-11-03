@@ -353,6 +353,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "最小/最大" => Some("parameter-group-minimax"),
         "溢色抑制" => Some("parameter-group-spill-suppressor"),
         "通道模糊" => Some("parameter-group-channel-blur"),
+        "可选颜色" => Some("parameter-group-selective-color"),
         _ => None,
     }
 }

@@ -1139,6 +1139,11 @@ pub enum EffectRenderOp {
         /// Authored window radius and the alpha toggle.
         grade: crate::MedianGrade,
     },
+    /// Selective colour: moves CMYK ink inside nine hue and tone ranges.
+    SelectiveColor {
+        /// Authored method, colour range, trim amounts and nine ink rows.
+        grade: crate::SelectiveColorGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1351,6 +1356,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Median { grade } => {
                 formatter.debug_struct("Median").field("grade", grade).finish()
+            }
+            Self::SelectiveColor { grade } => {
+                formatter.debug_struct("SelectiveColor").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2119,6 +2127,12 @@ impl EffectRenderOp {
                 87u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::SelectiveColor { grade } => {
+                89u8.hash(state);
+                let (deltas, method) = grade.gpu_controls();
+                deltas.map(|row| row.map(f32::to_bits)).hash(state);
+                method.hash(state);
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2396,6 +2410,7 @@ impl EffectRenderOp {
             EffectRenderOp::GridWarp { .. } => 3,
             EffectRenderOp::WireRemoval { .. } => 4,
             EffectRenderOp::Median { .. } => 4,
+            EffectRenderOp::SelectiveColor { .. } => 2,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2938,7 +2953,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 88] {
+fn builtin_effect_types() -> [EffectType; 89] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3027,6 +3042,7 @@ fn builtin_effect_types() -> [EffectType; 88] {
         EffectType::GridWarp,
         EffectType::WireRemoval,
         EffectType::Median,
+        EffectType::SelectiveColor,
         EffectType::FourColorGradient,
     ]
 }
@@ -8591,6 +8607,80 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::SelectiveColor => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "method",
+                "可选颜色",
+                "方法",
+                crate::SelectiveColorMethod::Relative.as_key(),
+                crate::SelectiveColorMethod::ALL
+                    .iter()
+                    .map(|method| {
+                        let key = method.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            method.label(),
+                            format!("mondrian.effect.selective_color.method.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "colors",
+                "可选颜色",
+                "颜色",
+                crate::SelectiveColorRange::Reds.as_key(),
+                crate::SelectiveColorRange::ALL
+                    .iter()
+                    .map(|range| {
+                        let key = range.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            range.label(),
+                            format!("mondrian.effect.selective_color.colors.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            let channels = [
+                ("cyan", "青色"),
+                ("magenta", "洋红色"),
+                ("yellow", "黄色"),
+                ("black", "黑色"),
+            ];
+            for (channel, label) in channels {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    &format!("trim_{channel}"),
+                    "可选颜色",
+                    label,
+                    PropertyValue::Float(0.0),
+                    Some(f64::from(crate::SELECTIVE_COLOR_SLIDER_MIN)),
+                    Some(f64::from(crate::SELECTIVE_COLOR_SLIDER_MAX)),
+                    Some(1.0),
+                );
+            }
+            for range in crate::SelectiveColorRange::ALL {
+                for (channel, channel_label) in channels {
+                    define_builtin_property(
+                        &mut properties,
+                        &effect_type,
+                        &format!("{}_{channel}", range.as_key()),
+                        "可选颜色",
+                        &format!("{}·{channel_label}", range.label()),
+                        PropertyValue::Float(0.0),
+                        Some(f64::from(crate::SELECTIVE_COLOR_SLIDER_MIN)),
+                        Some(f64::from(crate::SELECTIVE_COLOR_SLIDER_MAX)),
+                        Some(1.0),
+                    );
+                }
+            }
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -9537,6 +9627,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::Median => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // A median window can be as wide as the frame, so the
+            // definition-level envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::SelectiveColor => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The effect reads the whole sample to resolve ink, and the
+            // dedicated spatial pass writes a whole-frame destination, so the
             // definition-level envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -14065,6 +14163,81 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::SelectiveColor => {
+            let method_id = builtin_parameter_id(effect_type, "method");
+            let colors_id = builtin_parameter_id(effect_type, "colors");
+            let trim_ids = ["trim_cyan", "trim_magenta", "trim_yellow", "trim_black"]
+                .map(|parameter| builtin_parameter_id(effect_type, parameter));
+            let mut range_ids = Vec::with_capacity(
+                crate::selective_color::RANGE_COUNT * crate::selective_color::CHANNEL_COUNT,
+            );
+            for range in crate::SelectiveColorRange::ALL {
+                for channel in ["cyan", "magenta", "yellow", "black"] {
+                    range_ids.push(builtin_parameter_id(
+                        effect_type,
+                        &format!("{}_{channel}", range.as_key()),
+                    ));
+                }
+            }
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let method = match effect.evaluate_parameter(&method_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::SelectiveColorMethod::from_key(&key)
+                        .ok_or_else(|| {
+                        invalid(format!(
+                            "selective color method {key} is not a declared option"
+                        ))
+                    })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "selective color method must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::SelectiveColorMethod::Relative,
+                };
+                let range = match effect.evaluate_parameter(&colors_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::SelectiveColorRange::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "selective color colors {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "selective color colors must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::SelectiveColorRange::Reds,
+                };
+                let trim = trim_ids
+                    .each_ref()
+                    .map(|id| effect.evaluate_f32_parameter(id, context.time, 0.0));
+                let mut deltas = [[0.0f32; crate::selective_color::CHANNEL_COUNT];
+                    crate::selective_color::RANGE_COUNT];
+                for (index, id) in range_ids.iter().enumerate() {
+                    deltas[index / crate::selective_color::CHANNEL_COUNT]
+                        [index % crate::selective_color::CHANNEL_COUNT] =
+                        effect.evaluate_f32_parameter(id, context.time, 0.0);
+                }
+                let grade = crate::SelectiveColorGrade::new(
+                    method.as_menu(),
+                    range.as_menu(),
+                    trim,
+                    deltas,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // All forty sliders at zero is the identity, so no node is
+                // appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::SelectiveColor { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Dent => {
             let kind_id = builtin_parameter_id(effect_type, "kind");
             let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
@@ -14397,6 +14570,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::GridWarp => "网格变形",
         EffectType::WireRemoval => "祛线",
         EffectType::Median => "中间值",
+        EffectType::SelectiveColor => "可选颜色",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -15718,6 +15892,7 @@ mod tests {
             EffectType::GridWarp,
             EffectType::WireRemoval,
             EffectType::Median,
+            EffectType::SelectiveColor,
             EffectType::ChangeToColor,
             EffectType::FourColorGradient,
         ]
@@ -23939,6 +24114,101 @@ mod tests {
             let rendered = format!("{error:?}");
             assert!(rendered.contains("outside [-100, 100]"), "{rendered}");
         }
+    }
+
+    fn selective_color_op(graph: &EffectRenderGraph) -> Option<crate::SelectiveColorGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::SelectiveColor { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::SelectiveColor { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_selective_color(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::SelectiveColor)
+            .expect("the selective color effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::SelectiveColor.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the selective color parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn selective_color_defaults_build_no_stage() {
+        // All forty sliders default to zero, which is the documented identity:
+        // there is nothing for the renderer to run.
+        let effect = instantiate_effect_node(EffectType::SelectiveColor)
+            .expect("the selective color effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default selective color should compile");
+        assert_eq!(selective_color_op(&graph), None);
+    }
+
+    #[test]
+    fn selective_color_lowers_to_a_spatial_stage() {
+        let effect = author_selective_color(&[
+            ("method", PropertyValue::Enum("absolute".to_owned())),
+            ("colors", PropertyValue::Enum("reds".to_owned())),
+            ("reds_cyan", PropertyValue::Float(50.0)),
+            ("reds_black", PropertyValue::Float(-25.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored selective color graph should build");
+        let grade = selective_color_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.method(), crate::SelectiveColorMethod::Absolute);
+        assert_eq!(grade.range(), crate::SelectiveColorRange::Reds);
+        assert_eq!(grade.trim(), [0.0; 4]);
+        assert_eq!(grade.deltas()[0], [0.5, 0.0, 0.0, -0.25]);
+        assert!(!grade.is_identity());
+        let op = graph
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. } => Some(op),
+                _ => None,
+            })
+            .expect("the graph keeps the authored operation");
+        assert!(matches!(
+            crate::gpu_pipeline::spatial_pass_for(op),
+            Some(crate::gpu_pipeline::EffectGpuSpatialPass::SelectiveColor { .. })
+        ));
+    }
+
+    #[test]
+    fn selective_color_rejects_a_non_finite_parameter() {
+        let effect = author_selective_color(&[("reds_cyan", PropertyValue::Float(100.0))]);
+        let mut document = serde_json::to_value(&effect).expect("serialize the selective color");
+        // Deserialization bypasses authoring validation, so an overflowing
+        // float reaches the builder as an infinity.
+        overwrite_static_value(
+            &mut document,
+            "selective_color.reds_cyan",
+            serde_json::json!({ "Float": 1.0e39 }),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("restore the tampered selective color");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a non-finite slider must fail closed");
+        assert!(
+            matches!(
+                &error,
+                EffectGraphBuildError::InvalidAuthorState { effect_key, .. }
+                    if effect_key == "builtin.selective_color"
+            ),
+            "{error:?}"
+        );
     }
 
     fn choker_op(graph: &EffectRenderGraph) -> Option<crate::ChokerGrade> {

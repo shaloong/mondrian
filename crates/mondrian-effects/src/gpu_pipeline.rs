@@ -207,6 +207,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored window radius and the alpha toggle.
         grade: crate::MedianGrade,
     },
+    SelectiveColor {
+        /// Authored colour range, method, and the folded CMYK delta table.
+        grade: crate::SelectiveColorGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -250,6 +254,7 @@ impl EffectGpuSpatialPass {
             Self::ColorOffset { .. } => "color_offset",
             Self::ChannelBlur { .. } => "channel_blur",
             Self::Median { .. } => "median",
+            Self::SelectiveColor { .. } => "selective_color",
         }
     }
 
@@ -311,6 +316,8 @@ impl EffectGpuSpatialPass {
             // The window reaches at most the largest authored radius, which the
             // GPU gate already caps at three pixels.
             Self::Median { .. } => crate::median::MEDIAN_MAX_RADIUS,
+            // The kernel is a per-pixel point that reads no neighbour.
+            Self::SelectiveColor { .. } => 0,
         }
     }
 
@@ -364,6 +371,8 @@ impl EffectGpuSpatialPass {
             Self::ChannelBlur { .. } => u32::MAX,
             // Same reach as the horizontal halo.
             Self::Median { .. } => crate::median::MEDIAN_MAX_RADIUS,
+            // The kernel is a per-pixel point that reads no neighbour.
+            Self::SelectiveColor { .. } => 0,
         }
     }
 }
@@ -683,6 +692,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         // Admission is deliberately radius-agnostic: the renderer rejects radii
         // above the GPU cap while the chain is still being planned.
         EffectRenderOp::Median { grade } => Some(EffectGpuSpatialPass::Median { grade: *grade }),
+        EffectRenderOp::SelectiveColor { grade } => {
+            Some(EffectGpuSpatialPass::SelectiveColor { grade: *grade })
+        }
         _ => None,
     }
 }
