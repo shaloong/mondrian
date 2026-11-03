@@ -993,6 +993,10 @@ pub enum EffectRenderOp {
     TestSignals {
         grade: crate::TestSignalsGrade,
     },
+    /// Four-color gradient: blends four authored colours by inverse distance.
+    FourColorGradient {
+        grade: crate::FourColorGradientGrade,
+    },
     /// Color balance: shifts the shadow, midtone, and highlight colours apart.
     ColorBalance {
         grade: crate::ColorBalanceGrade,
@@ -1329,6 +1333,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::TestSignals { grade } => {
                 formatter.debug_struct("TestSignals").field("grade", grade).finish()
+            }
+            Self::FourColorGradient { grade } => {
+                formatter.debug_struct("FourColorGradient").field("grade", grade).finish()
             }
             Self::ColorBalance { grade } => {
                 formatter.debug_struct("ColorBalance").field("grade", grade).finish()
@@ -2112,6 +2119,13 @@ impl EffectRenderOp {
                 87u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::FourColorGradient { grade } => {
+                88u8.hash(state);
+                let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+                for cell in [params, color, extra0, extra1, extra2, extra3] {
+                    cell.map(f32::to_bits).hash(state);
+                }
+            }
             EffectRenderOp::LensDistortion { grade } => {
                 58u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2359,6 +2373,7 @@ impl EffectRenderOp {
             EffectRenderOp::BroadcastSafe { .. } => 1,
             EffectRenderOp::Choker { .. } => 2,
             EffectRenderOp::TestSignals { .. } => 1,
+            EffectRenderOp::FourColorGradient { .. } => 1,
             EffectRenderOp::ColorBalance { .. } => 1,
             EffectRenderOp::Minimax { .. } => 5,
             EffectRenderOp::SpillSuppressor { .. } => 2,
@@ -2923,7 +2938,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 87] {
+fn builtin_effect_types() -> [EffectType; 88] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3012,6 +3027,7 @@ fn builtin_effect_types() -> [EffectType; 87] {
         EffectType::GridWarp,
         EffectType::WireRemoval,
         EffectType::Median,
+        EffectType::FourColorGradient,
     ]
 }
 
@@ -8219,6 +8235,98 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::FourColorGradient => {
+            for (corner, point, colour) in [
+                (1, [25.6f32, 25.6], [1.0f32, 1.0, 0.0]),
+                (2, [230.4, 25.6], [0.0, 1.0, 0.0]),
+                (3, [25.6, 230.4], [1.0, 0.0, 1.0]),
+                (4, [230.4, 230.4], [0.0, 0.0, 1.0]),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    &format!("point_{corner}"),
+                    "四色渐变",
+                    &format!("点 {corner}"),
+                    PropertyValue::Vec2(glam::Vec2::new(point[0], point[1])),
+                    Some(-(crate::FOUR_COLOR_GRADIENT_MAX_POINT as f64)),
+                    Some(crate::FOUR_COLOR_GRADIENT_MAX_POINT as f64),
+                    Some(1.0),
+                );
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    &format!("color_{corner}"),
+                    "四色渐变",
+                    &format!("颜色 {corner}"),
+                    PropertyValue::Color(Color {
+                        r: colour[0],
+                        g: colour[1],
+                        b: colour[2],
+                        a: 1.0,
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend",
+                "四色渐变",
+                "混合",
+                PropertyValue::Float(crate::FOUR_COLOR_GRADIENT_DEFAULT_BLEND),
+                Some(f64::from(crate::FOUR_COLOR_GRADIENT_MIN_BLEND)),
+                Some(f64::from(crate::FOUR_COLOR_GRADIENT_MAX_BLEND)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "dither",
+                "四色渐变",
+                "抖动",
+                PropertyValue::Float(0.0),
+                Some(f64::from(crate::FOUR_COLOR_GRADIENT_MIN_DITHER)),
+                Some(f64::from(crate::FOUR_COLOR_GRADIENT_MAX_DITHER)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "四色渐变",
+                "不透明度",
+                PropertyValue::Float(crate::FOUR_COLOR_GRADIENT_DEFAULT_OPACITY),
+                Some(f64::from(crate::FOUR_COLOR_GRADIENT_MIN_OPACITY)),
+                Some(f64::from(crate::FOUR_COLOR_GRADIENT_MAX_OPACITY)),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "blend_mode",
+                "四色渐变",
+                "混合模式",
+                "normal",
+                mondrian_core::display_labels::blend_mode_options()
+                    .iter()
+                    .filter_map(|option| {
+                        let mode = option.mode?;
+                        if matches!(mode, mondrian_core::BlendMode::Dissolve) {
+                            return None;
+                        }
+                        let key = crate::fractal_noise::blend_mode_key(mode);
+                        Some(ParameterEnumOption::new(
+                            key,
+                            option.label,
+                            format!("mondrian.effect.four_color_gradient.blend_mode.{key}"),
+                        ))
+                    })
+                    .collect(),
+            );
+        }
         EffectType::ColorBalance => {
             for (parameter, name) in [
                 ("shadow_red", "阴影红色平衡"),
@@ -9008,6 +9116,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         ) => ParameterUnit::Pixels,
         (EffectType::WireRemoval, "mirror_blend") => ParameterUnit::Normalized,
         (EffectType::Ramp, "start" | "end") => ParameterUnit::Pixels,
+        (EffectType::FourColorGradient, "point_1" | "point_2" | "point_3" | "point_4") => {
+            ParameterUnit::Pixels
+        }
+        (EffectType::FourColorGradient, "blend") => ParameterUnit::Pixels,
+        (EffectType::FourColorGradient, "opacity") => ParameterUnit::Percent,
         (EffectType::ColorOffset, "red_phase" | "green_phase" | "blue_phase") => {
             ParameterUnit::Pixels
         }
@@ -9392,6 +9505,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::TestSignals => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::FourColorGradient => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -13551,6 +13668,104 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::FourColorGradient => {
+            let point_ids = [
+                builtin_parameter_id(effect_type, "point_1"),
+                builtin_parameter_id(effect_type, "point_2"),
+                builtin_parameter_id(effect_type, "point_3"),
+                builtin_parameter_id(effect_type, "point_4"),
+            ];
+            let colour_ids = [
+                builtin_parameter_id(effect_type, "color_1"),
+                builtin_parameter_id(effect_type, "color_2"),
+                builtin_parameter_id(effect_type, "color_3"),
+                builtin_parameter_id(effect_type, "color_4"),
+            ];
+            let blend_id = builtin_parameter_id(effect_type, "blend");
+            let dither_id = builtin_parameter_id(effect_type, "dither");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let blend_mode_id = builtin_parameter_id(effect_type, "blend_mode");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let point = |parameter_id: &ParameterId,
+                             name: &str,
+                             fallback: [f32; 2]|
+                 -> Result<[f32; 2], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Vec2(point)) => Ok([point.x, point.y]),
+                        Some(PropertyValue::DoubleVec2(point)) => {
+                            Ok([point[0] as f32, point[1] as f32])
+                        }
+                        Some(_) => Err(invalid(format!(
+                            "four color gradient {name} must be a point"
+                        ))),
+                        None => Ok(fallback),
+                    }
+                };
+                let colour = |parameter_id: &ParameterId,
+                              name: &str,
+                              fallback: [f32; 3]|
+                 -> Result<[f32; 3], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Color(color)) => Ok([color.r, color.g, color.b]),
+                        Some(_) => Err(invalid(format!(
+                            "four color gradient {name} must be a colour"
+                        ))),
+                        None => Ok(fallback),
+                    }
+                };
+                let blend_mode = match effect.evaluate_parameter(&blend_mode_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::fractal_noise::blend_mode_from_key(&key).ok_or_else(|| {
+                            invalid(format!(
+                                "four color gradient blend mode {key} is not a declared option"
+                            ))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid(
+                            "four color gradient blend mode must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => mondrian_core::BlendMode::Normal,
+                };
+                let grade = crate::FourColorGradientGrade::new(
+                    [
+                        point(&point_ids[0], "point 1", [25.6, 25.6])?,
+                        point(&point_ids[1], "point 2", [230.4, 25.6])?,
+                        point(&point_ids[2], "point 3", [25.6, 230.4])?,
+                        point(&point_ids[3], "point 4", [230.4, 230.4])?,
+                    ],
+                    [
+                        colour(&colour_ids[0], "colour 1", [1.0, 1.0, 0.0])?,
+                        colour(&colour_ids[1], "colour 2", [0.0, 1.0, 0.0])?,
+                        colour(&colour_ids[2], "colour 3", [1.0, 0.0, 1.0])?,
+                        colour(&colour_ids[3], "colour 4", [0.0, 0.0, 1.0])?,
+                    ],
+                    effect.evaluate_f32_parameter(
+                        &blend_id,
+                        context.time,
+                        crate::FOUR_COLOR_GRADIENT_DEFAULT_BLEND,
+                    ),
+                    effect.evaluate_f32_parameter(&dither_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(
+                        &opacity_id,
+                        context.time,
+                        crate::FOUR_COLOR_GRADIENT_DEFAULT_OPACITY,
+                    ),
+                    blend_mode,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::FourColorGradient { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorBalance => {
             let shadow_red_id = builtin_parameter_id(effect_type, "shadow_red");
             let shadow_green_id = builtin_parameter_id(effect_type, "shadow_green");
@@ -14172,6 +14387,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BroadcastSafe => "广播安全",
         EffectType::Choker => "阻塞收缩",
         EffectType::TestSignals => "彩条与测试信号",
+        EffectType::FourColorGradient => "四色渐变",
         EffectType::ColorBalance => "颜色平衡",
         EffectType::Minimax => "最小/最大",
         EffectType::SpillSuppressor => "溢色抑制",
@@ -15503,6 +15719,7 @@ mod tests {
             EffectType::WireRemoval,
             EffectType::Median,
             EffectType::ChangeToColor,
+            EffectType::FourColorGradient,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -23401,6 +23618,213 @@ mod tests {
             .expect_err("an out-of-range intensity must be rejected");
         let rendered = format!("{error:?}");
         assert!(rendered.contains("outside [0, 100]"), "{rendered}");
+    }
+
+    fn four_color_gradient_op(graph: &EffectRenderGraph) -> Option<crate::FourColorGradientGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::FourColorGradient { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::FourColorGradient { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_four_color_gradient(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::FourColorGradient)
+            .expect("the four color gradient effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::FourColorGradient.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the four color gradient parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn four_color_gradient_defaults_match_the_dump() {
+        let effect_type = EffectType::FourColorGradient;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("point_1", "点 1", ParameterUnit::Pixels),
+            ("color_1", "颜色 1", ParameterUnit::Unitless),
+            ("point_2", "点 2", ParameterUnit::Pixels),
+            ("color_2", "颜色 2", ParameterUnit::Unitless),
+            ("point_3", "点 3", ParameterUnit::Pixels),
+            ("color_3", "颜色 3", ParameterUnit::Unitless),
+            ("point_4", "点 4", ParameterUnit::Pixels),
+            ("color_4", "颜色 4", ParameterUnit::Unitless),
+            ("blend", "混合", ParameterUnit::Pixels),
+            ("dither", "抖动", ParameterUnit::Unitless),
+            ("opacity", "不透明度", ParameterUnit::Percent),
+            ("blend_mode", "混合模式", ParameterUnit::Unitless),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("四色渐变")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+
+        let default_of = |parameter: &str| {
+            properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the parameter should be defined")
+                .descriptor
+                .schema
+                .default_value
+                .clone()
+        };
+        assert_eq!(
+            default_of("point_1"),
+            PropertyValue::Vec2(glam::Vec2::new(25.6, 25.6))
+        );
+        assert_eq!(
+            default_of("point_2"),
+            PropertyValue::Vec2(glam::Vec2::new(230.4, 25.6))
+        );
+        assert_eq!(
+            default_of("point_3"),
+            PropertyValue::Vec2(glam::Vec2::new(25.6, 230.4))
+        );
+        assert_eq!(
+            default_of("point_4"),
+            PropertyValue::Vec2(glam::Vec2::new(230.4, 230.4))
+        );
+        assert_eq!(
+            default_of("color_1"),
+            PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 })
+        );
+        assert_eq!(
+            default_of("color_2"),
+            PropertyValue::Color(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
+        );
+        assert_eq!(
+            default_of("color_3"),
+            PropertyValue::Color(Color { r: 1.0, g: 0.0, b: 1.0, a: 1.0 })
+        );
+        assert_eq!(
+            default_of("color_4"),
+            PropertyValue::Color(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 })
+        );
+        assert_eq!(default_of("blend"), PropertyValue::Float(100.0));
+        assert_eq!(default_of("dither"), PropertyValue::Float(0.0));
+        assert_eq!(default_of("opacity"), PropertyValue::Float(100.0));
+        assert_eq!(
+            default_of("blend_mode"),
+            PropertyValue::Enum("normal".to_owned())
+        );
+
+        // The menu reuses the shared blend-mode captions minus `Dissolve`.
+        let blend_mode = properties
+            .property(&effect_type.property_path("blend_mode"))
+            .expect("the blend mode should be defined");
+        let options = &blend_mode.descriptor.schema.enum_options;
+        assert_eq!(options.len(), 26);
+        assert_eq!(options[0].key, "normal");
+        assert!(!options.iter().any(|option| option.key == "dissolve"));
+        for (option, shared) in options.iter().zip(
+            mondrian_core::display_labels::blend_mode_options().iter().filter(|option| {
+                option.mode.is_some_and(|mode| mode != mondrian_core::BlendMode::Dissolve)
+            }),
+        ) {
+            assert_eq!(option.display_name, shared.label);
+        }
+    }
+
+    #[test]
+    fn four_color_gradient_builder_appends_the_generator() {
+        let effect = instantiate_effect_node(EffectType::FourColorGradient)
+            .expect("the four color gradient effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default four color gradient should compile");
+        let grade =
+            four_color_gradient_op(&graph).expect("the default parameters emit the generator");
+        assert_eq!(grade.blend(), 100.0);
+        assert_eq!(grade.dither(), 0.0);
+        assert_eq!(grade.opacity(), 1.0);
+        assert_eq!(grade.blend_mode(), mondrian_core::BlendMode::Normal);
+        assert!(!grade.is_identity());
+        // The fused uniform is (params, color, extra0, extra1, extra2, extra3):
+        // points 1/2, colour 1 + blend radius, points 3/4, colour 2 + dither,
+        // colour 3 + opacity, colour 4 + blend-mode ordinal.
+        let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+        assert_eq!(params, [25.6, 25.6, 230.4, 25.6]);
+        assert_eq!(color, [1.0, 1.0, 0.0, 100.0]);
+        assert_eq!(extra0, [25.6, 230.4, 230.4, 230.4]);
+        assert_eq!(extra1, [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(extra2, [1.0, 0.0, 1.0, 1.0]);
+        assert_eq!(extra3, [0.0, 0.0, 1.0, 0.0]);
+
+        // Zero coverage is the identity, so the builder elides the operation
+        // instead of appending a no-op generator.
+        let effect = author_four_color_gradient(&[("opacity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("zero coverage compiles");
+        assert!(four_color_gradient_op(&graph).is_none());
+    }
+
+    #[test]
+    fn four_color_gradient_builder_rejects_dissolve_and_bad_geometry() {
+        let effect = instantiate_effect_node(EffectType::FourColorGradient)
+            .expect("the four color gradient effect should instantiate");
+        let effect_id = effect.id;
+
+        let mut document = serde_json::to_value(&effect).expect("serialize the gradient");
+        overwrite_static_value(
+            &mut document,
+            "four_color_gradient.blend_mode",
+            serde_json::json!({"Enum": "dissolve"}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the gradient node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("dissolve needs a frame seed the generator kernel does not receive");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        assert!(format!("{error:?}").contains("dissolve"));
+
+        let mut document = serde_json::to_value(&effect).expect("serialize the gradient");
+        overwrite_static_value(
+            &mut document,
+            "four_color_gradient.point_2",
+            serde_json::json!({"Float": 1.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the gradient node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a scalar point is not a usable control point");
+        // The parameter layer rejects the representation before the builder's
+        // own type guard runs, but both routes surface as an invalid author
+        // state rather than silently substituting a default point.
+        assert!(matches!(
+            &error,
+            EffectGraphBuildError::InvalidAuthorState { effect_key, .. }
+                if effect_key == "builtin.four_color_gradient"
+        ));
     }
 
     fn color_balance_op(graph: &EffectRenderGraph) -> Option<crate::ColorBalanceGrade> {

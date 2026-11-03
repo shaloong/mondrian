@@ -374,6 +374,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::FourColorGradient { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "four_color_gradient",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::ColorBalance { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "color_balance",
@@ -1008,6 +1014,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::ChangeToColor { .. } => 0,
         EffectRenderOp::BroadcastSafe { .. } => 0,
         EffectRenderOp::TestSignals { .. } => 0,
+        EffectRenderOp::FourColorGradient { .. } => 0,
         EffectRenderOp::ColorBalance { .. } => 0,
         // One matte plane plus the separable intermediate: the design budgets
         // two frames of scratch for the alpha morphology.
@@ -1508,6 +1515,18 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         EffectRenderOp::TestSignals { grade } => {
             crate::test_signals::apply_test_signals_f32_controlled(
                 working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::FourColorGradient { grade } => {
+            crate::four_color_gradient::apply_four_color_gradient_f32_region_controlled(
+                working,
+                region.x as usize,
+                region.y as usize,
                 region.width as usize,
                 region.height as usize,
                 grade,

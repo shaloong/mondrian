@@ -156,6 +156,10 @@ pub enum EffectGpuPointOp {
     TestSignals {
         grade: crate::TestSignalsGrade,
     },
+    /// Four-color gradient: blends four authored colours by inverse distance.
+    FourColorGradient {
+        grade: crate::FourColorGradientGrade,
+    },
     /// Color balance: shifts the shadow, midtone, and highlight colours apart.
     ColorBalance {
         grade: crate::ColorBalanceGrade,
@@ -882,6 +886,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::TestSignals { grade } => {
             Ok(EffectGpuPointOp::TestSignals { grade: *grade })
         }
+        EffectRenderOp::FourColorGradient { grade } => {
+            Ok(EffectGpuPointOp::FourColorGradient { grade: *grade })
+        }
         EffectRenderOp::ColorBalance { grade } => {
             Ok(EffectGpuPointOp::ColorBalance { grade: *grade })
         }
@@ -989,6 +996,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ChangeToColor { .. } => "change_to_color",
         EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
         EffectRenderOp::TestSignals { .. } => "test_signals",
+        EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         EffectRenderOp::ColorBalance { .. } => "color_balance",
         EffectRenderOp::SpillSuppressor { .. } => "spill_suppressor",
         EffectRenderOp::ChannelBlur { .. } => "channel_blur",

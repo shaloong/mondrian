@@ -308,6 +308,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "模糊" => Some("parameter-group-blur"),
         "残影" => Some("parameter-group-echo"),
         "测试信号" => Some("parameter-group-test-signals"),
+        "四色渐变" => Some("parameter-group-four-color-gradient"),
         "波形变形" => Some("parameter-group-wave-warp"),
         "波纹" => Some("parameter-group-ripple"),
         "浮雕" => Some("parameter-group-emboss"),

@@ -115,6 +115,8 @@ pub enum EffectType {
     Choker,
     /// Test signals: generates a calibration frame from pixel position alone.
     TestSignals,
+    /// Four-color gradient: blends four authored colours by inverse distance.
+    FourColorGradient,
     /// Color balance: shifts the shadow, midtone, and highlight colours apart.
     ColorBalance,
     /// Minimax: morphology over each RGB channel and the alpha channel.
@@ -222,6 +224,7 @@ impl EffectType {
             Self::BroadcastSafe => "builtin.broadcast_safe".to_string(),
             Self::Choker => "builtin.choker".to_string(),
             Self::TestSignals => "builtin.test_signals".to_string(),
+            Self::FourColorGradient => "builtin.four_color_gradient".to_string(),
             Self::ColorBalance => "builtin.color_balance".to_string(),
             Self::Minimax => "builtin.minimax".to_string(),
             Self::SpillSuppressor => "builtin.spill_suppressor".to_string(),
@@ -315,6 +318,7 @@ impl EffectType {
             "builtin.broadcast_safe" => Self::BroadcastSafe,
             "builtin.choker" => Self::Choker,
             "builtin.test_signals" => Self::TestSignals,
+            "builtin.four_color_gradient" => Self::FourColorGradient,
             "builtin.color_balance" => Self::ColorBalance,
             "builtin.minimax" => Self::Minimax,
             "builtin.spill_suppressor" => Self::SpillSuppressor,
@@ -408,6 +412,7 @@ impl EffectType {
             Self::BroadcastSafe => "广播安全",
             Self::Choker => "阻塞收缩",
             Self::TestSignals => "彩条与测试信号",
+            Self::FourColorGradient => "四色渐变",
             Self::ColorBalance => "颜色平衡",
             Self::Minimax => "最小/最大",
             Self::SpillSuppressor => "溢色抑制",
@@ -499,6 +504,7 @@ impl EffectType {
             Self::BroadcastSafe => vec!["颜色"],
             Self::Choker => vec!["抠像"],
             Self::TestSignals => vec!["生成器"],
+            Self::FourColorGradient => vec!["生成器"],
             Self::ColorBalance => vec!["颜色", "调色"],
             Self::Minimax => vec!["通道"],
             Self::SpillSuppressor => vec!["抠像"],
@@ -592,6 +598,7 @@ impl EffectType {
             Self::BroadcastSafe => "broadcast_safe".to_string(),
             Self::Choker => "choker".to_string(),
             Self::TestSignals => "test_signals".to_string(),
+            Self::FourColorGradient => "four_color_gradient".to_string(),
             Self::ColorBalance => "color_balance".to_string(),
             Self::Minimax => "minimax".to_string(),
             Self::SpillSuppressor => "spill_suppressor".to_string(),
@@ -934,6 +941,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::BroadcastSafe => Ok(()),
             Self::Choker => Ok(()),
             Self::TestSignals => Ok(()),
+            Self::FourColorGradient => Ok(()),
             Self::ColorBalance => Ok(()),
             Self::Minimax => Ok(()),
             Self::SpillSuppressor => Ok(()),

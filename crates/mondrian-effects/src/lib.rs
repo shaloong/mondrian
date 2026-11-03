@@ -42,6 +42,7 @@ pub mod effect;
 pub mod emboss;
 pub mod find_edges;
 pub mod flip;
+pub mod four_color_gradient;
 pub mod fractal_noise;
 mod project_properties;
 pub mod radial_blur;
@@ -494,6 +495,14 @@ pub use find_edges::{
 pub use flip::{
     flip_frame_f32, FlipAxis, FlipError, FlipGrade, FLIP_AXIS_COUNT, FLIP_MAX_BLEND_PERCENT,
     FLIP_MAX_CENTRE_PIXELS,
+};
+pub use four_color_gradient::{
+    four_color_gradient_frame_f32, four_color_gradient_pixel, FourColorGradientError,
+    FourColorGradientGrade, FOUR_COLOR_GRADIENT_DEFAULT_BLEND, FOUR_COLOR_GRADIENT_DEFAULT_OPACITY,
+    FOUR_COLOR_GRADIENT_DITHER_SALT, FOUR_COLOR_GRADIENT_MAX_BLEND, FOUR_COLOR_GRADIENT_MAX_DITHER,
+    FOUR_COLOR_GRADIENT_MAX_OPACITY, FOUR_COLOR_GRADIENT_MAX_POINT, FOUR_COLOR_GRADIENT_MIN_BLEND,
+    FOUR_COLOR_GRADIENT_MIN_DITHER, FOUR_COLOR_GRADIENT_MIN_OPACITY,
+    FOUR_COLOR_GRADIENT_POINT_COUNT,
 };
 pub use fractal_noise::{
     fractal_noise_frame_f32, FractalNoiseError, FractalNoiseGrade, FractalNoiseType,
