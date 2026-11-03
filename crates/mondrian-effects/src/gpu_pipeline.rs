@@ -220,6 +220,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored paint style, ink, brush profile, and opacity.
         grade: crate::StrokeGrade,
     },
+    DustScratches {
+        /// Authored window radius, repair threshold and the alpha toggle.
+        grade: crate::DustScratchesGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -266,6 +270,7 @@ impl EffectGpuSpatialPass {
             Self::Median { .. } => "median",
             Self::SelectiveColor { .. } => "selective_color",
             Self::Stroke { .. } => "stroke",
+            Self::DustScratches { .. } => "dust_scratches",
         }
     }
 
@@ -334,6 +339,10 @@ impl EffectGpuSpatialPass {
             // The band reaches at most half the brush plus the two-pixel
             // sampling overshoot; the GPU gate caps the brush at 200.
             Self::Stroke { grade } => stroke_halo(grade),
+            // The window reaches at most the largest authored radius. This is
+            // the "may influence" reach, not the GPU admission cap: a radius
+            // past three still widens the halo before the pass is refused.
+            Self::DustScratches { .. } => crate::dust_scratches::DUST_SCRATCHES_MAX_RADIUS,
         }
     }
 
@@ -393,6 +402,9 @@ impl EffectGpuSpatialPass {
             Self::SelectiveColor { .. } => 0,
             // Same reach as the horizontal halo.
             Self::Stroke { grade } => stroke_halo(grade),
+            // Same reach as the horizontal halo: the authored radius, not the
+            // GPU admission cap.
+            Self::DustScratches { .. } => crate::dust_scratches::DUST_SCRATCHES_MAX_RADIUS,
         }
     }
 }
@@ -727,6 +739,11 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::SelectiveColor { grade: *grade })
         }
         EffectRenderOp::Stroke { grade } => Some(EffectGpuSpatialPass::Stroke { grade: *grade }),
+        // Admission is deliberately radius-agnostic: the renderer rejects radii
+        // above the GPU cap while the chain is still being planned.
+        EffectRenderOp::DustScratches { grade } => {
+            Some(EffectGpuSpatialPass::DustScratches { grade: *grade })
+        }
         _ => None,
     }
 }
@@ -822,6 +839,55 @@ mod tests {
                 node_id: pipeline.output_value(),
             }
         );
+    }
+
+    #[test]
+    fn dust_scratches_maps_to_the_dedicated_spatial_pass() {
+        let grade = crate::DustScratchesGrade::new(2.0, 0.1, 0.0).expect("valid grade");
+        let op = EffectRenderOp::DustScratches { grade };
+        let pass = spatial_pass_for(&op).expect("dust & scratches runs as a spatial pass");
+        assert_eq!(pass, EffectGpuSpatialPass::DustScratches { grade });
+        assert_eq!(pass.name(), "dust_scratches");
+        // The halo is the authored reach, not the GPU admission cap: a radius
+        // of four still widens the tile before the renderer refuses the pass.
+        assert_eq!(pass.horizontal_halo(), crate::DUST_SCRATCHES_MAX_RADIUS);
+        assert_eq!(pass.vertical_halo(), crate::DUST_SCRATCHES_MAX_RADIUS);
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("repair pipeline");
+        assert_eq!(
+            pipeline.stages(),
+            &[EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::DustScratches { grade },
+                node_id: pipeline.output_value(),
+            }]
+        );
+    }
+
+    #[test]
+    fn dust_scratches_wide_radius_stays_in_the_gpu_plan_until_admission() {
+        // The effects plan is radius-agnostic: every authored radius lowers to the
+        // same single spatial stage, and `gpu_supported` is the flag the
+        // renderer's admission gate reads. Dropping the node here would hide the
+        // refusal from `texture_pass_count` and turn it into a missing pass.
+        for (radius, supported) in [(1.0_f32, true), (3.0, true), (4.0, false), (255.0, false)] {
+            let grade = crate::DustScratchesGrade::new(radius, 0.0, 0.0).expect("valid grade");
+            assert_eq!(grade.gpu_supported(), supported, "radius {radius}");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::DustScratches { grade });
+            let pipeline =
+                lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("repair pipeline");
+            assert_eq!(
+                pipeline.stages(),
+                &[EffectGpuStage::Spatial {
+                    pass: EffectGpuSpatialPass::DustScratches { grade },
+                    node_id: pipeline.output_value(),
+                }],
+                "radius {radius}"
+            );
+        }
     }
 
     #[test]

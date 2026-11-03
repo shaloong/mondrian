@@ -39,6 +39,7 @@ pub mod deband;
 pub mod dent;
 pub mod directional_blur;
 pub mod drop_shadow;
+pub mod dust_scratches;
 pub mod echo;
 pub mod effect;
 pub mod emboss;
@@ -527,6 +528,11 @@ pub use directional_blur::{
 pub use drop_shadow::{
     DropShadowError, DropShadowGrade, DROP_SHADOW_AUTHOR_MAX_DISTANCE_PIXELS,
     DROP_SHADOW_AUTHOR_MAX_OPACITY, DROP_SHADOW_AUTHOR_MAX_SOFTNESS_PIXELS,
+};
+pub use dust_scratches::{
+    dust_scratches_frame_f32, DustScratchesError, DustScratchesGrade,
+    DUST_SCRATCHES_DEFAULT_OPERATE_ON_ALPHA, DUST_SCRATCHES_DEFAULT_RADIUS,
+    DUST_SCRATCHES_DEFAULT_THRESHOLD, DUST_SCRATCHES_GPU_MAX_RADIUS, DUST_SCRATCHES_MAX_RADIUS,
 };
 pub use echo::{
     echo_offset, EchoError, EchoGrade, EchoOperator, EchoTap, ECHO_AUTHOR_MAX_COUNT,

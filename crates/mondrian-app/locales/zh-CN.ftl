@@ -2582,6 +2582,13 @@ parameter-group-median = 中间值
 parameter-mondrian-effect-builtin-median-radius-label = 半径
 parameter-mondrian-effect-builtin-median-operate-on-alpha-label = 在 Alpha 通道上运算
 
+## 蒙尘与划痕 Dust & Scratches
+effect-dust-scratches = 蒙尘与划痕
+parameter-group-dust-scratches = 蒙尘与划痕
+parameter-mondrian-effect-builtin-dust-scratches-radius-label = 半径
+parameter-mondrian-effect-builtin-dust-scratches-threshold-label = 阈值
+parameter-mondrian-effect-builtin-dust-scratches-operate-on-alpha-label = 在 Alpha 通道上运算
+
 ## Warp 弯曲
 effect-warp = 弯曲
 parameter-group-warp = 弯曲

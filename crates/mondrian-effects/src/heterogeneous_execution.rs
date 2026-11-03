@@ -2789,6 +2789,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::CircleEllipse { .. } => 95,
         EffectRenderOp::Stroke { .. } => 96,
         EffectRenderOp::Fill { .. } => 97,
+        EffectRenderOp::DustScratches { .. } => 98,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4893,6 +4894,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::RoughenEdges { .. }
             | crate::EffectRenderOp::EyedropperFill { .. }
             | crate::EffectRenderOp::Median { .. }
+            | crate::EffectRenderOp::DustScratches { .. }
             | crate::EffectRenderOp::SelectiveColor { .. }
             | crate::EffectRenderOp::BrushStrokes { .. }
             | crate::EffectRenderOp::ColorEmboss { .. }

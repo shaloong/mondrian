@@ -2650,6 +2650,13 @@ parameter-group-median = Median
 parameter-mondrian-effect-builtin-median-radius-label = Radius
 parameter-mondrian-effect-builtin-median-operate-on-alpha-label = Operate on Alpha Channel
 
+## Dust & Scratches 蒙尘与划痕
+effect-dust-scratches = Dust & Scratches
+parameter-group-dust-scratches = Dust & Scratches
+parameter-mondrian-effect-builtin-dust-scratches-radius-label = Radius
+parameter-mondrian-effect-builtin-dust-scratches-threshold-label = Threshold
+parameter-mondrian-effect-builtin-dust-scratches-operate-on-alpha-label = Operate on Alpha Channel
+
 ## Warp 弯曲
 effect-warp = Warp
 parameter-group-warp = Warp

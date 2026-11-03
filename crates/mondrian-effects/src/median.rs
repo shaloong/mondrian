@@ -347,7 +347,7 @@ pub(crate) fn median_value(bin: u32) -> f32 {
 }
 
 /// The zero-based rank of the lower median for a window of `taps` samples.
-fn window_rank(radius: usize) -> u32 {
+pub(crate) fn window_rank(radius: usize) -> u32 {
     let taps = 2 * radius + 1;
     let count = u32::try_from(taps * taps).unwrap_or(u32::MAX);
     count.div_ceil(2) - 1
@@ -355,13 +355,13 @@ fn window_rank(radius: usize) -> u32 {
 
 /// Clamps one window offset to a valid frame index.
 #[inline]
-fn clamp_coord(value: i64, extent: usize) -> usize {
+pub(crate) fn clamp_coord(value: i64, extent: usize) -> usize {
     value.clamp(0, extent as i64 - 1) as usize
 }
 
 /// Quantises the four channels of one sample once per tap.
 #[inline]
-fn bin_pixel(pixel: [f32; 4]) -> [u32; 4] {
+pub(crate) fn bin_pixel(pixel: [f32; 4]) -> [u32; 4] {
     [
         median_bin(pixel[0]),
         median_bin(pixel[1]),
@@ -374,14 +374,14 @@ fn bin_pixel(pixel: [f32; 4]) -> [u32; 4] {
 ///
 /// The arrays are band-private, so two bands never write the same counter and
 /// the result is independent of how the frame is split across threads.
-struct WindowHistograms {
+pub(crate) struct WindowHistograms {
     fine: [[u32; MEDIAN_BIN_COUNT]; 4],
     coarse: [[u32; MEDIAN_COARSE_BINS]; 4],
 }
 
 impl WindowHistograms {
     /// Builds an empty histogram set.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fine: [[0; MEDIAN_BIN_COUNT]; 4],
             coarse: [[0; MEDIAN_COARSE_BINS]; 4],
@@ -389,13 +389,13 @@ impl WindowHistograms {
     }
 
     /// Empties every counter before a new row window is built.
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.fine = [[0; MEDIAN_BIN_COUNT]; 4];
         self.coarse = [[0; MEDIAN_COARSE_BINS]; 4];
     }
 
     /// Counts one window sample.
-    fn add(&mut self, bins: [u32; 4], operate_on_alpha: bool) {
+    pub(crate) fn add(&mut self, bins: [u32; 4], operate_on_alpha: bool) {
         let channels = if operate_on_alpha { 4 } else { 3 };
         for ((bin, fine), coarse) in
             bins.iter().zip(self.fine.iter_mut()).zip(self.coarse.iter_mut()).take(channels)
@@ -407,7 +407,7 @@ impl WindowHistograms {
     }
 
     /// Uncounts one sample that left the window.
-    fn remove(&mut self, bins: [u32; 4], operate_on_alpha: bool) {
+    pub(crate) fn remove(&mut self, bins: [u32; 4], operate_on_alpha: bool) {
         let channels = if operate_on_alpha { 4 } else { 3 };
         for ((bin, fine), coarse) in
             bins.iter().zip(self.fine.iter_mut()).zip(self.coarse.iter_mut()).take(channels)
@@ -422,7 +422,7 @@ impl WindowHistograms {
     ///
     /// `rank` is zero-based and always below the window count, so the walk finds
     /// a bucket; the trailing value only keeps the return type total.
-    fn select(&self, channel: usize, rank: u32) -> u32 {
+    pub(crate) fn select(&self, channel: usize, rank: u32) -> u32 {
         let mut remaining = rank;
         let mut coarse_index = 0;
         while coarse_index + 1 < MEDIAN_COARSE_BINS

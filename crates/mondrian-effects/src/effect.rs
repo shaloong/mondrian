@@ -1180,6 +1180,12 @@ pub enum EffectRenderOp {
         /// Authored feather, colour, invert and opacity.
         grade: crate::FillGrade,
     },
+    /// Dust and scratches: replaces a pixel with its window median when the
+    /// centre deviates from that median by more than the threshold.
+    DustScratches {
+        /// Authored window radius, repair threshold and the alpha toggle.
+        grade: crate::DustScratchesGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1413,6 +1419,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("Stroke").field("grade", grade).finish()
             }
             Self::Fill { grade } => formatter.debug_struct("Fill").field("grade", grade).finish(),
+            Self::DustScratches { grade } => {
+                formatter.debug_struct("DustScratches").field("grade", grade).finish()
+            }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
@@ -2255,6 +2264,10 @@ impl EffectRenderOp {
                 // so the effect cache has to see it here.
                 grade.invert().hash(state);
             }
+            EffectRenderOp::DustScratches { grade } => {
+                97u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2540,6 +2553,7 @@ impl EffectRenderOp {
             EffectRenderOp::CircleEllipse { .. } => 1,
             EffectRenderOp::Stroke { .. } => 5,
             EffectRenderOp::Fill { .. } => 1,
+            EffectRenderOp::DustScratches { .. } => 4,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -3082,7 +3096,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 96] {
+fn builtin_effect_types() -> [EffectType; 97] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3180,6 +3194,7 @@ fn builtin_effect_types() -> [EffectType; 96] {
         EffectType::CircleEllipse,
         EffectType::Stroke,
         EffectType::Fill,
+        EffectType::DustScratches,
     ]
 }
 
@@ -9702,6 +9717,41 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::DustScratches => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "蒙尘与划痕",
+                "半径",
+                PropertyValue::Float(crate::DUST_SCRATCHES_DEFAULT_RADIUS),
+                Some(0.0),
+                Some(f64::from(crate::DUST_SCRATCHES_MAX_RADIUS)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "threshold",
+                "蒙尘与划痕",
+                "阈值",
+                PropertyValue::Float(crate::DUST_SCRATCHES_DEFAULT_THRESHOLD),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "operate_on_alpha",
+                "蒙尘与划痕",
+                "在 Alpha 通道上运算",
+                PropertyValue::Float(crate::DUST_SCRATCHES_DEFAULT_OPERATE_ON_ALPHA),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -10378,6 +10428,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Stroke, "start" | "end" | "spacing") => ParameterUnit::Percent,
         (EffectType::Fill, "feather_x" | "feather_y") => ParameterUnit::Pixels,
         (EffectType::Fill, "all_masks" | "opacity") => ParameterUnit::Normalized,
+        (EffectType::DustScratches, "radius") => ParameterUnit::Pixels,
+        (EffectType::DustScratches, "threshold") => ParameterUnit::Normalized,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -10700,6 +10752,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::Median => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // A median window can be as wide as the frame, so the
+            // definition-level envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::DustScratches => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The repair window can be as wide as the frame and the dedicated
+            // spatial pass writes a whole-frame destination, so the
             // definition-level envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -15719,6 +15779,41 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::DustScratches => {
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let threshold_id = builtin_parameter_id(effect_type, "threshold");
+            let operate_on_alpha_id = builtin_parameter_id(effect_type, "operate_on_alpha");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let radius = effect.evaluate_f32_parameter(
+                    &radius_id,
+                    context.time,
+                    crate::DUST_SCRATCHES_DEFAULT_RADIUS,
+                );
+                let threshold = effect.evaluate_f32_parameter(
+                    &threshold_id,
+                    context.time,
+                    crate::DUST_SCRATCHES_DEFAULT_THRESHOLD,
+                );
+                let operate_on_alpha = effect.evaluate_f32_parameter(
+                    &operate_on_alpha_id,
+                    context.time,
+                    crate::DUST_SCRATCHES_DEFAULT_OPERATE_ON_ALPHA,
+                );
+                let grade = crate::DustScratchesGrade::new(radius, threshold, operate_on_alpha)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // A sub-pixel radius or a threshold of one is the identity, so
+                // no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::DustScratches { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SelectiveColor => {
             let method_id = builtin_parameter_id(effect_type, "method");
             let colors_id = builtin_parameter_id(effect_type, "colors");
@@ -16289,6 +16384,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::CircleEllipse => "圆形与椭圆",
         EffectType::Stroke => "描边",
         EffectType::Fill => "填充",
+        EffectType::DustScratches => "蒙尘与划痕",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -17620,6 +17716,7 @@ mod tests {
             EffectType::CircleEllipse,
             EffectType::Stroke,
             EffectType::Fill,
+            EffectType::DustScratches,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -27564,6 +27661,169 @@ mod tests {
         let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
             .expect("the default median should compile");
         assert_eq!(median_op(&graph), None);
+    }
+
+    fn dust_scratches_op(graph: &EffectRenderGraph) -> Option<crate::DustScratchesGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::DustScratches { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::DustScratches { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_dust_scratches(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::DustScratches)
+            .expect("the dust & scratches effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::DustScratches.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the dust & scratches parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn dust_scratches_defaults_match_the_dump() {
+        let effect_type = EffectType::DustScratches;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("radius", "半径", ParameterUnit::Pixels),
+            ("threshold", "阈值", ParameterUnit::Normalized),
+            (
+                "operate_on_alpha",
+                "在 Alpha 通道上运算",
+                ParameterUnit::Unitless,
+            ),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("蒙尘与划痕")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "dust_scratches",
+            "the namespace is the FTL key stem"
+        );
+        // The dump declares a hard range for every parameter, and the authored
+        // default has to sit on the same 8-bit grid the kernel quantises to.
+        let defaults = [
+            (crate::DUST_SCRATCHES_DEFAULT_RADIUS, 0.0, 255.0),
+            (crate::DUST_SCRATCHES_DEFAULT_THRESHOLD, 0.0, 1.0),
+            (crate::DUST_SCRATCHES_DEFAULT_OPERATE_ON_ALPHA, 0.0, 1.0),
+        ];
+        for (parameter, (default, min, max)) in
+            ["radius", "threshold", "operate_on_alpha"].into_iter().zip(defaults)
+        {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Float(default),
+                "{parameter} default"
+            );
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .unwrap_or_else(|| panic!("{parameter} should declare a numeric contract"));
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, min, "{parameter} minimum");
+            assert_eq!(contract.hard_range.max, max, "{parameter} maximum");
+        }
+
+        // A default radius of one pixel is already a repair window, so the
+        // grade is not the identity and the GPU can take it.
+        let grade = crate::DustScratchesGrade::documented_defaults();
+        assert_eq!(grade.radius(), crate::DUST_SCRATCHES_DEFAULT_RADIUS);
+        assert_eq!(grade.threshold(), crate::DUST_SCRATCHES_DEFAULT_THRESHOLD);
+        assert!(!grade.is_identity());
+        assert!(grade.gpu_supported());
+        assert_eq!(grade.radius_pixels(1920, 1080), 1);
+        assert_eq!(grade.gpu_controls(), ([1.0, 0.0, 0.0, 0.0], [0.0; 4]));
+    }
+
+    #[test]
+    fn dust_scratches_defaults_build_one_op_with_scratch() {
+        let effect = instantiate_effect_node(EffectType::DustScratches)
+            .expect("the dust & scratches effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default dust & scratches should compile");
+        let grade = dust_scratches_op(&graph).expect("the default parameters emit the repair");
+        assert_eq!(grade, crate::DustScratchesGrade::documented_defaults());
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&EffectRenderOp::DustScratches {
+                grade
+            }),
+            1,
+            "the sliding histogram reads a staged source frame"
+        );
+    }
+
+    #[test]
+    fn dust_scratches_threshold_one_appends_nothing() {
+        let effect = author_dust_scratches(&[("threshold", PropertyValue::Float(1.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity dust & scratches should compile");
+        assert_eq!(
+            dust_scratches_op(&graph),
+            None,
+            "a threshold of one repairs nothing, so no node is appended"
+        );
+    }
+
+    #[test]
+    fn dust_scratches_invalid_radius_is_an_author_error() {
+        // The authoring boundary rejects anything outside the dump's range, but
+        // a persisted document can still carry a stale value, so the builder
+        // has its own defensive arm. Reopening a tampered node exercises it.
+        let effect = instantiate_effect_node(EffectType::DustScratches)
+            .expect("the dust & scratches effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "dust_scratches.radius",
+            serde_json::json!({"Float": 300.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a radius past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("outside [0, 255]"),
+            "the rejection must name the radius range: {reason}"
+        );
     }
 
     fn spill_suppressor_op(graph: &EffectRenderGraph) -> Option<crate::SpillSuppressorGrade> {

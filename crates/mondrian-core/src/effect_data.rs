@@ -154,6 +154,9 @@ pub enum EffectType {
     Stroke,
     /// Fill: paints the whole layer with one colour behind an inset feather ramp.
     Fill,
+    /// Dust and scratches: replaces a pixel with its window median when the
+    /// centre deviates from that median by more than the threshold.
+    DustScratches,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -260,6 +263,7 @@ impl EffectType {
             Self::CircleEllipse => "builtin.circle_ellipse".to_string(),
             Self::Stroke => "builtin.stroke".to_string(),
             Self::Fill => "builtin.fill".to_string(),
+            Self::DustScratches => "builtin.dust_scratches".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -362,6 +366,7 @@ impl EffectType {
             "builtin.circle_ellipse" => Self::CircleEllipse,
             "builtin.stroke" => Self::Stroke,
             "builtin.fill" => Self::Fill,
+            "builtin.dust_scratches" => Self::DustScratches,
             other => Self::External(other.to_string()),
         }
     }
@@ -464,6 +469,7 @@ impl EffectType {
             Self::CircleEllipse => "圆形与椭圆",
             Self::Stroke => "描边",
             Self::Fill => "填充",
+            Self::DustScratches => "蒙尘与划痕",
             Self::External(name) => name,
         }
     }
@@ -564,6 +570,7 @@ impl EffectType {
             Self::CircleEllipse => vec!["生成器"],
             Self::Stroke => vec!["生成器"],
             Self::Fill => vec!["生成器"],
+            Self::DustScratches => vec!["修复"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -666,6 +673,7 @@ impl EffectType {
             Self::CircleEllipse => "circle_ellipse".to_string(),
             Self::Stroke => "stroke".to_string(),
             Self::Fill => "fill".to_string(),
+            Self::DustScratches => "dust_scratches".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1017,6 +1025,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::CircleEllipse => Ok(()),
             Self::Stroke => Ok(()),
             Self::Fill => Ok(()),
+            Self::DustScratches => Ok(()),
         }
     }
 }

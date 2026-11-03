@@ -2842,6 +2842,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::SpillSuppressor { .. } => "spill_suppressor",
         crate::EffectRenderOp::ChannelBlur { .. } => "channel_blur",
         crate::EffectRenderOp::Median { .. } => "median",
+        crate::EffectRenderOp::DustScratches { .. } => "dust_scratches",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",

@@ -434,6 +434,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::DustScratches { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "dust_scratches",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::SelectiveColor { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "selective_color",
@@ -1081,6 +1087,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The median stages one source frame while the sliding histogram reads
         // it, so a single pass needs one frame of scratch.
         EffectRenderOp::Median { .. } => 1,
+        // The gate needs the median of the same window, and the window itself
+        // reads the staged source, so the repair still needs one scratch frame.
+        EffectRenderOp::DustScratches { .. } => 1,
         EffectRenderOp::LensDistortion { .. } => 0,
         EffectRenderOp::Threshold { .. } => 0,
         EffectRenderOp::Tint { .. } => 0,
@@ -1561,6 +1570,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Median { grade } => {
             crate::median::apply_median_f32_controlled(
+                working,
+                region.width,
+                region.height,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::DustScratches { grade } => {
+            crate::dust_scratches::apply_dust_scratches_f32_controlled(
                 working,
                 region.width,
                 region.height,
