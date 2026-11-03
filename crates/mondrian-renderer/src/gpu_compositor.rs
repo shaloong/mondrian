@@ -1350,6 +1350,9 @@ fn effects_author_coverage() -> bool {
         // The checkerboard is a generator too, so a transparent source pixel
         // must still reach the blend.
         if (effect.header.x == 36u) { return true; }
+        // The grid is the same kind of generator: it authors coverage from the
+        // authored border, so a transparent source pixel must not skip it.
+        if (effect.header.x == 37u) { return true; }
     }
     return false;
 }
@@ -2114,6 +2117,63 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 coverage = axis.x * axis.y + (1.0 - axis.x) * (1.0 - axis.y);
             }
             let alpha = clamp(coverage * effect.color.w, 0.0, 1.0);
+            pixel = blend_straight_alpha(
+                pixel,
+                vec4<f32>(effect.color.xyz, alpha),
+                1.0,
+                effect.header.z,
+                index,
+            );
+        } else if (effect.header.x == 37u) {
+            // `GridGrade`: params is [anchor.x, anchor.y, corner.x, corner.y],
+            // colour is [rgb, opacity], extra0 is [width, height, border, 0] and
+            // extra1 is [feather width, feather height, 0, 0]. header.y selects
+            // the cell size: 0 uses the corner delta, 1 uses the width on both
+            // axes and 2 uses the width and height sliders. header.w inverts the
+            // coverage. The generator reads no source pixel: the distance from
+            // the pixel centre to the nearest cell boundary decides the line.
+            let centre = floor(max(position, vec2<f32>(0.0))) + vec2<f32>(0.5);
+            var cell = vec2<f32>(effect.extra0.x, effect.extra0.x);
+            if (effect.header.y == 0u) {
+                cell = abs(effect.params.zw - effect.params.xy);
+            } else if (effect.header.y == 2u) {
+                cell = effect.extra0.xy;
+            }
+            var base = 0.0;
+            // `0.001` mirrors `GRID_DEGENERATE_CELL` on the CPU side, and the
+            // border test keeps a zero-width grid from painting a line: with
+            // `half_border == 0` an exact-boundary pixel would otherwise match
+            // `distance <= 0`, and a feathered ramp would paint a half line.
+            if (cell.x > 0.001 && cell.y > 0.001 && effect.extra0.z > 0.0) {
+                let offset = (centre - effect.params.xy) / cell;
+                let within = offset - floor(offset);
+                let distance = min(within, vec2<f32>(1.0, 1.0) - within) * cell;
+                let half_border = effect.extra0.z * 0.5;
+                var axis = vec2<f32>(
+                    select(0.0, 1.0, distance.x <= half_border),
+                    select(0.0, 1.0, distance.y <= half_border),
+                );
+                if (effect.extra1.x > 0.0) {
+                    axis.x = clamp(
+                        (half_border + effect.extra1.x * 0.5 - distance.x) / effect.extra1.x,
+                        0.0,
+                        1.0,
+                    );
+                }
+                if (effect.extra1.y > 0.0) {
+                    axis.y = clamp(
+                        (half_border + effect.extra1.y * 0.5 - distance.y) / effect.extra1.y,
+                        0.0,
+                        1.0,
+                    );
+                }
+                base = max(axis.x, axis.y);
+            }
+            var coverage = base;
+            if (effect.header.w != 0u) {
+                coverage = 1.0 - base;
+            }
+            let alpha = coverage * clamp(effect.color.w, 0.0, 1.0);
             pixel = blend_straight_alpha(
                 pixel,
                 vec4<f32>(effect.color.xyz, alpha),
@@ -5997,6 +6057,23 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::Grid { grade } => {
+                let (params, color, extra0, extra1) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [
+                        37,
+                        grade.size_from().index(),
+                        grade.blend_mode_index(),
+                        u32::from(grade.invert()),
+                    ],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
                 }
@@ -10534,6 +10611,259 @@ mod tests {
         assert!(
             report.within_budget,
             "GPU checkerboard coverage budget exceeded: {report:#?}"
+        );
+    }
+
+    /// Renders one grid point op on the CPU reference and the fused GPU pass,
+    /// and returns both frames.
+    ///
+    /// Every caller pins a zero-coverage input pixel: the generator has to paint
+    /// it, which only happens because `effects_author_coverage` answers true for
+    /// kind 37.
+    fn grid_parity_pixels(
+        context: &crate::GpuContext,
+        width: u32,
+        height: u32,
+        data: &[[f32; 4]],
+        grade: mondrian_effects::GridGrade,
+    ) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: data.to_vec(),
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Grid { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            context,
+            &[layer],
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        (expected.pixels().to_vec(), actual)
+    }
+
+    #[tokio::test]
+    async fn gpu_grid_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{GridGrade, GridSizeFrom};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU grid parity test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        // A fully transparent layer: without the author-coverage registration the
+        // fused pass would short-circuit every pixel and return transparent black.
+        let data = vec![[0.0; 4]; (width * height) as usize];
+
+        let grade = GridGrade::new(
+            [128.0, 128.0],
+            GridSizeFrom::Corner,
+            [153.6, 153.6],
+            32.0,
+            24.0,
+            5.0,
+            0.0,
+            0.0,
+            false,
+            [1.0, 1.0, 1.0],
+            100.0,
+            BlendMode::Normal,
+        )
+        .expect("valid grid grade");
+        let (expected_pixels, actual) = grid_parity_pixels(&context, width, height, &data, grade);
+        // Row 0 sits on a horizontal line, so every pixel of that row is
+        // painted. Pixel (3, 3) is deep inside the cell on both axes: one
+        // painted, one empty.
+        assert_eq!(actual[0], [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(actual[3 * 8 + 3], [0.0; 4]);
+        assert_eq!(expected_pixels[0], [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(expected_pixels[3 * 8 + 3], [0.0; 4]);
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU grid accuracy budget exceeded: {report:#?}"
+        );
+
+        // A zero-width, feathered grid paints nothing. Without the shader-side
+        // border guard a pixel centre on an exact cell boundary would match
+        // `distance <= half_border` with `half_border == 0` and paint a line,
+        // and the feather ramp would paint a half-intensity line everywhere.
+        let empty = GridGrade::new(
+            [0.0, 0.0],
+            GridSizeFrom::WidthHeightSliders,
+            [153.6, 153.6],
+            4.0,
+            4.0,
+            0.0,
+            6.0,
+            6.0,
+            false,
+            [1.0, 1.0, 1.0],
+            100.0,
+            BlendMode::Normal,
+        )
+        .expect("valid zero-border grid grade");
+        let (empty_expected, empty_actual) =
+            grid_parity_pixels(&context, width, height, &data, empty);
+        assert!(
+            empty_expected.iter().all(|pixel| *pixel == [0.0; 4]),
+            "the CPU reference must paint nothing for a zero-width border"
+        );
+        assert_eq!(empty_actual, empty_expected);
+    }
+
+    #[tokio::test]
+    async fn gpu_grid_feather_and_blend_match_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{GridGrade, GridSizeFrom};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU grid feather test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 13_u32;
+        // A half-transparent base exercises the straight-alpha blend path.
+        let data = vec![[0.2, 0.3, 0.4, 0.5]; (width * height) as usize];
+
+        let grade = GridGrade::new(
+            [0.0, 0.0],
+            GridSizeFrom::WidthHeightSliders,
+            [0.0, 0.0],
+            5.0,
+            5.0,
+            2.0,
+            3.0,
+            3.0,
+            false,
+            [1.0, 1.0, 1.0],
+            60.0,
+            BlendMode::Multiply,
+        )
+        .expect("valid grid grade");
+        let (expected_pixels, actual) = grid_parity_pixels(&context, width, height, &data, grade);
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU grid feather accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_grid_paints_transparent_layers() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{GridGrade, GridSizeFrom};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU grid coverage test: no GPU adapter available");
+            return;
+        };
+        let width = 5_u32;
+        let height = 5_u32;
+        // A fully transparent layer: without the author-coverage registration the
+        // fused pass would skip every pixel and return transparent black.
+        let data = vec![[0.0; 4]; (width * height) as usize];
+
+        let grade = GridGrade::new(
+            [128.0, 128.0],
+            GridSizeFrom::Corner,
+            [153.6, 153.6],
+            32.0,
+            24.0,
+            5.0,
+            0.0,
+            0.0,
+            false,
+            [1.0, 1.0, 1.0],
+            100.0,
+            BlendMode::Normal,
+        )
+        .expect("valid grid grade");
+        let (expected_pixels, actual) = grid_parity_pixels(&context, width, height, &data, grade);
+        // Pixel (0, 0) is on both lines and authors full coverage; pixel (3, 3)
+        // is inside the cell and has to stay transparent.
+        assert_eq!(actual[0], [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(actual[3 * 5 + 3], [0.0; 4]);
+        assert!(
+            actual.iter().any(|pixel| *pixel != [0.0; 4]),
+            "the transparent frame came back empty"
+        );
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU grid coverage budget exceeded: {report:#?}"
         );
     }
 
