@@ -1061,6 +1061,26 @@ fn ramp_hash(x: u32, y: u32, salt: u32) -> u32 {
 fn ramp_unit_noise(x: u32, y: u32) -> f32 {
     return f32(ramp_hash(x, y, RAMP_DITHER_SALT) >> 8u) / 16777216.0;
 }
+
+// GEN-02 four-color gradient: the dither hash mirrors
+// `four_color_gradient::dither_offset` / `noise::noise_hash` bit for bit, so a
+// re-render is identical to the CPU kernel.
+const FOUR_COLOR_GRADIENT_DITHER_SALT: u32 = 0x2545F491u;
+
+fn four_color_gradient_hash(x: u32, y: u32, salt: u32) -> u32 {
+    var hash = x * 0x9E3779B9u ^ y * 0x85EBCA6Bu ^ salt;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x846CA68Bu;
+    hash = hash ^ (hash >> 16u);
+    return hash;
+}
+
+fn four_color_gradient_noise(x: u32, y: u32) -> f32 {
+    let bits = (four_color_gradient_hash(x, y, FOUR_COLOR_GRADIENT_DITHER_SALT) >> 8u) & 65535u;
+    return f32(bits) / 65535.0 * 2.0 - 1.0;
+}
 // `ExtractGrade`: params.x is the channel, params.y the black point,
 // params.z the white point and params.w the invert toggle; extra0.xy are the
 // softness around each point.
@@ -1323,6 +1343,10 @@ fn effects_author_coverage() -> bool {
         // A generated test signal replaces the pixel outright, coverage
         // included, so an empty input pixel must not skip it.
         if (effect.header.x == 31u) { return true; }
+        // The four-color gradient is a generator as well: it authors its own
+        // coverage from the authored opacity, so a transparent source pixel
+        // must still reach the blend.
+        if (effect.header.x == 35u) { return true; }
     }
     return false;
 }
@@ -2003,6 +2027,58 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 }
             }
             pixel = vec4<f32>(clamp(corrected, vec3<f32>(0.0), vec3<f32>(1.0)), pixel.a);
+        } else if (effect.header.x == 35u) {
+            // `FourColorGradientGrade`: params is [p1.x, p1.y, p2.x, p2.y],
+            // colour is [c1.rgb, blend], extra0 is [p3.x, p3.y, p4.x, p4.y],
+            // extra1 is [c2.rgb, dither], extra2 is [c3.rgb, opacity] and
+            // extra3 is [c4.rgb, mode index]. The generator reads no source
+            // pixel. The four inverse-distance weights carry a soft radius
+            // lambda, so the sum is a partition of unity and never divides by
+            // zero, even when a point coincides with the sampled centre.
+            let centre = floor(max(position, vec2<f32>(0.0))) + vec2<f32>(0.5);
+            let points = array<vec2<f32>, 4>(
+                effect.params.xy,
+                effect.params.zw,
+                effect.extra0.xy,
+                effect.extra0.zw,
+            );
+            let colors = array<vec3<f32>, 4>(
+                effect.color.xyz,
+                effect.extra1.xyz,
+                effect.extra2.xyz,
+                effect.extra3.xyz,
+            );
+            let lambda_squared = effect.color.w * effect.color.w;
+            let lambda4 = lambda_squared * lambda_squared;
+            // A vector cannot take a runtime index assignment, so the weights
+            // live in an array and are folded afterwards in a fixed order.
+            var weights = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+            for (var corner = 0u; corner < 4u; corner = corner + 1u) {
+                let offset = centre - points[corner];
+                let distance_squared = dot(offset, offset);
+                let distance4 = distance_squared * distance_squared;
+                weights[corner] = 1.0 / (distance4 + lambda4);
+            }
+            let total = weights[0] + weights[1] + weights[2] + weights[3];
+            let w = vec4<f32>(weights[0], weights[1], weights[2], weights[3]) / total;
+            var gradient =
+                colors[0] * w.x + colors[1] * w.y + colors[2] * w.z + colors[3] * w.w;
+            let dither = effect.extra1.w;
+            if (dither > 0.0) {
+                let column = u32(centre.x);
+                let row = u32(centre.y);
+                gradient = gradient
+                    + vec3<f32>(four_color_gradient_noise(column, row)) * (dither / 255.0);
+            }
+            let gradient_saturated = clamp(gradient, vec3<f32>(0.0), vec3<f32>(1.0));
+            let opacity = clamp(effect.extra2.w, 0.0, 1.0);
+            pixel = blend_straight_alpha(
+                pixel,
+                vec4<f32>(gradient_saturated, opacity),
+                1.0,
+                u32(max(effect.extra3.w, 0.0) + 0.5),
+                index,
+            );
         } else if (effect.header.x == 34u) {
             // `ChangeToColorGrade`: params is [hue amount, lightness amount,
             // saturation amount, softness], colour is [to r, to g, to b, 0], and
@@ -5857,6 +5933,18 @@ fn effect_uniforms_for_ops(
                     extra1: [grade.gpu_view(), 0.0, 0.0, 0.0],
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::FourColorGradient { grade } => {
+                let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [35, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2,
+                    extra3,
                 }
             }
             EffectGpuPointOp::Noise { grade } => GpuEffectUniform {
@@ -9912,6 +10000,261 @@ mod tests {
         }
     }
 
+    /// Renders one four-color-gradient point op on the CPU reference and the
+    /// fused GPU pass, and returns both frames.
+    ///
+    /// Every caller pins a zero-coverage input pixel: the generator has to
+    /// paint it, which only happens because `effects_author_coverage` answers
+    /// true for kind 35.
+    fn four_color_gradient_parity_pixels(
+        context: &crate::GpuContext,
+        width: u32,
+        height: u32,
+        data: &[[f32; 4]],
+        grade: mondrian_effects::FourColorGradientGrade,
+    ) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: data.to_vec(),
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::FourColorGradient { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            context,
+            &[layer],
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        (expected.pixels().to_vec(), actual)
+    }
+
+    #[tokio::test]
+    async fn gpu_four_color_gradient_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::FourColorGradientGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU four-color gradient parity test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for index in 0..width * height {
+            let channel = |offset: u32| ((index * (offset + 5)) % 23) as f32 / 23.0;
+            data.push([channel(0), channel(1), channel(2), 1.0]);
+        }
+        // The pinned transparent pixel: (3, 2) at index 2 * 8 + 3 = 19.
+        data[19] = [0.0; 4];
+        assert_eq!(data[19], [0.0; 4]);
+
+        let grade = FourColorGradientGrade::new(
+            [[0.5, 0.5], [7.5, 0.5], [0.5, 5.5], [7.5, 5.5]],
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+            ],
+            5.0,
+            0.0,
+            100.0,
+            BlendMode::Normal,
+        )
+        .expect("valid four color gradient grade");
+        let (expected_pixels, actual) =
+            four_color_gradient_parity_pixels(&context, width, height, &data, grade);
+        // The generator authors coverage, so the transparent input pixel must
+        // come back painted rather than skipped.
+        assert_ne!(actual[19], [0.0; 4]);
+        for (index, pixel) in actual.iter().enumerate() {
+            if index != 19 {
+                assert_ne!(*pixel, [0.0; 4], "pixel {index} lost its coverage");
+            }
+        }
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU four color gradient accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_four_color_gradient_dither_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::FourColorGradientGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU four-color gradient dither test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 13_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for index in 0..width * height {
+            let channel = |offset: u32| ((index * (offset + 7)) % 29) as f32 / 29.0;
+            data.push([channel(0), channel(1), channel(2), 1.0]);
+        }
+        let zero_coverage = 0_usize;
+        data[zero_coverage] = [0.0; 4];
+        assert_eq!(data[zero_coverage], [0.0; 4]);
+
+        let grade = FourColorGradientGrade::new(
+            [[0.0, 0.0], [16.0, 0.0], [0.0, 12.0], [16.0, 12.0]],
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+            ],
+            40.0,
+            200.0,
+            65.0,
+            BlendMode::Multiply,
+        )
+        .expect("valid four color gradient grade");
+        let (expected_pixels, actual) =
+            four_color_gradient_parity_pixels(&context, width, height, &data, grade);
+        assert_ne!(actual[zero_coverage], [0.0; 4]);
+        // At zero coverage the multiply mode is ignored and only the
+        // gradient-plus-dither sum survives, so the two kernels have to agree
+        // far inside the general budget: the dither hash is bit-identical.
+        for channel in 0..3 {
+            let difference =
+                (expected_pixels[zero_coverage][channel] - actual[zero_coverage][channel]).abs();
+            assert!(
+                difference <= 1.0e-6,
+                "dither channel {channel} diverged by {difference}"
+            );
+        }
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU four color gradient dither accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_four_color_gradient_blend_modes_match_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::FourColorGradientGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU four-color gradient blend test: no GPU adapter available");
+            return;
+        };
+        let width = 5_u32;
+        let height = 5_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for index in 0..width * height {
+            let channel = |offset: u32| ((index * (offset + 3)) % 19) as f32 / 19.0;
+            data.push([channel(0), channel(1), channel(2), 1.0]);
+        }
+        // The pinned transparent pixel: (2, 2) at index 2 * 5 + 2 = 12.
+        let zero_coverage = 12_usize;
+        data[zero_coverage] = [0.0; 4];
+        assert_eq!(data[zero_coverage], [0.0; 4]);
+
+        let mut seen = 0_usize;
+        for option in mondrian_core::display_labels::blend_mode_options() {
+            let Some(mode) = option.mode else { continue };
+            if mode == BlendMode::Dissolve {
+                continue;
+            }
+            let grade = FourColorGradientGrade::new(
+                [[0.5, 0.5], [4.5, 0.5], [0.5, 4.5], [4.5, 4.5]],
+                [
+                    [0.9, 0.2, 0.2],
+                    [0.2, 0.9, 0.2],
+                    [0.2, 0.2, 0.9],
+                    [0.8, 0.8, 0.1],
+                ],
+                8.0,
+                0.0,
+                100.0,
+                mode,
+            )
+            .expect("valid four color gradient grade");
+            let (expected_pixels, actual) =
+                four_color_gradient_parity_pixels(&context, width, height, &data, grade);
+            assert_ne!(actual[zero_coverage], [0.0; 4], "{mode:?} lost coverage");
+            let report = compare_linear_rgba(
+                &expected_pixels,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU four color gradient {mode:?} accuracy budget exceeded: {report:#?}"
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, 26, "the effect offers every legal blend mode");
+    }
+
     #[tokio::test]
     async fn gpu_color_balance_matches_the_cpu_kernel() {
         use crate::color_accuracy::{
@@ -12102,9 +12445,13 @@ mod tests {
         width: u32,
         height: u32,
     ) -> Vec<[f32; 4]> {
+        // `copy_texture_to_buffer` demands a 256-byte row stride, so a frame
+        // wider than sixteen RGBA32F pixels has to be read back padded.
+        let row_bytes = width * 16;
+        let stride = row_bytes.div_ceil(256) * 256;
         let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mondrian-test-gpu-point-effect-readback"),
-            size: 256 * u64::from(height),
+            size: u64::from(stride) * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -12120,7 +12467,7 @@ mod tests {
                 buffer: &readback,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(256),
+                    bytes_per_row: Some(stride),
                     rows_per_image: Some(height),
                 },
             },
@@ -12129,9 +12476,9 @@ mod tests {
         context.queue.submit(std::iter::once(encoder.finish()));
         let mapped = map_test_readback(&context.device, &readback);
         let mut actual = Vec::with_capacity((width * height) as usize);
-        for row in mapped.chunks_exact(256).take(height as usize) {
+        for row in mapped.chunks_exact(stride as usize).take(height as usize) {
             actual.extend(
-                bytemuck::cast_slice::<u8, f32>(&row[..width as usize * 16])
+                bytemuck::cast_slice::<u8, f32>(&row[..row_bytes as usize])
                     .chunks_exact(4)
                     .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]]),
             );
