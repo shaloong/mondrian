@@ -152,6 +152,8 @@ pub enum EffectType {
     CircleEllipse,
     /// Stroke: paints a closed band along the layer's alpha contour.
     Stroke,
+    /// Fill: paints the whole layer with one colour behind an inset feather ramp.
+    Fill,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -257,6 +259,7 @@ impl EffectType {
             Self::Grid => "builtin.grid".to_string(),
             Self::CircleEllipse => "builtin.circle_ellipse".to_string(),
             Self::Stroke => "builtin.stroke".to_string(),
+            Self::Fill => "builtin.fill".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -358,6 +361,7 @@ impl EffectType {
             "builtin.grid" => Self::Grid,
             "builtin.circle_ellipse" => Self::CircleEllipse,
             "builtin.stroke" => Self::Stroke,
+            "builtin.fill" => Self::Fill,
             other => Self::External(other.to_string()),
         }
     }
@@ -459,6 +463,7 @@ impl EffectType {
             Self::Grid => "网格",
             Self::CircleEllipse => "圆形与椭圆",
             Self::Stroke => "描边",
+            Self::Fill => "填充",
             Self::External(name) => name,
         }
     }
@@ -558,6 +563,7 @@ impl EffectType {
             Self::Grid => vec!["生成器"],
             Self::CircleEllipse => vec!["生成器"],
             Self::Stroke => vec!["生成器"],
+            Self::Fill => vec!["生成器"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -659,6 +665,7 @@ impl EffectType {
             Self::Grid => "grid".to_string(),
             Self::CircleEllipse => "circle_ellipse".to_string(),
             Self::Stroke => "stroke".to_string(),
+            Self::Fill => "fill".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1009,6 +1016,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Grid => Ok(()),
             Self::CircleEllipse => Ok(()),
             Self::Stroke => Ok(()),
+            Self::Fill => Ok(()),
         }
     }
 }

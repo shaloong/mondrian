@@ -2942,3 +2942,13 @@ parameter-mondrian-effect-builtin-stroke-paint-style-label = Paint Style
 parameter-mondrian-effect-stroke-paint-style-on-original = On Original Image
 parameter-mondrian-effect-stroke-paint-style-on-transparent = On Transparent
 parameter-mondrian-effect-stroke-paint-style-reveal-original = Reveal Original Image
+
+effect-fill = Fill
+parameter-group-fill = Fill
+parameter-mondrian-effect-builtin-fill-fill-mask-label = Fill Mask
+parameter-mondrian-effect-builtin-fill-all-masks-label = All Masks
+parameter-mondrian-effect-builtin-fill-color-label = Color
+parameter-mondrian-effect-builtin-fill-invert-label = Invert
+parameter-mondrian-effect-builtin-fill-feather-x-label = Horizontal Feather
+parameter-mondrian-effect-builtin-fill-feather-y-label = Vertical Feather
+parameter-mondrian-effect-builtin-fill-opacity-label = Opacity

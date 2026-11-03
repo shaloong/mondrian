@@ -73,6 +73,7 @@ pub mod extension_contract;
 pub mod extension_sdk;
 pub mod extract;
 pub mod eyedropper_fill;
+pub mod fill;
 pub mod gamut_mapping;
 pub mod glow;
 pub mod gpu_pipeline;
@@ -276,6 +277,11 @@ pub use extract::{
 pub use eyedropper_fill::{
     eyedropper_fill_frame_f32, AverageMode, EyedropperFillError, EyedropperFillGrade,
     EYEDROPPER_MAX_COORDINATE, EYEDROPPER_MAX_RADIUS, EYEDROPPER_MIN_RADIUS,
+};
+pub use fill::{
+    fill_frame_f32, FillControls, FillError, FillGrade, FILL_DEFAULT_ALL_MASKS, FILL_DEFAULT_COLOR,
+    FILL_DEFAULT_FEATHER, FILL_DEFAULT_FILL_MASK, FILL_DEFAULT_OPACITY, FILL_MAX_ALL_MASKS,
+    FILL_MAX_FEATHER, FILL_MAX_OPACITY,
 };
 pub use gamut_mapping::{GamutCompressionGrade, GamutMappingError, HighlightRecoveryGrade};
 pub use glow::{

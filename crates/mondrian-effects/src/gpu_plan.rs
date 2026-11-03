@@ -172,6 +172,10 @@ pub enum EffectGpuPointOp {
     CircleEllipse {
         grade: crate::CircleEllipseGrade,
     },
+    /// Fill: paints the whole layer with one colour behind an inset feather ramp.
+    Fill {
+        grade: crate::FillGrade,
+    },
     /// Color balance: shifts the shadow, midtone, and highlight colours apart.
     ColorBalance {
         grade: crate::ColorBalanceGrade,
@@ -908,6 +912,7 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
         }
+        EffectRenderOp::Fill { grade } => Ok(EffectGpuPointOp::Fill { grade: *grade }),
         EffectRenderOp::ColorBalance { grade } => {
             Ok(EffectGpuPointOp::ColorBalance { grade: *grade })
         }
@@ -1019,6 +1024,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
+        EffectRenderOp::Fill { .. } => "fill",
         EffectRenderOp::ColorBalance { .. } => "color_balance",
         EffectRenderOp::SpillSuppressor { .. } => "spill_suppressor",
         EffectRenderOp::ChannelBlur { .. } => "channel_blur",

@@ -360,6 +360,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "网格" => Some("parameter-group-grid"),
         "圆形与椭圆" => Some("parameter-group-circle-ellipse"),
         "描边" => Some("parameter-group-stroke"),
+        "填充" => Some("parameter-group-fill"),
         _ => None,
     }
 }

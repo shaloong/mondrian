@@ -1175,6 +1175,11 @@ pub enum EffectRenderOp {
         /// Authored ink, band width, profile, opacity and paint style.
         grade: crate::StrokeGrade,
     },
+    /// Fill: paints the whole layer with one colour behind an inset feather ramp.
+    Fill {
+        /// Authored feather, colour, invert and opacity.
+        grade: crate::FillGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1407,6 +1412,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Stroke { grade } => {
                 formatter.debug_struct("Stroke").field("grade", grade).finish()
             }
+            Self::Fill { grade } => formatter.debug_struct("Fill").field("grade", grade).finish(),
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
@@ -2239,6 +2245,16 @@ impl EffectRenderOp {
                     cell.map(f32::to_bits).hash(state);
                 }
             }
+            EffectRenderOp::Fill { grade } => {
+                96u8.hash(state);
+                let (params, color) = grade.gpu_controls();
+                for cell in [params, color] {
+                    cell.map(f32::to_bits).hash(state);
+                }
+                // `invert` lives in the uniform header, not in `gpu_controls`,
+                // so the effect cache has to see it here.
+                grade.invert().hash(state);
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2523,6 +2539,7 @@ impl EffectRenderOp {
             EffectRenderOp::Grid { .. } => 1,
             EffectRenderOp::CircleEllipse { .. } => 1,
             EffectRenderOp::Stroke { .. } => 5,
+            EffectRenderOp::Fill { .. } => 1,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -3065,7 +3082,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 95] {
+fn builtin_effect_types() -> [EffectType; 96] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3162,6 +3179,7 @@ fn builtin_effect_types() -> [EffectType; 95] {
         EffectType::Grid,
         EffectType::CircleEllipse,
         EffectType::Stroke,
+        EffectType::Fill,
     ]
 }
 
@@ -9596,6 +9614,94 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Fill => {
+            // Lazy parameter: the schema exposes it and the graph builder
+            // reads it, but it never reaches the grade, the uniform or the
+            // cache key.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_mask",
+                "填充",
+                "填充蒙版",
+                PropertyValue::Float(crate::FILL_DEFAULT_FILL_MASK),
+                None,
+                None,
+                None,
+            );
+            // Lazy parameter: see `fill_mask`.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "all_masks",
+                "填充",
+                "所有蒙版",
+                PropertyValue::Float(crate::FILL_DEFAULT_ALL_MASKS),
+                Some(0.0),
+                Some(crate::FILL_MAX_ALL_MASKS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color",
+                "填充",
+                "颜色",
+                PropertyValue::Color(Color {
+                    r: crate::FILL_DEFAULT_COLOR[0],
+                    g: crate::FILL_DEFAULT_COLOR[1],
+                    b: crate::FILL_DEFAULT_COLOR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "填充",
+                "反转",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather_x",
+                "填充",
+                "水平羽化",
+                PropertyValue::Float(crate::FILL_DEFAULT_FEATHER),
+                Some(0.0),
+                Some(crate::FILL_MAX_FEATHER as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather_y",
+                "填充",
+                "垂直羽化",
+                PropertyValue::Float(crate::FILL_DEFAULT_FEATHER),
+                Some(0.0),
+                Some(crate::FILL_MAX_FEATHER as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "填充",
+                "不透明度",
+                PropertyValue::Float(crate::FILL_DEFAULT_OPACITY),
+                Some(0.0),
+                Some(crate::FILL_MAX_OPACITY as f64),
+                Some(0.01),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -10270,6 +10376,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Stroke, "brush_size") => ParameterUnit::Pixels,
         (EffectType::Stroke, "brush_hardness" | "opacity") => ParameterUnit::Normalized,
         (EffectType::Stroke, "start" | "end" | "spacing") => ParameterUnit::Percent,
+        (EffectType::Fill, "feather_x" | "feather_y") => ParameterUnit::Pixels,
+        (EffectType::Fill, "all_masks" | "opacity") => ParameterUnit::Normalized,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -10561,6 +10669,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // scanning the whole frame, so the definition-level envelope
             // cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Fill => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
         EffectType::ColorBalance => EffectExecutionContract {
@@ -15230,6 +15342,84 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Fill => {
+            let fill_mask_id = builtin_parameter_id(effect_type, "fill_mask");
+            let all_masks_id = builtin_parameter_id(effect_type, "all_masks");
+            let colour_id = builtin_parameter_id(effect_type, "color");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            let feather_x_id = builtin_parameter_id(effect_type, "feather_x");
+            let feather_y_id = builtin_parameter_id(effect_type, "feather_y");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                // Lazy mask parameters (design §1.8): evaluate them so
+                // animations on them stay well-formed, then drop them. They
+                // deliberately do not reach the grade, the uniform or the
+                // effect cache key.
+                let fill_mask = effect.evaluate_f32_parameter(
+                    &fill_mask_id,
+                    context.time,
+                    crate::FILL_DEFAULT_FILL_MASK,
+                );
+                debug_assert!(
+                    fill_mask.is_finite(),
+                    "fill mask index left its authoring range"
+                );
+                let _ = fill_mask;
+                let all_masks = effect.evaluate_f32_parameter(
+                    &all_masks_id,
+                    context.time,
+                    crate::FILL_DEFAULT_ALL_MASKS,
+                );
+                debug_assert!(
+                    (0.0..=crate::FILL_MAX_ALL_MASKS).contains(&all_masks),
+                    "fill all-masks factor left its authoring range"
+                );
+                let _ = all_masks;
+                let colour = match effect.evaluate_parameter(&colour_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(_) => {
+                        return Err(invalid("fill colour must be a colour".to_owned()));
+                    }
+                    None => crate::FILL_DEFAULT_COLOR,
+                };
+                let invert = match effect.evaluate_parameter(&invert_id, context.time) {
+                    Some(PropertyValue::Bool(invert)) => invert,
+                    Some(_) => {
+                        return Err(invalid("fill invert must be a boolean".to_owned()));
+                    }
+                    None => false,
+                };
+                let grade = crate::FillGrade::new(
+                    effect.evaluate_f32_parameter(
+                        &feather_x_id,
+                        context.time,
+                        crate::FILL_DEFAULT_FEATHER,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &feather_y_id,
+                        context.time,
+                        crate::FILL_DEFAULT_FEATHER,
+                    ),
+                    invert,
+                    colour,
+                    effect.evaluate_f32_parameter(
+                        &opacity_id,
+                        context.time,
+                        crate::FILL_DEFAULT_OPACITY,
+                    ),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Fill { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorBalance => {
             let shadow_red_id = builtin_parameter_id(effect_type, "shadow_red");
             let shadow_green_id = builtin_parameter_id(effect_type, "shadow_green");
@@ -16098,6 +16288,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Grid => "网格",
         EffectType::CircleEllipse => "圆形与椭圆",
         EffectType::Stroke => "描边",
+        EffectType::Fill => "填充",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -17428,6 +17619,7 @@ mod tests {
             EffectType::Grid,
             EffectType::CircleEllipse,
             EffectType::Stroke,
+            EffectType::Fill,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -26184,6 +26376,258 @@ mod tests {
             .expect("a bigger band compiles");
         let bigger_grade = stroke_op(&bigger_graph).expect("the band is still emitted");
         assert_ne!(hash_of(bigger_grade), hash_of(default_grade));
+    }
+
+    fn fill_op(graph: &EffectRenderGraph) -> Option<crate::FillGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Fill { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Fill { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_fill(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Fill).expect("the fill effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Fill.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the fill parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn fill_defaults_match_the_dump() {
+        let effect_type = EffectType::Fill;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("fill_mask", "填充蒙版", ParameterUnit::Unitless),
+            ("all_masks", "所有蒙版", ParameterUnit::Normalized),
+            ("color", "颜色", ParameterUnit::Unitless),
+            ("invert", "反转", ParameterUnit::Unitless),
+            ("feather_x", "水平羽化", ParameterUnit::Pixels),
+            ("feather_y", "垂直羽化", ParameterUnit::Pixels),
+            ("opacity", "不透明度", ParameterUnit::Normalized),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("填充")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "fill",
+            "the namespace is the FTL key stem"
+        );
+        // The dump declares a hard range for the feather and the opacity, so an
+        // out-of-range author value has to be rejected at the mutation.
+        for (parameter, value) in [
+            ("feather_x", 1000.0),
+            ("feather_y", 1000.0),
+            ("opacity", 1.01),
+        ] {
+            let mut effect = instantiate_effect_node(EffectType::Fill)
+                .expect("the fill effect should instantiate");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Fill.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect_err("the author value is outside the declared range");
+            assert!(
+                format!("{error:?}").contains("outside"),
+                "{parameter}: {error:?}"
+            );
+        }
+
+        let effect = author_fill(&[]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default fill should compile");
+        let grade = fill_op(&graph).expect("the default parameters emit the fill");
+        // The dump's defaults: no feather, pure red, opaque. `opacity` is 0..1,
+        // so the uniform cell carries the authored value unchanged.
+        assert_eq!(
+            grade.gpu_controls(),
+            ([0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0])
+        );
+        assert!(!grade.invert());
+        assert!(!grade.is_identity());
+        let compiled = crate::compile_reference_render_graph(graph).expect("compile the fill");
+        // A pure per-pixel generator reads no neighbour, so its ROI stays local.
+        assert_eq!(
+            compiled.execution_envelope().aggregate().roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal
+        );
+    }
+
+    #[test]
+    fn fill_defaults_build_one_fill_op() {
+        let effect = author_fill(&[]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default fill should compile");
+        let mut effect_nodes = 0;
+        for node in &graph.nodes {
+            if let EffectGraphNodeKind::UnaryEffect { .. }
+            | EffectGraphNodeKind::DomainEffect { .. } = &node.kind
+            {
+                effect_nodes += 1;
+            }
+        }
+        assert_eq!(effect_nodes, 1);
+        let grade = fill_op(&graph).expect("the default parameters emit the fill");
+        // The fused point stage writes in place: no scratch frame, cost one.
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&EffectRenderOp::Fill { grade }),
+            0
+        );
+    }
+
+    #[test]
+    fn fill_opacity_zero_appends_nothing() {
+        let effect = author_fill(&[("opacity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("zero opacity compiles");
+        assert!(fill_op(&graph).is_none());
+        let effect_nodes = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect { .. }
+                        | EffectGraphNodeKind::DomainEffect { .. }
+                )
+            })
+            .count();
+        assert_eq!(effect_nodes, 0, "zero opacity must append no operation");
+
+        // Inverting a hard-edged fill is the other identity: the coverage is
+        // exactly 1.0, so the complement paints nothing.
+        let effect = author_fill(&[("invert", PropertyValue::Bool(true))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("an inverted hard edge compiles");
+        assert!(fill_op(&graph).is_none());
+    }
+
+    #[test]
+    fn fill_invalid_color_is_an_author_error() {
+        // Design §1.7 asks for `InvalidAuthorState` here, but the property type
+        // check fires first: the schema declares `color` as a colour, so the
+        // authoring boundary rejects a float before any graph builder runs. The
+        // builder keeps its own defensive arm for symmetry with the other
+        // generators, but this test can only pin the guard that actually fires.
+        let mut effect =
+            instantiate_effect_node(EffectType::Fill).expect("the fill effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Fill.property_path("color"),
+                value: PropertyValue::Float(0.5),
+            })
+            .expect_err("a float colour is not a legal fill author state");
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("effect.fill.color"),
+            "the rejection must name the colour property: {reason}"
+        );
+        assert!(
+            !reason.contains("fill colour must be a colour"),
+            "the graph builder is never reached: {reason}"
+        );
+    }
+
+    #[test]
+    fn fill_gpu_plan_has_one_point_op() {
+        let grade = crate::FillGrade::new(3.0, 2.0, true, [0.2, 0.4, 0.6], 0.8)
+            .expect("the grade should validate");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Fill { grade });
+        let compiled = crate::compile_reference_render_graph(builder.finish())
+            .expect("the fill graph should compile");
+        let plan = crate::lower_effect_graph_to_gpu_plan(&compiled)
+            .expect("the fill lowers to the fused point stage");
+        assert_eq!(plan.operations().len(), 1);
+        let crate::EffectGpuPointOp::Fill { grade: planned } = plan.operations()[0] else {
+            panic!("expected a fill point op, got {:?}", plan.operations()[0]);
+        };
+        assert_eq!(planned, grade);
+        assert_eq!(
+            planned.gpu_controls(),
+            ([3.0, 2.0, 0.0, 0.0], [0.2, 0.4, 0.6, 0.8])
+        );
+        // No spatial pass: the fill is a point operation, so the plan must not
+        // ask the spatial driver for a kernel.
+        assert!(crate::spatial_pass_for(&EffectRenderOp::Fill { grade }).is_none());
+    }
+
+    #[test]
+    fn fill_lazy_parameters_are_inert() {
+        use std::hash::Hasher as _;
+
+        let default_effect = author_fill(&[]);
+        let default_graph = build_effect_render_graph(&[default_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default fill should compile");
+        let default_grade = fill_op(&default_graph).expect("the default parameters emit the fill");
+
+        // The two mask parameters are part of the schema so they show up in the
+        // UI and survive serialization, but they may change neither the uniform
+        // nor the effect cache key.
+        let lazy_effect = author_fill(&[
+            ("fill_mask", PropertyValue::Float(7.0)),
+            ("all_masks", PropertyValue::Float(1.0)),
+        ]);
+        let lazy_graph = build_effect_render_graph(&[lazy_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the lazy parameters do not change the graph");
+        let lazy_grade = fill_op(&lazy_graph).expect("the fill is still emitted");
+        assert_eq!(lazy_grade.gpu_controls(), default_grade.gpu_controls());
+
+        let hash_of = |grade: crate::FillGrade| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            EffectRenderOp::Fill { grade }.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash_of(lazy_grade), hash_of(default_grade));
+
+        // The same comparator does see a real edit.
+        let feathered = author_fill(&[("feather_x", PropertyValue::Float(12.0))]);
+        let feathered_graph = build_effect_render_graph(&[feathered], tt(0), TEST_WORKING_SPACE)
+            .expect("a feathered fill compiles");
+        let feathered_grade = fill_op(&feathered_graph).expect("the fill is still emitted");
+        assert_ne!(hash_of(feathered_grade), hash_of(default_grade));
+
+        // `invert` rides in the uniform header rather than in `gpu_controls`, so
+        // it must not move the surface but it must move the cache key. A hard
+        // edge cannot show that (it is the documented identity), hence the
+        // feather.
+        let inverted = author_fill(&[
+            ("feather_x", PropertyValue::Float(12.0)),
+            ("invert", PropertyValue::Bool(true)),
+        ]);
+        let inverted_graph = build_effect_render_graph(&[inverted], tt(0), TEST_WORKING_SPACE)
+            .expect("an inverted fill compiles");
+        let inverted_grade = fill_op(&inverted_graph).expect("the fill is still emitted");
+        assert_eq!(
+            inverted_grade.gpu_controls(),
+            feathered_grade.gpu_controls()
+        );
+        assert_ne!(hash_of(inverted_grade), hash_of(feathered_grade));
     }
 
     fn color_balance_op(graph: &EffectRenderGraph) -> Option<crate::ColorBalanceGrade> {

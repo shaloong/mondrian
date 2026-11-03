@@ -2874,3 +2874,13 @@ parameter-mondrian-effect-builtin-stroke-paint-style-label = 描边样式
 parameter-mondrian-effect-stroke-paint-style-on-original = 在原始图像上
 parameter-mondrian-effect-stroke-paint-style-on-transparent = 在透明上
 parameter-mondrian-effect-stroke-paint-style-reveal-original = 显示原始图像
+
+effect-fill = 填充
+parameter-group-fill = 填充
+parameter-mondrian-effect-builtin-fill-fill-mask-label = 填充蒙版
+parameter-mondrian-effect-builtin-fill-all-masks-label = 所有蒙版
+parameter-mondrian-effect-builtin-fill-color-label = 颜色
+parameter-mondrian-effect-builtin-fill-invert-label = 反转
+parameter-mondrian-effect-builtin-fill-feather-x-label = 水平羽化
+parameter-mondrian-effect-builtin-fill-feather-y-label = 垂直羽化
+parameter-mondrian-effect-builtin-fill-opacity-label = 不透明度

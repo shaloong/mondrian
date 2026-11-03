@@ -2835,6 +2835,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Checkerboard { .. } => "checkerboard",
         crate::EffectRenderOp::Grid { .. } => "grid",
         crate::EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
+        crate::EffectRenderOp::Fill { .. } => "fill",
         crate::EffectRenderOp::ColorBalance { .. } => "color_balance",
         crate::EffectRenderOp::Choker { .. } => "choker",
         crate::EffectRenderOp::Minimax { .. } => "minimax",
