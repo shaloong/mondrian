@@ -1356,6 +1356,9 @@ fn effects_author_coverage() -> bool {
         // The circle is another generator: it authors coverage from the signed
         // distance to the radius, so a transparent source pixel must not skip it.
         if (effect.header.x == 38u) { return true; }
+        // The fill is the last generator: its coverage comes from the inset
+        // feather ramp, so a transparent source pixel must not skip it either.
+        if (effect.header.x == 39u) { return true; }
     }
     return false;
 }
@@ -2214,6 +2217,41 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 vec4<f32>(effect.color.xyz, alpha),
                 1.0,
                 effect.header.y,
+                index,
+            );
+        } else if (effect.header.x == 39u) {
+            // `FillGrade`: params is [feather_x, feather_y, 0, 0], colour is
+            // [rgb, opacity], and the extras are zero. header.y is free (the fill
+            // has no blend-mode parameter and always composites Normal) and
+            // header.w inverts the coverage. The generator reads no source pixel:
+            // the inset from the frame border, measured from the pixel centre,
+            // decides both axis ramps and their product is the coverage.
+            let centre = floor(max(position, vec2<f32>(0.0))) + vec2<f32>(0.5);
+            let extent = max(uniforms.geometry.zw, vec2<f32>(1.0));
+            let inset = min(centre, extent - centre);
+            let feather = vec2<f32>(effect.params.x, effect.params.y);
+            // A zero feather is the constant branch, not a degenerate division:
+            // it asks for full coverage on that axis.
+            let axis_x = select(
+                clamp(inset.x / max(feather.x, 1.0e-6), 0.0, 1.0),
+                1.0,
+                feather.x <= 0.0,
+            );
+            let axis_y = select(
+                clamp(inset.y / max(feather.y, 1.0e-6), 0.0, 1.0),
+                1.0,
+                feather.y <= 0.0,
+            );
+            var coverage = axis_x * axis_y;
+            if (effect.header.w != 0u) {
+                coverage = 1.0 - coverage;
+            }
+            let alpha = clamp(coverage * clamp(effect.color.w, 0.0, 1.0), 0.0, 1.0);
+            pixel = blend_straight_alpha(
+                pixel,
+                vec4<f32>(effect.color.xyz, alpha),
+                1.0,
+                0u,
                 index,
             );
         } else if (effect.header.x == 34u) {
@@ -6121,6 +6159,20 @@ fn effect_uniforms_for_ops(
                     color,
                     extra0,
                     extra1,
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::Fill { grade } => {
+                let (params, color) = grade.gpu_controls();
+                GpuEffectUniform {
+                    // `header.y` is free: the fill has no blend-mode parameter
+                    // and always composites Normal.
+                    header: [39, 0, 0, u32::from(grade.invert())],
+                    params,
+                    color,
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
                 }
@@ -11137,6 +11189,222 @@ mod tests {
         assert!(
             report.within_budget,
             "GPU circle coverage budget exceeded: {report:#?}"
+        );
+    }
+
+    fn fill_parity_pixels(
+        context: &crate::GpuContext,
+        width: u32,
+        height: u32,
+        data: &[[f32; 4]],
+        grade: mondrian_effects::FillGrade,
+    ) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: data.to_vec(),
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Fill { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        // The fused point stage reuses the seven-cell uniform: kind 39 in
+        // `header.x`, the inverted flag in `header.w`, the feather in `params`
+        // and the paint in `color`. `header.y` stays free because the fill has no
+        // blend-mode parameter.
+        let uniforms =
+            effect_uniforms_for_ops(plan.operations(), None).expect("the fill packs a uniform");
+        let (expected_params, expected_color) = grade.gpu_controls();
+        assert_eq!(uniforms[0].header, [39, 0, 0, u32::from(grade.invert())]);
+        assert_eq!(uniforms[0].params, expected_params);
+        assert_eq!(uniforms[0].color, expected_color);
+        for cell in [
+            uniforms[0].extra0,
+            uniforms[0].extra1,
+            uniforms[0].extra2,
+            uniforms[0].extra3,
+        ] {
+            assert_eq!(cell, [0.0; 4]);
+        }
+
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            context,
+            &[layer],
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        (expected.pixels().to_vec(), actual)
+    }
+
+    #[tokio::test]
+    async fn gpu_fill_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::FillGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU fill parity test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        // A fully transparent layer: without the author-coverage registration the
+        // fused pass would short-circuit every pixel and return transparent black.
+        let data = vec![[0.0; 4]; (width * height) as usize];
+        let grade =
+            FillGrade::new(3.0, 1.5, false, [1.0, 0.0, 0.0], 0.8).expect("valid fill grade");
+        let (expected_pixels, actual) = fill_parity_pixels(&context, width, height, &data, grade);
+
+        // The corner centre sits half a pixel in, so its ramp is 1/6 on x and 1/3
+        // on y; the middle is inside both ramps and carries the full opacity.
+        let painted = actual[2 * 8 + 4];
+        assert_eq!(painted[0], 1.0);
+        assert!(
+            (painted[3] - 0.8).abs() <= 1.0e-4,
+            "the middle must reach the authored opacity, got {painted:?}"
+        );
+        assert!(
+            actual[0][3] > 0.0 && actual[0][3] < 0.1,
+            "the corner must sit on the ramp, got {:?}",
+            actual[0]
+        );
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU fill accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_fill_feather_and_invert_match_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::FillGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU fill feather test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 13_u32;
+        // A half-transparent base exercises the straight-alpha blend path.
+        let data = vec![[0.2, 0.3, 0.4, 0.5]; (width * height) as usize];
+        let grade = FillGrade::new(2.5, 4.0, true, [0.9, 0.6, 0.3], 1.0)
+            .expect("valid inverted fill grade");
+        let (expected_pixels, actual) = fill_parity_pixels(&context, width, height, &data, grade);
+
+        // Inverted, the border is nearly opaque while the middle keeps the base.
+        // The corner keeps 2.5% of its own coverage, so the 0.5 base alpha leaks
+        // through and the composite lands just under one.
+        assert!(
+            (actual[0][3] - 0.9875).abs() <= 1.0e-4,
+            "the inverted border must nearly reach opaque, got {:?}",
+            actual[0]
+        );
+        assert!(
+            (actual[6 * 17 + 8][3] - 0.5).abs() <= 1.0e-4,
+            "the inverted middle must keep the base alpha, got {:?}",
+            actual[6 * 17 + 8]
+        );
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU fill feather accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_fill_paints_transparent_layers() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::FillGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU fill coverage test: no GPU adapter available");
+            return;
+        };
+        let width = 5_u32;
+        let height = 5_u32;
+        // A fully transparent layer: without the author-coverage registration the
+        // fused pass would skip every pixel and return transparent black.
+        let data = vec![[0.0; 4]; (width * height) as usize];
+        let grade =
+            FillGrade::new(0.0, 0.0, false, [0.0, 1.0, 0.0], 1.0).expect("valid fill grade");
+        let (expected_pixels, actual) = fill_parity_pixels(&context, width, height, &data, grade);
+
+        // A hard-edged fill covers everything, so the transparent frame must come
+        // back fully painted instead of empty.
+        for (index, pixel) in actual.iter().enumerate() {
+            assert_eq!(*pixel, [0.0, 1.0, 0.0, 1.0], "pixel {index}");
+        }
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU fill coverage budget exceeded: {report:#?}"
         );
     }
 
