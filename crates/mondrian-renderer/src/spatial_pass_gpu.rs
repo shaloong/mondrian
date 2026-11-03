@@ -82,6 +82,7 @@ pub(crate) struct EffectSpatialGpu {
     choker_composite: wgpu::RenderPipeline,
     minimax: wgpu::RenderPipeline,
     channel_blur: wgpu::RenderPipeline,
+    median: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -1380,6 +1381,38 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Median writes the selected window median straight into the scratch
+        // frame: one pass, no composite stage.
+        let median = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.median"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_median"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         // Fractal noise needs twenty-six scalars, so the shared uniform struct is
         // too small: the stage gets its own shader module, bind group layout, and
         // uniform payload instead of a sixth `extra` vector.
@@ -1490,6 +1523,7 @@ impl EffectSpatialGpu {
             choker_composite,
             minimax,
             channel_blur,
+            median,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -2019,6 +2053,16 @@ impl EffectSpatialGpu {
                 Ok(u32::from(grade.direction().blurs_horizontal())
                     + u32::from(grade.direction().blurs_vertical()))
             }
+            // The median is one gather pass. The radius gate lives here, on the
+            // admission path, so a too-wide window is rejected while the chain is
+            // still being planned instead of failing mid-recording.
+            EffectGpuSpatialPass::Median { grade } => {
+                if grade.gpu_supported() {
+                    Ok(1)
+                } else {
+                    Err(EffectSpatialGpuError::UnsupportedPass("median_radius"))
+                }
+            }
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -2446,6 +2490,9 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::ChannelBlur { grade } => {
                 return self
                     .record_channel_blur(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::Median { grade } => {
+                return self.record_median(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -3965,6 +4012,53 @@ impl EffectSpatialGpu {
         Ok(scratch[written - 1].clone())
     }
 
+    /// Records the median pass: one gather that selects the window median.
+    ///
+    /// The radius is rounded and clamped to the frame extent here so the shader
+    /// sees the same integer as [`mondrian_effects::MedianGrade::radius_pixels`].
+    /// The admission path already rejected radii past
+    /// [`mondrian_effects::MEDIAN_GPU_MAX_RADIUS`]; the check below only guards a
+    /// direct call.
+    fn record_median(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::MedianGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if scratch.is_empty() {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "median_scratch_geometry",
+            ));
+        }
+        let radius = grade.radius_pixels(width, height);
+        if radius > mondrian_effects::MEDIAN_GPU_MAX_RADIUS {
+            return Err(EffectSpatialGpuError::UnsupportedPass("median_radius"));
+        }
+        let (params, extra) = grade.gpu_controls();
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params: [radius as f32, params[1], 0.0, 0.0],
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.median,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(scratch[0].clone())
+    }
+
     /// Records one matte filter pass and advances the matte ping-pong.
     ///
     /// The first matte pass binds the frame and asks the shader for the frame
@@ -4532,6 +4626,56 @@ fn fs_channel_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
         sums = sums + select(vec4<f32>(0.0), tap, inside > vec4<f32>(0.5));
     }
     return sums / (2.0 * vec4<f32>(radii) + vec4<f32>(1.0));
+}
+
+// The median pass selects the exact per-channel median of the `(2r + 1)^2`
+// window in the 8-bit domain: `bin = round(clamp01(value) * 255)`. Selection is
+// bit-serial: eight rounds build the answer from the high bit down, and each
+// round counts how many taps fall below the candidate bin. The count never
+// exceeds 255, so comparisons against `rank` stay exact. `params` is
+// `[radius_pixels, operate_on_alpha, 0, 0]`; the alpha channel joins the
+// selection only when the toggle is on, otherwise the centre alpha is copied
+// bit for bit from the straight-alpha source.
+fn median_bin_of(value: f32) -> u32 {
+    // NaN has no ordering, so it lands in the lowest bin, like clamp01 does.
+    let safe = select(value, 0.0, value != value);
+    return u32(round(clamp(safe, 0.0, 1.0) * 255.0));
+}
+
+@fragment
+fn fs_median(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let radius = i32(round(uniforms.params.x));
+    let on_alpha = uniforms.params.y >= 0.5;
+    let centre = load_clamped_from(src, pixel);
+    let side = 2 * radius + 1;
+    let count = u32(side * side);
+    let rank = (count + 1u) / 2u - 1u;
+    var prefix = vec4<u32>(0u);
+    for (var bit = 7; bit >= 0; bit = bit - 1) {
+        let candidate = prefix | vec4<u32>(1u << u32(bit));
+        var below = vec4<u32>(0u);
+        for (var dy = -radius; dy <= radius; dy = dy + 1) {
+            for (var dx = -radius; dx <= radius; dx = dx + 1) {
+                let aim = load_clamped_from(src, pixel + vec2<i32>(dx, dy));
+                let q = vec4<u32>(
+                    median_bin_of(aim.r),
+                    median_bin_of(aim.g),
+                    median_bin_of(aim.b),
+                    median_bin_of(aim.a),
+                );
+                below = below + select(vec4<u32>(0u), vec4<u32>(1u), q < candidate);
+            }
+        }
+        prefix = select(prefix, candidate, below <= vec4<u32>(rank));
+    }
+    let selected = vec4<f32>(
+        f32(prefix.r),
+        f32(prefix.g),
+        f32(prefix.b),
+        f32(prefix.a),
+    ) / 255.0;
+    return vec4<f32>(selected.rgb, select(centre.a, selected.a, on_alpha));
 }
 
 fn sobel_magnitude(pixel: vec2<i32>) -> f32 {
@@ -6693,6 +6837,22 @@ mod tests {
     use mondrian_effects::{box_blur, BoxBlurDirection};
     use pollster::block_on;
 
+    #[test]
+    fn spatial_effect_shader_validates() {
+        let module = naga::front::wgsl::parse_str(SPATIAL_EFFECT_SHADER)
+            .expect("spatial effect shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("spatial effect shader validates");
+        assert!(
+            module.entry_points.iter().any(|entry| entry.name == "fs_median"),
+            "the median fragment entry point must survive validation"
+        );
+    }
+
     fn upload(
         context: &crate::GpuContext,
         pixels: &[[f32; 4]],
@@ -6820,6 +6980,33 @@ mod tests {
         drop(data);
         buffer.unmap();
         pixels
+    }
+
+    /// Compares one median result against the CPU kernel.
+    ///
+    /// The selected bin is the kernel contract and must be identical. The decoded
+    /// value may sit one ulp away from the CPU quotient because the D3D12 shader
+    /// compiler lowers `/ 255.0` into a multiply by a rounded reciprocal, which is
+    /// not correctly rounded; the visible difference stays below 1.0e-6 (one
+    /// 8-bit step is 1/255).
+    fn assert_median_parity(cpu: &[[f32; 4]], gpu: &[[f32; 4]], label: &str) {
+        assert_eq!(cpu.len(), gpu.len(), "{label} frame length");
+        for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+            for channel in 0..4 {
+                let cpu_value = cpu_pixel[channel];
+                let gpu_value = gpu_pixel[channel];
+                let cpu_bin = (cpu_value * 255.0).round() as i32;
+                let gpu_bin = (gpu_value * 255.0).round() as i32;
+                assert_eq!(
+                    cpu_bin, gpu_bin,
+                    "{label} pixel {pixel_index} channel {channel} rank: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+                assert!(
+                    (cpu_value - gpu_value).abs() <= 1.0e-6,
+                    "{label} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+            }
+        }
     }
 
     fn run_box_blur_on_gpu(
@@ -7434,7 +7621,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             0,
         )
         .expect("valid wire removal grade");
+        // Take the exact window median with the alpha toggle off: the pass runs
+        // first so every later stage consumes its quantised output, and radius 2
+        // stays inside the GPU cap.
+        let median = mondrian_effects::MedianGrade::new(2.0, 0.0).expect("valid median grade");
         let passes = [
+            mondrian_effects::EffectGpuSpatialPass::Median { grade: median },
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
                 iterations: 1,
@@ -7464,9 +7656,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 21, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 22, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
+        assert!(mondrian_effects::median_frame_f32(
+            &mut cpu, width, height, &median
+        ));
         assert!(mondrian_effects::box_blur_frame_f32(
             &mut cpu,
             width as usize,
@@ -9575,6 +9770,207 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             matches!(
                 error,
                 EffectSpatialGpuError::UnsupportedPass("channel_blur_scratch_geometry")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn gpu_median_opaque_noise() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU median parity test: no GPU adapter available");
+            return;
+        };
+        let width = 16_u32;
+        let height = 16_u32;
+        // On-grid data (multiples of 1/255) plus one isolated speck and one empty
+        // pixel: the speck is erased by the window median and the empty pixel
+        // keeps its colour because the alpha toggle is off.
+        let mut pixels = vec![[0.0_f32; 4]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let phase = 17 * x + 29 * y;
+                pixels[y * width as usize + x] = [
+                    (phase % 256) as f32 / 255.0,
+                    ((phase * 3) % 256) as f32 / 255.0,
+                    ((phase * 7) % 256) as f32 / 255.0,
+                    1.0,
+                ];
+            }
+        }
+        pixels[5 * width as usize + 5] = [1.0, 0.0, 1.0, 1.0];
+        pixels[9 * width as usize + 3] = [0.0, 0.0, 0.0, 0.0];
+        let grade = mondrian_effects::MedianGrade::new(1.0, 0.0).expect("valid median grade");
+        let pass = mondrian_effects::EffectGpuSpatialPass::Median { grade };
+        assert_eq!(
+            EffectSpatialGpu::texture_pass_count(&pass).expect("supported pass"),
+            1
+        );
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::median_frame_f32(
+            &mut cpu, width, height, &grade
+        ));
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let pool = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.median-encoder"),
+        });
+        let output = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &source,
+                &pool,
+                width,
+                height,
+            )
+            .expect("recorded median");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        assert_median_parity(&cpu, &gpu, "median");
+    }
+
+    #[test]
+    fn gpu_median_transparent_neighbour() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU median parity test: no GPU adapter available");
+            return;
+        };
+        // Odd geometry, so the rank is a true middle sample on both axes.
+        let width = 9_u32;
+        let height = 7_u32;
+        let mut pixels = vec![[0.0_f32; 4]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let phase = 11 * x + 23 * y;
+                pixels[y * width as usize + x] = [
+                    (phase % 256) as f32 / 255.0,
+                    ((phase * 5) % 256) as f32 / 255.0,
+                    ((phase * 9) % 256) as f32 / 255.0,
+                    1.0,
+                ];
+            }
+        }
+        // A semi-transparent band whose hidden RGB is black: with alpha in the
+        // median the band survives, without it the RGB median still sees the
+        // hidden samples.
+        for x in 0..width as usize {
+            pixels[3 * width as usize + x] = [0.0, 0.0, 0.0, 0.5];
+        }
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let pool = scratch(&context, width, height, 1);
+        for toggle in [0.0_f32, 1.0] {
+            let grade =
+                mondrian_effects::MedianGrade::new(2.0, toggle).expect("valid median grade");
+            let pass = mondrian_effects::EffectGpuSpatialPass::Median { grade };
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::median_frame_f32(
+                &mut cpu, width, height, &grade
+            ));
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.median-alpha-encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool,
+                    width,
+                    height,
+                )
+                .expect("recorded median");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            assert_median_parity(&cpu, &gpu, &format!("median toggle {toggle}"));
+        }
+    }
+
+    #[test]
+    fn gpu_median_hdr_and_non_finite() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU median parity test: no GPU adapter available");
+            return;
+        };
+        let width = 32_u32;
+        let height = 24_u32;
+        let mut pixels = vec![[0.0_f32; 4]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let phase = 13 * x + 31 * y;
+                pixels[y * width as usize + x] = [
+                    (phase % 256) as f32 / 255.0,
+                    ((phase * 3) % 256) as f32 / 255.0,
+                    ((phase * 5) % 256) as f32 / 255.0,
+                    1.0,
+                ];
+            }
+        }
+        // HDR above one clamps to the top bin, negatives and NaN to the bottom.
+        pixels[11] = [2.5, -0.25, f32::NAN, 1.0];
+        pixels[12] = [4.0, f32::NEG_INFINITY, 1.0, 1.0];
+        let grade = mondrian_effects::MedianGrade::new(3.0, 0.0).expect("valid median grade");
+        let pass = mondrian_effects::EffectGpuSpatialPass::Median { grade };
+        assert_eq!(
+            EffectSpatialGpu::texture_pass_count(&pass).expect("supported pass"),
+            1
+        );
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::median_frame_f32(
+            &mut cpu, width, height, &grade
+        ));
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let pool = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.median-hdr-encoder"),
+        });
+        let output = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &source,
+                &pool,
+                width,
+                height,
+            )
+            .expect("recorded median");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        assert_median_parity(&cpu, &gpu, "median hdr");
+
+        // The radius gate belongs to admission, not to recording.
+        let too_wide = mondrian_effects::EffectGpuSpatialPass::Median {
+            grade: mondrian_effects::MedianGrade::new(4.0, 0.0).expect("valid grade"),
+        };
+        assert!(matches!(
+            EffectSpatialGpu::texture_pass_count(&too_wide),
+            Err(EffectSpatialGpuError::UnsupportedPass("median_radius"))
+        ));
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.median-geometry-encoder"),
+        });
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &source,
+                &[],
+                width,
+                height,
+            )
+            .expect_err("the median needs one scratch texture");
+        assert!(
+            matches!(
+                error,
+                EffectSpatialGpuError::UnsupportedPass("median_scratch_geometry")
             ),
             "unexpected error: {error:?}"
         );

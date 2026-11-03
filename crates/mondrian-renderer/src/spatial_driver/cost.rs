@@ -364,6 +364,9 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "warp" => 0.6,
         // Wire removal reads up to two bilinear taps and writes one pixel.
         "wire_removal" => 0.6,
+        // The median gathers the whole window eight times over, so it costs more
+        // than a separable blur pass despite the small GPU radius cap.
+        "median" => 4.0,
         _ => GPU_DEFAULT_NS_PER_PX,
     }
 }
@@ -381,6 +384,8 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "warp" => 2.0,
         // Up to two bilinear taps averaged behind a per-row band test.
         "wire_removal" => 2.0,
+        // The sliding histogram touches each window twice per axis.
+        "median" => 3.0,
         "radial_blur" | "turbulent_displace" | "keylight" | "matte_refine" => 4.0,
         "minimax" | "choker" | "find_edges" | "emboss" | "color_emboss" => 2.5,
         _ => 2.0,
