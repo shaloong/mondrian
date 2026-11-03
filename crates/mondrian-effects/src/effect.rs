@@ -1144,6 +1144,11 @@ pub enum EffectRenderOp {
         /// Authored method, colour range, trim amounts and nine ink rows.
         grade: crate::SelectiveColorGrade,
     },
+    /// Roughen edges: grows shape edges out along a fractal field.
+    RoughenEdges {
+        /// Authored edge type, displacement, field shape and colouring.
+        grade: crate::RoughenEdgesGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1359,6 +1364,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::SelectiveColor { grade } => {
                 formatter.debug_struct("SelectiveColor").field("grade", grade).finish()
+            }
+            Self::RoughenEdges { grade } => {
+                formatter.debug_struct("RoughenEdges").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2133,6 +2141,13 @@ impl EffectRenderOp {
                 deltas.map(|row| row.map(f32::to_bits)).hash(state);
                 method.hash(state);
             }
+            EffectRenderOp::RoughenEdges { grade } => {
+                90u8.hash(state);
+                let (params, extra, extra1) = grade.gpu_controls();
+                for cell in [params, extra, extra1, grade.aces_controls()] {
+                    cell.map(f32::to_bits).hash(state);
+                }
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2411,6 +2426,7 @@ impl EffectRenderOp {
             EffectRenderOp::WireRemoval { .. } => 4,
             EffectRenderOp::Median { .. } => 4,
             EffectRenderOp::SelectiveColor { .. } => 2,
+            EffectRenderOp::RoughenEdges { .. } => 4,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -2953,7 +2969,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 89] {
+fn builtin_effect_types() -> [EffectType; 90] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3043,6 +3059,7 @@ fn builtin_effect_types() -> [EffectType; 89] {
         EffectType::WireRemoval,
         EffectType::Median,
         EffectType::SelectiveColor,
+        EffectType::RoughenEdges,
         EffectType::FourColorGradient,
     ]
 }
@@ -8681,6 +8698,159 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 }
             }
         }
+        EffectType::RoughenEdges => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "edge_type",
+                "粗糙边缘",
+                "边缘类型",
+                crate::RoughenEdgesType::Roughen.as_key(),
+                crate::RoughenEdgesType::ALL
+                    .iter()
+                    .map(|edge_type| {
+                        let key = edge_type.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            edge_type.label(),
+                            format!("mondrian.effect.roughen_edges.edge_type.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_color",
+                "粗糙边缘",
+                "边缘颜色",
+                PropertyValue::Color(Color { r: 0.6, g: 0.2, b: 0.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "border",
+                "粗糙边缘",
+                "边界",
+                PropertyValue::Float(8.0),
+                Some(f64::from(crate::ROUGHEN_EDGES_MIN_BORDER)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_BORDER)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sharpness",
+                "粗糙边缘",
+                "边缘锐度",
+                PropertyValue::Float(1.0),
+                Some(f64::from(crate::ROUGHEN_EDGES_MIN_SHARPNESS)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_SHARPNESS)),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "influence",
+                "粗糙边缘",
+                "分形影响",
+                PropertyValue::Float(1.0),
+                Some(f64::from(crate::ROUGHEN_EDGES_MIN_INFLUENCE)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_INFLUENCE)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "scale",
+                "粗糙边缘",
+                "比例",
+                PropertyValue::Float(100.0),
+                Some(f64::from(crate::ROUGHEN_EDGES_MIN_SCALE)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_SCALE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "stretch",
+                "粗糙边缘",
+                "伸缩宽度或高度",
+                PropertyValue::Float(0.0),
+                Some(f64::from(crate::ROUGHEN_EDGES_MIN_STRETCH)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_STRETCH)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "offset",
+                "粗糙边缘",
+                "偏移（湍流）",
+                PropertyValue::Vec2(glam::Vec2::new(0.0, 0.0)),
+                Some(-f64::from(crate::ROUGHEN_EDGES_MAX_OFFSET_PIXELS)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_OFFSET_PIXELS)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "complexity",
+                "粗糙边缘",
+                "复杂度",
+                PropertyValue::Int(2),
+                Some(f64::from(crate::ROUGHEN_EDGES_MIN_COMPLEXITY)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_COMPLEXITY)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "evolution",
+                "粗糙边缘",
+                "演化",
+                PropertyValue::Float(0.0),
+                Some(-f64::from(crate::ROUGHEN_EDGES_MAX_EVOLUTION_DEGREES)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_EVOLUTION_DEGREES)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle_evolution",
+                "粗糙边缘",
+                "循环演化",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle",
+                "粗糙边缘",
+                "循环（旋转次数）",
+                PropertyValue::Int(1),
+                Some(f64::from(crate::ROUGHEN_EDGES_MIN_CYCLE)),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_CYCLE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "random_seed",
+                "粗糙边缘",
+                "随机植入",
+                PropertyValue::Int(0),
+                Some(0.0),
+                Some(f64::from(crate::ROUGHEN_EDGES_MAX_RANDOM_SEED)),
+                Some(1.0),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -9205,6 +9375,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             "point_a_x" | "point_a_y" | "point_b_x" | "point_b_y" | "thickness",
         ) => ParameterUnit::Pixels,
         (EffectType::WireRemoval, "mirror_blend") => ParameterUnit::Normalized,
+        (EffectType::RoughenEdges, "border" | "offset") => ParameterUnit::Pixels,
+        (EffectType::RoughenEdges, "scale" | "stretch") => ParameterUnit::Percent,
+        (EffectType::RoughenEdges, "evolution") => ParameterUnit::Degrees,
         (EffectType::Ramp, "start" | "end") => ParameterUnit::Pixels,
         (EffectType::FourColorGradient, "point_1" | "point_2" | "point_3" | "point_4") => {
             ParameterUnit::Pixels
@@ -9722,6 +9895,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::WireRemoval => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::RoughenEdges => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -14477,6 +14655,111 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::RoughenEdges => {
+            let edge_type_id = builtin_parameter_id(effect_type, "edge_type");
+            let edge_color_id = builtin_parameter_id(effect_type, "edge_color");
+            let border_id = builtin_parameter_id(effect_type, "border");
+            let sharpness_id = builtin_parameter_id(effect_type, "sharpness");
+            let influence_id = builtin_parameter_id(effect_type, "influence");
+            let scale_id = builtin_parameter_id(effect_type, "scale");
+            let stretch_id = builtin_parameter_id(effect_type, "stretch");
+            let offset_id = builtin_parameter_id(effect_type, "offset");
+            let complexity_id = builtin_parameter_id(effect_type, "complexity");
+            let evolution_id = builtin_parameter_id(effect_type, "evolution");
+            let cycle_evolution_id = builtin_parameter_id(effect_type, "cycle_evolution");
+            let cycle_id = builtin_parameter_id(effect_type, "cycle");
+            let random_seed_id = builtin_parameter_id(effect_type, "random_seed");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let count = |parameter_id: &ParameterId,
+                             name: &str,
+                             fallback: u32|
+                 -> Result<u32, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Int(value)) => u32::try_from(value).map_err(|_| {
+                            invalid(format!(
+                                "roughen edges {name} must be a non-negative integer"
+                            ))
+                        }),
+                        Some(_) => Err(invalid(format!("roughen edges {name} must be an integer"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let edge_type = match effect.evaluate_parameter(&edge_type_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::RoughenEdgesType::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "roughen edges edge type {key} is not a declared option"
+                            ))
+                        })?
+                        .as_menu(),
+                    Some(_) => {
+                        return Err(invalid(
+                            "roughen edges edge type must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::RoughenEdgesType::Roughen.as_menu(),
+                };
+                let edge_color = match effect.evaluate_parameter(&edge_color_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(PropertyValue::DoubleRgb(color)) => {
+                        [color[0] as f32, color[1] as f32, color[2] as f32]
+                    }
+                    Some(_) => {
+                        return Err(invalid(
+                            "roughen edges edge colour must be a colour".to_owned(),
+                        ));
+                    }
+                    None => [0.6, 0.2, 0.0],
+                };
+                let offset = match effect.evaluate_parameter(&offset_id, context.time) {
+                    Some(PropertyValue::Vec2(point)) => [point.x, point.y],
+                    Some(PropertyValue::DoubleVec2(point)) => [point[0] as f32, point[1] as f32],
+                    Some(_) => {
+                        return Err(invalid("roughen edges offset must be a point".to_owned()));
+                    }
+                    None => [0.0, 0.0],
+                };
+                let cycle_evolution =
+                    match effect.evaluate_parameter(&cycle_evolution_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => value,
+                        Some(_) => {
+                            return Err(invalid(
+                                "roughen edges cycle evolution must be a boolean".to_owned(),
+                            ));
+                        }
+                        None => false,
+                    };
+                let grade = crate::RoughenEdgesGrade::new(
+                    edge_type,
+                    edge_color,
+                    effect.evaluate_f32_parameter(&border_id, context.time, 8.0),
+                    effect.evaluate_f32_parameter(&sharpness_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&influence_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&scale_id, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&stretch_id, context.time, 0.0),
+                    offset,
+                    count(
+                        &complexity_id,
+                        "complexity",
+                        crate::ROUGHEN_EDGES_MIN_COMPLEXITY,
+                    )?,
+                    effect.evaluate_f32_parameter(&evolution_id, context.time, 0.0),
+                    cycle_evolution,
+                    count(&cycle_id, "cycle", crate::ROUGHEN_EDGES_MIN_CYCLE)?,
+                    count(&random_seed_id, "random seed", 0)?,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::RoughenEdges { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -14571,6 +14854,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::WireRemoval => "祛线",
         EffectType::Median => "中间值",
         EffectType::SelectiveColor => "可选颜色",
+        EffectType::RoughenEdges => "粗糙边缘",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -15893,6 +16177,7 @@ mod tests {
             EffectType::WireRemoval,
             EffectType::Median,
             EffectType::SelectiveColor,
+            EffectType::RoughenEdges,
             EffectType::ChangeToColor,
             EffectType::FourColorGradient,
         ]
@@ -24206,6 +24491,110 @@ mod tests {
                 &error,
                 EffectGraphBuildError::InvalidAuthorState { effect_key, .. }
                     if effect_key == "builtin.selective_color"
+            ),
+            "{error:?}"
+        );
+    }
+
+    fn roughen_edges_op(graph: &EffectRenderGraph) -> Option<crate::RoughenEdgesGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::RoughenEdges { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_roughen_edges(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::RoughenEdges)
+            .expect("registered roughen edges definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::RoughenEdges.property_path(parameter),
+                value,
+            })
+            .expect("authors roughen edges parameter");
+        effect
+    }
+
+    #[test]
+    fn roughen_edges_defaults_build_one_spatial_stage() {
+        let effect = instantiate_effect_node(EffectType::RoughenEdges)
+            .expect("registered roughen edges definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds roughen edges graph");
+        let stages = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.kind,
+                    EffectGraphNodeKind::UnaryEffect {
+                        op: EffectRenderOp::RoughenEdges { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(stages, 1);
+        let grade = roughen_edges_op(&graph).expect("roughen edges op");
+        assert_eq!(grade.edge_type(), crate::RoughenEdgesType::Roughen);
+        assert_eq!(grade.border(), 8.0);
+        assert_eq!(grade.sharpness(), 1.0);
+        assert_eq!(grade.influence(), 1.0);
+        assert_eq!(grade.scale(), 100.0);
+        assert_eq!(grade.stretch(), 0.0);
+        assert_eq!(grade.offset(), [0.0, 0.0]);
+        assert_eq!(grade.complexity(), 2);
+        assert_eq!(grade.evolution(), 0.0);
+        assert!(!grade.cycle_evolution());
+        assert_eq!(grade.cycle(), 1);
+        assert_eq!(grade.random_seed(), 0);
+        assert!(!grade.is_identity());
+        let op = graph
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. } => Some(op),
+                _ => None,
+            })
+            .expect("the graph keeps the authored operation");
+        assert!(matches!(
+            crate::gpu_pipeline::spatial_pass_for(op),
+            Some(crate::gpu_pipeline::EffectGpuSpatialPass::RoughenEdges { .. })
+        ));
+    }
+
+    #[test]
+    fn roughen_edges_with_zero_border_builds_no_stage() {
+        let effect = author_roughen_edges("border", PropertyValue::Float(0.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds roughen edges graph");
+        assert!(roughen_edges_op(&graph).is_none());
+    }
+
+    #[test]
+    fn roughen_edges_rejects_a_non_finite_parameter() {
+        let effect = instantiate_effect_node(EffectType::RoughenEdges)
+            .expect("registered roughen edges definition");
+        let mut document = serde_json::to_value(&effect).expect("serialize the roughen edges");
+        // Deserialization bypasses authoring validation, so an overflowing
+        // float reaches the builder as an infinity.
+        overwrite_static_value(
+            &mut document,
+            "roughen_edges.border",
+            serde_json::json!({ "Float": 1.0e39 }),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("restore the tampered roughen edges");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a non-finite border must fail closed");
+        assert!(
+            matches!(
+                &error,
+                EffectGraphBuildError::InvalidAuthorState { effect_key, .. }
+                    if effect_key == "builtin.roughen_edges"
             ),
             "{error:?}"
         );

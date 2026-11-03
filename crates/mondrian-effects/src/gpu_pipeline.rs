@@ -107,6 +107,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored wire removal line and controls.
         grade: crate::WireRemovalGrade,
     },
+    /// Fractal growth of the opaque silhouette.
+    RoughenEdges {
+        /// Authored roughen edges parameters.
+        grade: crate::RoughenEdgesGrade,
+    },
     /// Arbitrary three by three convolution.
     Convolution {
         /// Authored convolution parameters.
@@ -230,6 +235,7 @@ impl EffectGpuSpatialPass {
             Self::Warp { .. } => "warp",
             Self::GridWarp { .. } => "grid_warp",
             Self::WireRemoval { .. } => "wire_removal",
+            Self::RoughenEdges { .. } => "roughen_edges",
             Self::Convolution { .. } => "convolution",
             Self::Mirror { .. } => "mirror",
             Self::PolarCoordinates { .. } => "polar_coordinates",
@@ -311,6 +317,8 @@ impl EffectGpuSpatialPass {
             Self::Split { .. } => u32::MAX,
             Self::LinearColorKey { .. } => 0,
             Self::ColorOffset { grade } => grade.halo_pixels(),
+            // The sample can move at most the border away from the pixel.
+            Self::RoughenEdges { grade } => grade.halo_pixels(),
             // The blur window can be as wide as the frame.
             Self::ChannelBlur { .. } => u32::MAX,
             // The window reaches at most the largest authored radius, which the
@@ -367,6 +375,8 @@ impl EffectGpuSpatialPass {
             Self::Split { .. } => u32::MAX,
             Self::LinearColorKey { .. } => 0,
             Self::ColorOffset { grade } => grade.halo_pixels(),
+            // Same reach as the horizontal halo.
+            Self::RoughenEdges { grade } => grade.halo_pixels(),
             // The blur window can be as wide as the frame.
             Self::ChannelBlur { .. } => u32::MAX,
             // Same reach as the horizontal halo.
@@ -638,6 +648,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::WireRemoval { grade } => {
             Some(EffectGpuSpatialPass::WireRemoval { grade: *grade })
+        }
+        EffectRenderOp::RoughenEdges { grade } => {
+            Some(EffectGpuSpatialPass::RoughenEdges { grade: *grade })
         }
         EffectRenderOp::Convolution { grade } => {
             Some(EffectGpuSpatialPass::Convolution { grade: *grade })
@@ -1034,5 +1047,27 @@ mod tests {
         let pass = EffectGpuSpatialPass::DirectionalBlur { length: 10.0, direction_degrees: 90.0 };
         assert_eq!(pass.name(), "directional_blur");
         assert!(pass.vertical_halo() >= 5);
+
+        let pass = EffectGpuSpatialPass::RoughenEdges {
+            grade: crate::RoughenEdgesGrade::new(
+                1,
+                [0.6, 0.2, 0.0],
+                8.0,
+                1.0,
+                1.0,
+                100.0,
+                0.0,
+                [0.0, 0.0],
+                2,
+                0.0,
+                false,
+                1,
+                0,
+            )
+            .expect("valid roughen edges grade"),
+        };
+        assert_eq!(pass.name(), "roughen_edges");
+        assert_eq!(pass.horizontal_halo(), 9);
+        assert_eq!(pass.vertical_halo(), 9);
     }
 }

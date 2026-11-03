@@ -139,6 +139,8 @@ pub enum EffectType {
     Median,
     /// Selective colour: moves CMYK ink inside nine hue and tone ranges.
     SelectiveColor,
+    /// Roughen edges: grows shape edges out along a fractal field.
+    RoughenEdges,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -238,6 +240,7 @@ impl EffectType {
             Self::WireRemoval => "builtin.wire_removal".to_string(),
             Self::Median => "builtin.median".to_string(),
             Self::SelectiveColor => "builtin.selective_color".to_string(),
+            Self::RoughenEdges => "builtin.roughen_edges".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -333,6 +336,7 @@ impl EffectType {
             "builtin.wire_removal" => Self::WireRemoval,
             "builtin.median" => Self::Median,
             "builtin.selective_color" => Self::SelectiveColor,
+            "builtin.roughen_edges" => Self::RoughenEdges,
             other => Self::External(other.to_string()),
         }
     }
@@ -428,6 +432,7 @@ impl EffectType {
             Self::WireRemoval => "祛线",
             Self::Median => "中间值",
             Self::SelectiveColor => "可选颜色",
+            Self::RoughenEdges => "粗糙边缘",
             Self::External(name) => name,
         }
     }
@@ -521,6 +526,7 @@ impl EffectType {
             Self::WireRemoval => vec!["修复"],
             Self::Median => vec!["颜色", "模糊与锐化"],
             Self::SelectiveColor => vec!["颜色", "调色"],
+            Self::RoughenEdges => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -616,6 +622,7 @@ impl EffectType {
             Self::WireRemoval => "wire_removal".to_string(),
             Self::Median => "median".to_string(),
             Self::SelectiveColor => "selective_color".to_string(),
+            Self::RoughenEdges => "roughen_edges".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -960,6 +967,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::WireRemoval => Ok(()),
             Self::Median => Ok(()),
             Self::SelectiveColor => Ok(()),
+            Self::RoughenEdges => Ok(()),
         }
     }
 }
