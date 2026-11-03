@@ -1165,6 +1165,11 @@ pub enum EffectRenderOp {
         /// mode.
         grade: crate::GridGrade,
     },
+    /// Circle and ellipse: paints a pixel-local soft-edged circle.
+    CircleEllipse {
+        /// Authored centre, radius, edge, feathering, colour and blend mode.
+        grade: crate::CircleEllipseGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1391,6 +1396,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("Checkerboard").field("grade", grade).finish()
             }
             Self::Grid { grade } => formatter.debug_struct("Grid").field("grade", grade).finish(),
+            Self::CircleEllipse { grade } => {
+                formatter.debug_struct("CircleEllipse").field("grade", grade).finish()
+            }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
             }
@@ -2204,6 +2212,17 @@ impl EffectRenderOp {
                 grade.blend_mode().hash(state);
                 grade.invert().hash(state);
             }
+            EffectRenderOp::CircleEllipse { grade } => {
+                94u8.hash(state);
+                let (params, color, extra0, extra1) = grade.gpu_controls();
+                for cell in [params, color, extra0, extra1] {
+                    cell.map(f32::to_bits).hash(state);
+                }
+                // `blend_mode` and `invert` live in the uniform header, not in
+                // `gpu_controls`, so the effect cache has to see them here.
+                grade.blend_mode().hash(state);
+                grade.invert().hash(state);
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2486,6 +2505,7 @@ impl EffectRenderOp {
             EffectRenderOp::EyedropperFill { .. } => 5,
             EffectRenderOp::Checkerboard { .. } => 1,
             EffectRenderOp::Grid { .. } => 1,
+            EffectRenderOp::CircleEllipse { .. } => 1,
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -3028,7 +3048,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 93] {
+fn builtin_effect_types() -> [EffectType; 94] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3123,6 +3143,7 @@ fn builtin_effect_types() -> [EffectType; 93] {
         EffectType::EyedropperFill,
         EffectType::Checkerboard,
         EffectType::Grid,
+        EffectType::CircleEllipse,
     ]
 }
 
@@ -9287,6 +9308,135 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::CircleEllipse => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "center",
+                "圆形与椭圆",
+                "中心",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::CIRCLE_ELLIPSE_DEFAULT_CENTER[0],
+                    crate::CIRCLE_ELLIPSE_DEFAULT_CENTER[1],
+                )),
+                Some(-f64::from(crate::CIRCLE_ELLIPSE_MAX_COORDINATE)),
+                Some(f64::from(crate::CIRCLE_ELLIPSE_MAX_COORDINATE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "圆形与椭圆",
+                "半径",
+                PropertyValue::Float(crate::CIRCLE_ELLIPSE_DEFAULT_RADIUS),
+                Some(-f64::from(crate::CIRCLE_ELLIPSE_MAX_RADIUS)),
+                Some(f64::from(crate::CIRCLE_ELLIPSE_MAX_RADIUS)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge",
+                "圆形与椭圆",
+                "边缘",
+                PropertyValue::Float(crate::CIRCLE_ELLIPSE_DEFAULT_EDGE),
+                Some(f64::from(crate::CIRCLE_ELLIPSE_MIN_EDGE)),
+                Some(f64::from(crate::CIRCLE_ELLIPSE_MAX_EDGE)),
+                Some(1.0),
+            );
+            // Lazy parameter: the schema exposes it and the graph builder reads
+            // it, but it never reaches the grade, the uniform or the cache key.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "context_slider",
+                "圆形与椭圆",
+                "上下文滑块",
+                PropertyValue::Float(crate::CIRCLE_ELLIPSE_DEFAULT_CONTEXT_SLIDER),
+                Some(0.0),
+                Some(f64::from(crate::CIRCLE_ELLIPSE_MAX_CONTEXT_SLIDER)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather_outer",
+                "圆形与椭圆",
+                "外侧羽化",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(f64::from(crate::CIRCLE_ELLIPSE_MAX_FEATHER)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather_inner",
+                "圆形与椭圆",
+                "内侧羽化",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(f64::from(crate::CIRCLE_ELLIPSE_MAX_FEATHER)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "圆形与椭圆",
+                "反转",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color",
+                "圆形与椭圆",
+                "颜色",
+                PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "圆形与椭圆",
+                "不透明度",
+                PropertyValue::Float(crate::CIRCLE_ELLIPSE_DEFAULT_OPACITY),
+                Some(0.0),
+                Some(f64::from(crate::CIRCLE_ELLIPSE_DEFAULT_OPACITY)),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "blend_mode",
+                "圆形与椭圆",
+                "混合模式",
+                "normal",
+                mondrian_core::display_labels::blend_mode_options()
+                    .iter()
+                    .filter_map(|option| {
+                        let mode = option.mode?;
+                        if matches!(mode, mondrian_core::BlendMode::Dissolve) {
+                            return None;
+                        }
+                        let key = crate::fractal_noise::blend_mode_key(mode);
+                        Some(ParameterEnumOption::new(
+                            key,
+                            option.label,
+                            format!("mondrian.effect.circle_ellipse.blend_mode.{key}"),
+                        ))
+                    })
+                    .collect(),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -9835,6 +9985,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             | "feather_height",
         ) => ParameterUnit::Pixels,
         (EffectType::Grid, "opacity") => ParameterUnit::Percent,
+        (
+            EffectType::CircleEllipse,
+            "center" | "radius" | "edge" | "feather_outer" | "feather_inner",
+        ) => ParameterUnit::Pixels,
+        (EffectType::CircleEllipse, "opacity") => ParameterUnit::Percent,
         (EffectType::ColorOffset, "red_phase" | "green_phase" | "blue_phase") => {
             ParameterUnit::Pixels
         }
@@ -10231,6 +10386,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Grid => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::CircleEllipse => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -14723,6 +14882,106 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::CircleEllipse => {
+            let center_id = builtin_parameter_id(effect_type, "center");
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let edge_id = builtin_parameter_id(effect_type, "edge");
+            let context_slider_id = builtin_parameter_id(effect_type, "context_slider");
+            let feather_outer_id = builtin_parameter_id(effect_type, "feather_outer");
+            let feather_inner_id = builtin_parameter_id(effect_type, "feather_inner");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            let colour_id = builtin_parameter_id(effect_type, "color");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let blend_mode_id = builtin_parameter_id(effect_type, "blend_mode");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let point = |parameter_id: &ParameterId,
+                             name: &str,
+                             fallback: [f32; 2]|
+                 -> Result<[f32; 2], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Vec2(point)) => Ok([point.x, point.y]),
+                        Some(PropertyValue::DoubleVec2(point)) => {
+                            Ok([point[0] as f32, point[1] as f32])
+                        }
+                        Some(_) => Err(invalid(format!("circle {name} must be a point"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let invert = match effect.evaluate_parameter(&invert_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid("circle invert must be a boolean".to_owned()));
+                    }
+                    None => false,
+                };
+                let colour = match effect.evaluate_parameter(&colour_id, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    Some(_) => {
+                        return Err(invalid("circle colour must be a colour".to_owned()));
+                    }
+                    None => [1.0, 1.0, 1.0],
+                };
+                let blend_mode = match effect.evaluate_parameter(&blend_mode_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::fractal_noise::blend_mode_from_key(&key).ok_or_else(|| {
+                            invalid(format!("circle blend mode {key} is not a declared option"))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid(
+                            "circle blend mode must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => mondrian_core::BlendMode::Normal,
+                };
+                // Lazy context slider (design R3): read it so animations on the
+                // parameter stay well-formed, then drop it. It deliberately does
+                // not reach the grade, the uniform or the effect cache key.
+                let context_slider = effect.evaluate_f32_parameter(
+                    &context_slider_id,
+                    context.time,
+                    crate::CIRCLE_ELLIPSE_DEFAULT_CONTEXT_SLIDER,
+                );
+                debug_assert!(
+                    (0.0..=crate::CIRCLE_ELLIPSE_MAX_CONTEXT_SLIDER).contains(&context_slider),
+                    "circle context slider left its authoring range"
+                );
+                let _ = context_slider;
+                let grade = crate::CircleEllipseGrade::new(
+                    point(&center_id, "centre", crate::CIRCLE_ELLIPSE_DEFAULT_CENTER)?,
+                    effect.evaluate_f32_parameter(
+                        &radius_id,
+                        context.time,
+                        crate::CIRCLE_ELLIPSE_DEFAULT_RADIUS,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &edge_id,
+                        context.time,
+                        crate::CIRCLE_ELLIPSE_DEFAULT_EDGE,
+                    ),
+                    effect.evaluate_f32_parameter(&feather_outer_id, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&feather_inner_id, context.time, 0.0),
+                    invert,
+                    colour,
+                    effect.evaluate_f32_parameter(
+                        &opacity_id,
+                        context.time,
+                        crate::CIRCLE_ELLIPSE_DEFAULT_OPACITY,
+                    ),
+                    blend_mode,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::CircleEllipse { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::ColorBalance => {
             let shadow_red_id = builtin_parameter_id(effect_type, "shadow_red");
             let shadow_green_id = builtin_parameter_id(effect_type, "shadow_green");
@@ -15589,6 +15848,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::EyedropperFill => "吸管填充",
         EffectType::Checkerboard => "棋盘",
         EffectType::Grid => "网格",
+        EffectType::CircleEllipse => "圆形与椭圆",
         EffectType::ChangeToColor => "定向改色",
         EffectType::External(_) => "外部效果",
     }
@@ -16917,6 +17177,7 @@ mod tests {
             EffectType::EyedropperFill,
             EffectType::Checkerboard,
             EffectType::Grid,
+            EffectType::CircleEllipse,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -25304,6 +25565,181 @@ mod tests {
             format!("{error:?}").contains("outside [1, 4000]"),
             "{error:?}"
         );
+    }
+
+    fn circle_ellipse_op(graph: &EffectRenderGraph) -> Option<crate::CircleEllipseGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::CircleEllipse { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::CircleEllipse { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_circle_ellipse(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::CircleEllipse)
+            .expect("the circle effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::CircleEllipse.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the circle parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn circle_ellipse_defaults_match_the_dump() {
+        let effect_type = EffectType::CircleEllipse;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("center", "中心", ParameterUnit::Pixels),
+            ("radius", "半径", ParameterUnit::Pixels),
+            ("edge", "边缘", ParameterUnit::Pixels),
+            ("context_slider", "上下文滑块", ParameterUnit::Unitless),
+            ("feather_outer", "外侧羽化", ParameterUnit::Pixels),
+            ("feather_inner", "内侧羽化", ParameterUnit::Pixels),
+            ("invert", "反转", ParameterUnit::Unitless),
+            ("color", "颜色", ParameterUnit::Unitless),
+            ("opacity", "不透明度", ParameterUnit::Percent),
+            ("blend_mode", "混合模式", ParameterUnit::Unitless),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("圆形与椭圆")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+
+        let effect = instantiate_effect_node(EffectType::CircleEllipse)
+            .expect("the circle effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default circle should compile");
+        let grade = circle_ellipse_op(&graph).expect("the default parameters emit the generator");
+        assert_eq!(
+            grade.gpu_controls(),
+            (
+                [128.0, 128.0, 75.0, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+                [0.0; 4],
+                [0.0; 4],
+            )
+        );
+        assert_eq!(grade.center(), [128.0, 128.0]);
+        assert_eq!(grade.radius(), 75.0);
+        assert_eq!(grade.edge(), 1.0);
+        assert_eq!(grade.blend_mode(), mondrian_core::BlendMode::Normal);
+        assert!(!grade.invert());
+        assert!(!grade.is_identity());
+        let compiled = crate::compile_reference_render_graph(graph).expect("compile the generator");
+        assert_eq!(
+            compiled.execution_envelope().aggregate().roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal
+        );
+    }
+
+    #[test]
+    fn circle_ellipse_builder_appends_the_generator() {
+        let effect = instantiate_effect_node(EffectType::CircleEllipse)
+            .expect("the circle effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default circle should compile");
+        let mut effect_nodes = 0;
+        for node in &graph.nodes {
+            if let EffectGraphNodeKind::UnaryEffect { .. }
+            | EffectGraphNodeKind::DomainEffect { .. } = &node.kind
+            {
+                effect_nodes += 1;
+            }
+        }
+        assert_eq!(effect_nodes, 1);
+
+        // Zero opacity is the only identity, so the builder elides the op.
+        let effect = author_circle_ellipse(&[("opacity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("zero opacity compiles");
+        assert!(circle_ellipse_op(&graph).is_none());
+
+        // A zero radius is still a visible half-coverage dot: an animation
+        // pulling the radius to zero must not make the generator disappear.
+        let effect = author_circle_ellipse(&[("radius", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a zero radius compiles");
+        let grade = circle_ellipse_op(&graph).expect("a zero radius is not an identity");
+        assert_eq!(grade.radius(), 0.0);
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn circle_ellipse_context_slider_is_lazy() {
+        use std::hash::Hasher as _;
+
+        let default_effect = author_circle_ellipse(&[]);
+        let default_graph = build_effect_render_graph(&[default_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default circle should compile");
+        let default_grade =
+            circle_ellipse_op(&default_graph).expect("the default parameters emit the generator");
+
+        // The lazy slider is part of the schema, but it may change neither the
+        // uniforms nor the effect cache key.
+        let slid_effect =
+            author_circle_ellipse(&[("context_slider", PropertyValue::Float(9_999.0))]);
+        let slid_graph = build_effect_render_graph(&[slid_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the lazy slider does not change the graph");
+        let slid_grade = circle_ellipse_op(&slid_graph).expect("the generator is still emitted");
+        assert_eq!(slid_grade.gpu_controls(), default_grade.gpu_controls());
+
+        let hash_of = |grade: crate::CircleEllipseGrade| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            EffectRenderOp::CircleEllipse { grade }.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash_of(slid_grade), hash_of(default_grade));
+
+        // The same comparator does see a real edit, including state that only
+        // lives in the uniform header (`invert`) and the blend mode.
+        let bigger_effect = author_circle_ellipse(&[("radius", PropertyValue::Float(90.0))]);
+        let bigger_graph = build_effect_render_graph(&[bigger_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a bigger circle compiles");
+        let bigger_grade =
+            circle_ellipse_op(&bigger_graph).expect("the generator is still emitted");
+        assert_ne!(hash_of(bigger_grade), hash_of(default_grade));
+
+        let inverted_effect = author_circle_ellipse(&[("invert", PropertyValue::Bool(true))]);
+        let inverted_graph =
+            build_effect_render_graph(&[inverted_effect], tt(0), TEST_WORKING_SPACE)
+                .expect("an inverted circle compiles");
+        let inverted_grade =
+            circle_ellipse_op(&inverted_graph).expect("the generator is still emitted");
+        assert_eq!(inverted_grade.gpu_controls(), default_grade.gpu_controls());
+        assert_ne!(hash_of(inverted_grade), hash_of(default_grade));
+
+        let blended_effect =
+            author_circle_ellipse(&[("blend_mode", PropertyValue::Enum("screen".to_owned()))]);
+        let blended_graph = build_effect_render_graph(&[blended_effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a blended circle compiles");
+        let blended_grade =
+            circle_ellipse_op(&blended_graph).expect("the generator is still emitted");
+        assert_eq!(blended_grade.gpu_controls(), default_grade.gpu_controls());
+        assert_ne!(hash_of(blended_grade), hash_of(default_grade));
     }
 
     fn color_balance_op(graph: &EffectRenderGraph) -> Option<crate::ColorBalanceGrade> {

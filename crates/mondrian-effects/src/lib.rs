@@ -27,6 +27,7 @@ pub mod channel_mixer;
 pub mod checkerboard;
 pub mod choker;
 pub mod chroma_key;
+pub mod circle_ellipse;
 pub mod color_balance;
 pub mod color_curves;
 pub mod color_emboss;
@@ -189,6 +190,13 @@ pub use brush_strokes::{
 pub use bulge::{
     bulge_frame_f32, BulgeError, BulgeGrade, BULGE_MAX_HEIGHT, BULGE_MAX_RADIUS_PIXELS,
     BULGE_MAX_TAPER_PIXELS, BULGE_MIN_HEIGHT, BULGE_MIN_RADIUS_PIXELS, BULGE_MIN_TAPER_PIXELS,
+};
+pub use circle_ellipse::{
+    circle_ellipse_frame_f32, circle_ellipse_pixel, CircleEllipseControls, CircleEllipseError,
+    CircleEllipseGrade, CIRCLE_ELLIPSE_DEFAULT_CENTER, CIRCLE_ELLIPSE_DEFAULT_CONTEXT_SLIDER,
+    CIRCLE_ELLIPSE_DEFAULT_EDGE, CIRCLE_ELLIPSE_DEFAULT_OPACITY, CIRCLE_ELLIPSE_DEFAULT_RADIUS,
+    CIRCLE_ELLIPSE_MAX_CONTEXT_SLIDER, CIRCLE_ELLIPSE_MAX_COORDINATE, CIRCLE_ELLIPSE_MAX_EDGE,
+    CIRCLE_ELLIPSE_MAX_FEATHER, CIRCLE_ELLIPSE_MAX_RADIUS, CIRCLE_ELLIPSE_MIN_EDGE,
 };
 pub use color_offset::{
     color_offset_frame_f32, ColorOffsetError, ColorOffsetGrade, ColorOffsetOverflow,

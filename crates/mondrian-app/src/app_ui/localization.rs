@@ -358,6 +358,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "吸管填充" => Some("parameter-group-eyedropper-fill"),
         "棋盘" => Some("parameter-group-checkerboard"),
         "网格" => Some("parameter-group-grid"),
+        "圆形与椭圆" => Some("parameter-group-circle-ellipse"),
         _ => None,
     }
 }

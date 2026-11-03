@@ -168,6 +168,10 @@ pub enum EffectGpuPointOp {
     Grid {
         grade: crate::GridGrade,
     },
+    /// Circle and ellipse: paints a pixel-local soft-edged circle.
+    CircleEllipse {
+        grade: crate::CircleEllipseGrade,
+    },
     /// Color balance: shifts the shadow, midtone, and highlight colours apart.
     ColorBalance {
         grade: crate::ColorBalanceGrade,
@@ -901,6 +905,9 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::Checkerboard { grade: *grade })
         }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
+        EffectRenderOp::CircleEllipse { grade } => {
+            Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
+        }
         EffectRenderOp::ColorBalance { grade } => {
             Ok(EffectGpuPointOp::ColorBalance { grade: *grade })
         }
@@ -1011,6 +1018,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
         EffectRenderOp::Grid { .. } => "grid",
+        EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::ColorBalance { .. } => "color_balance",
         EffectRenderOp::SpillSuppressor { .. } => "spill_suppressor",
         EffectRenderOp::ChannelBlur { .. } => "channel_blur",
