@@ -1353,6 +1353,9 @@ fn effects_author_coverage() -> bool {
         // The grid is the same kind of generator: it authors coverage from the
         // authored border, so a transparent source pixel must not skip it.
         if (effect.header.x == 37u) { return true; }
+        // The circle is another generator: it authors coverage from the signed
+        // distance to the radius, so a transparent source pixel must not skip it.
+        if (effect.header.x == 38u) { return true; }
     }
     return false;
 }
@@ -2179,6 +2182,38 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 vec4<f32>(effect.color.xyz, alpha),
                 1.0,
                 effect.header.z,
+                index,
+            );
+        } else if (effect.header.x == 38u) {
+            // `CircleEllipseGrade`: params is [centre.x, centre.y, radius, edge],
+            // colour is [rgb, opacity] and extra0 is [feather outer, feather
+            // inner, 0, 0]. header.y selects the blend mode and header.w inverts
+            // the coverage. The generator reads no source pixel: the signed
+            // distance from the pixel centre decides both ramps, and the
+            // geometric radius sits at exactly half coverage.
+            let centre = floor(max(position, vec2<f32>(0.0))) + vec2<f32>(0.5);
+            let offset = centre - effect.params.xy;
+            let distance = sqrt(offset.x * offset.x + offset.y * offset.y);
+            let radius = abs(effect.params.z);
+            let half_edge = max(effect.params.w, 0.0) * 0.5;
+            let inside_width = max(effect.extra0.y, half_edge);
+            let outside_width = max(effect.extra0.x, half_edge);
+            let signed_distance = distance - radius;
+            var coverage = 0.0;
+            if (signed_distance <= 0.0) {
+                coverage = 0.5 + 0.5 * clamp(-signed_distance / inside_width, 0.0, 1.0);
+            } else {
+                coverage = 0.5 * (1.0 - clamp(signed_distance / outside_width, 0.0, 1.0));
+            }
+            if (effect.header.w != 0u) {
+                coverage = 1.0 - coverage;
+            }
+            let alpha = coverage * clamp(effect.color.w, 0.0, 1.0);
+            pixel = blend_straight_alpha(
+                pixel,
+                vec4<f32>(effect.color.xyz, alpha),
+                1.0,
+                effect.header.y,
                 index,
             );
         } else if (effect.header.x == 34u) {
@@ -6070,6 +6105,18 @@ fn effect_uniforms_for_ops(
                         grade.blend_mode_index(),
                         u32::from(grade.invert()),
                     ],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::CircleEllipse { grade } => {
+                let (params, color, extra0, extra1) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [38, grade.blend_mode_index(), 0, u32::from(grade.invert())],
                     params,
                     color,
                     extra0,
@@ -10864,6 +10911,232 @@ mod tests {
         assert!(
             report.within_budget,
             "GPU grid coverage budget exceeded: {report:#?}"
+        );
+    }
+
+    /// Renders one circle point op on the CPU reference and the fused GPU pass,
+    /// and returns both frames.
+    ///
+    /// Every caller pins a zero-coverage input pixel: the generator has to paint
+    /// it, which only happens because `effects_author_coverage` answers true for
+    /// kind 38.
+    fn circle_ellipse_parity_pixels(
+        context: &crate::GpuContext,
+        width: u32,
+        height: u32,
+        data: &[[f32; 4]],
+        grade: mondrian_effects::CircleEllipseGrade,
+    ) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: data.to_vec(),
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::CircleEllipse { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            context,
+            &[layer],
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        (expected.pixels().to_vec(), actual)
+    }
+
+    #[tokio::test]
+    async fn gpu_circle_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::CircleEllipseGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU circle parity test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        // A fully transparent layer: without the author-coverage registration the
+        // fused pass would short-circuit every pixel and return transparent black.
+        let data = vec![[0.0; 4]; (width * height) as usize];
+
+        // The centre lands on the centre of pixel (3, 2): radius 2.5 with edge 1
+        // gives a two-pixel ramp around the radius.
+        let grade = CircleEllipseGrade::new(
+            [3.5, 2.5],
+            2.5,
+            1.0,
+            0.0,
+            0.0,
+            false,
+            [1.0, 1.0, 1.0],
+            100.0,
+            BlendMode::Normal,
+        )
+        .expect("valid circle grade");
+        let (expected_pixels, actual) =
+            circle_ellipse_parity_pixels(&context, width, height, &data, grade);
+        // The centre pixel is fully covered, and the pixel whose centre is three
+        // units away sits two ramp widths outside the radius: fully transparent.
+        assert_eq!(actual[2 * 8 + 3], [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(actual[2 * 8 + 6], [0.0; 4]);
+        assert_eq!(expected_pixels[2 * 8 + 3], [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(expected_pixels[2 * 8 + 6], [0.0; 4]);
+        // The ramp really is a ramp: the diagonal pixel is partially covered.
+        assert!(
+            actual[4 * 8 + 5][3] > 0.0 && actual[4 * 8 + 5][3] < 1.0,
+            "the edge ramp must be partial, got {:?}",
+            actual[4 * 8 + 5]
+        );
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU circle accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_circle_feather_and_blend_match_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::CircleEllipseGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU circle feather test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 13_u32;
+        // A half-transparent base exercises the straight-alpha blend path.
+        let data = vec![[0.2, 0.3, 0.4, 0.5]; (width * height) as usize];
+
+        let grade = CircleEllipseGrade::new(
+            [8.5, 6.5],
+            4.0,
+            1.0,
+            3.0,
+            2.0,
+            false,
+            [0.9, 0.6, 0.3],
+            60.0,
+            BlendMode::Multiply,
+        )
+        .expect("valid circle grade");
+        let (expected_pixels, actual) =
+            circle_ellipse_parity_pixels(&context, width, height, &data, grade);
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU circle feather accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_circle_paints_transparent_layers() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::CircleEllipseGrade;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU circle coverage test: no GPU adapter available");
+            return;
+        };
+        let width = 5_u32;
+        let height = 5_u32;
+        // A fully transparent layer: without the author-coverage registration the
+        // fused pass would skip every pixel and return transparent black.
+        let data = vec![[0.0; 4]; (width * height) as usize];
+
+        let grade = CircleEllipseGrade::new(
+            [2.5, 2.5],
+            2.0,
+            1.0,
+            0.0,
+            0.0,
+            true,
+            [1.0, 1.0, 1.0],
+            100.0,
+            BlendMode::Normal,
+        )
+        .expect("valid inverted circle grade");
+        let (expected_pixels, actual) =
+            circle_ellipse_parity_pixels(&context, width, height, &data, grade);
+        // Inverted, the centre is empty and the far corner is fully covered.
+        assert_eq!(actual[2 * 5 + 2], [0.0; 4]);
+        assert_eq!(actual[0], [1.0, 1.0, 1.0, 1.0]);
+        assert!(
+            actual.iter().any(|pixel| *pixel != [0.0; 4]),
+            "the transparent frame came back empty"
+        );
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU circle coverage budget exceeded: {report:#?}"
         );
     }
 
