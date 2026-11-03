@@ -83,9 +83,11 @@ pub(crate) struct EffectSpatialGpu {
     minimax: wgpu::RenderPipeline,
     channel_blur: wgpu::RenderPipeline,
     median: wgpu::RenderPipeline,
+    selective_color: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
+    selective_color_bindings: wgpu::BindGroupLayout,
 }
 
 impl EffectSpatialGpu {
@@ -1481,6 +1483,79 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Selective colour needs a 160-byte payload: sixteen control bytes and
+        // the nine folded delta rows. The shared uniform struct is far too
+        // small, so the stage gets its own shader module, bind group layout, and
+        // uniform instead of another `extra` vector.
+        let selective_color_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.effect-spatial.selective-color-shader"),
+            source: wgpu::ShaderSource::Wgsl(SPATIAL_SELECTIVE_COLOR_SHADER.into()),
+        });
+        let selective_color_bindings =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mondrian.effect-spatial.selective-color-bindings"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                SelectiveColorUniform,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let selective_color_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("mondrian.effect-spatial.selective-color-layout"),
+                bind_group_layouts: &[Some(&selective_color_bindings)],
+                immediate_size: 0,
+            });
+        let selective_color = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.selective-color"),
+            layout: Some(&selective_color_layout),
+            vertex: wgpu::VertexState {
+                module: &selective_color_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &selective_color_shader,
+                entry_point: Some("fs_selective_color"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -1524,9 +1599,11 @@ impl EffectSpatialGpu {
             minimax,
             channel_blur,
             median,
+            selective_color,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
+            selective_color_bindings,
         }
     }
 
@@ -1915,6 +1992,30 @@ impl EffectSpatialGpu {
         self.record_fractal_noise_pass(device, encoder, &input_view, &output_view, uniform);
         Ok(destination.clone())
     }
+    /// Records the selective colour pass.
+    ///
+    /// The kernel is a per-pixel point that reads no neighbour, so one
+    /// full-screen draw covers the whole frame.
+    pub(crate) fn record_selective_color(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::SelectiveColorGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let (deltas, method) = grade.gpu_controls();
+        let uniform = SelectiveColorUniform { control: [method, 0, 0, 0], deltas };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_selective_color_pass(device, encoder, &input_view, &output_view, &uniform);
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -2063,6 +2164,9 @@ impl EffectSpatialGpu {
                     Err(EffectSpatialGpuError::UnsupportedPass("median_radius"))
                 }
             }
+            // The dedicated pass writes the whole frame in one full-screen
+            // draw, so the scratch pool needs the source and the destination.
+            EffectGpuSpatialPass::SelectiveColor { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -2466,6 +2570,18 @@ impl EffectSpatialGpu {
                     device,
                     encoder,
                     &uniform,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::SelectiveColor { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_selective_color(
+                    device,
+                    encoder,
+                    *grade,
                     source,
                     destination,
                     width,
@@ -3207,6 +3323,53 @@ impl EffectSpatialGpu {
         pass.draw(0..4, 0..1);
     }
 
+    fn record_selective_color_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        uniforms: &SelectiveColorUniform,
+    ) {
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mondrian.effect-spatial.selective-color-uniforms"),
+            contents: bytemuck::bytes_of(uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian.effect-spatial.selective-color-bind-group"),
+            layout: &self.selective_color_bindings,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(input),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.effect-spatial.selective-color-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.selective_color);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..4, 0..1);
+    }
     /// Records the three-pass deband chain.
     ///
     /// The horizontal and vertical box blur passes reuse [`Self::box_blur`] and
@@ -4220,6 +4383,18 @@ struct FractalNoiseUniform {
     extra5: [f32; 4],
 }
 
+/// The dedicated uniform payload of the selective colour pass.
+///
+/// Merged into [`SpatialPassUniform`] this would need ten cells, so the stage
+/// carries its own struct and bind group layout instead.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SelectiveColorUniform {
+    /// `x` is the method menu (1 relative, 2 absolute); the rest is reserved.
+    control: [u32; 4],
+    /// The nine folded CMYK delta rows, in range order.
+    deltas: [[f32; 4]; 9],
+}
 const SPATIAL_EFFECT_SHADER: &str = r#"
 struct Uniforms {
     size: vec4<f32>,
@@ -6830,6 +7005,140 @@ fn fs_fractal_noise(@builtin(position) position: vec4<f32>) -> @location(0) vec4
 }
 "#;
 
+/// The selective colour pass.
+///
+/// The stage needs one hundred and sixty bytes of parameters, more than the
+/// shared spatial uniform carries, so it ships its own uniform struct, its own
+/// bind group layout, and its own entry point. The arithmetic mirrors
+/// `mondrian_effects::selective_color` statement for statement, in the same
+/// order, so the CPU and the GPU resolve the same ink shift.
+const SPATIAL_SELECTIVE_COLOR_SHADER: &str = r#"
+struct SelectiveColorUniform {
+    control: vec4<u32>,
+    deltas: array<vec4<f32>, 9>,
+};
+
+@group(0) @binding(0) var sc_src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> sc: SelectiveColorUniform;
+
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(-1.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    var out: VsOut;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    return out;
+}
+
+fn sc_smoothstep01(value: f32) -> f32 {
+    let clamped = clamp(value, 0.0, 1.0);
+    return clamped * clamped * (3.0 - 2.0 * clamped);
+}
+
+fn sc_hue(rgb: vec3<f32>, max_channel: f32, chroma: f32) -> f32 {
+    if (chroma <= 0.0) {
+        return 0.0;
+    }
+    var hue: f32;
+    if (max_channel == rgb.r) {
+        hue = 60.0 * ((rgb.g - rgb.b) / chroma);
+    } else if (max_channel == rgb.g) {
+        hue = 60.0 * ((rgb.b - rgb.r) / chroma + 2.0);
+    } else {
+        hue = 60.0 * ((rgb.r - rgb.g) / chroma + 4.0);
+    }
+    if (hue < 0.0) {
+        hue = hue + 360.0;
+    }
+    return hue;
+}
+
+fn sc_tent(hue: f32, centre: f32) -> f32 {
+    var distance = hue - centre;
+    distance = distance - 360.0 * round(distance / 360.0);
+    return max(0.0, 1.0 - abs(distance) / 60.0);
+}
+
+fn sc_relative(value: f32, delta: f32) -> f32 {
+    if (delta >= 0.0) {
+        return value + delta * (1.0 - value);
+    }
+    return value * (1.0 + delta);
+}
+
+fn sc_load(pixel: vec2<i32>) -> vec4<f32> {
+    let size = vec2<i32>(textureDimensions(sc_src));
+    let clamped = clamp(pixel, vec2<i32>(0, 0), size - vec2<i32>(1, 1));
+    return textureLoad(sc_src, clamped, 0);
+}
+
+@fragment
+fn fs_selective_color(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let source = sc_load(vec2<i32>(position.xy));
+    if (source.a <= 0.0) {
+        return source;
+    }
+    let rgb = source.rgb;
+    let max_channel = max(rgb.r, max(rgb.g, rgb.b));
+    let min_channel = min(rgb.r, min(rgb.g, rgb.b));
+    let chroma = max_channel - min_channel;
+    let luma = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+    let gate = sc_smoothstep01((chroma - 0.02) / 0.08);
+    let hue = sc_hue(rgb, max_channel, chroma);
+    let white = sc_smoothstep01((luma - 0.5) / 0.5);
+    let black = sc_smoothstep01((0.5 - luma) / 0.5);
+
+    var weights: array<f32, 9>;
+    weights[0] = gate * sc_tent(hue, 0.0);
+    weights[1] = gate * sc_tent(hue, 60.0);
+    weights[2] = gate * sc_tent(hue, 120.0);
+    weights[3] = gate * sc_tent(hue, 180.0);
+    weights[4] = gate * sc_tent(hue, 240.0);
+    weights[5] = gate * sc_tent(hue, 300.0);
+    weights[6] = (1.0 - gate) * white;
+    weights[7] = (1.0 - gate) * (1.0 - white - black);
+    weights[8] = (1.0 - gate) * black;
+
+    var delta = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    for (var index: i32 = 0; index < 9; index = index + 1) {
+        delta = delta + weights[index] * sc.deltas[index];
+    }
+
+    let safe = max(max_channel, 0.000001);
+    let cmyk = vec4<f32>(
+        (safe - rgb.r) / safe,
+        (safe - rgb.g) / safe,
+        (safe - rgb.b) / safe,
+        1.0 - safe,
+    );
+    var ink: vec4<f32>;
+    if (sc.control.x == 1u) {
+        ink = vec4<f32>(
+            sc_relative(cmyk.x, delta.x),
+            sc_relative(cmyk.y, delta.y),
+            sc_relative(cmyk.z, delta.z),
+            sc_relative(cmyk.w, delta.w),
+        );
+    } else {
+        ink = cmyk + delta;
+    }
+    let shade = 1.0 - ink.w;
+    let graded = vec3<f32>(
+        clamp(shade * (1.0 - ink.x), 0.0, 1.0),
+        clamp(shade * (1.0 - ink.y), 0.0, 1.0),
+        clamp(shade * (1.0 - ink.z), 0.0, 1.0),
+    );
+    return vec4<f32>(graded, source.a);
+}
+"#;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7625,8 +7934,19 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         // first so every later stage consumes its quantised output, and radius 2
         // stays inside the GPU cap.
         let median = mondrian_effects::MedianGrade::new(2.0, 0.0).expect("valid median grade");
+        // Route a reds tint through the stage's own 160-byte uniform and private
+        // shader module, so the chain also proves the dedicated bind group layout
+        // records beside the shared one.
+        let selective_color = mondrian_effects::SelectiveColorGrade::new(
+            1,
+            1,
+            [0.0, 0.0, 0.0, 25.0],
+            [[40.0, 0.0, 0.0, 0.0]; 9],
+        )
+        .expect("valid selective colour grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::Median { grade: median },
+            mondrian_effects::EffectGpuSpatialPass::SelectiveColor { grade: selective_color },
             mondrian_effects::EffectGpuSpatialPass::BoxBlur {
                 radius: 1.5,
                 iterations: 1,
@@ -7656,11 +7976,15 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 22, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 23, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::median_frame_f32(
             &mut cpu, width, height, &median
+        ));
+        assert!(mondrian_effects::selective_color_frame_f32(
+            &mut cpu,
+            &selective_color,
         ));
         assert!(mondrian_effects::box_blur_frame_f32(
             &mut cpu,
@@ -11062,6 +11386,132 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 height,
             )
             .expect_err("a missing scratch texture cannot run wire removal");
+        assert!(
+            matches!(error, EffectSpatialGpuError::EmptyFrame),
+            "unexpected error: {error:?}"
+        );
+    }
+    #[test]
+    fn gpu_selective_color_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU selective colour parity test: no GPU adapter available");
+            return;
+        };
+        // Frame one: one block per colour family plus a transparent pixel, so the
+        // hue tents, the chroma gate, and the alpha passthrough all run.
+        let blocks = [
+            [1.0_f32, 0.0, 0.0, 1.0],
+            [1.0, 0.5, 0.0, 1.0],
+            [0.5, 0.5, 0.5, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.4, 0.2, 0.9, 0.0],
+        ];
+        let block_frame: Vec<[f32; 4]> = blocks.into_iter().cycle().take(20).collect();
+        let block_grade =
+            mondrian_effects::SelectiveColorGrade::new(1, 1, [0.0; 4], [[50.0, 0.0, 0.0, 0.0]; 9])
+                .expect("valid reds relative selective colour grade");
+
+        // Frame two: a gradient with a fully transparent row and a yellow shift
+        // authored in absolute mode, so the additive ink path runs.
+        let mut gradient_frame = Vec::new();
+        for y in 0..3 {
+            for x in 0..7 {
+                let coverage = if y == 2 { 0.0 } else { 1.0 };
+                gradient_frame.push([
+                    x as f32 / 6.0,
+                    y as f32 / 2.0,
+                    1.0 - x as f32 / 6.0,
+                    coverage,
+                ]);
+            }
+        }
+        let mut blue_deltas = [[0.0_f32; 4]; 9];
+        blue_deltas[4] = [0.0, 0.0, -40.0, 0.0];
+        let gradient_grade =
+            mondrian_effects::SelectiveColorGrade::new(2, 5, [0.0; 4], blue_deltas)
+                .expect("valid blues absolute selective colour grade");
+
+        // Frame three: out-of-range samples plus a near-neutral highlight and a
+        // near-neutral clip, so the tone ranges and the unclamped CMYK round trip
+        // are both compared. The single output clamp is what keeps them finite.
+        let mut hdr_frame = Vec::new();
+        for index in 0..16 {
+            let x = index % 4;
+            let y = index / 4;
+            hdr_frame.push([1.5 + 0.1 * x as f32, -0.2 - 0.05 * y as f32, 0.5, 1.0]);
+        }
+        hdr_frame[14] = [1.55, 1.552, 1.548, 1.0];
+        hdr_frame[15] = [-0.20, -0.19, -0.21, 1.0];
+        let mut neutral_deltas = [[0.0_f32; 4]; 9];
+        neutral_deltas[7] = [0.0, 0.0, 0.0, 100.0];
+        let hdr_grade = mondrian_effects::SelectiveColorGrade::new(1, 8, [0.0; 4], neutral_deltas)
+            .expect("valid neutrals relative selective colour grade");
+
+        let cases = [
+            ("blocks", 5_u32, 4_u32, block_frame, block_grade),
+            ("gradient", 7, 3, gradient_frame, gradient_grade),
+            ("hdr", 4, 4, hdr_frame, hdr_grade),
+        ];
+        for (label, width, height, pixels, grade) in cases {
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::selective_color_frame_f32(
+                &mut cpu, &grade
+            ));
+
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.selective-color-encoder"),
+                });
+            let output = executor
+                .record_selective_color(
+                    &context.device,
+                    &mut encoder,
+                    grade,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded selective colour");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    // The shader mirrors the kernel statement for statement; the
+                    // only divergence left is fused multiply-add selection inside
+                    // the adapter's float units, so 1e-4 absolute covers the ink
+                    // round trip without hiding a formula change.
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "selective colour {label} pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+
+        // One pass needs exactly one scratch raster.
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &vec![[0.0_f32; 4]; 20], 5, 4);
+        let none = scratch(&context, 5, 4, 0);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.selective-color-geometry-encoder"),
+        });
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &mondrian_effects::EffectGpuSpatialPass::SelectiveColor { grade: block_grade },
+                &source,
+                &none,
+                5,
+                4,
+            )
+            .expect_err("a missing scratch texture cannot run selective colour");
         assert!(
             matches!(error, EffectSpatialGpuError::EmptyFrame),
             "unexpected error: {error:?}"
