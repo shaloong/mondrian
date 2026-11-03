@@ -76,6 +76,7 @@ pub mod glow;
 pub mod gpu_pipeline;
 pub mod gpu_plan;
 pub mod graph;
+pub mod grid;
 pub mod grid_warp;
 pub mod hdr_grading;
 pub mod heterogeneous_execution;
@@ -293,6 +294,12 @@ pub use graph::{
     EffectDomainBlockerKind, EffectDomainTransition, EffectGraphBuilderState, EffectGraphNode,
     EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
     PreparedEffectGraphTopology,
+};
+pub use grid::{
+    grid_frame_f32, grid_pixel, GridControls, GridError, GridGrade, GridSizeFrom,
+    GRID_DEFAULT_ANCHOR, GRID_DEFAULT_BORDER, GRID_DEFAULT_CORNER, GRID_DEFAULT_HEIGHT,
+    GRID_DEFAULT_OPACITY, GRID_DEFAULT_SIZE_FROM, GRID_DEFAULT_WIDTH, GRID_DEGENERATE_CELL,
+    GRID_MAX_BORDER, GRID_MAX_COORDINATE, GRID_MAX_FEATHER, GRID_MAX_WIDTH, GRID_MIN_WIDTH,
 };
 pub use grid_warp::{
     grid_warp_frame_f32, GridWarpError, GridWarpGrade, GRID_WARP_AMPLITUDE_RATIO,

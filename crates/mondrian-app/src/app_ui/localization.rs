@@ -357,6 +357,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "粗糙边缘" => Some("parameter-group-roughen-edges"),
         "吸管填充" => Some("parameter-group-eyedropper-fill"),
         "棋盘" => Some("parameter-group-checkerboard"),
+        "网格" => Some("parameter-group-grid"),
         _ => None,
     }
 }

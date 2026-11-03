@@ -2351,6 +2351,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::TestSignals { .. } => "test_signals",
         EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
+        EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::ColorBalance { .. } => "color_balance",
         EffectRenderOp::Choker { .. } => "choker",
         EffectRenderOp::Minimax { .. } => "minimax",

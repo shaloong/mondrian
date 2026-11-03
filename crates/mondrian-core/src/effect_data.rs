@@ -145,6 +145,8 @@ pub enum EffectType {
     EyedropperFill,
     /// Checkerboard: paints a pixel-local checker grid with feathered edges.
     Checkerboard,
+    /// Grid: paints pixel-local grid lines with feathered edges.
+    Grid,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -247,6 +249,7 @@ impl EffectType {
             Self::RoughenEdges => "builtin.roughen_edges".to_string(),
             Self::EyedropperFill => "builtin.eyedropper_fill".to_string(),
             Self::Checkerboard => "builtin.checkerboard".to_string(),
+            Self::Grid => "builtin.grid".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -345,6 +348,7 @@ impl EffectType {
             "builtin.roughen_edges" => Self::RoughenEdges,
             "builtin.eyedropper_fill" => Self::EyedropperFill,
             "builtin.checkerboard" => Self::Checkerboard,
+            "builtin.grid" => Self::Grid,
             other => Self::External(other.to_string()),
         }
     }
@@ -443,6 +447,7 @@ impl EffectType {
             Self::RoughenEdges => "粗糙边缘",
             Self::EyedropperFill => "吸管填充",
             Self::Checkerboard => "棋盘",
+            Self::Grid => "网格",
             Self::External(name) => name,
         }
     }
@@ -539,6 +544,7 @@ impl EffectType {
             Self::RoughenEdges => vec!["风格化"],
             Self::EyedropperFill => vec!["生成器"],
             Self::Checkerboard => vec!["生成器"],
+            Self::Grid => vec!["生成器"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -637,6 +643,7 @@ impl EffectType {
             Self::RoughenEdges => "roughen_edges".to_string(),
             Self::EyedropperFill => "eyedropper_fill".to_string(),
             Self::Checkerboard => "checkerboard".to_string(),
+            Self::Grid => "grid".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -984,6 +991,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::RoughenEdges => Ok(()),
             Self::EyedropperFill => Ok(()),
             Self::Checkerboard => Ok(()),
+            Self::Grid => Ok(()),
         }
     }
 }
