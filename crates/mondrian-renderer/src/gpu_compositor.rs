@@ -14814,6 +14814,76 @@ mod tests {
     }
 
     #[test]
+    fn gpu_dust_scratches_plan_past_the_gpu_cap_falls_back_to_cpu() {
+        use mondrian_effects::{DustScratchesGrade, EffectRenderOp};
+
+        let width = 9;
+        let height = 7;
+        let wide = spatial_test_pipeline(EffectRenderOp::DustScratches {
+            grade: DustScratchesGrade::new(4.0, 0.0, 0.0).expect("valid dust & scratches grade"),
+        });
+        let blocker = crate::spatial_driver::gpu_spatial_chain_plan(&wide, width, height)
+            .expect_err("a radius past the GPU cap has no spatial plan");
+        assert!(
+            matches!(
+                &blocker,
+                crate::spatial_driver::GpuSpatialChainBlocker::UnsupportedPass { pass, .. }
+                    if *pass == "dust_scratches_radius"
+            ),
+            "{blocker:?}"
+        );
+        assert_eq!(blocker.code(), "spatial_pass_unsupported");
+
+        // A refused chain always chooses the CPU path and keeps the blocker as the
+        // reason, so the layer still renders through the fallback instead of
+        // failing the frame.
+        let choice = crate::choose_spatial_chain_for_plan(
+            Err(&blocker),
+            width,
+            height,
+            true,
+            crate::SpatialChainPreference::Auto,
+        );
+        assert!(!choice.use_gpu, "a blocked chain must fall back to the CPU");
+        assert!(
+            matches!(
+                choice.reason,
+                crate::SpatialChainChoiceReason::PlanUnavailable(_)
+            ),
+            "{:?}",
+            choice.reason
+        );
+
+        // The CPU plan for the same authored state still executes, and it is what
+        // the fallback renders: the same frame in, the same bits out.
+        let grade = DustScratchesGrade::new(4.0, 0.0, 0.0).expect("valid dust & scratches grade");
+        let pixels = spatial_test_pixels(width, height);
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::dust_scratches_frame_f32(
+            &mut cpu, width, height, &grade
+        ));
+        let mut again = pixels.clone();
+        assert!(mondrian_effects::dust_scratches_frame_f32(
+            &mut again, width, height, &grade
+        ));
+        for (index, (left, right)) in cpu.iter().zip(again.iter()).enumerate() {
+            assert_eq!(
+                left.map(f32::to_bits),
+                right.map(f32::to_bits),
+                "pixel {index}"
+            );
+        }
+
+        // Radius three is still admitted, which is the boundary the cap names.
+        let narrow = spatial_test_pipeline(EffectRenderOp::DustScratches {
+            grade: DustScratchesGrade::new(3.0, 0.0, 0.0).expect("valid dust & scratches grade"),
+        });
+        let plan = crate::spatial_driver::gpu_spatial_chain_plan(&narrow, width, height)
+            .expect("radius three is inside the GPU cap");
+        assert_eq!(plan.spatial_passes, 1);
+    }
+
+    #[test]
     fn spatial_chain_rejects_a_layer_carrying_both_plans() {
         use mondrian_effects::{EffectRenderOp, TwirlGrade};
 

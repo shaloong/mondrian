@@ -376,6 +376,10 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // The median gathers the whole window eight times over, so it costs more
         // than a separable blur pass despite the small GPU radius cap.
         "median" => 4.0,
+        // Dust & scratches gathers the same window as the median, so it carries
+        // the same cap and the same rate; the gate is a few extra comparisons on
+        // top of the selection.
+        "dust_scratches" => 4.0,
         _ => GPU_DEFAULT_NS_PER_PX,
     }
 }
@@ -402,6 +406,8 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "stroke" => 6.0,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
+        // Same sliding histogram as the median plus the deviation gate.
+        "dust_scratches" => 3.0,
         "radial_blur" | "turbulent_displace" | "keylight" | "matte_refine" => 4.0,
         "minimax" | "choker" | "find_edges" | "emboss" | "color_emboss" => 2.5,
         _ => 2.0,

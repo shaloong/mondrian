@@ -84,6 +84,7 @@ pub(crate) struct EffectSpatialGpu {
     minimax: wgpu::RenderPipeline,
     channel_blur: wgpu::RenderPipeline,
     median: wgpu::RenderPipeline,
+    dust_scratches: wgpu::RenderPipeline,
     selective_color: wgpu::RenderPipeline,
     stroke: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
@@ -1448,6 +1449,38 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Dust & scratches reuses the median gather and gates its result, so it
+        // writes the repaired pixel straight into the scratch frame as well.
+        let dust_scratches = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.dust-scratches"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_dust_scratches"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         // Fractal noise needs twenty-six scalars, so the shared uniform struct is
         // too small: the stage gets its own shader module, bind group layout, and
         // uniform payload instead of a sixth `extra` vector.
@@ -1702,6 +1735,7 @@ impl EffectSpatialGpu {
             minimax,
             channel_blur,
             median,
+            dust_scratches,
             selective_color,
             stroke,
             bindings,
@@ -2294,6 +2328,18 @@ impl EffectSpatialGpu {
                     Err(EffectSpatialGpuError::UnsupportedPass("median_radius"))
                 }
             }
+            // The repair is one gather pass as well, and the same admission
+            // gate: a window wider than the GPU cap is refused while the chain
+            // is still being planned.
+            EffectGpuSpatialPass::DustScratches { grade } => {
+                if grade.gpu_supported() {
+                    Ok(1)
+                } else {
+                    Err(EffectSpatialGpuError::UnsupportedPass(
+                        "dust_scratches_radius",
+                    ))
+                }
+            }
             // The dedicated pass writes the whole frame in one full-screen
             // draw, so the scratch pool needs the source and the destination.
             EffectGpuSpatialPass::SelectiveColor { .. } => Ok(1),
@@ -2770,6 +2816,11 @@ impl EffectSpatialGpu {
             }
             EffectGpuSpatialPass::Median { grade } => {
                 return self.record_median(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::DustScratches { grade } => {
+                return self.record_dust_scratches(
+                    device, encoder, *grade, source, scratch, width, height,
+                );
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -4469,6 +4520,61 @@ impl EffectSpatialGpu {
         Ok(scratch[0].clone())
     }
 
+    /// Records the dust & scratches pass: one gather that gates the window
+    /// median against the centre pixel.
+    ///
+    /// The radius is rounded and clamped to the frame extent here so the shader
+    /// sees the same integer as
+    /// [`mondrian_effects::DustScratchesGrade::radius_pixels`]. The admission
+    /// path already rejected radii past
+    /// [`mondrian_effects::DUST_SCRATCHES_GPU_MAX_RADIUS`]; the check below only
+    /// guards a direct call.
+    fn record_dust_scratches(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::DustScratchesGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if scratch.is_empty() {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "dust_scratches_scratch_geometry",
+            ));
+        }
+        let radius = grade.radius_pixels(width, height);
+        if radius > mondrian_effects::DUST_SCRATCHES_GPU_MAX_RADIUS {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "dust_scratches_radius",
+            ));
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params: [
+                radius as f32,
+                grade.threshold(),
+                f32::from(u8::from(grade.operates_on_alpha())),
+                0.0,
+            ],
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.dust_scratches,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(scratch[0].clone())
+    }
+
     /// Records one matte filter pass and advances the matte ping-pong.
     ///
     /// The first matte pass binds the frame and asks the shader for the frame
@@ -5080,12 +5186,10 @@ fn median_bin_of(value: f32) -> u32 {
     return u32(round(clamp(safe, 0.0, 1.0) * 255.0));
 }
 
-@fragment
-fn fs_median(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let pixel = vec2<i32>(floor(position.xy));
-    let radius = i32(round(uniforms.params.x));
-    let on_alpha = uniforms.params.y >= 0.5;
-    let centre = load_clamped_from(src, pixel);
+// Selects the per-channel median of the `(2 * radius + 1)^2` window centred on
+// `pixel`. The bit-serial loop is the whole of the median kernel, shared by the
+// median pass and the dust & scratches gate.
+fn median_window(pixel: vec2<i32>, radius: i32) -> vec4<f32> {
     let side = 2 * radius + 1;
     let count = u32(side * side);
     let rank = (count + 1u) / 2u - 1u;
@@ -5107,13 +5211,45 @@ fn fs_median(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         }
         prefix = select(prefix, candidate, below <= vec4<u32>(rank));
     }
-    let selected = vec4<f32>(
+    return vec4<f32>(
         f32(prefix.r),
         f32(prefix.g),
         f32(prefix.b),
         f32(prefix.a),
     ) / 255.0;
+}
+
+@fragment
+fn fs_median(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let radius = i32(round(uniforms.params.x));
+    let on_alpha = uniforms.params.y >= 0.5;
+    let centre = load_clamped_from(src, pixel);
+    let selected = median_window(pixel, radius);
     return vec4<f32>(selected.rgb, select(centre.a, selected.a, on_alpha));
+}
+
+// The dust & scratches pass keeps the centre pixel unless it deviates from the
+// median of its window by more than the threshold, in which case the median
+// replaces it. `params` is `[radius_pixels, threshold, operate_on_alpha, 0]`.
+// The gate quantises the centre exactly like the selection does, so a threshold
+// of zero repairs exactly the pixels the median itself would move.
+@fragment
+fn fs_dust_scratches(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let radius = i32(round(uniforms.params.x));
+    let threshold = uniforms.params.y;
+    let on_alpha = uniforms.params.z >= 0.5;
+    let centre = load_clamped_from(src, pixel);
+    let med = median_window(pixel, radius);
+    let gated = select(vec4<f32>(0.0), clamp(centre, vec4<f32>(0.0), vec4<f32>(1.0)), centre == centre);
+    let rgb_delta = max(max(abs(gated.r - med.r), abs(gated.g - med.g)), abs(gated.b - med.b));
+    let alpha_delta = select(0.0, abs(gated.a - med.a), on_alpha);
+    let repair = max(rgb_delta, alpha_delta) > threshold;
+    return vec4<f32>(
+        select(centre.rgb, med.rgb, repair),
+        select(centre.a, med.a, repair && on_alpha),
+    );
 }
 
 fn sobel_magnitude(pixel: vec2<i32>) -> f32 {
@@ -7678,6 +7814,10 @@ mod tests {
             module.entry_points.iter().any(|entry| entry.name == "fs_median"),
             "the median fragment entry point must survive validation"
         );
+        assert!(
+            module.entry_points.iter().any(|entry| entry.name == "fs_dust_scratches"),
+            "the dust & scratches fragment entry point must survive validation"
+        );
     }
 
     #[test]
@@ -8504,6 +8644,8 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             0.8,
         )
         .expect("valid stroke grade");
+        let dust_scratches = mondrian_effects::DustScratchesGrade::new(1.0, 0.1, 0.0)
+            .expect("valid dust & scratches grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::Median { grade: median },
             mondrian_effects::EffectGpuSpatialPass::SelectiveColor { grade: selective_color },
@@ -8535,10 +8677,11 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Choker { grade: choker },
             mondrian_effects::EffectGpuSpatialPass::Minimax { grade: minimax },
             mondrian_effects::EffectGpuSpatialPass::ChannelBlur { grade: channel_blur },
+            mondrian_effects::EffectGpuSpatialPass::DustScratches { grade: dust_scratches },
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 25, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 26, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::median_frame_f32(
@@ -8688,6 +8831,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             &channel_blur,
+        ));
+        assert!(mondrian_effects::dust_scratches_frame_f32(
+            &mut cpu,
+            width,
+            height,
+            &dust_scratches,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -10869,6 +11018,185 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             matches!(
                 error,
                 EffectSpatialGpuError::UnsupportedPass("median_scratch_geometry")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn gpu_dust_scratches_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU dust & scratches parity test: no GPU adapter available");
+            return;
+        };
+        // Odd geometry on both axes, so the window rank is a true middle sample.
+        let width = 9_u32;
+        let height = 7_u32;
+        let base = [0.25_f32, 0.5, 0.75, 1.0];
+        let mut pixels = vec![base; (width * height) as usize];
+        // A scratch and a dust speck: both deviate from the window median by far
+        // more than the threshold, so both are repaired to the median.
+        pixels[3 * width as usize + 4] = [1.0, 1.0, 1.0, 1.0];
+        pixels[5 * width as usize + 2] = [0.0, 0.0, 0.0, 1.0];
+        // A ten-unit step that stays inside the threshold: the centre must be
+        // kept bit for bit, which exercises the pass-through branch.
+        pixels[0] = [0.25 + 10.0 / 255.0, 0.5, 0.75, 1.0];
+        let grade = mondrian_effects::DustScratchesGrade::new(2.0, 0.1, 0.0).expect("valid grade");
+        let pass = mondrian_effects::EffectGpuSpatialPass::DustScratches { grade };
+        assert_eq!(
+            EffectSpatialGpu::texture_pass_count(&pass).expect("supported pass"),
+            1
+        );
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::dust_scratches_frame_f32(
+            &mut cpu, width, height, &grade
+        ));
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let pool = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.dust-scratches-encoder"),
+        });
+        let output = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &source,
+                &pool,
+                width,
+                height,
+            )
+            .expect("recorded dust & scratches");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        assert_median_parity(&cpu, &gpu, "dust & scratches");
+    }
+
+    #[test]
+    fn gpu_dust_scratches_alpha_participates() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU dust & scratches parity test: no GPU adapter available");
+            return;
+        };
+        let width = 11_u32;
+        let height = 6_u32;
+        let mut pixels = vec![[0.0_f32; 4]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let phase = 19 * x + 37 * y;
+                pixels[y * width as usize + x] = [
+                    (phase % 256) as f32 / 255.0,
+                    ((phase * 5) % 256) as f32 / 255.0,
+                    ((phase * 9) % 256) as f32 / 255.0,
+                    1.0,
+                ];
+            }
+        }
+        // A semi-transparent band whose hidden RGB is black: with the alpha
+        // toggle on the band's alpha takes part in the gate and the repair, with
+        // it off every alpha bit stays exactly where the frame put it.
+        for x in 0..width as usize {
+            pixels[2 * width as usize + x] = [0.0, 0.0, 0.0, 0.5];
+        }
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let pool = scratch(&context, width, height, 1);
+        for toggle in [0.0_f32, 1.0] {
+            let grade = mondrian_effects::DustScratchesGrade::new(1.0, 0.25, toggle)
+                .expect("valid dust & scratches grade");
+            let pass = mondrian_effects::EffectGpuSpatialPass::DustScratches { grade };
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::dust_scratches_frame_f32(
+                &mut cpu, width, height, &grade
+            ));
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.dust-scratches-alpha-encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &pool,
+                    width,
+                    height,
+                )
+                .expect("recorded dust & scratches");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            assert_median_parity(&cpu, &gpu, &format!("dust & scratches toggle {toggle}"));
+        }
+    }
+
+    #[test]
+    fn gpu_dust_scratches_rejects_a_wide_radius() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU dust & scratches admission test: no GPU adapter available");
+            return;
+        };
+        let too_wide = mondrian_effects::EffectGpuSpatialPass::DustScratches {
+            grade: mondrian_effects::DustScratchesGrade::new(4.0, 0.0, 0.0)
+                .expect("valid dust & scratches grade"),
+        };
+        // The radius gate belongs to admission, not to recording.
+        assert!(matches!(
+            EffectSpatialGpu::texture_pass_count(&too_wide),
+            Err(EffectSpatialGpuError::UnsupportedPass(
+                "dust_scratches_radius"
+            ))
+        ));
+        let width = 5_u32;
+        let height = 5_u32;
+        let pixels = vec![[0.5_f32, 0.5, 0.5, 1.0]; (width * height) as usize];
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let pool = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.dust-scratches-radius-encoder"),
+        });
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &too_wide,
+                &source,
+                &pool,
+                width,
+                height,
+            )
+            .expect_err("a radius past the GPU cap cannot be recorded");
+        assert!(
+            matches!(
+                error,
+                EffectSpatialGpuError::UnsupportedPass("dust_scratches_radius")
+            ),
+            "unexpected error: {error:?}"
+        );
+        let supported = mondrian_effects::EffectGpuSpatialPass::DustScratches {
+            grade: mondrian_effects::DustScratchesGrade::new(1.0, 0.0, 0.0)
+                .expect("valid dust & scratches grade"),
+        };
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.dust-scratches-geometry-encoder"),
+        });
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &supported,
+                &source,
+                &[],
+                width,
+                height,
+            )
+            .expect_err("the repair needs one scratch texture");
+        assert!(
+            matches!(
+                error,
+                EffectSpatialGpuError::UnsupportedPass("dust_scratches_scratch_geometry")
             ),
             "unexpected error: {error:?}"
         );
