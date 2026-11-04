@@ -88,11 +88,13 @@ pub(crate) struct EffectSpatialGpu {
     dust_scratches: wgpu::RenderPipeline,
     selective_color: wgpu::RenderPipeline,
     stroke: wgpu::RenderPipeline,
+    bezier_warp: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
     selective_color_bindings: wgpu::BindGroupLayout,
     stroke_bindings: wgpu::BindGroupLayout,
+    bezier_warp_bindings: wgpu::BindGroupLayout,
 }
 
 impl EffectSpatialGpu {
@@ -1722,6 +1724,77 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // The bezier warp inverts a Coons patch per fragment and carries a
+        // hundred-and-twenty-eight byte payload, so it also gets its own shader
+        // module, bind group layout, and pipeline.
+        let bezier_warp_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.effect-spatial.bezier-warp-shader"),
+            source: wgpu::ShaderSource::Wgsl(SPATIAL_BEZIER_WARP_SHADER.into()),
+        });
+        let bezier_warp_bindings =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mondrian.effect-spatial.bezier-warp-bindings"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                BezierWarpUniform,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let bezier_warp_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mondrian.effect-spatial.bezier-warp-layout"),
+            bind_group_layouts: &[Some(&bezier_warp_bindings)],
+            immediate_size: 0,
+        });
+        let bezier_warp = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.bezier-warp"),
+            layout: Some(&bezier_warp_layout),
+            vertex: wgpu::VertexState {
+                module: &bezier_warp_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &bezier_warp_shader,
+                entry_point: Some("fs_bezier_warp"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             box_blur,
             emboss,
@@ -1770,11 +1843,13 @@ impl EffectSpatialGpu {
             dust_scratches,
             selective_color,
             stroke,
+            bezier_warp,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
             selective_color_bindings,
             stroke_bindings,
+            bezier_warp_bindings,
         }
     }
 
@@ -2211,6 +2286,34 @@ impl EffectSpatialGpu {
         self.record_stroke_pass(device, encoder, &input_view, &output_view, &uniform);
         Ok(destination.clone())
     }
+    /// Records the bezier warp pass.
+    ///
+    /// Every fragment inverts the Coons patch for its own target, so one
+    /// full-screen draw covers the whole frame.
+    pub(crate) fn record_bezier_warp(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::BezierWarpGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let (points, control) = grade.gpu_controls();
+        let uniform = BezierWarpUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            points,
+            control,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_bezier_warp_pass(device, encoder, &input_view, &output_view, &uniform);
+        Ok(destination.clone())
+    }
     /// Records the lens distortion pass.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_distortion(
@@ -2379,6 +2482,8 @@ impl EffectSpatialGpu {
             // One draw resolves the whole band; only the source and the
             // destination are needed.
             EffectGpuSpatialPass::Stroke { .. } => Ok(1),
+            // The bezier warp inverts the patch per fragment in a single draw.
+            EffectGpuSpatialPass::BezierWarp { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
@@ -2834,6 +2939,18 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Stroke { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return self.record_stroke(
+                    device,
+                    encoder,
+                    *grade,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::BezierWarp { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_bezier_warp(
                     device,
                     encoder,
                     *grade,
@@ -3756,6 +3873,54 @@ impl EffectSpatialGpu {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.stroke);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..4, 0..1);
+    }
+
+    fn record_bezier_warp_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        input: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        uniforms: &BezierWarpUniform,
+    ) {
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mondrian.effect-spatial.bezier-warp-uniforms"),
+            contents: bytemuck::bytes_of(uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian.effect-spatial.bezier-warp-bind-group"),
+            layout: &self.bezier_warp_bindings,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(input),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.effect-spatial.bezier-warp-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.bezier_warp);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
@@ -4854,6 +5019,22 @@ struct StrokeUniform {
     color: [f32; 4],
     /// `x` is the brush size and `y` the brush hardness; the rest is reserved.
     geometry: [f32; 4],
+}
+/// The dedicated uniform payload of the bezier warp pass.
+///
+/// A hundred and twenty-eight bytes: the frame size, six cells of two control
+/// points, and the solver step count in the first lane of a seventh cell. The
+/// shared five-cell uniform holds twenty floats, and the twelve control points
+/// alone need twenty-four, so the stage carries its own payload.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BezierWarpUniform {
+    /// `xy` is the frame size in pixels; `zw` is reserved.
+    size: [f32; 4],
+    /// Two control points per cell, in dump order.
+    points: [[f32; 4]; 6],
+    /// `x` is the solver step count; the rest is reserved.
+    control: [f32; 4],
 }
 const SPATIAL_EFFECT_SHADER: &str = r#"
 struct Uniforms {
@@ -8073,6 +8254,210 @@ fn fs_stroke(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// The bezier warp pass.
+///
+/// Each fragment inverts a Coons patch with a fixed-count Newton iteration and
+/// samples the premultiplied source at the solved parameters. The arithmetic
+/// mirrors `mondrian_effects::bezier_warp` statement for statement, in the same
+/// order (in f32 instead of f64); a fragment whose solve fails or runs away
+/// copies its own source pixel, exactly like the kernel.
+const SPATIAL_BEZIER_WARP_SHADER: &str = r#"
+struct BezierWarpUniform {
+    size: vec4<f32>,
+    points: array<vec4<f32>, 6>,
+    control: vec4<f32>,
+};
+
+@group(0) @binding(0) var bw_src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> bw: BezierWarpUniform;
+
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(-1.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    var out: VsOut;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    return out;
+}
+
+fn bw_point(index: i32) -> vec2<f32> {
+    let cell = bw.points[index / 2];
+    if ((index % 2) == 0) {
+        return cell.xy;
+    }
+    return cell.zw;
+}
+
+fn bw_cubic(p0: vec2<f32>, p1: vec2<f32>, p2: vec2<f32>, p3: vec2<f32>, t: f32) -> vec2<f32> {
+    let inverse = 1.0 - t;
+    let a = inverse * inverse * inverse;
+    let b = 3.0 * inverse * inverse * t;
+    let c = 3.0 * inverse * t * t;
+    let d = t * t * t;
+    return a * p0 + b * p1 + c * p2 + d * p3;
+}
+
+fn bw_derivative(
+    p0: vec2<f32>,
+    p1: vec2<f32>,
+    p2: vec2<f32>,
+    p3: vec2<f32>,
+    t: f32,
+) -> vec2<f32> {
+    let inverse = 1.0 - t;
+    let a = 3.0 * inverse * inverse;
+    let b = 6.0 * inverse * t;
+    let c = 3.0 * t * t;
+    return a * (p1 - p0) + b * (p2 - p1) + c * (p3 - p2);
+}
+
+fn bw_top(parameter: f32) -> vec2<f32> {
+    return bw_cubic(bw_point(0), bw_point(1), bw_point(2), bw_point(3), parameter);
+}
+
+fn bw_bottom(parameter: f32) -> vec2<f32> {
+    return bw_cubic(bw_point(9), bw_point(8), bw_point(7), bw_point(6), parameter);
+}
+
+fn bw_left_side(parameter: f32) -> vec2<f32> {
+    return bw_cubic(bw_point(0), bw_point(11), bw_point(10), bw_point(9), parameter);
+}
+
+fn bw_right_side(parameter: f32) -> vec2<f32> {
+    return bw_cubic(bw_point(3), bw_point(4), bw_point(5), bw_point(6), parameter);
+}
+
+fn bw_patch(u: f32, v: f32) -> vec2<f32> {
+    let top = bw_top(u);
+    let bottom = bw_bottom(u);
+    let left = bw_left_side(v);
+    let right = bw_right_side(v);
+    let top_left = bw_point(0);
+    let top_right = bw_point(3);
+    let bottom_right = bw_point(6);
+    let bottom_left = bw_point(9);
+    let across = 1.0 - u;
+    let down = 1.0 - v;
+    return down * top + v * bottom + across * left + u * right
+        - (across * down * top_left
+            + u * down * top_right
+            + across * v * bottom_left
+            + u * v * bottom_right);
+}
+
+fn bw_patch_du(u: f32, v: f32) -> vec2<f32> {
+    let top = bw_derivative(bw_point(0), bw_point(1), bw_point(2), bw_point(3), u);
+    let bottom = bw_derivative(bw_point(9), bw_point(8), bw_point(7), bw_point(6), u);
+    let left = bw_left_side(v);
+    let right = bw_right_side(v);
+    let top_left = bw_point(0);
+    let top_right = bw_point(3);
+    let bottom_right = bw_point(6);
+    let bottom_left = bw_point(9);
+    let down = 1.0 - v;
+    return down * top + v * bottom - left + right
+        + (down * (top_left - top_right) + v * (bottom_left - bottom_right));
+}
+
+fn bw_patch_dv(u: f32, v: f32) -> vec2<f32> {
+    let top = bw_top(u);
+    let bottom = bw_bottom(u);
+    let left = bw_derivative(bw_point(0), bw_point(11), bw_point(10), bw_point(9), v);
+    let right = bw_derivative(bw_point(3), bw_point(4), bw_point(5), bw_point(6), v);
+    let top_left = bw_point(0);
+    let top_right = bw_point(3);
+    let bottom_right = bw_point(6);
+    let bottom_left = bw_point(9);
+    let across = 1.0 - u;
+    return across * left + u * right - top + bottom
+        + (across * (top_left - bottom_left) + u * (top_right - bottom_right));
+}
+
+fn bw_solve(goal: vec2<f32>, steps: u32) -> vec2<f32> {
+    var parameters = goal;
+    for (var iteration: u32 = 0u; iteration < steps; iteration = iteration + 1u) {
+        let mapped = bw_patch(parameters.x, parameters.y);
+        let residual = mapped - goal;
+        let du = bw_patch_du(parameters.x, parameters.y);
+        let dv = bw_patch_dv(parameters.x, parameters.y);
+        let determinant = du.x * dv.y - dv.x * du.y;
+        if (!(determinant > 0.0)) {
+            return vec2<f32>(-1.0, -1.0);
+        }
+        let step_u = (-residual.x * dv.y + residual.y * dv.x) / determinant;
+        let step_v = (-residual.y * du.x + residual.x * du.y) / determinant;
+        parameters = parameters + vec2<f32>(step_u, step_v);
+        if (!(parameters.x == parameters.x) || !(parameters.y == parameters.y)) {
+            return vec2<f32>(-1.0, -1.0);
+        }
+        if (abs(parameters.x) > 4.0 || abs(parameters.y) > 4.0) {
+            return vec2<f32>(-1.0, -1.0);
+        }
+    }
+    return clamp(parameters, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+}
+
+fn bw_load(pixel: vec2<i32>) -> vec4<f32> {
+    let limit = vec2<i32>(textureDimensions(bw_src)) - vec2<i32>(1, 1);
+    return textureLoad(bw_src, clamp(pixel, vec2<i32>(0, 0), limit), 0);
+}
+
+fn bw_premultiply(sample: vec4<f32>) -> vec4<f32> {
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    return vec4<f32>(sample.rgb * alpha, alpha);
+}
+
+fn bw_unpremultiply(sample: vec4<f32>) -> vec4<f32> {
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(sample.rgb / alpha, alpha);
+}
+
+fn bw_sample(x: f32, y: f32) -> vec4<f32> {
+    let limit = vec2<i32>(textureDimensions(bw_src)) - vec2<i32>(1, 1);
+    let limit_f = vec2<f32>(f32(limit.x), f32(limit.y));
+    let p = clamp(vec2<f32>(x, y), vec2<f32>(0.0, 0.0), limit_f);
+    let base = floor(p);
+    let fraction = p - base;
+    let x0 = i32(base.x);
+    let y0 = i32(base.y);
+    let x1 = min(x0 + 1, limit.x);
+    let y1 = min(y0 + 1, limit.y);
+    let top_left = bw_premultiply(textureLoad(bw_src, vec2<i32>(x0, y0), 0));
+    let top_right = bw_premultiply(textureLoad(bw_src, vec2<i32>(x1, y0), 0));
+    let bottom_left = bw_premultiply(textureLoad(bw_src, vec2<i32>(x0, y1), 0));
+    let bottom_right = bw_premultiply(textureLoad(bw_src, vec2<i32>(x1, y1), 0));
+    let top = top_left + (top_right - top_left) * fraction.x;
+    let bottom = bottom_left + (bottom_right - bottom_left) * fraction.x;
+    return top + (bottom - top) * fraction.y;
+}
+
+@fragment
+fn fs_bezier_warp(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = bw_load(pixel);
+    let frame = bw.size.xy;
+    let goal = vec2<f32>(f32(pixel.x) / frame.x, f32(pixel.y) / frame.y);
+    let steps = min(u32(bw.control.x), 13u);
+    let parameters = bw_solve(goal, steps);
+    if (!(parameters.x >= 0.0) || !(parameters.y >= 0.0)) {
+        return source;
+    }
+    let sample = bw_sample(parameters.x * frame.x, parameters.y * frame.y);
+    return bw_unpremultiply(sample);
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8097,6 +8482,22 @@ mod tests {
         assert!(
             module.entry_points.iter().any(|entry| entry.name == "fs_dust_scratches"),
             "the dust & scratches fragment entry point must survive validation"
+        );
+    }
+
+    #[test]
+    fn spatial_bezier_warp_shader_validates() {
+        let module = naga::front::wgsl::parse_str(SPATIAL_BEZIER_WARP_SHADER)
+            .expect("spatial bezier warp shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("spatial bezier warp shader validates");
+        assert!(
+            module.entry_points.iter().any(|entry| entry.name == "fs_bezier_warp"),
+            "the bezier warp fragment entry point must survive validation"
         );
     }
 
@@ -8937,6 +9338,26 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         .expect("valid stroke grade");
         let dust_scratches = mondrian_effects::DustScratchesGrade::new(1.0, 0.1, 0.0)
             .expect("valid dust & scratches grade");
+        // Bend the top edge of the patch towards the frame centre: the stage runs
+        // the Newton solve of the Coons patch, so the chain also proves the
+        // dedicated eight-cell uniform records through the shared pass recorder.
+        let third = 256.0_f32 / 3.0;
+        let mut bezier_points = [[0.0_f32, 0.0_f32]; 12];
+        bezier_points[0] = [0.0, 0.0];
+        bezier_points[1] = [third, 24.0];
+        bezier_points[2] = [2.0 * third, 24.0];
+        bezier_points[3] = [256.0, 0.0];
+        bezier_points[4] = [256.0, third];
+        bezier_points[5] = [256.0, 2.0 * third];
+        bezier_points[6] = [256.0, 256.0];
+        bezier_points[7] = [2.0 * third, 256.0];
+        bezier_points[8] = [third, 256.0];
+        bezier_points[9] = [0.0, 256.0];
+        bezier_points[10] = [0.0, 2.0 * third];
+        bezier_points[11] = [0.0, third];
+        let bezier_warp =
+            mondrian_effects::BezierWarpGrade::from_reference_points(bezier_points, 4)
+                .expect("valid bezier warp grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::Median { grade: median },
             mondrian_effects::EffectGpuSpatialPass::SelectiveColor { grade: selective_color },
@@ -8970,10 +9391,11 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::Minimax { grade: minimax },
             mondrian_effects::EffectGpuSpatialPass::ChannelBlur { grade: channel_blur },
             mondrian_effects::EffectGpuSpatialPass::DustScratches { grade: dust_scratches },
+            mondrian_effects::EffectGpuSpatialPass::BezierWarp { grade: bezier_warp },
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 27, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 28, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::median_frame_f32(
@@ -9135,6 +9557,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width,
             height,
             &dust_scratches,
+        ));
+        assert!(mondrian_effects::bezier_warp_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            bezier_warp,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -12282,6 +12710,133 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             assert_ne!(pass.vertical_halo(), u32::MAX);
         }
     }
+    #[test]
+    fn gpu_bezier_warp_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU bezier warp parity test: no GPU adapter available");
+            return;
+        };
+        let width = 13_u32;
+        let height = 11_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let value = 0.06 * (x + 3 * y) as f32;
+                pixels[y * width as usize + x] = [value, 0.5 - value * 0.4, value * 1.3, 1.0];
+            }
+        }
+        pixels[12] = [0.0, 0.0, 0.0, 0.0];
+        pixels[77] = [2.0, -0.5, 1.5, 0.5];
+        let identity = [
+            [0.0_f32, 0.0],
+            [85.333_336, 0.0],
+            [170.666_67, 0.0],
+            [256.0, 0.0],
+            [256.0, 85.333_336],
+            [256.0, 170.666_67],
+            [256.0, 256.0],
+            [170.666_67, 256.0],
+            [85.333_336, 256.0],
+            [0.0, 256.0],
+            [0.0, 170.666_67],
+            [0.0, 85.333_336],
+        ];
+        let mut bent = identity;
+        bent[1][1] = 48.0;
+        bent[2][1] = 40.0;
+        let mut skewed = identity;
+        skewed[0] = [24.0, 16.0];
+        skewed[6] = [240.0, 248.0];
+        skewed[9] = [16.0, 240.0];
+        for (points, quality) in [(bent, 3_u32), (skewed, 10_u32)] {
+            let grade = mondrian_effects::BezierWarpGrade::from_reference_points(points, quality)
+                .expect("bezier warp grade");
+            let mut cpu = pixels.clone();
+            assert!(mondrian_effects::bezier_warp_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade,
+            ));
+            let executor = EffectSpatialGpu::new(&context.device);
+            let source = upload(&context, &pixels, width, height);
+            let destination = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.bezier-warp-encoder"),
+                });
+            let output = executor
+                .record_bezier_warp(
+                    &context.device,
+                    &mut encoder,
+                    grade,
+                    &source,
+                    &destination[0],
+                    width,
+                    height,
+                )
+                .expect("recorded bezier warp");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                // Straight-alpha RGB is ill-conditioned once coverage is
+                // negligible: the kernel and the shader solve the patch in f64
+                // and f32, so a fragment landing one float step away from a
+                // transparent texel edge divides a neighbouring colour by a
+                // near-zero alpha. Both sides must agree that the pixel is
+                // transparent, and the alpha itself must stay put.
+                if cpu_pixel[3] < 1.0e-4 && gpu_pixel[3] < 1.0e-4 {
+                    let difference = (cpu_pixel[3] - gpu_pixel[3]).abs();
+                    assert!(
+                        difference <= 1.0e-6,
+                        "quality {quality} pixel {index} alpha: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                    continue;
+                }
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "quality {quality} pixel {index} channel {channel}: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bezier_warp_lowers_to_its_own_spatial_stage() {
+        let points = [
+            [0.0_f32, 0.0],
+            [85.333_336, 48.0],
+            [170.666_67, 40.0],
+            [256.0, 0.0],
+            [256.0, 85.333_336],
+            [256.0, 170.666_67],
+            [256.0, 256.0],
+            [170.666_67, 256.0],
+            [85.333_336, 256.0],
+            [0.0, 256.0],
+            [0.0, 170.666_67],
+            [0.0, 85.333_336],
+        ];
+        let grade = mondrian_effects::BezierWarpGrade::from_reference_points(points, 5)
+            .expect("bezier warp grade");
+        let op = mondrian_effects::EffectRenderOp::BezierWarp { grade };
+        let pass = mondrian_effects::gpu_pipeline::spatial_pass_for(&op)
+            .expect("bezier warp must lower to a spatial stage");
+        assert_eq!(pass.name(), "bezier_warp");
+        assert!(matches!(
+            pass,
+            mondrian_effects::EffectGpuSpatialPass::BezierWarp { .. }
+        ));
+        // The patch can map any target anywhere, so the halo covers the frame.
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+    }
+
     #[test]
     fn gpu_dent_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {

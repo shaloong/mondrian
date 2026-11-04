@@ -382,6 +382,9 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // the same cap and the same rate; the gate is a few extra comparisons on
         // top of the selection.
         "dust_scratches" => 4.0,
+        // The bezier warp runs up to thirteen Newton iterations per pixel, and
+        // every iteration evaluates the patch, both partials, and the corners.
+        "bezier_warp" => 6.0,
         _ => GPU_DEFAULT_NS_PER_PX,
     }
 }
@@ -413,6 +416,8 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "median" => 3.0,
         // Same sliding histogram as the median plus the deviation gate.
         "dust_scratches" => 3.0,
+        // Thirteen f64 Newton iterations in the worst case; far above a remap.
+        "bezier_warp" => 8.0,
         "radial_blur" | "turbulent_displace" | "keylight" | "matte_refine" => 4.0,
         "minimax" | "choker" | "find_edges" | "emboss" | "color_emboss" => 2.5,
         _ => 2.0,
