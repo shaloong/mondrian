@@ -51,6 +51,7 @@ pub(crate) struct EffectSpatialGpu {
     spherize: wgpu::RenderPipeline,
     vr_rotate_sphere: wgpu::RenderPipeline,
     vr_sphere_to_plane: wgpu::RenderPipeline,
+    vr_project_2d: wgpu::RenderPipeline,
     magnify: wgpu::RenderPipeline,
     dent: wgpu::RenderPipeline,
     warp: wgpu::RenderPipeline,
@@ -448,6 +449,36 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_vr_sphere_to_plane"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let vr_project_2d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.vr_project_2d"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_vr_project_2d"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -1867,6 +1898,7 @@ impl EffectSpatialGpu {
             spherize,
             vr_rotate_sphere,
             vr_sphere_to_plane,
+            vr_project_2d,
             magnify,
             dent,
             warp,
@@ -2476,6 +2508,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Spherize { .. }
             | EffectGpuSpatialPass::VrRotateSphere { .. }
             | EffectGpuSpatialPass::VrSphereToPlane { .. }
+            | EffectGpuSpatialPass::VrProject2D { .. }
             | EffectGpuSpatialPass::Magnify { .. }
             | EffectGpuSpatialPass::Dent { .. }
             | EffectGpuSpatialPass::Warp { .. }
@@ -2695,6 +2728,22 @@ impl EffectSpatialGpu {
                     params,
                     extra,
                     aces,
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::VrProject2D { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra, aces, extra1) = grade.gpu_controls();
+                return self.record_vr_project_2d(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    aces,
+                    extra1,
                     source,
                     destination,
                     width,
@@ -3399,6 +3448,49 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.vr_sphere_to_plane,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+    /// Records the perspective card to panorama sphere projection.
+    ///
+    /// `params` carries `[h_fov_rad, v_fov_rad, tan(scale / 2),
+    /// tan(stereo_disparity)]`, `extra` the source card pose and the feather
+    /// fraction, `extra1` the projection pose and the frame layout code. The
+    /// shader receives the whole frame and derives the eye size with the same
+    /// integer division as [`VrFrameLayout::eye_size`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_vr_project_2d(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        aces: [f32; 4],
+        extra1: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.vr_project_2d,
             &input_view,
             &output_view,
             &uniform,
@@ -6035,6 +6127,144 @@ fn fs_vr_sphere_to_plane(@builtin(position) position: vec4<f32>) -> @location(0)
         (0.5 - lat_src / 3.1415927) * size.y - 0.5,
     );
     return unpremultiply(sample_bilinear_premultiplied(tap.x, tap.y));
+}
+
+@fragment
+fn fs_vr_project_2d(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(position.xy);
+    let base = load_clamped(pixel);
+    let frame_layout = uniforms.extra1.w;
+    // `VrFrameLayout::eye_size` divides with truncation, so the shader must use
+    // integer division rather than a floating point half.
+    let full_width = u32(uniforms.size.x);
+    let full_height = u32(uniforms.size.y);
+    let eye_width = f32(select(full_width, full_width / 2u, frame_layout > 1.5));
+    let eye_height = f32(select(full_height, full_height / 2u, frame_layout > 0.5 && frame_layout < 1.5));
+    var origin = vec2<f32>(0.0, 0.0);
+    if (frame_layout > 0.5 && frame_layout < 1.5) {
+        origin = vec2<f32>(0.0, select(0.0, eye_height, position.y >= eye_height));
+    } else if (frame_layout > 1.5) {
+        origin = vec2<f32>(select(0.0, eye_width, position.x >= eye_width), 0.0);
+    }
+    let local = position.xy - origin;
+    // The CPU walks only the eye sub-frame: an odd trailing row or column
+    // belongs to no eye and is left bit-identical.
+    if (local.x >= eye_width || local.y >= eye_height) {
+        return base;
+    }
+    let u = local.x / eye_width;
+    let v = local.y / eye_height;
+    let longitude = (u - 0.5) * uniforms.params.x;
+    let latitude = (0.5 - v) * uniforms.params.y;
+    let cos_latitude = cos(latitude);
+    let direction = vec3<f32>(
+        cos_latitude * sin(longitude),
+        sin(latitude),
+        cos_latitude * cos(longitude),
+    );
+    // Projection pose, row by row: R_p = Rz(roll) * Ry(yaw) * Rx(pitch).
+    let projection_pitch = uniforms.extra1.x;
+    let projection_yaw = uniforms.extra1.y;
+    let projection_roll = uniforms.extra1.z;
+    let pp = sin(projection_pitch);
+    let qp = cos(projection_pitch);
+    let py = sin(projection_yaw);
+    let qy = cos(projection_yaw);
+    let pr = sin(projection_roll);
+    let qr = cos(projection_roll);
+    let p00 = qr * qy;
+    let p01 = qr * py * pp - pr * qp;
+    let p02 = qr * py * qp + pr * pp;
+    let p10 = pr * qy;
+    let p11 = pr * py * pp + qr * qp;
+    let p12 = pr * py * qp - qr * pp;
+    let p20 = -py;
+    let p21 = qy * pp;
+    let p22 = qy * qp;
+    // The mapping is destination to source, so both poses sample with the real
+    // transpose of the pose matrix, never with negated angles.
+    let q = vec3<f32>(
+        p00 * direction.x + p10 * direction.y + p20 * direction.z,
+        p01 * direction.x + p11 * direction.y + p21 * direction.z,
+        p02 * direction.x + p12 * direction.y + p22 * direction.z,
+    );
+    if (q.z <= 0.0) {
+        return base;
+    }
+    let patch_x = q.x / q.z;
+    let patch_y = q.y / q.z;
+    let half_extent = max(uniforms.params.z, 1.0e-6);
+    if (abs(patch_x) > half_extent || abs(patch_y) > half_extent) {
+        return base;
+    }
+    // Source card pose, row by row: R_s = Rz(roll) * Ry(yaw) * Rx(pitch).
+    let source_pitch = uniforms.extra.x;
+    let source_yaw = uniforms.extra.y;
+    let source_roll = uniforms.extra.z;
+    let sp = sin(source_pitch);
+    let cp = cos(source_pitch);
+    let sy = sin(source_yaw);
+    let cy = cos(source_yaw);
+    let sr = sin(source_roll);
+    let cr = cos(source_roll);
+    let s00 = cr * cy;
+    let s01 = cr * sy * sp - sr * cp;
+    let s02 = cr * sy * cp + sr * sp;
+    let s10 = sr * cy;
+    let s11 = sr * sy * sp + cr * cp;
+    let s12 = sr * sy * cp - cr * sp;
+    let s20 = -sy;
+    let s21 = cy * sp;
+    let s22 = cy * cp;
+    let s = vec3<f32>(
+        s00 * patch_x + s10 * patch_y + s20,
+        s01 * patch_x + s11 * patch_y + s21,
+        s02 * patch_x + s12 * patch_y + s22,
+    );
+    if (s.z <= 0.0) {
+        return base;
+    }
+    let source_x = s.x / s.z;
+    let source_y = s.y / s.z;
+    let denominator = 2.0 * half_extent;
+    let u_source = 0.5 + (source_x - uniforms.params.w) / denominator;
+    let v_source = 0.5 - source_y / denominator;
+    let raw_tap = origin + vec2<f32>(u_source * eye_width - 0.5, v_source * eye_height - 0.5);
+    // Each eye samples only its own sub-frame, matching the CPU tap clamp.
+    let tap_pos = clamp(raw_tap, origin, origin + vec2<f32>(eye_width - 1.0, eye_height - 1.0));
+    let patch_sample = unpremultiply(sample_bilinear_premultiplied(tap_pos.x, tap_pos.y));
+    // Feather is measured on the destination patch, which is square, so the
+    // normalized radius uses the larger axis instead of the Euclidean length.
+    let radius = max(abs(patch_x), abs(patch_y)) / half_extent;
+    let edge = 1.0 - radius;
+    if (edge <= 0.0) {
+        return base;
+    }
+    let feather = uniforms.extra.w;
+    var weight = 1.0;
+    if (feather > 0.0) {
+        let t = clamp(edge / feather, 0.0, 1.0);
+        weight = t * t * (3.0 - 2.0 * t);
+    }
+    if (weight <= 0.0) {
+        return base;
+    }
+    // Same over composite as `blend_rgba_f32_pixel(..., BlendMode::Normal)`.
+    let base_alpha = clamp(base.a, 0.0, 1.0);
+    let blend_alpha = clamp(patch_sample.a * weight, 0.0, 1.0);
+    if (blend_alpha <= 0.0) {
+        return base;
+    }
+    if (base_alpha <= 0.0) {
+        return vec4<f32>(patch_sample.rgb, blend_alpha);
+    }
+    let out_alpha = blend_alpha + base_alpha * (1.0 - blend_alpha);
+    if (out_alpha <= 0.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let out_rgb =
+        (patch_sample.rgb * blend_alpha + base.rgb * base_alpha * (1.0 - blend_alpha)) / out_alpha;
+    return vec4<f32>(out_rgb, out_alpha);
 }
 
 fn dent_radius() -> f32 {
@@ -9691,6 +9921,24 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         let vr_sphere_to_plane =
             mondrian_effects::VrSphereToPlaneGrade::new(120.0, 8.0, -12.0, 4.0, false)
                 .expect("valid vr sphere to plane grade");
+        // Project a perspective card onto the panorama sphere: the pass has no
+        // identity, and it is the one projection that feathers on the
+        // destination patch, so the chain also covers the band composite.
+        let vr_project_2d = mondrian_effects::VrProject2DGrade::new(
+            240.0,
+            120.0,
+            50.0,
+            4.0,
+            20.0,
+            6.0,
+            -8.0,
+            2.0,
+            5.0,
+            -10.0,
+            3.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+        )
+        .expect("valid vr project 2d grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::Median { grade: median },
             mondrian_effects::EffectGpuSpatialPass::SelectiveColor { grade: selective_color },
@@ -9727,10 +9975,11 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::BezierWarp { grade: bezier_warp },
             mondrian_effects::EffectGpuSpatialPass::VrRotateSphere { grade: vr_rotate_sphere },
             mondrian_effects::EffectGpuSpatialPass::VrSphereToPlane { grade: vr_sphere_to_plane },
+            mondrian_effects::EffectGpuSpatialPass::VrProject2D { grade: vr_project_2d },
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 30, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 31, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::median_frame_f32(
@@ -9910,6 +10159,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             vr_sphere_to_plane,
+        ));
+        assert!(mondrian_effects::vr_project_2d_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            vr_project_2d,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -13745,6 +14000,439 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 );
             }
         }
+    }
+
+    #[test]
+    fn vr_project_2d_halo_is_full_frame() {
+        let grade = mondrian_effects::VrProject2DGrade::new(
+            120.0,
+            90.0,
+            45.0,
+            0.0,
+            10.0,
+            5.0,
+            -8.0,
+            3.0,
+            2.0,
+            0.0,
+            -4.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+        )
+        .expect("valid vr project 2d grade");
+        let op = mondrian_effects::EffectRenderOp::VrProject2D { grade };
+        let pass = mondrian_effects::gpu_pipeline::spatial_pass_for(&op)
+            .expect("vr project 2d must lower to a spatial stage");
+        assert_eq!(pass.name(), "vr_project_2d");
+        assert!(matches!(
+            pass,
+            mondrian_effects::EffectGpuSpatialPass::VrProject2D { .. }
+        ));
+        // The card can sit anywhere on the destination sphere, so a destination
+        // pixel may read anywhere in the source frame.
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+    }
+
+    #[test]
+    fn vr_project_2d_takes_a_single_pass() {
+        let grade = mondrian_effects::VrProject2DGrade::new(
+            360.0,
+            180.0,
+            60.0,
+            0.0,
+            10.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+        )
+        .expect("valid vr project 2d grade");
+        let pass = mondrian_effects::EffectGpuSpatialPass::VrProject2D { grade };
+        // One trigonometric remap per pixel: no window, iteration or separable
+        // direction to keep in scratch textures.
+        assert_eq!(EffectSpatialGpu::texture_pass_count(&pass), Ok(1));
+    }
+
+    #[test]
+    fn spatial_vr_project_2d_shader_validates() {
+        let module = naga::front::wgsl::parse_str(SPATIAL_EFFECT_SHADER)
+            .expect("spatial effect shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("spatial effect shader validates");
+        assert!(
+            module.entry_points.iter().any(|entry| entry.name == "fs_vr_project_2d"),
+            "the vr project 2d fragment entry point must survive validation"
+        );
+    }
+
+    /// Independent f64 evaluation of the plane to sphere inverse mapping.
+    ///
+    /// The destination ray, both poses and the patch test are rebuilt from the
+    /// authored parameters instead of reusing the kernel's private geometry, so
+    /// the two implementations can only agree if the published mapping is right.
+    fn reference_vr_project_2d_position(
+        grade: mondrian_effects::VrProject2DGrade,
+        column: f64,
+        row: f64,
+        width: usize,
+        height: usize,
+    ) -> Option<(f64, f64)> {
+        let u = (column + 0.5) / width as f64;
+        let v = (row + 0.5) / height as f64;
+        let longitude = (u - 0.5) * grade.horizontal_fov_degrees().to_radians();
+        let latitude = (0.5 - v) * grade.vertical_fov_degrees().to_radians();
+        let direction = [
+            latitude.cos() * longitude.sin(),
+            latitude.sin(),
+            latitude.cos() * longitude.cos(),
+        ];
+        let projection = reference_rotation(
+            grade.projection_tilt_x_degrees().to_radians(),
+            grade.projection_pan_y_degrees().to_radians(),
+            grade.projection_roll_z_degrees().to_radians(),
+        );
+        let q = reference_transpose_transform(projection, direction);
+        if q[2] <= 0.0 {
+            return None;
+        }
+        let patch_x = q[0] / q[2];
+        let patch_y = q[1] / q[2];
+        let half_extent = grade.patch_half_extent();
+        if patch_x.abs() > half_extent || patch_y.abs() > half_extent {
+            return None;
+        }
+        let source = reference_rotation(
+            grade.source_tilt_x_degrees().to_radians(),
+            grade.source_pan_y_degrees().to_radians(),
+            grade.source_roll_z_degrees().to_radians(),
+        );
+        let s = reference_transpose_transform(source, [patch_x, patch_y, 1.0]);
+        if s[2] <= 0.0 {
+            return None;
+        }
+        let source_x = s[0] / s[2];
+        let source_y = s[1] / s[2];
+        let denominator = 2.0 * half_extent;
+        let tangent = grade.stereo_disparity_degrees().to_radians().tan();
+        let u_source = 0.5 + (source_x - tangent) / denominator;
+        let v_source = 0.5 - source_y / denominator;
+        Some((
+            u_source * width as f64 - 0.5,
+            v_source * height as f64 - 0.5,
+        ))
+    }
+
+    fn reference_rotation(pitch: f64, yaw: f64, roll: f64) -> [[f64; 3]; 3] {
+        let (sp, cp) = (pitch.sin(), pitch.cos());
+        let (sy, cy) = (yaw.sin(), yaw.cos());
+        let (sr, cr) = (roll.sin(), roll.cos());
+        [
+            [cr * cy, cr * sy * sp - sr * cp, cr * sy * cp + sr * sp],
+            [sr * cy, sr * sy * sp + cr * cp, sr * sy * cp - cr * sp],
+            [-sy, cy * sp, cy * cp],
+        ]
+    }
+
+    fn reference_transpose_transform(matrix: [[f64; 3]; 3], vector: [f64; 3]) -> [f64; 3] {
+        [
+            matrix[0][0] * vector[0] + matrix[1][0] * vector[1] + matrix[2][0] * vector[2],
+            matrix[0][1] * vector[0] + matrix[1][1] * vector[1] + matrix[2][1] * vector[2],
+            matrix[0][2] * vector[0] + matrix[1][2] * vector[1] + matrix[2][2] * vector[2],
+        ]
+    }
+
+    #[test]
+    fn gpu_vr_project_2d_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU vr project 2d parity test: no GPU adapter available");
+            return;
+        };
+        let width = 128_u32;
+        let height = 64_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        // A periodic analytic gradient: the source seam does not introduce a
+        // colour step, so the only differences left are numeric.
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                pixels[y * width as usize + x] = [
+                    0.5 + 0.4 * (std::f32::consts::TAU * u).sin(),
+                    0.5 + 0.4 * (std::f32::consts::TAU * v).cos(),
+                    0.5 + 0.3 * (std::f32::consts::TAU * (u + v)).sin(),
+                    1.0,
+                ];
+            }
+        }
+        // A 179 degree card covers almost the whole visible hemisphere, so the
+        // comparison exercises the mapping instead of a few centre pixels.
+        let grade = mondrian_effects::VrProject2DGrade::new(
+            360.0,
+            180.0,
+            179.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+        )
+        .expect("valid vr project 2d grade");
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::vr_project_2d_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            grade,
+        ));
+        let (params, extra, aces, extra1) = grade.gpu_controls();
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let destination = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.vr-project-2d-encoder"),
+        });
+        let output = executor
+            .record_vr_project_2d(
+                &context.device,
+                &mut encoder,
+                params,
+                extra,
+                aces,
+                extra1,
+                &source,
+                &destination[0],
+                width,
+                height,
+            )
+            .expect("recorded vr project 2d");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        let mut compared = 0_usize;
+        for row in 0..height as usize {
+            for column in 0..width as usize {
+                let column_f64 = column as f64;
+                let row_f64 = row as f64;
+                let Some((sample_x, sample_y)) =
+                    grade.source_position(column_f64, row_f64, width as usize, height as usize)
+                else {
+                    // A skipped pixel must stay bit-identical on both sides.
+                    assert_eq!(
+                        cpu[row * width as usize + column].map(f32::to_bits),
+                        pixels[row * width as usize + column].map(f32::to_bits),
+                        "cpu skip at column {column} row {row}"
+                    );
+                    assert_eq!(
+                        gpu[row * width as usize + column].map(f32::to_bits),
+                        pixels[row * width as usize + column].map(f32::to_bits),
+                        "gpu skip at column {column} row {row}"
+                    );
+                    continue;
+                };
+                let (reference_x, reference_y) = reference_vr_project_2d_position(
+                    grade,
+                    column_f64,
+                    row_f64,
+                    width as usize,
+                    height as usize,
+                )
+                .expect("reference agrees the pixel hits the patch");
+                assert!(
+                    (sample_x - reference_x).abs() <= 1.0e-4,
+                    "column {column} row {row}: sample x {sample_x} vs reference {reference_x}"
+                );
+                assert!(
+                    (sample_y - reference_y).abs() <= 1.0e-4,
+                    "column {column} row {row}: sample y {sample_y} vs reference {reference_y}"
+                );
+                // The source clamps at the frame border, where the two
+                // implementations can tap opposite sides of the border, and the
+                // patch edge can flip between f32 and f64.
+                if !(2.0..=width as f64 - 3.0).contains(&sample_x)
+                    || !(2.0..=height as f64 - 3.0).contains(&sample_y)
+                {
+                    continue;
+                }
+                let mut near_boundary = false;
+                for dy in -2..=2 {
+                    for dx in -2..=2 {
+                        if grade
+                            .patch_coordinates(
+                                column_f64 + f64::from(dx),
+                                row_f64 + f64::from(dy),
+                                width as usize,
+                                height as usize,
+                            )
+                            .is_none()
+                        {
+                            near_boundary = true;
+                        }
+                    }
+                }
+                if near_boundary {
+                    continue;
+                }
+                let index = row * width as usize + column;
+                for channel in 0..4 {
+                    let difference = (cpu[index][channel] - gpu[index][channel]).abs();
+                    assert!(
+                        difference <= 2.0 / 255.0,
+                        "column {column} row {row} channel {channel}: cpu {:?} gpu {:?}",
+                        cpu[index],
+                        gpu[index]
+                    );
+                }
+                compared += 1;
+            }
+        }
+        assert!(
+            compared > (width as usize * height as usize) / 3,
+            "the gradient comparison must cover most of the visible hemisphere, compared {compared}"
+        );
+    }
+
+    #[test]
+    fn gpu_vr_project_2d_eye_split_matches_the_cpu_integer_division() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU vr project 2d eye test: no GPU adapter available");
+            return;
+        };
+        // An odd frame height is the case where a floating point half would put
+        // the second eye one row below the CPU's integer division.
+        let width = 64_u32;
+        let height = 181_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                pixels[y * width as usize + x] = [
+                    0.5 + 0.35 * (std::f32::consts::TAU * u).sin(),
+                    0.4 + 0.3 * v,
+                    0.5 + 0.3 * (std::f32::consts::TAU * (u + v)).cos(),
+                    1.0,
+                ];
+            }
+        }
+        let layout = mondrian_effects::VrFrameLayout::OverUnder;
+        let grade = mondrian_effects::VrProject2DGrade::new(
+            360.0, 180.0, 120.0, 0.0, 10.0, 6.0, -4.0, 3.0, 2.0, -3.0, 1.0, layout,
+        )
+        .expect("valid vr project 2d grade");
+        // The layout does not affect the mapping, so the same geometry without
+        // the stereo split gives the eye-local patch coordinates.
+        let mono = mondrian_effects::VrProject2DGrade::new(
+            360.0,
+            180.0,
+            120.0,
+            0.0,
+            10.0,
+            6.0,
+            -4.0,
+            3.0,
+            2.0,
+            -3.0,
+            1.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+        )
+        .expect("valid monoscopic vr project 2d grade");
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::vr_project_2d_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            grade,
+        ));
+        let (params, extra, aces, extra1) = grade.gpu_controls();
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let destination = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.vr-project-2d-eyes-encoder"),
+        });
+        let output = executor
+            .record_vr_project_2d(
+                &context.device,
+                &mut encoder,
+                params,
+                extra,
+                aces,
+                extra1,
+                &source,
+                &destination[0],
+                width,
+                height,
+            )
+            .expect("recorded vr project 2d");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        let (eye_width, eye_height) = layout.eye_size(width as usize, height as usize);
+        assert_eq!((eye_width, eye_height), (64, 90));
+        let mut compared = 0_usize;
+        for eye in 0..2_usize {
+            for local_row in 0..eye_height {
+                for local_column in 0..eye_width {
+                    let row = eye * eye_height + local_row;
+                    let index = row * width as usize + local_column;
+                    let Some((patch_x, patch_y)) = mono.patch_coordinates(
+                        local_column as f64,
+                        local_row as f64,
+                        eye_width,
+                        eye_height,
+                    ) else {
+                        // Outside the patch both kernels leave the pixel alone.
+                        assert_eq!(
+                            gpu[index].map(f32::to_bits),
+                            pixels[index].map(f32::to_bits),
+                            "gpu skip at eye {eye} column {local_column} row {local_row}"
+                        );
+                        continue;
+                    };
+                    if mono.feather_weight(patch_x, patch_y) < 0.05 {
+                        continue;
+                    }
+                    for channel in 0..4 {
+                        let difference = (cpu[index][channel] - gpu[index][channel]).abs();
+                        assert!(
+                            difference <= 2.0 / 255.0,
+                            "eye {eye} column {local_column} row {local_row} channel {channel}: \
+                             cpu {:?} gpu {:?}",
+                            cpu[index],
+                            gpu[index]
+                        );
+                    }
+                    compared += 1;
+                }
+            }
+        }
+        // The odd trailing row belongs to no eye: neither kernel may touch it.
+        for column in 0..width as usize {
+            let index = 180 * width as usize + column;
+            assert_eq!(
+                cpu[index].map(f32::to_bits),
+                pixels[index].map(f32::to_bits),
+                "cpu touched the odd trailing row"
+            );
+            assert_eq!(
+                gpu[index].map(f32::to_bits),
+                pixels[index].map(f32::to_bits),
+                "gpu touched the odd trailing row"
+            );
+        }
+        assert!(
+            compared > 2_000,
+            "the two eyes must both project a real patch, compared {compared}"
+        );
     }
 
     #[test]
