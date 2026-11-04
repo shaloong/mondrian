@@ -272,6 +272,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "Qualifier · 3D" => Some("parameter-group-qualifier-3d"),
         "Qualifier · Matte" => Some("parameter-group-qualifier-matte"),
         "VR 旋转球面" => Some("parameter-group-vr-rotate-sphere"),
+        "VR 球面到平面" => Some("parameter-group-vr-sphere-to-plane"),
         "万花筒" => Some("parameter-group-kaleidoscope"),
         "三色调" => Some("parameter-group-tritone"),
         "亮度对比度" => Some("parameter-group-brightness-contrast"),

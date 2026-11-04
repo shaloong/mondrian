@@ -63,6 +63,7 @@ pub mod tritone;
 pub mod twirl;
 pub mod vibrance;
 pub mod vr_rotate_sphere;
+pub mod vr_sphere_to_plane;
 pub mod warp;
 pub mod wave_warp;
 pub mod wire_removal;
@@ -502,6 +503,11 @@ pub use vr_rotate_sphere::{
     vr_rotate_sphere_frame_f32, VrFrameLayout, VrRotateSphereControls, VrRotateSphereError,
     VrRotateSphereGrade, VR_ROTATE_SPHERE_MAX_HORIZONTAL_FOV_DEGREES,
     VR_ROTATE_SPHERE_MAX_VERTICAL_FOV_DEGREES, VR_ROTATE_SPHERE_MIN_FOV_DEGREES,
+};
+pub use vr_sphere_to_plane::{
+    vr_sphere_to_plane_frame_f32, VrSphereToPlaneControls, VrSphereToPlaneError,
+    VrSphereToPlaneGrade, VR_SPHERE_TO_PLANE_DEFAULT_FOV_DEGREES,
+    VR_SPHERE_TO_PLANE_MAX_FOV_DEGREES, VR_SPHERE_TO_PLANE_MIN_FOV_DEGREES,
 };
 pub use warp::{
     warp_frame_f32, WarpAxis, WarpError, WarpGrade, WarpStyle, WARP_DEFAULT_AXIS,

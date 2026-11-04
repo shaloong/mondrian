@@ -117,6 +117,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored tilt, pan, roll and projection controls.
         grade: crate::VrRotateSphereGrade,
     },
+    /// Virtual-reality equirectangular sphere to perspective plane.
+    VrSphereToPlane {
+        /// Authored field of view, projection tilt and direction switch.
+        grade: crate::VrSphereToPlaneGrade,
+    },
     /// Parallel displacement clone across an authored line.
     WireRemoval {
         /// Authored wire removal line and controls.
@@ -260,6 +265,7 @@ impl EffectGpuSpatialPass {
             Self::GridWarp { .. } => "grid_warp",
             Self::BezierWarp { .. } => "bezier_warp",
             Self::VrRotateSphere { .. } => "vr_rotate_sphere",
+            Self::VrSphereToPlane { .. } => "vr_sphere_to_plane",
             Self::WireRemoval { .. } => "wire_removal",
             Self::RoughenEdges { .. } => "roughen_edges",
             Self::Convolution { .. } => "convolution",
@@ -324,6 +330,7 @@ impl EffectGpuSpatialPass {
             | Self::GridWarp { .. }
             | Self::BezierWarp { .. }
             | Self::VrRotateSphere { .. }
+            | Self::VrSphereToPlane { .. }
             | Self::WireRemoval { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
@@ -395,6 +402,7 @@ impl EffectGpuSpatialPass {
             | Self::GridWarp { .. }
             | Self::BezierWarp { .. }
             | Self::VrRotateSphere { .. }
+            | Self::VrSphereToPlane { .. }
             | Self::WireRemoval { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
@@ -720,6 +728,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::VrRotateSphere { grade } => {
             Some(EffectGpuSpatialPass::VrRotateSphere { grade: *grade })
+        }
+        EffectRenderOp::VrSphereToPlane { grade } => {
+            Some(EffectGpuSpatialPass::VrSphereToPlane { grade: *grade })
         }
         EffectRenderOp::WireRemoval { grade } => {
             Some(EffectGpuSpatialPass::WireRemoval { grade: *grade })

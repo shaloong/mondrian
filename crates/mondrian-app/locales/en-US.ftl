@@ -3058,3 +3058,12 @@ parameter-mondrian-effect-builtin-vr-rotate-sphere-invert-label = Invert Rotatio
 parameter-mondrian-effect-vr-rotate-sphere-frame-layout-monoscopic = Monoscopic
 parameter-mondrian-effect-vr-rotate-sphere-frame-layout-over-under = Over-Under
 parameter-mondrian-effect-vr-rotate-sphere-frame-layout-side-by-side = Side-by-Side
+
+## VR Sphere to Plane VR 球面到平面
+effect-vr-sphere-to-plane = VR Sphere to Plane
+parameter-group-vr-sphere-to-plane = VR Sphere to Plane
+parameter-mondrian-effect-builtin-vr-sphere-to-plane-horizontal-fov-label = Horizontal FOV
+parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-x-label = Projection Tilt (X Axis)
+parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-y-label = Projection Tilt (Y Axis)
+parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-z-label = Projection Tilt (Z Axis)
+parameter-mondrian-effect-builtin-vr-sphere-to-plane-invert-label = Invert Rotation

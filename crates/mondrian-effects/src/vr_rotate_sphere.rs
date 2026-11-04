@@ -439,7 +439,10 @@ impl VrRotateSphereGrade {
 }
 
 /// Wraps an angle in degrees into `(-180, 180]`.
-fn wrap_degrees(degrees: f64) -> f64 {
+///
+/// Shared with the sphere-to-plane kernel, which uses the same author range and
+/// the same wrap convention for its three projection angles.
+pub(crate) fn wrap_degrees(degrees: f64) -> f64 {
     let wrapped = degrees - (degrees / 360.0).floor() * 360.0;
     if wrapped > 180.0 {
         wrapped - 360.0

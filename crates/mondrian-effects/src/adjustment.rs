@@ -536,6 +536,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::VrSphereToPlane { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "vr_sphere_to_plane",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::WireRemoval { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "wire_removal",
@@ -1140,6 +1146,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The kernel snapshots the straight frame and premultiplies a copy, so
         // it must never write the source in place.
         EffectRenderOp::VrRotateSphere { .. } => 1,
+        // The kernel snapshots the straight frame and premultiplies a copy, so
+        // it must never write the source in place.
+        EffectRenderOp::VrSphereToPlane { .. } => 1,
         EffectRenderOp::WireRemoval { .. } => 1,
         EffectRenderOp::RoughenEdges { .. } => 1,
         EffectRenderOp::EyedropperFill { .. } => 0,
@@ -1802,6 +1811,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::VrRotateSphere { grade } => {
             crate::vr_rotate_sphere::apply_vr_rotate_sphere_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *grade,
+                checkpoint,
+            )
+        }
+        EffectRenderOp::VrSphereToPlane { grade } => {
+            crate::vr_sphere_to_plane::apply_vr_sphere_to_plane_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,

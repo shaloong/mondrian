@@ -164,6 +164,9 @@ pub enum EffectType {
     /// VR rotate sphere: re-projects the layer through a virtual-reality
     /// equirectangular sphere rotated by the authored tilt, pan and roll.
     VrRotateSphere,
+    /// VR sphere to plane: projects an equirectangular frame through a
+    /// virtual camera with a horizontal field of view and projection tilt.
+    VrSphereToPlane,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -274,6 +277,7 @@ impl EffectType {
             Self::Magnify => "builtin.magnify".to_string(),
             Self::DustScratches => "builtin.dust_scratches".to_string(),
             Self::VrRotateSphere => "builtin.vr_rotate_sphere".to_string(),
+            Self::VrSphereToPlane => "builtin.vr_sphere_to_plane".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -380,6 +384,7 @@ impl EffectType {
             "builtin.magnify" => Self::Magnify,
             "builtin.dust_scratches" => Self::DustScratches,
             "builtin.vr_rotate_sphere" => Self::VrRotateSphere,
+            "builtin.vr_sphere_to_plane" => Self::VrSphereToPlane,
             other => Self::External(other.to_string()),
         }
     }
@@ -486,6 +491,7 @@ impl EffectType {
             Self::Magnify => "放大",
             Self::DustScratches => "蒙尘与划痕",
             Self::VrRotateSphere => "VR 旋转球面",
+            Self::VrSphereToPlane => "VR 球面到平面",
             Self::External(name) => name,
         }
     }
@@ -590,6 +596,7 @@ impl EffectType {
             Self::Magnify => vec!["变形"],
             Self::DustScratches => vec!["修复"],
             Self::VrRotateSphere => vec!["变形"],
+            Self::VrSphereToPlane => vec!["变形"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -696,6 +703,7 @@ impl EffectType {
             Self::Magnify => "magnify".to_string(),
             Self::DustScratches => "dust_scratches".to_string(),
             Self::VrRotateSphere => "vr_rotate_sphere".to_string(),
+            Self::VrSphereToPlane => "vr_sphere_to_plane".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1051,6 +1059,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Magnify => Ok(()),
             Self::DustScratches => Ok(()),
             Self::VrRotateSphere => Ok(()),
+            Self::VrSphereToPlane => Ok(()),
         }
     }
 }

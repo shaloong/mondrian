@@ -1092,6 +1092,11 @@ pub enum EffectRenderOp {
     VrRotateSphere {
         grade: crate::VrRotateSphereGrade,
     },
+    /// VR sphere to plane: projects an equirectangular frame through a virtual
+    /// camera with an authored horizontal field of view and projection tilt.
+    VrSphereToPlane {
+        grade: crate::VrSphereToPlaneGrade,
+    },
     /// Wire removal: clones pixels from a parallel displacement across an
     /// authored line (RES-07).
     WireRemoval {
@@ -1479,6 +1484,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::VrRotateSphere { grade } => {
                 formatter.debug_struct("VrRotateSphere").field("grade", grade).finish()
+            }
+            Self::VrSphereToPlane { grade } => {
+                formatter.debug_struct("VrSphereToPlane").field("grade", grade).finish()
             }
             Self::WireRemoval { grade } => {
                 formatter.debug_struct("WireRemoval").field("grade", grade).finish()
@@ -2381,6 +2389,13 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::VrSphereToPlane { grade } => {
+                101u8.hash(state);
+                let (params, extra, aces, extra1) = grade.gpu_controls();
+                for value in params.into_iter().chain(extra).chain(aces).chain(extra1) {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::WireRemoval { grade } => {
                 86u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2590,6 +2605,7 @@ impl EffectRenderOp {
             EffectRenderOp::GridWarp { .. } => 3,
             EffectRenderOp::BezierWarp { .. } => 6,
             EffectRenderOp::VrRotateSphere { .. } => 5,
+            EffectRenderOp::VrSphereToPlane { .. } => 5,
             EffectRenderOp::WireRemoval { .. } => 4,
             EffectRenderOp::Median { .. } => 4,
             EffectRenderOp::SelectiveColor { .. } => 2,
@@ -3143,7 +3159,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 100] {
+fn builtin_effect_types() -> [EffectType; 101] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3245,6 +3261,7 @@ fn builtin_effect_types() -> [EffectType; 100] {
         EffectType::DustScratches,
         EffectType::BezierWarp,
         EffectType::VrRotateSphere,
+        EffectType::VrSphereToPlane,
     ]
 }
 
@@ -10413,6 +10430,50 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::VrSphereToPlane => {
+            // The field of view comes first, then the three projection tilt
+            // angles, then the direction switch. The output always exists:
+            // there is no identity camera for a perspective projection.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "horizontal_fov",
+                "VR 球面到平面",
+                "水平视角",
+                PropertyValue::Float(90.0),
+                Some(f64::from(crate::VR_SPHERE_TO_PLANE_MIN_FOV_DEGREES)),
+                Some(f64::from(crate::VR_SPHERE_TO_PLANE_MAX_FOV_DEGREES)),
+                Some(1.0),
+            );
+            for (parameter, name) in [
+                ("projection_tilt_x", "投影倾斜 (X 轴)"),
+                ("projection_tilt_y", "投影倾斜 (Y 轴)"),
+                ("projection_tilt_z", "投影倾斜 (Z 轴)"),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "VR 球面到平面",
+                    name,
+                    PropertyValue::Float(0.0),
+                    None,
+                    None,
+                    Some(1.0),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "VR 球面到平面",
+                "反旋转",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -10821,6 +10882,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             "horizontal_fov" | "vertical_fov" | "tilt_x" | "pan_y" | "roll_z",
         ) => ParameterUnit::Degrees,
         (EffectType::VrRotateSphere, _) => ParameterUnit::Unitless,
+        (
+            EffectType::VrSphereToPlane,
+            "horizontal_fov" | "projection_tilt_x" | "projection_tilt_y" | "projection_tilt_z",
+        ) => ParameterUnit::Degrees,
+        (EffectType::VrSphereToPlane, _) => ParameterUnit::Unitless,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -11256,6 +11322,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::VrRotateSphere => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::VrSphereToPlane => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -16729,6 +16800,52 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::VrSphereToPlane => {
+            let horizontal_fov_id = builtin_parameter_id(effect_type, "horizontal_fov");
+            let projection_tilt_x_id = builtin_parameter_id(effect_type, "projection_tilt_x");
+            let projection_tilt_y_id = builtin_parameter_id(effect_type, "projection_tilt_y");
+            let projection_tilt_z_id = builtin_parameter_id(effect_type, "projection_tilt_z");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let horizontal_fov = effect.evaluate_f32_parameter(
+                    &horizontal_fov_id,
+                    context.time,
+                    crate::VR_SPHERE_TO_PLANE_DEFAULT_FOV_DEGREES,
+                );
+                let tilt_x =
+                    effect.evaluate_f32_parameter(&projection_tilt_x_id, context.time, 0.0);
+                let tilt_y =
+                    effect.evaluate_f32_parameter(&projection_tilt_y_id, context.time, 0.0);
+                let tilt_z =
+                    effect.evaluate_f32_parameter(&projection_tilt_z_id, context.time, 0.0);
+                let invert = match effect.evaluate_parameter(&invert_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(
+                            "vr sphere to plane invert must be a boolean".to_owned(),
+                        ));
+                    }
+                    None => false,
+                };
+                let grade = crate::VrSphereToPlaneGrade::new(
+                    f64::from(horizontal_fov),
+                    f64::from(tilt_x),
+                    f64::from(tilt_y),
+                    f64::from(tilt_z),
+                    invert,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // A perspective projection always has a lens, so the pass is
+                // appended even for the default view: there is no identity.
+                graph.append_unary(EffectRenderOp::VrSphereToPlane { grade });
+                Ok(())
+            }))
+        }
         EffectType::WireRemoval => {
             let point_a_x_id = builtin_parameter_id(effect_type, "point_a_x");
             let point_a_y_id = builtin_parameter_id(effect_type, "point_a_y");
@@ -17049,6 +17166,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::GridWarp => "网格变形",
         EffectType::BezierWarp => "贝塞尔曲线变形",
         EffectType::VrRotateSphere => "VR 旋转球面",
+        EffectType::VrSphereToPlane => "VR 球面到平面",
         EffectType::WireRemoval => "祛线",
         EffectType::Median => "中间值",
         EffectType::SelectiveColor => "可选颜色",
@@ -18395,6 +18513,7 @@ mod tests {
             EffectType::DustScratches,
             EffectType::BezierWarp,
             EffectType::VrRotateSphere,
+            EffectType::VrSphereToPlane,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -22265,6 +22384,148 @@ mod tests {
         assert_eq!(format!("{off_graph:?}"), format!("{on_graph:?}"));
         assert!(vr_rotate_sphere_op(&off_graph).is_none());
         assert!(vr_rotate_sphere_op(&on_graph).is_none());
+    }
+
+    fn vr_sphere_to_plane_op(graph: &EffectRenderGraph) -> Option<crate::VrSphereToPlaneGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::VrSphereToPlane { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_vr_sphere_to_plane(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::VrSphereToPlane)
+            .expect("registered vr sphere to plane definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::VrSphereToPlane.property_path(parameter),
+                value,
+            })
+            .expect("authors vr sphere to plane parameter");
+        effect
+    }
+
+    fn author_vr_sphere_to_plane_more(
+        mut effect: EffectNode,
+        parameter: &str,
+        value: PropertyValue,
+    ) -> EffectNode {
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::VrSphereToPlane.property_path(parameter),
+                value,
+            })
+            .expect("authors vr sphere to plane parameter");
+        effect
+    }
+
+    fn vr_sphere_to_plane_grade() -> crate::VrSphereToPlaneGrade {
+        crate::VrSphereToPlaneGrade::new(120.0, 10.0, 20.0, 30.0, false)
+            .expect("valid vr sphere to plane grade")
+    }
+
+    #[test]
+    fn vr_sphere_to_plane_default_graph_appends_one_node() {
+        // Every perspective projection has a lens, so the default view is not
+        // the identity and the pass must still run.
+        let effect = instantiate_effect_node(EffectType::VrSphereToPlane)
+            .expect("registered vr sphere to plane definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds vr sphere to plane graph");
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|node| matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect {
+                        op: EffectRenderOp::VrSphereToPlane { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the default view must still append the projection pass"
+        );
+        let grade = vr_sphere_to_plane_op(&graph).expect("vr sphere to plane op");
+        assert_eq!(grade.horizontal_fov_degrees(), 90.0);
+        assert_eq!(grade.projection_tilt_x_degrees(), 0.0);
+        assert_eq!(grade.projection_tilt_y_degrees(), 0.0);
+        assert_eq!(grade.projection_tilt_z_degrees(), 0.0);
+        assert!(!grade.invert());
+    }
+
+    #[test]
+    fn vr_sphere_to_plane_authored_state_reaches_the_operation() {
+        let effect = author_vr_sphere_to_plane("horizontal_fov", PropertyValue::Float(120.0));
+        let effect =
+            author_vr_sphere_to_plane_more(effect, "projection_tilt_x", PropertyValue::Float(10.0));
+        let effect =
+            author_vr_sphere_to_plane_more(effect, "projection_tilt_y", PropertyValue::Float(-5.0));
+        let effect =
+            author_vr_sphere_to_plane_more(effect, "projection_tilt_z", PropertyValue::Float(90.0));
+        let effect = author_vr_sphere_to_plane_more(effect, "invert", PropertyValue::Bool(true));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds vr sphere to plane graph");
+        let grade = vr_sphere_to_plane_op(&graph).expect("vr sphere to plane op");
+        assert_eq!(grade.horizontal_fov_degrees(), 120.0);
+        assert_eq!(grade.projection_tilt_x_degrees(), 10.0);
+        assert_eq!(grade.projection_tilt_y_degrees(), -5.0);
+        assert_eq!(grade.projection_tilt_z_degrees(), 90.0);
+        assert!(grade.invert());
+    }
+
+    #[test]
+    fn the_vr_sphere_to_plane_shape_tag_is_102_and_the_hash_tag_is_101() {
+        // VR rotate sphere owns hash 100 / shape 101, so the next pass lands on
+        // hash 101 / shape 102.
+        let grade = vr_sphere_to_plane_grade();
+        let op = EffectRenderOp::VrSphereToPlane { grade };
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            102
+        );
+        let mut actual = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual);
+        let mut expected = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&101u8, &mut expected);
+        let (params, extra, aces, extra1) = grade.gpu_controls();
+        for value in params.into_iter().chain(extra).chain(aces).chain(extra1) {
+            std::hash::Hash::hash(&value.to_bits(), &mut expected);
+        }
+        assert_eq!(
+            std::hash::Hasher::finish(&actual),
+            std::hash::Hasher::finish(&expected)
+        );
+    }
+
+    #[test]
+    fn vr_sphere_to_plane_requirements_report_full_frame_and_both_modes() {
+        let op = EffectRenderOp::VrSphereToPlane { grade: vr_sphere_to_plane_grade() };
+        let requirements = crate::graph::render_op_requirements(&op);
+        assert!(requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Cpu,
+            crate::EffectWorkingPrecision::Float32,
+        ));
+        assert!(requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Gpu,
+            crate::EffectWorkingPrecision::Float32,
+        ));
+        assert!(!requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Cpu,
+            crate::EffectWorkingPrecision::NormalizedU8,
+        ));
+        assert!(!requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Gpu,
+            crate::EffectWorkingPrecision::NormalizedU8,
+        ));
+        assert_eq!(
+            requirements.roi_from_effect_input,
+            crate::EffectRoiPropagation::FullFrame
+        );
     }
 
     fn dent_op(graph: &EffectRenderGraph) -> Option<crate::DentGrade> {

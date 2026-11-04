@@ -2380,6 +2380,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::GridWarp { .. } => "grid_warp",
         EffectRenderOp::BezierWarp { .. } => "bezier_warp",
         EffectRenderOp::VrRotateSphere { .. } => "vr_rotate_sphere",
+        EffectRenderOp::VrSphereToPlane { .. } => "vr_sphere_to_plane",
         EffectRenderOp::WireRemoval { .. } => "wire_removal",
         EffectRenderOp::RoughenEdges { .. } => "roughen_edges",
         EffectRenderOp::EyedropperFill { .. } => "eyedropper_fill",
