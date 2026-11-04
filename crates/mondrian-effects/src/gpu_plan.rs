@@ -168,6 +168,10 @@ pub enum EffectGpuPointOp {
     Checkerboard {
         grade: crate::CheckerboardGrade,
     },
+    /// Cell pattern: paints a pixel-local Worley cell field.
+    CellPattern {
+        grade: crate::CellPatternGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         grade: crate::GridGrade,
@@ -915,6 +919,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::Checkerboard { grade } => {
             Ok(EffectGpuPointOp::Checkerboard { grade: *grade })
         }
+        EffectRenderOp::CellPattern { grade } => {
+            Ok(EffectGpuPointOp::CellPattern { grade: *grade })
+        }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1030,6 +1037,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::TestSignals { .. } => "test_signals",
         EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
+        EffectRenderOp::CellPattern { .. } => "cell_pattern",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

@@ -2834,6 +2834,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::TestSignals { .. } => "test_signals",
         crate::EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         crate::EffectRenderOp::Checkerboard { .. } => "checkerboard",
+        crate::EffectRenderOp::CellPattern { .. } => "cell_pattern",
         crate::EffectRenderOp::Grid { .. } => "grid",
         crate::EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         crate::EffectRenderOp::Fill { .. } => "fill",

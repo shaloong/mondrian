@@ -1187,6 +1187,11 @@ pub enum EffectRenderOp {
         /// Authored anchor, cell sizing, feathering, colour and blend mode.
         grade: crate::CheckerboardGrade,
     },
+    /// Cell pattern: paints a pixel-local Worley cell field.
+    CellPattern {
+        /// Authored cell type, field shaping, evolution and tiling.
+        grade: crate::CellPatternGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         /// Authored anchor, cell sizing, border, feathering, colour and blend
@@ -1441,6 +1446,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Checkerboard { grade } => {
                 formatter.debug_struct("Checkerboard").field("grade", grade).finish()
+            }
+            Self::CellPattern { grade } => {
+                formatter.debug_struct("CellPattern").field("grade", grade).finish()
             }
             Self::Grid { grade } => formatter.debug_struct("Grid").field("grade", grade).finish(),
             Self::CircleEllipse { grade } => {
@@ -2274,6 +2282,21 @@ impl EffectRenderOp {
                 grade.size_from().index().hash(state);
                 grade.blend_mode().hash(state);
             }
+            EffectRenderOp::CellPattern { grade } => {
+                104u8.hash(state);
+                let (params, color, extra0, _extra1) = grade.gpu_controls();
+                for cell in [params, color, extra0] {
+                    cell.map(f32::to_bits).hash(state);
+                }
+                // The cell type, overflow mode and the three flags live in the
+                // uniform header, not in `gpu_controls`, so the effect cache has
+                // to see them here.
+                grade.pattern().index().hash(state);
+                grade.overflow().index().hash(state);
+                grade.invert().hash(state);
+                grade.tiling().hash(state);
+                grade.cycle_evolution().hash(state);
+            }
             EffectRenderOp::Grid { grade } => {
                 93u8.hash(state);
                 let (params, color, extra0, extra1) = grade.gpu_controls();
@@ -2642,6 +2665,7 @@ impl EffectRenderOp {
             EffectRenderOp::RoughenEdges { .. } => 4,
             EffectRenderOp::EyedropperFill { .. } => 5,
             EffectRenderOp::Checkerboard { .. } => 1,
+            EffectRenderOp::CellPattern { .. } => 4,
             EffectRenderOp::Grid { .. } => 1,
             EffectRenderOp::CircleEllipse { .. } => 1,
             EffectRenderOp::Stroke { .. } => 5,
@@ -3189,7 +3213,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 103] {
+fn builtin_effect_types() -> [EffectType; 104] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3294,6 +3318,7 @@ fn builtin_effect_types() -> [EffectType; 103] {
         EffectType::VrSphereToPlane,
         EffectType::VrProject2D,
         EffectType::HdrToneMapping,
+        EffectType::CellPattern,
     ]
 }
 
@@ -9512,6 +9537,181 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::CellPattern => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "pattern",
+                "单元格图案",
+                "单元格图案",
+                crate::CELL_PATTERN_DEFAULT_PATTERN.as_key(),
+                crate::CellPatternType::ALL
+                    .iter()
+                    .map(|cell_type| {
+                        let key = cell_type.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            cell_type.label(),
+                            format!("mondrian.effect.cell_pattern.pattern.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "单元格图案",
+                "反转",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "contrast",
+                "单元格图案",
+                "对比度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(f64::from(crate::CELL_PATTERN_MAX_CONTRAST)),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "overflow",
+                "单元格图案",
+                "溢出",
+                crate::CELL_PATTERN_DEFAULT_OVERFLOW.as_key(),
+                crate::CellPatternOverflow::ALL
+                    .iter()
+                    .map(|overflow| {
+                        let key = overflow.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            overflow.label(),
+                            format!("mondrian.effect.cell_pattern.overflow.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "disperse",
+                "单元格图案",
+                "分散",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(f64::from(crate::CELL_PATTERN_MAX_DISPERSE)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "size",
+                "单元格图案",
+                "大小",
+                PropertyValue::Float(crate::CELL_PATTERN_DEFAULT_SIZE),
+                Some(f64::from(crate::CELL_PATTERN_MIN_SIZE)),
+                Some(f64::from(crate::CELL_PATTERN_MAX_SIZE)),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "offset",
+                "单元格图案",
+                "偏移",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::CELL_PATTERN_DEFAULT_OFFSET[0],
+                    crate::CELL_PATTERN_DEFAULT_OFFSET[1],
+                )),
+                Some(-f64::from(crate::CELL_PATTERN_MAX_COORDINATE)),
+                Some(f64::from(crate::CELL_PATTERN_MAX_COORDINATE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tiling",
+                "单元格图案",
+                "启用平铺",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cells_horizontal",
+                "单元格图案",
+                "水平单元格",
+                PropertyValue::Float(4.0),
+                Some(1.0),
+                Some(f64::from(crate::CELL_PATTERN_MAX_CELLS)),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cells_vertical",
+                "单元格图案",
+                "垂直单元格",
+                PropertyValue::Float(4.0),
+                Some(1.0),
+                Some(f64::from(crate::CELL_PATTERN_MAX_CELLS)),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "evolution",
+                "单元格图案",
+                "演化",
+                PropertyValue::Float(0.0),
+                Some(-f64::from(crate::CELL_PATTERN_MAX_EVOLUTION)),
+                Some(f64::from(crate::CELL_PATTERN_MAX_EVOLUTION)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle_evolution",
+                "单元格图案",
+                "循环演化",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle_revolutions",
+                "单元格图案",
+                "循环（旋转次数）",
+                PropertyValue::Float(1.0),
+                Some(1.0),
+                Some(f64::from(crate::CELL_PATTERN_MAX_CYCLE_REVOLUTIONS)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "seed",
+                "单元格图案",
+                "随机植入",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(f64::from(crate::CELL_PATTERN_MAX_SEED)),
+                Some(1.0),
+            );
+        }
         EffectType::Grid => {
             define_builtin_property(
                 &mut properties,
@@ -10920,6 +11120,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             "anchor" | "corner" | "width" | "height" | "feather_width" | "feather_height",
         ) => ParameterUnit::Pixels,
         (EffectType::Checkerboard, "opacity") => ParameterUnit::Percent,
+        (EffectType::CellPattern, "size" | "offset") => ParameterUnit::Pixels,
         (
             EffectType::Grid,
             "anchor" | "corner" | "width" | "height" | "border" | "feather_width"
@@ -11360,6 +11561,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Checkerboard => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::CellPattern => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -16069,6 +16274,101 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::CellPattern => {
+            let pattern_id = builtin_parameter_id(effect_type, "pattern");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            let contrast_id = builtin_parameter_id(effect_type, "contrast");
+            let overflow_id = builtin_parameter_id(effect_type, "overflow");
+            let disperse_id = builtin_parameter_id(effect_type, "disperse");
+            let size_id = builtin_parameter_id(effect_type, "size");
+            let offset_id = builtin_parameter_id(effect_type, "offset");
+            let tiling_id = builtin_parameter_id(effect_type, "tiling");
+            let cells_horizontal_id = builtin_parameter_id(effect_type, "cells_horizontal");
+            let cells_vertical_id = builtin_parameter_id(effect_type, "cells_vertical");
+            let evolution_id = builtin_parameter_id(effect_type, "evolution");
+            let cycle_evolution_id = builtin_parameter_id(effect_type, "cycle_evolution");
+            let cycle_revolutions_id = builtin_parameter_id(effect_type, "cycle_revolutions");
+            let seed_id = builtin_parameter_id(effect_type, "seed");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let point = |parameter_id: &ParameterId,
+                             name: &str,
+                             fallback: [f32; 2]|
+                 -> Result<[f32; 2], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Vec2(point)) => Ok([point.x, point.y]),
+                        Some(PropertyValue::DoubleVec2(point)) => {
+                            Ok([point[0] as f32, point[1] as f32])
+                        }
+                        Some(_) => Err(invalid(format!("cell pattern {name} must be a point"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let flag = |parameter_id: &ParameterId,
+                            name: &str|
+                 -> Result<bool, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => Ok(value),
+                        Some(_) => Err(invalid(format!("cell pattern {name} must be a boolean"))),
+                        None => Ok(false),
+                    }
+                };
+                let pattern = match effect.evaluate_parameter(&pattern_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::CellPatternType::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("cell pattern type {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "cell pattern type must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::CELL_PATTERN_DEFAULT_PATTERN,
+                };
+                let overflow = match effect.evaluate_parameter(&overflow_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::CellPatternOverflow::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "cell pattern overflow {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "cell pattern overflow must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::CELL_PATTERN_DEFAULT_OVERFLOW,
+                };
+                let grade = crate::CellPatternGrade::new(
+                    pattern,
+                    flag(&invert_id, "invert")?,
+                    effect.evaluate_f32_parameter(&contrast_id, context.time, 100.0),
+                    overflow,
+                    effect.evaluate_f32_parameter(&disperse_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(
+                        &size_id,
+                        context.time,
+                        crate::CELL_PATTERN_DEFAULT_SIZE,
+                    ),
+                    point(&offset_id, "offset", crate::CELL_PATTERN_DEFAULT_OFFSET)?,
+                    flag(&tiling_id, "tiling")?,
+                    effect.evaluate_f32_parameter(&cells_horizontal_id, context.time, 4.0),
+                    effect.evaluate_f32_parameter(&cells_vertical_id, context.time, 4.0),
+                    effect.evaluate_f32_parameter(&evolution_id, context.time, 0.0),
+                    flag(&cycle_evolution_id, "cycle evolution")?,
+                    effect.evaluate_f32_parameter(&cycle_revolutions_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&seed_id, context.time, 0.0),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // A cell pattern always paints, so there is no identity check.
+                graph.append_unary(EffectRenderOp::CellPattern { grade });
+                Ok(())
+            }))
+        }
         EffectType::CircleEllipse => {
             let center_id = builtin_parameter_id(effect_type, "center");
             let radius_id = builtin_parameter_id(effect_type, "radius");
@@ -17522,6 +17822,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::RoughenEdges => "粗糙边缘",
         EffectType::EyedropperFill => "吸管填充",
         EffectType::Checkerboard => "棋盘",
+        EffectType::CellPattern => "单元格图案",
         EffectType::Grid => "网格",
         EffectType::CircleEllipse => "圆形与椭圆",
         EffectType::Stroke => "描边",
@@ -18865,6 +19166,7 @@ mod tests {
             EffectType::VrSphereToPlane,
             EffectType::VrProject2D,
             EffectType::HdrToneMapping,
+            EffectType::CellPattern,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -27865,6 +28167,247 @@ mod tests {
         assert!(
             format!("{error:?}").contains("outside [1, 4000]"),
             "{error:?}"
+        );
+    }
+
+    fn cell_pattern_op(graph: &EffectRenderGraph) -> Option<crate::CellPatternGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::CellPattern { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::CellPattern { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_cell_pattern(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::CellPattern)
+            .expect("the cell pattern effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::CellPattern.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the cell pattern parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn cell_pattern_defaults_append_exactly_one_generator_node() {
+        let effect_type = EffectType::CellPattern;
+        let properties = default_properties_for(effect_type.clone());
+        assert_eq!(properties.iter().count(), 14);
+        let expected = [
+            ("pattern", "单元格图案"),
+            ("invert", "反转"),
+            ("contrast", "对比度"),
+            ("overflow", "溢出"),
+            ("disperse", "分散"),
+            ("size", "大小"),
+            ("offset", "偏移"),
+            ("tiling", "启用平铺"),
+            ("cells_horizontal", "水平单元格"),
+            ("cells_vertical", "垂直单元格"),
+            ("evolution", "演化"),
+            ("cycle_evolution", "循环演化"),
+            ("cycle_revolutions", "循环（旋转次数）"),
+            ("seed", "随机植入"),
+        ];
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("单元格图案")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        let size = properties
+            .property(&effect_type.property_path("size"))
+            .expect("the cell size should be defined");
+        assert_eq!(size.descriptor.schema.unit, ParameterUnit::Pixels);
+        let offset = properties
+            .property(&effect_type.property_path("offset"))
+            .expect("the cell offset should be defined");
+        assert_eq!(offset.descriptor.schema.unit, ParameterUnit::Pixels);
+        let pattern = properties
+            .property(&effect_type.property_path("pattern"))
+            .expect("the cell type should be defined");
+        assert_eq!(pattern.descriptor.schema.enum_options.len(), 12);
+        assert_eq!(pattern.descriptor.schema.enum_options[0].key, "bubbles");
+        let overflow = properties
+            .property(&effect_type.property_path("overflow"))
+            .expect("the overflow mode should be defined");
+        assert_eq!(overflow.descriptor.schema.enum_options.len(), 3);
+        assert_eq!(overflow.descriptor.schema.enum_options[0].key, "clip");
+
+        let effect = instantiate_effect_node(EffectType::CellPattern)
+            .expect("the cell pattern effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default cell pattern should compile");
+        // The graph always carries a source node; the generator adds one more.
+        assert_eq!(graph.nodes.len(), 2);
+        let mut effect_nodes = 0;
+        for node in &graph.nodes {
+            if let EffectGraphNodeKind::UnaryEffect { .. }
+            | EffectGraphNodeKind::DomainEffect { .. } = &node.kind
+            {
+                effect_nodes += 1;
+            }
+        }
+        assert_eq!(effect_nodes, 1);
+        let grade = cell_pattern_op(&graph).expect("the default parameters emit the generator");
+        assert_eq!(
+            grade.gpu_controls(),
+            (
+                [60.0, 128.0, 128.0, 1.0],
+                [4.0, 4.0, 0.0, 100.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            )
+        );
+        assert_eq!(grade.header_flags(), 0);
+        assert_eq!(grade.pattern(), crate::CellPatternType::Bubbles);
+        assert_eq!(grade.overflow(), crate::CellPatternOverflow::Clip);
+        assert!(!grade.is_identity());
+        let compiled = crate::compile_reference_render_graph(graph).expect("compile the generator");
+        assert_eq!(
+            compiled.execution_envelope().aggregate().roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal
+        );
+
+        // Tags were measured against the tree at HEAD 0630abd3: hash 103 and
+        // shape 104 were the maxima (HDR tone mapping), so the cell pattern
+        // takes hash 104, shape 105 and the 104th effect-library slot.
+        let op = EffectRenderOp::CellPattern { grade };
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            105
+        );
+        assert_eq!(crate::effect::builtin_effect_types().len(), 104);
+        let mut actual = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual);
+        let mut expected = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&104u8, &mut expected);
+        let (params, color, extra0, _extra1) = grade.gpu_controls();
+        for cell in [params, color, extra0] {
+            std::hash::Hash::hash(&cell.map(f32::to_bits), &mut expected);
+        }
+        std::hash::Hash::hash(&grade.pattern().index(), &mut expected);
+        std::hash::Hash::hash(&grade.overflow().index(), &mut expected);
+        std::hash::Hash::hash(&grade.invert(), &mut expected);
+        std::hash::Hash::hash(&grade.tiling(), &mut expected);
+        std::hash::Hash::hash(&grade.cycle_evolution(), &mut expected);
+        assert_eq!(
+            std::hash::Hasher::finish(&actual),
+            std::hash::Hasher::finish(&expected)
+        );
+    }
+
+    #[test]
+    fn cell_pattern_authored_configuration_reaches_the_op() {
+        let effect = author_cell_pattern(&[
+            ("pattern", PropertyValue::Enum("crystals".to_owned())),
+            ("invert", PropertyValue::Bool(true)),
+            ("contrast", PropertyValue::Float(250.0)),
+            ("overflow", PropertyValue::Enum("wrap_back".to_owned())),
+            ("disperse", PropertyValue::Float(0.5)),
+            ("size", PropertyValue::Float(32.0)),
+            ("offset", PropertyValue::Vec2(glam::Vec2::new(10.0, 20.0))),
+            ("tiling", PropertyValue::Bool(true)),
+            ("cells_horizontal", PropertyValue::Float(3.0)),
+            ("cells_vertical", PropertyValue::Float(5.0)),
+            ("evolution", PropertyValue::Float(2.5)),
+            ("cycle_evolution", PropertyValue::Bool(true)),
+            ("cycle_revolutions", PropertyValue::Float(4.0)),
+            ("seed", PropertyValue::Float(7.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored cell pattern should compile");
+        let grade = cell_pattern_op(&graph).expect("the authored parameters emit the generator");
+        assert_eq!(grade.pattern(), crate::CellPatternType::Crystals);
+        assert_eq!(grade.overflow(), crate::CellPatternOverflow::WrapBack);
+        assert!(grade.invert());
+        assert!(grade.tiling());
+        assert!(grade.cycle_evolution());
+        assert_eq!(grade.contrast(), 250.0);
+        assert_eq!(grade.disperse(), 0.5);
+        assert_eq!(grade.size(), 32.0);
+        assert_eq!(grade.offset(), [10.0, 20.0]);
+        assert_eq!(grade.cells_horizontal(), 3.0);
+        assert_eq!(grade.cells_vertical(), 5.0);
+        assert_eq!(grade.evolution(), 2.5);
+        assert_eq!(grade.cycle_revolutions(), 4.0);
+        assert_eq!(grade.seed(), 7.0);
+        // Every authored header field is packed into the flag word.
+        assert_eq!(grade.header_flags(), 0b111);
+    }
+
+    #[test]
+    fn cell_pattern_builder_rejects_out_of_range_parameters() {
+        let effect = instantiate_effect_node(EffectType::CellPattern)
+            .expect("the cell pattern effect should instantiate");
+        let effect_id = effect.id;
+
+        let mut document = serde_json::to_value(&effect).expect("serialize the cell pattern");
+        overwrite_static_value(
+            &mut document,
+            "cell_pattern.size",
+            serde_json::json!({"Float": 1.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the cell pattern node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a cell size below the minimum cannot be authored through the schema");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        // The parameter layer rejects the persisted value before the builder's
+        // own range guard runs, but both routes surface as an invalid author
+        // state rather than silently clamping the cell to a legal size.
+        assert!(format!("{error:?}").contains("outside"), "{error:?}");
+    }
+
+    #[test]
+    fn cell_pattern_round_trips_through_serialization() {
+        let effect = author_cell_pattern(&[
+            ("pattern", PropertyValue::Enum("mixed_crystals".to_owned())),
+            ("contrast", PropertyValue::Float(140.0)),
+            ("size", PropertyValue::Float(48.0)),
+            ("tiling", PropertyValue::Bool(true)),
+            ("cells_horizontal", PropertyValue::Float(6.0)),
+            ("evolution", PropertyValue::Float(-3.25)),
+            ("seed", PropertyValue::Float(11.0)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the cell pattern");
+        let reopened: EffectNode =
+            serde_json::from_value(document).expect("reopen the cell pattern node");
+        assert_eq!(reopened, effect);
+        assert_eq!(reopened.effect_type.key(), "builtin.cell_pattern");
+        let before = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored cell pattern should compile");
+        let after = build_effect_render_graph(&[reopened], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened cell pattern should compile");
+        assert_eq!(cell_pattern_op(&before), cell_pattern_op(&after));
+        assert_eq!(
+            cell_pattern_op(&after)
+                .expect("the reopened parameters emit the generator")
+                .pattern(),
+            crate::CellPatternType::MixedCrystals
         );
     }
 

@@ -21,6 +21,7 @@ pub mod black_white;
 pub mod box_blur;
 pub mod brightness_contrast;
 pub mod bulge;
+pub mod cell_pattern;
 pub mod change_to_color;
 pub mod channel_blur;
 pub mod channel_mixer;
@@ -168,6 +169,15 @@ pub use broadcast_safe::{
     broadcast_safe_frame_f32, BroadcastLocale, BroadcastSafeError, BroadcastSafeGrade,
     BroadcastSafeMode, BROADCAST_SAFE_LOCALE_COUNT, BROADCAST_SAFE_MAX_IRE, BROADCAST_SAFE_MIN_IRE,
     BROADCAST_SAFE_MODE_COUNT,
+};
+pub use cell_pattern::{
+    cell_pattern_frame_f32, CellPatternControls, CellPatternError, CellPatternGrade,
+    CellPatternOverflow, CellPatternType, CELL_PATTERN_DEFAULT_OFFSET,
+    CELL_PATTERN_DEFAULT_OVERFLOW, CELL_PATTERN_DEFAULT_PATTERN, CELL_PATTERN_DEFAULT_SIZE,
+    CELL_PATTERN_MAX_CELLS, CELL_PATTERN_MAX_CONTRAST, CELL_PATTERN_MAX_COORDINATE,
+    CELL_PATTERN_MAX_CYCLE_REVOLUTIONS, CELL_PATTERN_MAX_DISPERSE, CELL_PATTERN_MAX_EVOLUTION,
+    CELL_PATTERN_MAX_SEED, CELL_PATTERN_MAX_SIZE, CELL_PATTERN_MIN_SIZE, CELL_PATTERN_SALT_ID,
+    CELL_PATTERN_SALT_JITTER, CELL_PATTERN_SALT_MIXED, CELL_PATTERN_SALT_STRIDE,
 };
 pub use change_to_color::{
     change_to_color_frame_f32, ChangeToColorBy, ChangeToColorChange, ChangeToColorError,

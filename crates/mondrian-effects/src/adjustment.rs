@@ -392,6 +392,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::CellPattern { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "cell_pattern",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Grid { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "grid",
@@ -1107,6 +1113,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::TestSignals { .. } => 0,
         EffectRenderOp::FourColorGradient { .. } => 0,
         EffectRenderOp::Checkerboard { .. } => 0,
+        EffectRenderOp::CellPattern { .. } => 0,
         EffectRenderOp::Grid { .. } => 0,
         EffectRenderOp::CircleEllipse { .. } => 0,
         EffectRenderOp::Fill { .. } => 0,
@@ -1668,6 +1675,18 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Checkerboard { grade } => {
             crate::checkerboard::apply_checkerboard_f32_region_controlled(
+                working,
+                region.x as usize,
+                region.y as usize,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::CellPattern { grade } => {
+            crate::cell_pattern::apply_cell_pattern_f32_region_controlled(
                 working,
                 region.x as usize,
                 region.y as usize,

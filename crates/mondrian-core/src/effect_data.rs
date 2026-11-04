@@ -149,6 +149,8 @@ pub enum EffectType {
     EyedropperFill,
     /// Checkerboard: paints a pixel-local checker grid with feathered edges.
     Checkerboard,
+    /// Cell pattern: paints a pixel-local field of Worley cells.
+    CellPattern,
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid,
     /// Circle and ellipse: paints a pixel-local soft-edged circle. The ellipse
@@ -276,6 +278,7 @@ impl EffectType {
             Self::RoughenEdges => "builtin.roughen_edges".to_string(),
             Self::EyedropperFill => "builtin.eyedropper_fill".to_string(),
             Self::Checkerboard => "builtin.checkerboard".to_string(),
+            Self::CellPattern => "builtin.cell_pattern".to_string(),
             Self::Grid => "builtin.grid".to_string(),
             Self::CircleEllipse => "builtin.circle_ellipse".to_string(),
             Self::Stroke => "builtin.stroke".to_string(),
@@ -385,6 +388,7 @@ impl EffectType {
             "builtin.roughen_edges" => Self::RoughenEdges,
             "builtin.eyedropper_fill" => Self::EyedropperFill,
             "builtin.checkerboard" => Self::Checkerboard,
+            "builtin.cell_pattern" => Self::CellPattern,
             "builtin.grid" => Self::Grid,
             "builtin.circle_ellipse" => Self::CircleEllipse,
             "builtin.stroke" => Self::Stroke,
@@ -494,6 +498,7 @@ impl EffectType {
             Self::RoughenEdges => "粗糙边缘",
             Self::EyedropperFill => "吸管填充",
             Self::Checkerboard => "棋盘",
+            Self::CellPattern => "单元格图案",
             Self::Grid => "网格",
             Self::CircleEllipse => "圆形与椭圆",
             Self::Stroke => "描边",
@@ -601,6 +606,7 @@ impl EffectType {
             Self::RoughenEdges => vec!["风格化"],
             Self::EyedropperFill => vec!["生成器"],
             Self::Checkerboard => vec!["生成器"],
+            Self::CellPattern => vec!["生成器"],
             Self::Grid => vec!["生成器"],
             Self::CircleEllipse => vec!["生成器"],
             Self::Stroke => vec!["生成器"],
@@ -710,6 +716,7 @@ impl EffectType {
             Self::RoughenEdges => "roughen_edges".to_string(),
             Self::EyedropperFill => "eyedropper_fill".to_string(),
             Self::Checkerboard => "checkerboard".to_string(),
+            Self::CellPattern => "cell_pattern".to_string(),
             Self::Grid => "grid".to_string(),
             Self::CircleEllipse => "circle_ellipse".to_string(),
             Self::Stroke => "stroke".to_string(),
@@ -1068,6 +1075,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::RoughenEdges => Ok(()),
             Self::EyedropperFill => Ok(()),
             Self::Checkerboard => Ok(()),
+            Self::CellPattern => Ok(()),
             Self::Grid => Ok(()),
             Self::CircleEllipse => Ok(()),
             Self::Stroke => Ok(()),
