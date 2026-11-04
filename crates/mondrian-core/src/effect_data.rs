@@ -153,6 +153,9 @@ pub enum EffectType {
     CellPattern,
     /// Fractal: paints an escape-time set with oversampling and a palette.
     Fractal,
+    /// Remove color matting: recovers a straight-alpha sample from the matte
+    /// background it was composited over.
+    RemoveColorMatting,
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid,
     /// Circle and ellipse: paints a pixel-local soft-edged circle. The ellipse
@@ -282,6 +285,7 @@ impl EffectType {
             Self::Checkerboard => "builtin.checkerboard".to_string(),
             Self::CellPattern => "builtin.cell_pattern".to_string(),
             Self::Fractal => "builtin.fractal".to_string(),
+            Self::RemoveColorMatting => "builtin.remove_color_matting".to_string(),
             Self::Grid => "builtin.grid".to_string(),
             Self::CircleEllipse => "builtin.circle_ellipse".to_string(),
             Self::Stroke => "builtin.stroke".to_string(),
@@ -393,6 +397,7 @@ impl EffectType {
             "builtin.checkerboard" => Self::Checkerboard,
             "builtin.cell_pattern" => Self::CellPattern,
             "builtin.fractal" => Self::Fractal,
+            "builtin.remove_color_matting" => Self::RemoveColorMatting,
             "builtin.grid" => Self::Grid,
             "builtin.circle_ellipse" => Self::CircleEllipse,
             "builtin.stroke" => Self::Stroke,
@@ -504,6 +509,7 @@ impl EffectType {
             Self::Checkerboard => "棋盘",
             Self::CellPattern => "单元格图案",
             Self::Fractal => "分形",
+            Self::RemoveColorMatting => "移除颜色遮罩",
             Self::Grid => "网格",
             Self::CircleEllipse => "圆形与椭圆",
             Self::Stroke => "描边",
@@ -613,6 +619,7 @@ impl EffectType {
             Self::Checkerboard => vec!["生成器"],
             Self::CellPattern => vec!["生成器"],
             Self::Fractal => vec!["生成器"],
+            Self::RemoveColorMatting => vec!["通道"],
             Self::Grid => vec!["生成器"],
             Self::CircleEllipse => vec!["生成器"],
             Self::Stroke => vec!["生成器"],
@@ -724,6 +731,7 @@ impl EffectType {
             Self::Checkerboard => "checkerboard".to_string(),
             Self::CellPattern => "cell_pattern".to_string(),
             Self::Fractal => "fractal".to_string(),
+            Self::RemoveColorMatting => "remove_color_matting".to_string(),
             Self::Grid => "grid".to_string(),
             Self::CircleEllipse => "circle_ellipse".to_string(),
             Self::Stroke => "stroke".to_string(),
@@ -1084,6 +1092,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Checkerboard => Ok(()),
             Self::CellPattern => Ok(()),
             Self::Fractal => Ok(()),
+            Self::RemoveColorMatting => Ok(()),
             Self::Grid => Ok(()),
             Self::CircleEllipse => Ok(()),
             Self::Stroke => Ok(()),

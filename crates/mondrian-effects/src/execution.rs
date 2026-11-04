@@ -2354,6 +2354,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
         EffectRenderOp::CellPattern { .. } => "cell_pattern",
         EffectRenderOp::Fractal { .. } => "fractal",
+        EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

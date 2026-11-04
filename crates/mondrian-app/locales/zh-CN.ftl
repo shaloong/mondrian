@@ -3109,3 +3109,9 @@ parameter-mondrian-effect-fractal-palette-grayscale = 灰度
 parameter-mondrian-effect-fractal-palette-apple-ii = 苹果 ][
 parameter-mondrian-effect-fractal-oversample-method-edge-detect = 边缘检测（快，可能遗漏像素）
 parameter-mondrian-effect-fractal-oversample-method-brute-force = 强力（慢，逐像素）
+
+## Remove Color Matting 移除颜色遮罩
+effect-remove-color-matting = 移除颜色遮罩
+parameter-group-remove-color-matting = 移除颜色遮罩
+parameter-mondrian-effect-builtin-remove-color-matting-background-color-label = 背景颜色
+parameter-mondrian-effect-builtin-remove-color-matting-clip-label = 剪切

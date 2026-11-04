@@ -2836,6 +2836,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Checkerboard { .. } => "checkerboard",
         crate::EffectRenderOp::CellPattern { .. } => "cell_pattern",
         crate::EffectRenderOp::Fractal { .. } => "fractal",
+        crate::EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
         crate::EffectRenderOp::Grid { .. } => "grid",
         crate::EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         crate::EffectRenderOp::Fill { .. } => "fill",

@@ -176,6 +176,10 @@ pub enum EffectGpuPointOp {
     Fractal {
         grade: crate::FractalGrade,
     },
+    /// Remove color matting: recovers a straight-alpha sample from its matte.
+    RemoveColorMatting {
+        grade: crate::RemoveColorMattingGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         grade: crate::GridGrade,
@@ -927,6 +931,9 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::CellPattern { grade: *grade })
         }
         EffectRenderOp::Fractal { grade } => Ok(EffectGpuPointOp::Fractal { grade: *grade }),
+        EffectRenderOp::RemoveColorMatting { grade } => {
+            Ok(EffectGpuPointOp::RemoveColorMatting { grade: *grade })
+        }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1044,6 +1051,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
         EffectRenderOp::CellPattern { .. } => "cell_pattern",
         EffectRenderOp::Fractal { .. } => "fractal",
+        EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

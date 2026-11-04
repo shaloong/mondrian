@@ -1224,6 +1224,12 @@ pub enum EffectRenderOp {
         /// Authored window radius, repair threshold and the alpha toggle.
         grade: crate::DustScratchesGrade,
     },
+    /// Remove color matting: recovers a straight-alpha sample from the matte
+    /// background it was composited over.
+    RemoveColorMatting {
+        /// Authored matte background and the clip switch.
+        grade: crate::RemoveColorMattingGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1561,6 +1567,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .field("sample_offset", sample_offset)
                 .field("mix", mix)
                 .finish(),
+            Self::RemoveColorMatting { grade } => {
+                formatter.debug_struct("RemoveColorMatting").field("grade", grade).finish()
+            }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
                 .field("semantic_fingerprint", lut.semantic_fingerprint())
@@ -2546,6 +2555,16 @@ impl EffectRenderOp {
                 sample_offset.hash(state);
                 mix.to_bits().hash(state);
             }
+            EffectRenderOp::RemoveColorMatting { grade } => {
+                106u8.hash(state);
+                // Every channel of the authored color, alpha included, so two
+                // grades that differ in a value the author can see never share
+                // a cache entry.
+                grade.background_color().map(f32::to_bits).hash(state);
+                // The switch is a uniform header flag rather than part of the
+                // color payload, so the cache has to see it separately.
+                grade.clip().hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2712,6 +2731,7 @@ impl EffectRenderOp {
             EffectRenderOp::Sharpen { .. } => 4,
             EffectRenderOp::ChromaticAberration { .. } => 4,
             EffectRenderOp::TemporalFrameBlend { .. } => 2,
+            EffectRenderOp::RemoveColorMatting { .. } => 1,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3238,7 +3258,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 105] {
+fn builtin_effect_types() -> [EffectType; 106] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3345,6 +3365,7 @@ fn builtin_effect_types() -> [EffectType; 105] {
         EffectType::HdrToneMapping,
         EffectType::CellPattern,
         EffectType::Fractal,
+        EffectType::RemoveColorMatting,
     ]
 }
 
@@ -11157,6 +11178,33 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 );
             }
         }
+        EffectType::RemoveColorMatting => {
+            // The default is the exact identity: a black background over which
+            // nothing was composited, with the clip on. Both parameters sit in
+            // one group because they only make sense together.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "background_color",
+                "移除颜色遮罩",
+                "背景颜色",
+                PropertyValue::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "clip",
+                "移除颜色遮罩",
+                "剪切",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -11845,6 +11893,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::HdrToneMapping => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::RemoveColorMatting => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // One sample in, one sample out: the grade never reads a neighbour,
+            // so the contract keeps the pixel-local ROI default.
             ..cpu_linear
         },
         EffectType::Choker => EffectExecutionContract {
@@ -18211,6 +18265,44 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::RemoveColorMatting => {
+            let background_color_id = builtin_parameter_id(effect_type, "background_color");
+            let clip_id = builtin_parameter_id(effect_type, "clip");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                // The colour widget writes all four channels, so the alpha has
+                // to be carried through even though the formula reads rgb only.
+                let background_color =
+                    match effect.evaluate_parameter(&background_color_id, context.time) {
+                        Some(PropertyValue::Color(color)) => [color.r, color.g, color.b, color.a],
+                        Some(_) => {
+                            return Err(invalid(
+                                crate::RemoveColorMattingError::BackgroundColor.to_string(),
+                            ));
+                        }
+                        None => [0.0, 0.0, 0.0, 1.0],
+                    };
+                let clip = match effect.evaluate_parameter(&clip_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(crate::RemoveColorMattingError::Clip.to_string()));
+                    }
+                    None => true,
+                };
+                let grade = crate::RemoveColorMattingGrade::new(background_color, clip)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // A black background with the clip on is the default and maps
+                // every in-range sample to itself, so the node is elided.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::RemoveColorMatting { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -18322,6 +18414,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Fill => "填充",
         EffectType::DustScratches => "蒙尘与划痕",
         EffectType::ChangeToColor => "定向改色",
+        EffectType::RemoveColorMatting => "移除颜色遮罩",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -19661,6 +19754,7 @@ mod tests {
             EffectType::HdrToneMapping,
             EffectType::CellPattern,
             EffectType::Fractal,
+            EffectType::RemoveColorMatting,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -28734,7 +28828,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 105);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 106);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -29262,7 +29356,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 105);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 106);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -31910,6 +32004,277 @@ mod tests {
             frames[0], frames[1],
             "resize_layer is lazy and must not touch the rendered frame"
         );
+    }
+    fn remove_color_matting_op(
+        graph: &EffectRenderGraph,
+    ) -> Option<crate::RemoveColorMattingGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::RemoveColorMatting { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::RemoveColorMatting { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_remove_color_matting(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::RemoveColorMatting)
+            .expect("the remove color matting effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::RemoveColorMatting.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the remove color matting parameter should be assignable");
+        }
+        effect
+    }
+
+    fn remove_color_matting_effect_nodes(graph: &EffectRenderGraph) -> usize {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect { .. }
+                        | EffectGraphNodeKind::DomainEffect { .. }
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn remove_color_matting_g1_defaults_are_the_elided_identity() {
+        let effect = author_remove_color_matting(&[]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default matte removal should compile");
+        assert!(remove_color_matting_op(&graph).is_none());
+        assert_eq!(
+            remove_color_matting_effect_nodes(&graph),
+            0,
+            "the default black matte with clipping is the identity"
+        );
+
+        // Measured against the tree at HEAD c4d26520: the hash tags stopped at
+        // 105, the shape tags at 106 and the library held 105 entries, so the
+        // matte removal takes hash 106, shape 107 and the 106th slot.
+        assert_eq!(crate::effect::builtin_effect_types().len(), 106);
+        let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
+            .expect("the documented default validates");
+        assert!(default.is_identity());
+        assert_eq!(
+            default.gpu_controls(),
+            ([43.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn remove_color_matting_g2_authored_state_reaches_the_operation() {
+        let effect_type = EffectType::RemoveColorMatting;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [("background_color", "背景颜色"), ("clip", "剪切")];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, ParameterUnit::Unitless);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("移除颜色遮罩")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+
+        let effect = author_remove_color_matting(&[(
+            "background_color",
+            PropertyValue::Color(mondrian_core::Color { r: 0.25, g: 0.5, b: 0.75, a: 1.0 }),
+        )]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("an authored background should compile");
+        assert_eq!(remove_color_matting_effect_nodes(&graph), 1);
+        let grade = remove_color_matting_op(&graph).expect("the authored grade reaches the graph");
+        assert_eq!(grade.background_color(), [0.25, 0.5, 0.75, 1.0]);
+        assert!(grade.clip());
+        assert_eq!(
+            grade.gpu_controls(),
+            ([43.0, 1.0, 0.0, 0.0], [0.25, 0.5, 0.75, 0.0])
+        );
+        // One fused point op, no scratch frame and no spatial kernel.
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&EffectRenderOp::RemoveColorMatting {
+                grade
+            }),
+            0
+        );
+        assert!(crate::spatial_pass_for(&EffectRenderOp::RemoveColorMatting { grade }).is_none());
+
+        // A float standing in for the colour never reaches the builder through
+        // the authoring API: the property schema rejects it first.
+        let mut effect = instantiate_effect_node(EffectType::RemoveColorMatting)
+            .expect("the remove color matting effect should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::RemoveColorMatting.property_path("background_color"),
+                value: PropertyValue::Float(0.5),
+            })
+            .expect_err("a float background is not a legal author state");
+        assert!(
+            format!("{error:?}").contains("effect.remove_color_matting.background_color"),
+            "the rejection names the colour property: {error:?}"
+        );
+
+        // A persisted type mismatch is rejected by the schema type check, which
+        // runs before the graph builder. The builder keeps its own defensive
+        // arms for the same reason the other point effects do, but the guard
+        // that actually fires is the property type check, so that is what this
+        // test pins.
+        for parameter in ["background_color", "clip"] {
+            let effect = instantiate_effect_node(EffectType::RemoveColorMatting)
+                .expect("the remove color matting effect should instantiate");
+            let mut document = serde_json::to_value(&effect).expect("serialize the effect");
+            overwrite_static_value(
+                &mut document,
+                &format!("remove_color_matting.{parameter}"),
+                serde_json::json!({"Float": 1.0}),
+            );
+            let tampered: EffectNode = serde_json::from_value(document).expect("reopen the node");
+            let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a mistyped parameter cannot be authored");
+            let reason = format!("{error:?}");
+            assert!(
+                matches!(error, EffectGraphBuildError::InvalidAuthorState { .. }),
+                "a mistyped parameter is an author error: {reason}"
+            );
+            assert!(
+                reason.contains(&format!("effect.remove_color_matting.{parameter}")),
+                "the rejection names the property: {reason}"
+            );
+            assert!(
+                reason.contains("property_type_check"),
+                "the schema type check fires before the builder: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_color_matting_g3_clip_off_changes_the_graph_shape_and_the_hash() {
+        let elided = build_effect_render_graph(
+            &[author_remove_color_matting(&[])],
+            tt(0),
+            TEST_WORKING_SPACE,
+        )
+        .expect("the default compiles");
+        assert_eq!(remove_color_matting_effect_nodes(&elided), 0);
+
+        // Turning the clip off makes the grade non-identity even with a black
+        // matte (a tiny alpha can still push a channel below zero), so the
+        // builder must stop eliding it.
+        let authored = build_effect_render_graph(
+            &[author_remove_color_matting(&[(
+                "clip",
+                PropertyValue::Bool(false),
+            )])],
+            tt(0),
+            TEST_WORKING_SPACE,
+        )
+        .expect("an unclipped grade compiles");
+        assert_eq!(remove_color_matting_effect_nodes(&authored), 1);
+        let grade = remove_color_matting_op(&authored).expect("clip off must not be elided");
+        assert!(!grade.clip());
+        assert_eq!(
+            grade.gpu_controls(),
+            ([43.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            grade.apply_pixel([1.5, -0.5, 0.5, 0.5]),
+            [1.5, -0.5, 0.5, 0.5],
+            "the unclipped grade leaves out-of-range channels alone"
+        );
+        let clipped_grade = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
+            .expect("the default validates");
+        assert_eq!(
+            clipped_grade.apply_pixel([1.5, -0.5, 0.5, 0.5]),
+            [1.0, 0.0, 0.5, 0.5]
+        );
+
+        let unclipped = EffectRenderOp::RemoveColorMatting { grade };
+        let clipped = EffectRenderOp::RemoveColorMatting { grade: clipped_grade };
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&unclipped),
+            107
+        );
+        let mut actual = std::collections::hash_map::DefaultHasher::new();
+        unclipped.hash_signature(&mut actual);
+        let mut expected = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&106u8, &mut expected);
+        std::hash::Hash::hash(&grade.background_color().map(f32::to_bits), &mut expected);
+        std::hash::Hash::hash(&grade.clip(), &mut expected);
+        assert_eq!(
+            std::hash::Hasher::finish(&actual),
+            std::hash::Hasher::finish(&expected)
+        );
+        let mut other = std::collections::hash_map::DefaultHasher::new();
+        clipped.hash_signature(&mut other);
+        assert_ne!(
+            std::hash::Hasher::finish(&actual),
+            std::hash::Hasher::finish(&other),
+            "the clip switch is part of the persisted signature"
+        );
+    }
+
+    #[test]
+    fn remove_color_matting_g4_key_lookup_and_metadata() {
+        assert_eq!(
+            EffectType::RemoveColorMatting.key(),
+            "builtin.remove_color_matting"
+        );
+        assert_eq!(
+            EffectType::from_key("builtin.remove_color_matting"),
+            EffectType::RemoveColorMatting
+        );
+        // An unknown key is not silently folded onto the builtin: it becomes an
+        // external plugin effect that the authoring layer cannot instantiate.
+        assert_eq!(
+            EffectType::from_key("builtin.remove_color_matting_"),
+            EffectType::External("builtin.remove_color_matting_".to_owned())
+        );
+        assert!(
+            instantiate_effect_node(EffectType::External(
+                "builtin.remove_color_matting_".to_owned()
+            ))
+            .is_err(),
+            "an unknown key must not author"
+        );
+        assert_eq!(
+            EffectType::RemoveColorMatting.display_name(),
+            "移除颜色遮罩"
+        );
+        assert_eq!(EffectType::RemoveColorMatting.category_path(), vec!["通道"]);
+        assert_eq!(
+            EffectType::RemoveColorMatting.property_namespace(),
+            "remove_color_matting"
+        );
+        assert_eq!(
+            EffectType::RemoveColorMatting.property_path("clip"),
+            "effect.remove_color_matting.clip"
+        );
+        assert_eq!(
+            builtin_display_name(&EffectType::RemoveColorMatting),
+            "移除颜色遮罩"
+        );
+        assert!(effect_definition(&EffectType::RemoveColorMatting).is_some());
     }
 }
 

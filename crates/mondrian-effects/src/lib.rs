@@ -137,6 +137,7 @@ pub mod polar_coordinates;
 pub mod posterize;
 pub mod qualifier;
 pub mod ramp;
+pub mod remove_color_matting;
 pub mod scatter;
 pub mod selective_color;
 pub mod shift_channels;
@@ -463,6 +464,9 @@ pub use radial_blur::{
 pub use ramp::{
     ramp_frame_f32, RampError, RampGrade, RampShape, RAMP_DITHER_SALT, RAMP_MAX_BLEND,
     RAMP_MAX_CENTRE_PIXELS, RAMP_MAX_SCATTER, RAMP_SHAPE_COUNT,
+};
+pub use remove_color_matting::{
+    remove_color_matting_frame_f32, RemoveColorMattingError, RemoveColorMattingGrade,
 };
 pub use scatter::{
     scatter_frame_f32, ScatterError, ScatterGrade, SCATTER_MAX_AMOUNT_PIXELS, SCATTER_MAX_COPIES,

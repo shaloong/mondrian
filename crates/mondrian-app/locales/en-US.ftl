@@ -3177,3 +3177,9 @@ parameter-mondrian-effect-fractal-palette-grayscale = Grayscale
 parameter-mondrian-effect-fractal-palette-apple-ii = Apple ][
 parameter-mondrian-effect-fractal-oversample-method-edge-detect = Edge Detect (Fast, May Miss Pixels)
 parameter-mondrian-effect-fractal-oversample-method-brute-force = Brute Force (Slow, Per-Pixel)
+
+## Remove Color Matting 移除颜色遮罩
+effect-remove-color-matting = Remove Color Matting
+parameter-group-remove-color-matting = Remove Color Matting
+parameter-mondrian-effect-builtin-remove-color-matting-background-color-label = Background Colour
+parameter-mondrian-effect-builtin-remove-color-matting-clip-label = Clip
