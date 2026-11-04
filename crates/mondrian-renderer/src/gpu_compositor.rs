@@ -1510,6 +1510,273 @@ fn cell_pattern_value(effect: EffectUniform, centre: vec2<f32>) -> f32 {
     return clamp(shaped, 0.0, 1.0);
 }
 
+struct FractalEscape {
+    escaped: bool,
+    iterations: u32,
+    fraction: f32,
+    last_z: vec2<f32>,
+};
+
+fn fractal_complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    // Keep the two products in their own locals: DXC may otherwise contract
+    // `a * b - c * d` into an fma, which would move the escape fraction by
+    // one ulp relative to the Rust kernel's fixed multiply/subtract order.
+    let real_left = a.x * b.x;
+    let real_right = a.y * b.y;
+    let imag_left = a.x * b.y;
+    let imag_right = a.y * b.x;
+    return vec2<f32>(real_left - real_right, imag_left + imag_right);
+}
+
+fn fractal_complex_add(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+    return a + b;
+}
+
+// The one reciprocal in the fractal shader, mirroring the Rust
+// `apply_inversion` exactly. Inverse modes funnel through this function.
+fn fractal_inversion(value: vec2<f32>, post: vec2<f32>) -> vec2<f32> {
+    let r2_real = value.x * value.x;
+    let r2_imag = value.y * value.y;
+    let r2 = r2_real + r2_imag;
+    let r2_safe = max(r2, 1.0e-30);
+    return vec2<f32>(value.x / r2_safe + post.x, -(value.y / r2_safe) + post.y);
+}
+
+fn fractal_hue_rgb(hue: f32) -> vec3<f32> {
+    let t = (hue - floor(hue)) * 6.0;
+    return vec3<f32>(
+        clamp(abs(t - 3.0) - 1.0, 0.0, 1.0),
+        clamp(2.0 - abs(t - 2.0), 0.0, 1.0),
+        clamp(2.0 - abs(t - 4.0), 0.0, 1.0),
+    );
+}
+
+fn fractal_atan_turns(y: f32, x: f32) -> f32 {
+    let ax = abs(x);
+    let ay = abs(y);
+    let steep = ay > ax;
+    let t = select(
+        ay / max(ax, 1.0e-30),
+        ax / max(ay, 1.0e-30),
+        steep,
+    );
+    let a = t * (0.125 + 0.04345 * (1.0 - t));
+    let quarter = select(a, 0.25 - a, steep);
+    let half = select(quarter, 1.0 - quarter, y < 0.0);
+    let turn = select(half, 0.5 - half, x < 0.0);
+    return turn - floor(turn);
+}
+
+fn fractal_escape(
+    constant: vec2<f32>,
+    start: vec2<f32>,
+    equation: u32,
+    max_iterations: u32,
+) -> FractalEscape {
+    // The bailout is derived from the constant itself, so `|z| == bailout` is a
+    // common exact tie: the first iterate is the constant. A few ulp of
+    // headroom keeps that tie from being decided by whether DXC fuses one of
+    // the two squared-norm sums. Must match `fractal.rs` exactly.
+    let bailout_real = constant.x * constant.x;
+    let bailout_imag = constant.y * constant.y;
+    let bailout_r2 = max(bailout_real + bailout_imag, 4.0) * 1.000001;
+    var z = start;
+    var last_r2 = 0.0;
+    var iterations = 0u;
+    var fraction = 0.0;
+    var escaped = false;
+    for (var step = 0u; step < max_iterations; step = step + 1u) {
+        let r2_real = z.x * z.x;
+        let r2_imag = z.y * z.y;
+        let r2 = r2_real + r2_imag;
+        if (r2 > bailout_r2) {
+            fraction = clamp(
+                (r2 - bailout_r2) / max(r2 - last_r2, 1.0e-30),
+                0.0,
+                1.0,
+            );
+            escaped = true;
+            break;
+        }
+        last_r2 = r2;
+        let squared = fractal_complex_mul(z, z);
+        var next = squared;
+        if (equation == 2u) {
+            next = fractal_complex_mul(squared, z);
+        } else if (equation == 3u) {
+            let fourth = fractal_complex_mul(squared, squared);
+            next = fractal_complex_mul(fourth, z);
+        } else if (equation == 4u) {
+            let fourth = fractal_complex_mul(squared, squared);
+            let sixth = fractal_complex_mul(fourth, squared);
+            next = fractal_complex_mul(sixth, z);
+        }
+        z = fractal_complex_add(next, constant);
+        iterations = iterations + 1u;
+    }
+    if (!escaped) {
+        iterations = max_iterations;
+    }
+    return FractalEscape(escaped, iterations, fraction, z);
+}
+
+fn fractal_palette_rgb(
+    palette: u32,
+    w: f32,
+    band: f32,
+    hue_turns: f32,
+    last_z: vec2<f32>,
+    cycle_steps: f32,
+    edge_highlight: f32,
+) -> vec3<f32> {
+    if (palette == 4u) {
+        return fractal_hue_rgb(hue_turns);
+    }
+    let k = hue_turns + band * (1.0 / cycle_steps);
+    var rgb = vec3<f32>(0.0);
+    if (palette == 1u) {
+        rgb = vec3<f32>(w) * (vec3<f32>(0.5) + 0.5 * fractal_hue_rgb(k));
+    } else if (palette == 2u) {
+        rgb = fractal_hue_rgb(k);
+    } else if (palette == 3u) {
+        let value = band - 2.0 * floor(band * 0.5);
+        rgb = vec3<f32>(value);
+    } else if (palette == 5u) {
+        rgb = fractal_hue_rgb(fractal_atan_turns(last_z.y, last_z.x) + hue_turns);
+    } else if (palette == 6u) {
+        rgb = vec3<f32>(1.0 - abs(2.0 * w - 1.0));
+    } else {
+        let q = min(floor(w * 4.0), 3.0);
+        let c0 = vec3<f32>(0.15, 0.85, 0.25);
+        let c1 = vec3<f32>(0.85, 0.30, 0.85);
+        let c2 = vec3<f32>(0.95, 0.95, 0.95);
+        let c3 = vec3<f32>(0.95, 0.55, 0.10);
+        rgb = c0;
+        if (q > 0.5) { rgb = c1; }
+        if (q > 1.5) { rgb = c2; }
+        if (q > 2.5) { rgb = c3; }
+    }
+    if (edge_highlight > 0.0) {
+        let distance = min(w, 1.0 - w);
+        let width = edge_highlight * 0.05;
+        let edge = clamp((width - distance) / max(width, 0.02), 0.0, 1.0);
+        rgb = rgb + (vec3<f32>(1.0) - rgb) * edge;
+    }
+    return rgb;
+}
+
+fn fractal_point(effect: EffectUniform, x: f32, y: f32) -> vec4<f32> {
+    let set_choice = effect.header.y;
+    let equation = effect.header.z;
+    let iterations = effect.header.w;
+    let inverse_iterations = 1.0 / f32(iterations);
+    let width = max(uniforms.geometry.z, 1.0);
+    let height = max(uniforms.geometry.w, 1.0);
+    let half = max(min(width, height) * 0.5, 1.0);
+    let mandelbrot_family = set_choice <= 4u;
+    let julia = vec2<f32>(effect.params.w, effect.color.x);
+    let centre = select(julia, effect.params.xy, mandelbrot_family);
+    let inverse = (set_choice == 2u) || (set_choice == 4u) || (set_choice == 6u);
+    let starts_at_julia = (set_choice == 3u) || (set_choice == 4u);
+    let post = effect.color.zw;
+    let view = vec2<f32>(
+        centre.x + ((x - width * 0.5) / half) * effect.extra2.y,
+        centre.y + ((y - height * 0.5) / half) * effect.extra2.y,
+    );
+
+    var constant = view;
+    var start = vec2<f32>(0.0);
+    if (mandelbrot_family) {
+        if (inverse) { constant = fractal_inversion(view, post); }
+        if (starts_at_julia) { start = julia; }
+    } else {
+        constant = julia;
+        start = select(view, fractal_inversion(view, post), inverse);
+    }
+
+    let field = fractal_escape(constant, start, equation, iterations);
+    let inside = !field.escaped;
+    let u = select(1.0, (f32(field.iterations) + field.fraction) * inverse_iterations, field.escaped);
+    let hue_turns = effect.extra0.w * (1.0 / 360.0);
+    let palette = u32(effect.extra0.z);
+    var rgb = vec3<f32>(0.0);
+    var alpha = 1.0;
+    if (palette == 4u) {
+        let visible = select(inside, !inside, effect.extra0.y > 0.5);
+        rgb = fractal_hue_rgb(hue_turns);
+        alpha = select(0.0, 1.0, visible);
+    } else {
+        if (!inside) {
+            let phase = u * effect.extra1.x + effect.extra1.y * (1.0 / 360.0);
+            let band = floor(phase);
+            let w = phase - band;
+            rgb = fractal_palette_rgb(
+                palette,
+                w,
+                band,
+                hue_turns,
+                field.last_z,
+                effect.extra1.x,
+                effect.extra1.z,
+            );
+        }
+        if (effect.extra0.y > 0.5 && inside) {
+            alpha = 0.0;
+        }
+    }
+
+    if (effect.extra0.x > 0.0 && !inside) {
+        let ghost_iterations = max(16u, iterations / 4u);
+        var ghost_constant = view;
+        var ghost_start = vec2<f32>(0.0);
+        if (mandelbrot_family) {
+            ghost_constant = julia;
+            ghost_start = view;
+        }
+        let ghost = fractal_escape(ghost_constant, ghost_start, equation, ghost_iterations);
+        let ghost_inside = !ghost.escaped;
+        let ghost_u = select(
+            1.0,
+            (f32(ghost.iterations) + ghost.fraction) * (1.0 / f32(ghost_iterations)),
+            ghost.escaped,
+        );
+        var ghost_rgb = vec3<f32>(0.0);
+        if (!ghost_inside) {
+            let phase = ghost_u * effect.extra1.x + effect.extra1.y * (1.0 / 360.0);
+            let band = floor(phase);
+            let w = phase - band;
+            ghost_rgb = fractal_palette_rgb(
+                palette,
+                w,
+                band,
+                hue_turns,
+                ghost.last_z,
+                effect.extra1.x,
+                0.0,
+            );
+        }
+        rgb = max(rgb, ghost_rgb * effect.extra0.x);
+    }
+    return vec4<f32>(rgb, alpha);
+}
+
+fn fractal_value(effect: EffectUniform, origin: vec2<f32>) -> vec4<f32> {
+    let side = u32(effect.extra2.x);
+    if (side <= 1u) {
+        return fractal_point(effect, origin.x + 0.5, origin.y + 0.5);
+    }
+    let step = 1.0 / f32(side);
+    var sum = vec4<f32>(0.0);
+    for (var sub_y = 0u; sub_y < side; sub_y = sub_y + 1u) {
+        for (var sub_x = 0u; sub_x < side; sub_x = sub_x + 1u) {
+            let x = origin.x + (f32(sub_x) + 0.5) * step;
+            let y = origin.y + (f32(sub_y) + 0.5) * step;
+            sum = sum + fractal_point(effect, x, y);
+        }
+    }
+    return sum * (1.0 / f32(side * side));
+}
+
 // `ExtractGrade`: params.x is the channel, params.y the black point,
 // params.z the white point and params.w the invert toggle; extra0.xy are the
 // softness around each point.
@@ -1791,6 +2058,9 @@ fn effects_author_coverage() -> bool {
         // The cell pattern is a generator as well: it always writes opaque
         // coverage, so a transparent source pixel must not skip it.
         if (effect.header.x == 41u) { return true; }
+        // The fractal is a generator too: it authors coverage from the escape
+        // field, so a transparent source pixel must not skip it.
+        if (effect.header.x == 42u) { return true; }
     }
     return false;
 }
@@ -2716,6 +2986,17 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             let centre = floor(max(position, vec2<f32>(0.0))) + vec2<f32>(0.5);
             let value = cell_pattern_value(effect, centre);
             pixel = vec4<f32>(value, value, value, 1.0);
+        } else if (effect.header.x == 42u) {
+            // `FractalGrade`: params is [mb_x, mb_y, mb_magnification,
+            // julia_x], colour is [julia_y, julia_magnification, post_x,
+            // post_y], extra0 is [overlay, transparency, palette, hue],
+            // extra1 is [cycle_steps, cycle_offset, edge_highlight,
+            // oversample_method] and extra2 is [sample_side, view_scale, 0, 0].
+            // header.y is the set choice, header.z the equation and header.w
+            // the resolved iteration budget. The generator replaces the pixel
+            // outright, matching the CPU kernel's coverage.
+            let origin = floor(max(position, vec2<f32>(0.0)));
+            pixel = fractal_value(effect, origin);
         } else if (effect.header.x == 34u) {
             // `ChangeToColorGrade`: params is [hue amount, lightness amount,
             // saturation amount, softness], colour is [to r, to g, to b, 0], and
@@ -6668,6 +6949,27 @@ fn effect_uniforms_for_ops(
                     extra0,
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::Fractal { grade } => {
+                let (params, color, extra0, extra1, extra2) = grade.gpu_controls();
+                GpuEffectUniform {
+                    // The header carries the set choice, the equation and the
+                    // resolved iteration budget; all three are loop/selection
+                    // state and must stay integral. extra2.x is the square
+                    // oversample side and extra2.y the precomputed view scale.
+                    header: [
+                        42,
+                        grade.set_choice().index(),
+                        grade.equation().index(),
+                        grade.effective_iterations(),
+                    ],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2: [extra2[0], extra2[1], 0.0, 0.0],
                     extra3: [0.0; 4],
                 }
             }
@@ -12067,6 +12369,311 @@ mod tests {
         assert!(
             report.within_budget,
             "GPU cell pattern accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    fn fractal_parity_pixels(
+        context: &crate::GpuContext,
+        width: u32,
+        height: u32,
+        data: &[[f32; 4]],
+        grade: mondrian_effects::FractalGrade,
+    ) -> (Vec<[f32; 4]>, Vec<[f32; 4]>, mondrian_effects::FractalGrade) {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: data.to_vec(),
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Fractal { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        let uniforms =
+            effect_uniforms_for_ops(plan.operations(), None).expect("the fractal packs a uniform");
+        let (params, color, extra0, extra1, extra2) = grade.gpu_controls();
+        assert_eq!(
+            uniforms[0].header,
+            [
+                42,
+                grade.set_choice().index(),
+                grade.equation().index(),
+                grade.effective_iterations(),
+            ]
+        );
+        assert_eq!(uniforms[0].params, params);
+        assert_eq!(uniforms[0].color, color);
+        assert_eq!(uniforms[0].extra0, extra0);
+        assert_eq!(uniforms[0].extra1, extra1);
+        assert_eq!(uniforms[0].extra2, [extra2[0], extra2[1], 0.0, 0.0]);
+        assert_eq!(uniforms[0].extra3, [0.0; 4]);
+
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            context,
+            &[layer],
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        (expected.pixels().to_vec(), actual, grade)
+    }
+
+    fn default_fractal_grade() -> mondrian_effects::FractalGrade {
+        mondrian_effects::FractalGrade::new(
+            1,
+            1,
+            [-0.703, 0.0],
+            0.0,
+            300.0,
+            [0.0, 0.0],
+            0.0,
+            300.0,
+            [0.0, 0.0],
+            0.0,
+            0.0,
+            1,
+            0.0,
+            29.0,
+            0.0,
+            0.0,
+            1,
+            4.0,
+        )
+        .expect("valid default fractal grade")
+    }
+
+    /// True when nudging the sample by one floating-point step leaves the CPU
+    /// colour alone, so a GPU comparison is meaningful there.
+    fn fractal_pixel_is_stable(
+        grade: mondrian_effects::FractalGrade,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        grade.sample_is_stable(x, y, width, height)
+    }
+
+    #[tokio::test]
+    async fn gpu_fractal_probe_pixels_match_the_cpu_kernel_bit_for_bit() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU fractal probe test: no GPU adapter available");
+            return;
+        };
+        let width = 96_u32;
+        let height = 96_u32;
+        let data = vec![[0.0, 0.0, 0.0, 1.0]; (width * height) as usize];
+        let grade = mondrian_effects::FractalGrade::new(
+            1,
+            1,
+            [-0.703, 0.0],
+            0.0,
+            300.0,
+            [0.0, 0.0],
+            0.0,
+            300.0,
+            [0.0, 0.0],
+            0.0,
+            0.0,
+            1,
+            0.0,
+            29.0,
+            0.0,
+            0.0,
+            1,
+            4.0,
+        )
+        .expect("valid default fractal grade");
+        let (expected, actual, grade) =
+            fractal_parity_pixels(&context, width, height, &data, grade);
+
+        let stable = |x: u32, y: u32| fractal_pixel_is_stable(grade, x, y, width, height);
+        let anchors = [
+            (48_u32, 48_u32),
+            (48, 0),
+            (48, 95),
+            (0, 48),
+            (0, 0),
+            (95, 0),
+            (0, 95),
+            (95, 95),
+        ];
+        for (anchor_x, anchor_y) in anchors {
+            let mut probe = None;
+            for radius in 0..=8_u32 {
+                let left = anchor_x.saturating_sub(radius);
+                let right = (anchor_x + radius).min(width - 1);
+                let top = anchor_y.saturating_sub(radius);
+                let bottom = (anchor_y + radius).min(height - 1);
+                for y in top..=bottom {
+                    for x in left..=right {
+                        let on_ring = x == left || x == right || y == top || y == bottom;
+                        if on_ring && stable(x, y) {
+                            probe = Some((x, y));
+                            break;
+                        }
+                    }
+                    if probe.is_some() {
+                        break;
+                    }
+                }
+                if probe.is_some() {
+                    break;
+                }
+            }
+            let Some((x, y)) = probe else {
+                panic!("no numerically stable pixel within 8 of anchor ({anchor_x},{anchor_y})");
+            };
+            let index = (y * width + x) as usize;
+            let (cpu_escape, _) = grade.escape_band(x, y, width, height);
+            let difference = (0..4)
+                .map(|channel| (actual[index][channel] - expected[index][channel]).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                difference <= 1.0e-6,
+                "probe ({x},{y}) near anchor ({anchor_x},{anchor_y}) with escape {cpu_escape} \
+                 differs by {difference:e}: cpu {expected:?} vs gpu {actual:?}",
+                expected = expected[index],
+                actual = actual[index]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_fractal_paints_a_fully_transparent_source() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU fractal coverage test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        let data = vec![[0.0; 4]; (width * height) as usize];
+        let grade = default_fractal_grade();
+        let (_, actual, _) = fractal_parity_pixels(&context, width, height, &data, grade);
+
+        for (index, pixel) in actual.iter().enumerate() {
+            assert_eq!(
+                pixel[3], 1.0,
+                "the generator must author full coverage at pixel {index}, got {pixel:?}"
+            );
+        }
+        assert!(
+            actual.iter().any(|pixel| pixel[0] > 0.0),
+            "the fully transparent source must still receive fractal colour"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_fractal_band_tolerance_holds_outside_escape_boundaries() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU fractal band tolerance test: no GPU adapter available");
+            return;
+        };
+        let width = 96_u32;
+        let height = 96_u32;
+        let data = vec![[0.0, 0.0, 0.0, 1.0]; (width * height) as usize];
+        let grade = default_fractal_grade();
+        let (expected, actual, grade) =
+            fractal_parity_pixels(&context, width, height, &data, grade);
+
+        // The iteration is chaotic: a sub-ulp difference in the view can flip an
+        // escape count and with it a whole colour band. So the claim is not a
+        // flat tolerance, it is this: every disagreement must be a colour the
+        // CPU itself produces for the same pixel a few hundred ulp away. A
+        // genuinely different formula paints colours no nearby orbit can reach
+        // and fails here, while chaos is accounted for instead of hidden.
+        const TOLERANCE: f32 = 1.0e-4;
+        const NEIGHBOURHOOD: [i32; 7] = [0, -512, 512, -2048, 2048, -8192, 8192];
+        let frame_pixels = f64::from(width * height);
+        let mut compared = 0_usize;
+        let mut masked = 0_usize;
+        let mut beyond_tolerance = 0_usize;
+        let mut unexplained: Vec<(u32, u32, [f32; 4], [f32; 4])> = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let index = (y * width + x) as usize;
+                if !fractal_pixel_is_stable(grade, x, y, width, height) {
+                    masked += 1;
+                    continue;
+                }
+                compared += 1;
+                let difference = (0..4)
+                    .map(|channel| (actual[index][channel] - expected[index][channel]).abs())
+                    .fold(0.0_f32, f32::max);
+                if difference <= TOLERANCE {
+                    continue;
+                }
+                beyond_tolerance += 1;
+                let explained = NEIGHBOURHOOD.iter().any(|&step_x| {
+                    NEIGHBOURHOOD.iter().any(|&step_y| {
+                        let candidate = grade.sample_nudged(x, y, width, height, step_x, step_y);
+                        (0..4).all(|channel| {
+                            (actual[index][channel] - candidate[channel]).abs() <= TOLERANCE
+                        })
+                    })
+                });
+                if !explained {
+                    unexplained.push((x, y, expected[index], actual[index]));
+                }
+            }
+        }
+
+        let masked_fraction = masked as f64 / frame_pixels;
+        assert!(
+            masked_fraction <= 0.25,
+            "chaotic samples cover {:.2}% of the frame, which makes this test vacuous",
+            masked_fraction * 100.0
+        );
+        let compared_fraction = compared as f64 / frame_pixels;
+        assert!(
+            compared_fraction >= 0.5,
+            "only {:.2}% of the frame can be compared; the test needs a majority",
+            compared_fraction * 100.0
+        );
+        assert!(
+            unexplained.is_empty(),
+            "{} of {compared} comparable pixels painted a colour no nearby orbit produces, \
+             first offenders: {:#?}",
+            unexplained.len(),
+            &unexplained[..unexplained.len().min(6)]
+        );
+        let beyond_fraction = beyond_tolerance as f64 / compared as f64;
+        assert!(
+            beyond_fraction <= 0.01,
+            "{:.2}% of comparable pixels differ by more than {TOLERANCE:e}",
+            beyond_fraction * 100.0
         );
     }
 
