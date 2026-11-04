@@ -49,6 +49,7 @@ pub(crate) struct EffectSpatialGpu {
     offset: wgpu::RenderPipeline,
     twirl: wgpu::RenderPipeline,
     spherize: wgpu::RenderPipeline,
+    vr_rotate_sphere: wgpu::RenderPipeline,
     magnify: wgpu::RenderPipeline,
     dent: wgpu::RenderPipeline,
     warp: wgpu::RenderPipeline,
@@ -386,6 +387,36 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_spherize"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let vr_rotate_sphere = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.vr_rotate_sphere"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_vr_rotate_sphere"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -1803,6 +1834,7 @@ impl EffectSpatialGpu {
             offset,
             twirl,
             spherize,
+            vr_rotate_sphere,
             magnify,
             dent,
             warp,
@@ -2410,6 +2442,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Offset { .. }
             | EffectGpuSpatialPass::Twirl { .. }
             | EffectGpuSpatialPass::Spherize { .. }
+            | EffectGpuSpatialPass::VrRotateSphere { .. }
             | EffectGpuSpatialPass::Magnify { .. }
             | EffectGpuSpatialPass::Dent { .. }
             | EffectGpuSpatialPass::Warp { .. }
@@ -2596,6 +2629,23 @@ impl EffectSpatialGpu {
                     device,
                     encoder,
                     grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::VrRotateSphere { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra, aces, _) = grade.gpu_controls();
+                let (eye_width, eye_height) = grade.eye_size(width as usize, height as usize);
+                return self.record_vr_rotate_sphere(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    aces,
+                    [0.0, 0.0, eye_width as f32, eye_height as f32],
                     source,
                     destination,
                     width,
@@ -3215,6 +3265,50 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.spherize,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+    /// Records the virtual-reality sphere rotation.
+    ///
+    /// `params` carries the horizontal and vertical fields of view in radians
+    /// followed by the pitch and yaw, `extra` the roll, the direction switch,
+    /// the frame layout code and the wrap flag, and `extra1` the eye sub-frame
+    /// size. The eye size is divided with integer arithmetic on the CPU so both
+    /// eyes split on exactly the same boundary as the kernel; the shader only
+    /// compares against it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_vr_rotate_sphere(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        aces: [f32; 4],
+        extra1: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.vr_rotate_sphere,
             &input_view,
             &output_view,
             &uniform,
@@ -5721,6 +5815,78 @@ fn fs_spherize(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
     let sample_x = centre.x + delta.x * scale;
     let sample_y = centre.y + delta.y * scale;
     return unpremultiply(sample_bilinear_premultiplied(sample_x, sample_y));
+}
+
+@fragment
+fn fs_vr_rotate_sphere(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(position.xy);
+    let frame_layout = uniforms.extra.z;
+    let eye_w = max(uniforms.extra1.z, 1.0);
+    let eye_h = max(uniforms.extra1.w, 1.0);
+    var origin = vec2<f32>(0.0, 0.0);
+    if (frame_layout > 0.5 && frame_layout < 1.5) {
+        origin = vec2<f32>(0.0, select(0.0, eye_h, position.y >= eye_h));
+    } else if (frame_layout > 1.5) {
+        origin = vec2<f32>(select(0.0, eye_w, position.x >= eye_w), 0.0);
+    }
+    // The CPU converts its pixel centre with `(column + 0.5) / eye`, so the
+    // eye-local index is the same subtraction here; `position.xy` is already
+    // the pixel centre, hence no extra half-pixel shift.
+    let local = vec2<f32>(f32(pixel.x), f32(pixel.y)) - origin;
+    let u = (local.x + 0.5) / eye_w;
+    let v = (local.y + 0.5) / eye_h;
+    let h_fov = uniforms.params.x;
+    let v_fov = uniforms.params.y;
+    let lon_dst = (u - 0.5) * h_fov;
+    let lat_dst = (0.5 - v) * v_fov;
+    let cos_lat = cos(lat_dst);
+    let d_dst = vec3<f32>(cos_lat * sin(lon_dst), sin(lat_dst), cos_lat * cos(lon_dst));
+    let pitch = uniforms.params.z;
+    let yaw = uniforms.params.w;
+    let roll = uniforms.extra.x;
+    let sp = sin(pitch);
+    let cp = cos(pitch);
+    let sy = sin(yaw);
+    let cy = cos(yaw);
+    let sr = sin(roll);
+    let cr = cos(roll);
+    // R = Rz(roll) * Ry(yaw) * Rx(pitch), row by row.
+    let r00 = cr * cy;
+    let r01 = cr * sy * sp - sr * cp;
+    let r02 = cr * sy * cp + sr * sp;
+    let r10 = sr * cy;
+    let r11 = sr * sy * sp + cr * cp;
+    let r12 = sr * sy * cp - cr * sp;
+    let r20 = -sy;
+    let r21 = cy * sp;
+    let r22 = cy * cp;
+    // Forward samples with R (the camera-to-world rotation); inverted samples
+    // with its transpose. Negating the angles would be the wrong matrix.
+    let invert = uniforms.extra.y > 0.5;
+    let x_forward = r00 * d_dst.x + r01 * d_dst.y + r02 * d_dst.z;
+    let x_inverse = r00 * d_dst.x + r10 * d_dst.y + r20 * d_dst.z;
+    let y_forward = r10 * d_dst.x + r11 * d_dst.y + r12 * d_dst.z;
+    let y_inverse = r01 * d_dst.x + r11 * d_dst.y + r21 * d_dst.z;
+    let z_forward = r20 * d_dst.x + r21 * d_dst.y + r22 * d_dst.z;
+    let z_inverse = r02 * d_dst.x + r12 * d_dst.y + r22 * d_dst.z;
+    let d_src = vec3<f32>(
+        select(x_forward, x_inverse, invert),
+        select(y_forward, y_inverse, invert),
+        select(z_forward, z_inverse, invert),
+    );
+    let lon_src = atan2(d_src.x, d_src.z);
+    let lat_src = asin(clamp(d_src.y, -1.0, 1.0));
+    var u_src = lon_src / h_fov + 0.5;
+    let v_src = 0.5 - lat_src / v_fov;
+    if (uniforms.extra.w > 0.5) {
+        // Wrap the column, not the longitude: folding the longitude into
+        // [0, 2*pi) first would leave u in [0.5, 1.5).
+        u_src = u_src - floor(u_src);
+    }
+    let raw = vec2<f32>(u_src * eye_w - 0.5 + origin.x, v_src * eye_h - 0.5 + origin.y);
+    // Each eye samples only its own sub-frame, matching the CPU tap clamp.
+    let tap = clamp(raw, origin, origin + vec2<f32>(eye_w - 1.0, eye_h - 1.0));
+    return unpremultiply(sample_bilinear_premultiplied(tap.x, tap.y));
 }
 
 fn dent_radius() -> f32 {
@@ -9358,6 +9524,19 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         let bezier_warp =
             mondrian_effects::BezierWarpGrade::from_reference_points(bezier_points, 4)
                 .expect("valid bezier warp grade");
+        // Rotate the panorama sphere: the stage is the one spatial pass whose
+        // uniform carries the eye sub-frame size, so the chain also proves the
+        // integer-divided eye rectangle records through the shared pass recorder.
+        let vr_rotate_sphere = mondrian_effects::VrRotateSphereGrade::new(
+            360.0,
+            180.0,
+            12.0,
+            -20.0,
+            5.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+            false,
+        )
+        .expect("valid vr rotate sphere grade");
         let passes = [
             mondrian_effects::EffectGpuSpatialPass::Median { grade: median },
             mondrian_effects::EffectGpuSpatialPass::SelectiveColor { grade: selective_color },
@@ -9392,10 +9571,11 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::EffectGpuSpatialPass::ChannelBlur { grade: channel_blur },
             mondrian_effects::EffectGpuSpatialPass::DustScratches { grade: dust_scratches },
             mondrian_effects::EffectGpuSpatialPass::BezierWarp { grade: bezier_warp },
+            mondrian_effects::EffectGpuSpatialPass::VrRotateSphere { grade: vr_rotate_sphere },
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 28, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 29, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::median_frame_f32(
@@ -9563,6 +9743,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             bezier_warp,
+        ));
+        assert!(mondrian_effects::vr_rotate_sphere_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            vr_rotate_sphere,
         ));
 
         let executor = EffectSpatialGpu::new(&context.device);
@@ -12835,6 +13021,310 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         // The patch can map any target anywhere, so the halo covers the frame.
         assert_eq!(pass.horizontal_halo(), u32::MAX);
         assert_eq!(pass.vertical_halo(), u32::MAX);
+    }
+
+    #[test]
+    fn vr_rotate_sphere_halo_is_full_frame() {
+        let grade = mondrian_effects::VrRotateSphereGrade::new(
+            360.0,
+            180.0,
+            10.0,
+            -20.0,
+            5.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+            false,
+        )
+        .expect("valid vr rotate sphere grade");
+        let op = mondrian_effects::EffectRenderOp::VrRotateSphere { grade };
+        let pass = mondrian_effects::gpu_pipeline::spatial_pass_for(&op)
+            .expect("vr rotate sphere must lower to a spatial stage");
+        assert_eq!(pass.name(), "vr_rotate_sphere");
+        assert!(matches!(
+            pass,
+            mondrian_effects::EffectGpuSpatialPass::VrRotateSphere { .. }
+        ));
+        // One row's longitude sweep already covers the full circle, so every
+        // destination pixel may read anywhere in its eye sub-frame.
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+    }
+
+    #[test]
+    fn vr_rotate_sphere_takes_a_single_pass() {
+        let grade = mondrian_effects::VrRotateSphereGrade::new(
+            360.0,
+            180.0,
+            10.0,
+            -20.0,
+            5.0,
+            mondrian_effects::VrFrameLayout::OverUnder,
+            false,
+        )
+        .expect("valid vr rotate sphere grade");
+        let pass = mondrian_effects::EffectGpuSpatialPass::VrRotateSphere { grade };
+        // A single trigonometric remap per pixel: no window, iteration or
+        // separable direction to keep in scratch textures.
+        assert_eq!(EffectSpatialGpu::texture_pass_count(&pass), Ok(1));
+    }
+
+    #[test]
+    fn spatial_vr_rotate_sphere_shader_validates() {
+        let module = naga::front::wgsl::parse_str(SPATIAL_EFFECT_SHADER)
+            .expect("spatial effect shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("spatial effect shader validates");
+        assert!(
+            module.entry_points.iter().any(|entry| entry.name == "fs_vr_rotate_sphere"),
+            "the vr rotate sphere fragment entry point must survive validation"
+        );
+    }
+
+    /// Independent f64 evaluation of the inverse equirectangular mapping.
+    ///
+    /// The rotation matrix is built from the authored angles directly instead of
+    /// reusing the kernel's private matrix, so the two implementations can only
+    /// agree if the published mapping is right.
+    fn reference_vr_position(
+        grade: mondrian_effects::VrRotateSphereGrade,
+        column: f64,
+        row: f64,
+        width: usize,
+        height: usize,
+    ) -> (f64, f64) {
+        let (eye_width, eye_height) = grade.eye_size(width, height);
+        let (origin_x, origin_y) = grade.eye_origin(column as usize, row as usize, width, height);
+        let u = (column - origin_x as f64 + 0.5) / eye_width as f64;
+        let v = (row - origin_y as f64 + 0.5) / eye_height as f64;
+        let h_fov = grade.horizontal_fov_degrees().to_radians();
+        let v_fov = grade.vertical_fov_degrees().to_radians();
+        let longitude = (u - 0.5) * h_fov;
+        let latitude = (0.5 - v) * v_fov;
+        let (sin_lon, cos_lon) = (longitude.sin(), longitude.cos());
+        let (sin_lat, cos_lat) = (latitude.sin(), latitude.cos());
+        let direction = [cos_lat * sin_lon, sin_lat, cos_lat * cos_lon];
+        let pitch = grade.tilt_x_degrees().to_radians();
+        let yaw = grade.pan_y_degrees().to_radians();
+        let roll = grade.roll_z_degrees().to_radians();
+        let (sp, cp) = (pitch.sin(), pitch.cos());
+        let (sy, cy) = (yaw.sin(), yaw.cos());
+        let (sr, cr) = (roll.sin(), roll.cos());
+        let rotation = [
+            [cr * cy, cr * sy * sp - sr * cp, cr * sy * cp + sr * sp],
+            [sr * cy, sr * sy * sp + cr * cp, sr * sy * cp - cr * sp],
+            [-sy, cy * sp, cy * cp],
+        ];
+        let sample = if grade.invert() {
+            [
+                rotation[0][0] * direction[0]
+                    + rotation[1][0] * direction[1]
+                    + rotation[2][0] * direction[2],
+                rotation[0][1] * direction[0]
+                    + rotation[1][1] * direction[1]
+                    + rotation[2][1] * direction[2],
+                rotation[0][2] * direction[0]
+                    + rotation[1][2] * direction[1]
+                    + rotation[2][2] * direction[2],
+            ]
+        } else {
+            [
+                rotation[0][0] * direction[0]
+                    + rotation[0][1] * direction[1]
+                    + rotation[0][2] * direction[2],
+                rotation[1][0] * direction[0]
+                    + rotation[1][1] * direction[1]
+                    + rotation[1][2] * direction[2],
+                rotation[2][0] * direction[0]
+                    + rotation[2][1] * direction[1]
+                    + rotation[2][2] * direction[2],
+            ]
+        };
+        let longitude_src = sample[0].atan2(sample[2]);
+        let latitude_src = sample[1].clamp(-1.0, 1.0).asin();
+        let mut u_source = longitude_src / h_fov + 0.5;
+        if grade.wrap_longitude() {
+            u_source -= u_source.floor();
+        }
+        let v_source = 0.5 - latitude_src / v_fov;
+        (
+            u_source * eye_width as f64 - 0.5 + origin_x as f64,
+            v_source * eye_height as f64 - 0.5 + origin_y as f64,
+        )
+    }
+
+    #[test]
+    fn cpu_and_gpu_agree_to_one_eight_thousandth_on_a_smooth_gradient() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU vr rotate sphere parity test: no GPU adapter available");
+            return;
+        };
+        let width = 128_u32;
+        let height = 64_u32;
+        let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+        // A periodic analytic gradient: the panorama seam does not introduce a
+        // colour step, so the only differences left are numeric.
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                pixels[y * width as usize + x] = [
+                    0.5 + 0.4 * (std::f32::consts::TAU * u).sin(),
+                    0.5 + 0.4 * (std::f32::consts::TAU * v).cos(),
+                    0.5 + 0.3 * (std::f32::consts::TAU * (u + v)).sin(),
+                    1.0,
+                ];
+            }
+        }
+        let grade = mondrian_effects::VrRotateSphereGrade::new(
+            360.0,
+            180.0,
+            10.0,
+            -20.0,
+            5.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+            false,
+        )
+        .expect("valid vr rotate sphere grade");
+        let mut cpu = pixels.clone();
+        assert!(mondrian_effects::vr_rotate_sphere_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            grade,
+        ));
+        // Poles and the seam are excluded on purpose: next to |lat| = 90 the
+        // asin derivative diverges, and the two seam columns tap the clamped
+        // frame edge from opposite sides.
+        for row in 2..height as usize - 2 {
+            for column in 2..width as usize - 2 {
+                let (sample_x, sample_y) = grade.source_position(
+                    column as f64,
+                    row as f64,
+                    width as usize,
+                    height as usize,
+                );
+                let (reference_x, reference_y) = reference_vr_position(
+                    grade,
+                    column as f64,
+                    row as f64,
+                    width as usize,
+                    height as usize,
+                );
+                assert!(
+                    (sample_x - reference_x).abs() <= 1.0e-4,
+                    "column {column} row {row}: sample x {sample_x} vs reference {reference_x}"
+                );
+                assert!(
+                    (sample_y - reference_y).abs() <= 1.0e-4,
+                    "column {column} row {row}: sample y {sample_y} vs reference {reference_y}"
+                );
+            }
+        }
+        let (params, extra, aces, _) = grade.gpu_controls();
+        let (eye_width, eye_height) = grade.eye_size(width as usize, height as usize);
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let destination = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.vr-rotate-sphere-encoder"),
+        });
+        let output = executor
+            .record_vr_rotate_sphere(
+                &context.device,
+                &mut encoder,
+                params,
+                extra,
+                aces,
+                [0.0, 0.0, eye_width as f32, eye_height as f32],
+                &source,
+                &destination[0],
+                width,
+                height,
+            )
+            .expect("recorded vr rotate sphere");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        let mut compared = 0_usize;
+        for row in 2..height as usize - 2 {
+            for column in 2..width as usize - 2 {
+                let index = row * width as usize + column;
+                for channel in 0..4 {
+                    let difference = (cpu[index][channel] - gpu[index][channel]).abs();
+                    assert!(
+                        difference <= 2.0 / 255.0,
+                        "column {column} row {row} channel {channel}: cpu {:?} gpu {:?}",
+                        cpu[index],
+                        gpu[index]
+                    );
+                }
+                compared += 1;
+            }
+        }
+        assert!(
+            compared > (width as usize * height as usize) / 2,
+            "the gradient comparison must cover most of the frame"
+        );
+    }
+
+    #[test]
+    fn gpu_output_has_no_nan_or_inf_at_the_poles() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU vr rotate sphere pole test: no GPU adapter available");
+            return;
+        };
+        let width = 64_u32;
+        let height = 64_u32;
+        let mut pixels = vec![[0.25_f32, 0.5, 0.75, 1.0]; (width * height) as usize];
+        pixels[0] = [0.0, 0.0, 0.0, 0.0];
+        pixels[63] = [1.0, 1.0, 1.0, 0.5];
+        let grade = mondrian_effects::VrRotateSphereGrade::new(
+            360.0,
+            180.0,
+            90.0,
+            0.0,
+            0.0,
+            mondrian_effects::VrFrameLayout::Monoscopic,
+            false,
+        )
+        .expect("valid vr rotate sphere grade");
+        let (params, extra, aces, _) = grade.gpu_controls();
+        let (eye_width, eye_height) = grade.eye_size(width as usize, height as usize);
+        let executor = EffectSpatialGpu::new(&context.device);
+        let source = upload(&context, &pixels, width, height);
+        let destination = scratch(&context, width, height, 1);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.effect-spatial.vr-rotate-sphere-poles-encoder"),
+        });
+        let output = executor
+            .record_vr_rotate_sphere(
+                &context.device,
+                &mut encoder,
+                params,
+                extra,
+                aces,
+                [0.0, 0.0, eye_width as f32, eye_height as f32],
+                &source,
+                &destination[0],
+                width,
+                height,
+            )
+            .expect("recorded vr rotate sphere");
+        context.queue.submit(Some(encoder.finish()));
+        let gpu = readback(&context, &output, width, height);
+        // A 90 degree pitch puts the whole top and bottom row on the poles, where
+        // the longitude is undefined. The value there is allowed to be anything;
+        // it must just never be NaN or infinite.
+        for (index, pixel) in gpu.iter().enumerate() {
+            for (channel, value) in pixel.iter().enumerate() {
+                assert!(
+                    value.is_finite(),
+                    "pole pixel {index} channel {channel} is {value}"
+                );
+            }
+        }
     }
 
     #[test]
