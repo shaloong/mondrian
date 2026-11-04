@@ -2997,6 +2997,22 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             // outright, matching the CPU kernel's coverage.
             let origin = floor(max(position, vec2<f32>(0.0)));
             pixel = fractal_value(effect, origin);
+        } else if (effect.header.x == 43u) {
+            // `RemoveColorMattingGrade`: params is [background r, background g,
+            // background b, 0] and header.y is the clip switch. The background
+            // is straight (unpremultiplied), so the unmix term (1 - a) / a is
+            // computed first and subtracted from the colour; the clip is one
+            // final clamp of the three colour channels, never a mid-way clamp.
+            // The form matches the CPU kernel exactly (C - B * (1 - a) / a), and
+            // a pixel without coverage is returned untouched.
+            if (pixel.a > 0.0) {
+                let rgb = pixel.rgb - effect.params.xyz * ((1.0 - pixel.a) / pixel.a);
+                if (effect.header.y > 0u) {
+                    pixel = vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), pixel.a);
+                } else {
+                    pixel = vec4<f32>(rgb, pixel.a);
+                }
+            }
         } else if (effect.header.x == 34u) {
             // `ChangeToColorGrade`: params is [hue amount, lightness amount,
             // saturation amount, softness], colour is [to r, to g, to b, 0], and
@@ -6812,6 +6828,18 @@ fn effect_uniforms_for_ops(
                     params,
                     color: [0.0; 4],
                     extra0,
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::RemoveColorMatting { grade } => {
+                let (header, params) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: header.map(|value| value as u32),
+                    params,
+                    color: [0.0; 4],
+                    extra0: [0.0; 4],
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
@@ -11039,6 +11067,116 @@ mod tests {
                 report.within_budget,
                 "GPU hdr tone mapping accuracy budget exceeded for {grade:?}: {report:#?}"
             );
+        }
+    }
+
+    /// P1: the fused point kernel mirrors the CPU formula. Five alpha levels
+    /// cross two backgrounds (black and white) with the clip on and off, so the
+    /// unmix term, the negative-channel case and the single final clamp are all
+    /// exercised against the reference frame.
+    #[tokio::test]
+    async fn gpu_remove_color_matting_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            RemoveColorMattingGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU remove color matting parity test: no GPU adapter available");
+            return;
+        };
+        // Five alpha levels ride the column index so every row sees zero, tiny,
+        // half, three-quarter and full coverage. The colour stays in range so
+        // the unclipped white matte produces the large negative channels the
+        // formula promises.
+        let alphas = [0.0_f32, 0.25, 0.5, 0.75, 1.0];
+        let width = 64_u32;
+        let height = 8_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = x as f32 / (width - 1) as f32;
+                let v = y as f32 / (height - 1) as f32;
+                let alpha = alphas[(x % alphas.len() as u32) as usize];
+                data.push([0.15 + 0.7 * u, 0.2 + 0.6 * v, 0.9 - 0.5 * u * v, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for background in [[0.0_f32; 4], [1.0, 1.0, 1.0, 1.0]] {
+            for clip in [true, false] {
+                let grade = RemoveColorMattingGrade::new(background, clip)
+                    .expect("valid remove color matting grade");
+                let mut builder = EffectGraphBuilderState::new();
+                builder.append_unary(EffectRenderOp::RemoveColorMatting { grade });
+                let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+                let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+                assert_eq!(plan.operations().len(), 1);
+                let expected = apply_compiled_effect_graph_rgba_f32(
+                    mondrian_effects::EffectFloatFrameView::new(
+                        mondrian_effects::EffectFrameExtent::new(width, height),
+                        mondrian_effects::EffectValueFormat::new(
+                            mondrian_effects::EffectWorkingPrecision::Float32,
+                            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &frame.rgba_f32().data,
+                    ),
+                    &graph,
+                    0,
+                )
+                .expect("CPU float reference");
+                // Compositing a zero-coverage layer onto a transparent target
+                // discards its rgb, so the composite only observes the alpha of
+                // those pixels; the kernel's bit-identical skip is covered by the
+                // unit tests.
+                let expected_pixels: Vec<[f32; 4]> = expected
+                    .pixels()
+                    .iter()
+                    .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
+                    .collect();
+                let layer = GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::CpuFrame(&frame),
+                    opacity: 1.0,
+                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: Some(&plan),
+                    frame_seed: 0,
+                };
+                let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                    &context,
+                    &[layer],
+                    width,
+                    height,
+                    WorkingColorSpace::LinearRec709,
+                );
+                assert_eq!(diagnostics.execution.fused_point_operations, 1);
+                let report = compare_linear_rgba(
+                    &expected_pixels,
+                    &actual,
+                    LinearRgbaAccuracyBudget {
+                        rgb: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                        alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                    },
+                )
+                .expect("comparable frames");
+                assert!(
+                    report.within_budget,
+                    "GPU remove color matting budget exceeded for background \
+                     {background:?} clip {clip}: {report:#?}"
+                );
+            }
         }
     }
 
