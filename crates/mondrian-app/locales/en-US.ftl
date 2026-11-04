@@ -3043,3 +3043,18 @@ parameter-mondrian-effect-bezier-warp-quality-7 = 7
 parameter-mondrian-effect-bezier-warp-quality-8 = 8
 parameter-mondrian-effect-bezier-warp-quality-9 = 9
 parameter-mondrian-effect-bezier-warp-quality-10 = 10
+
+## VR Rotate Sphere VR 旋转球面
+effect-vr-rotate-sphere = VR Rotate Sphere
+parameter-group-vr-rotate-sphere = VR Rotate Sphere
+parameter-mondrian-effect-builtin-vr-rotate-sphere-auto-vr-label = Auto VR Properties
+parameter-mondrian-effect-builtin-vr-rotate-sphere-frame-layout-label = Frame Layout
+parameter-mondrian-effect-builtin-vr-rotate-sphere-horizontal-fov-label = Horizontal FOV
+parameter-mondrian-effect-builtin-vr-rotate-sphere-vertical-fov-label = Vertical FOV
+parameter-mondrian-effect-builtin-vr-rotate-sphere-tilt-x-label = Tilt (X Axis)
+parameter-mondrian-effect-builtin-vr-rotate-sphere-pan-y-label = Pan (Y Axis)
+parameter-mondrian-effect-builtin-vr-rotate-sphere-roll-z-label = Roll (Z Axis)
+parameter-mondrian-effect-builtin-vr-rotate-sphere-invert-label = Invert Rotation
+parameter-mondrian-effect-vr-rotate-sphere-frame-layout-monoscopic = Monoscopic
+parameter-mondrian-effect-vr-rotate-sphere-frame-layout-over-under = Over-Under
+parameter-mondrian-effect-vr-rotate-sphere-frame-layout-side-by-side = Side-by-Side

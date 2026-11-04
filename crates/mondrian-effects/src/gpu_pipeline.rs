@@ -112,6 +112,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored bezier warp control points and quality.
         grade: crate::BezierWarpGrade,
     },
+    /// Virtual-reality equirectangular sphere rotation.
+    VrRotateSphere {
+        /// Authored tilt, pan, roll and projection controls.
+        grade: crate::VrRotateSphereGrade,
+    },
     /// Parallel displacement clone across an authored line.
     WireRemoval {
         /// Authored wire removal line and controls.
@@ -254,6 +259,7 @@ impl EffectGpuSpatialPass {
             Self::Warp { .. } => "warp",
             Self::GridWarp { .. } => "grid_warp",
             Self::BezierWarp { .. } => "bezier_warp",
+            Self::VrRotateSphere { .. } => "vr_rotate_sphere",
             Self::WireRemoval { .. } => "wire_removal",
             Self::RoughenEdges { .. } => "roughen_edges",
             Self::Convolution { .. } => "convolution",
@@ -317,6 +323,7 @@ impl EffectGpuSpatialPass {
             | Self::Warp { .. }
             | Self::GridWarp { .. }
             | Self::BezierWarp { .. }
+            | Self::VrRotateSphere { .. }
             | Self::WireRemoval { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
@@ -387,6 +394,7 @@ impl EffectGpuSpatialPass {
             | Self::Warp { .. }
             | Self::GridWarp { .. }
             | Self::BezierWarp { .. }
+            | Self::VrRotateSphere { .. }
             | Self::WireRemoval { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
@@ -709,6 +717,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::BezierWarp { grade } => {
             Some(EffectGpuSpatialPass::BezierWarp { grade: *grade })
+        }
+        EffectRenderOp::VrRotateSphere { grade } => {
+            Some(EffectGpuSpatialPass::VrRotateSphere { grade: *grade })
         }
         EffectRenderOp::WireRemoval { grade } => {
             Some(EffectGpuSpatialPass::WireRemoval { grade: *grade })

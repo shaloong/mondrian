@@ -2701,7 +2701,7 @@ fn hash_effect_operation_shape(
     Ok(())
 }
 
-const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
+pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
     match operation {
         EffectRenderOp::ColorAdjust { .. } => 1,
         EffectRenderOp::GaussianBlur { .. } => 2,
@@ -2792,6 +2792,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::DustScratches { .. } => 98,
         EffectRenderOp::Magnify { .. } => 99,
         EffectRenderOp::BezierWarp { .. } => 100,
+        EffectRenderOp::VrRotateSphere { .. } => 101,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4894,6 +4895,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Warp { .. }
             | crate::EffectRenderOp::GridWarp { .. }
             | crate::EffectRenderOp::BezierWarp { .. }
+            | crate::EffectRenderOp::VrRotateSphere { .. }
             | crate::EffectRenderOp::WireRemoval { .. }
             | crate::EffectRenderOp::RoughenEdges { .. }
             | crate::EffectRenderOp::EyedropperFill { .. }

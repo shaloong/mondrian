@@ -62,6 +62,7 @@ pub mod transform;
 pub mod tritone;
 pub mod twirl;
 pub mod vibrance;
+pub mod vr_rotate_sphere;
 pub mod warp;
 pub mod wave_warp;
 pub mod wire_removal;
@@ -497,6 +498,11 @@ pub use unsharp_mask::{
     UNSHARP_MASK_AUTHOR_MIN_RADIUS_PIXELS,
 };
 pub use vibrance::{vibrance_frame_f32, VibranceError, VibranceGrade};
+pub use vr_rotate_sphere::{
+    vr_rotate_sphere_frame_f32, VrFrameLayout, VrRotateSphereControls, VrRotateSphereError,
+    VrRotateSphereGrade, VR_ROTATE_SPHERE_MAX_HORIZONTAL_FOV_DEGREES,
+    VR_ROTATE_SPHERE_MAX_VERTICAL_FOV_DEGREES, VR_ROTATE_SPHERE_MIN_FOV_DEGREES,
+};
 pub use warp::{
     warp_frame_f32, WarpAxis, WarpError, WarpGrade, WarpStyle, WARP_DEFAULT_AXIS,
     WARP_DEFAULT_BEND, WARP_DEFAULT_DISTORTION, WARP_DEFAULT_STYLE, WARP_IDENTITY_EPSILON,

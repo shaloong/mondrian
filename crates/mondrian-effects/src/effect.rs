@@ -1087,6 +1087,11 @@ pub enum EffectRenderOp {
     BezierWarp {
         grade: crate::BezierWarpGrade,
     },
+    /// VR rotate sphere: re-projects the layer through a virtual-reality
+    /// equirectangular sphere rotated by the authored tilt, pan and roll.
+    VrRotateSphere {
+        grade: crate::VrRotateSphereGrade,
+    },
     /// Wire removal: clones pixels from a parallel displacement across an
     /// authored line (RES-07).
     WireRemoval {
@@ -1471,6 +1476,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::BezierWarp { grade } => {
                 formatter.debug_struct("BezierWarp").field("grade", grade).finish()
+            }
+            Self::VrRotateSphere { grade } => {
+                formatter.debug_struct("VrRotateSphere").field("grade", grade).finish()
             }
             Self::WireRemoval { grade } => {
                 formatter.debug_struct("WireRemoval").field("grade", grade).finish()
@@ -2366,6 +2374,13 @@ impl EffectRenderOp {
                 }
                 grade.quality().hash(state);
             }
+            EffectRenderOp::VrRotateSphere { grade } => {
+                100u8.hash(state);
+                let (params, extra, aces, extra1) = grade.gpu_controls();
+                for value in params.into_iter().chain(extra).chain(aces).chain(extra1) {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::WireRemoval { grade } => {
                 86u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2574,6 +2589,7 @@ impl EffectRenderOp {
             EffectRenderOp::Warp { .. } => 3,
             EffectRenderOp::GridWarp { .. } => 3,
             EffectRenderOp::BezierWarp { .. } => 6,
+            EffectRenderOp::VrRotateSphere { .. } => 5,
             EffectRenderOp::WireRemoval { .. } => 4,
             EffectRenderOp::Median { .. } => 4,
             EffectRenderOp::SelectiveColor { .. } => 2,
@@ -3127,7 +3143,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 99] {
+fn builtin_effect_types() -> [EffectType; 100] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3228,6 +3244,7 @@ fn builtin_effect_types() -> [EffectType; 99] {
         EffectType::Magnify,
         EffectType::DustScratches,
         EffectType::BezierWarp,
+        EffectType::VrRotateSphere,
     ]
 }
 
@@ -10307,6 +10324,95 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::VrRotateSphere => {
+            // Display order is the author-visible order: the VR bookkeeping
+            // first, then the frame layout, then the field of view, then the
+            // three rotation angles and finally the direction switch.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "auto_vr",
+                "VR 旋转球面",
+                "自动 VR 属性",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "frame_layout",
+                "VR 旋转球面",
+                "帧布局",
+                crate::VrFrameLayout::Monoscopic.key(),
+                crate::VrFrameLayout::ALL
+                    .into_iter()
+                    .map(|layout| {
+                        ParameterEnumOption::new(
+                            layout.key(),
+                            layout.label(),
+                            format!(
+                                "mondrian.effect.vr_rotate_sphere.frame_layout.{}",
+                                layout.key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "horizontal_fov",
+                "VR 旋转球面",
+                "水平视角",
+                PropertyValue::Float(360.0),
+                Some(f64::from(crate::VR_ROTATE_SPHERE_MIN_FOV_DEGREES)),
+                Some(f64::from(
+                    crate::VR_ROTATE_SPHERE_MAX_HORIZONTAL_FOV_DEGREES,
+                )),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "vertical_fov",
+                "VR 旋转球面",
+                "垂直视角",
+                PropertyValue::Float(180.0),
+                Some(f64::from(crate::VR_ROTATE_SPHERE_MIN_FOV_DEGREES)),
+                Some(f64::from(crate::VR_ROTATE_SPHERE_MAX_VERTICAL_FOV_DEGREES)),
+                Some(1.0),
+            );
+            for (parameter, name) in [
+                ("tilt_x", "倾斜 (X 轴)"),
+                ("pan_y", "平移 (Y 轴)"),
+                ("roll_z", "滚动 (Z 轴)"),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "VR 旋转球面",
+                    name,
+                    PropertyValue::Float(0.0),
+                    None,
+                    None,
+                    Some(1.0),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "VR 旋转球面",
+                "反旋转",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -10710,6 +10816,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         // The patch points are authored in a reference box, not in frame pixels,
         // and the quality option is an iteration count, so neither carries a unit.
         (EffectType::BezierWarp, _) => ParameterUnit::Unitless,
+        (
+            EffectType::VrRotateSphere,
+            "horizontal_fov" | "vertical_fov" | "tilt_x" | "pan_y" | "roll_z",
+        ) => ParameterUnit::Degrees,
+        (EffectType::VrRotateSphere, _) => ParameterUnit::Unitless,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -11140,6 +11251,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::BezierWarp => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::VrRotateSphere => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -16532,6 +16648,87 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::VrRotateSphere => {
+            let auto_vr_id = builtin_parameter_id(effect_type, "auto_vr");
+            let frame_layout_id = builtin_parameter_id(effect_type, "frame_layout");
+            let horizontal_fov_id = builtin_parameter_id(effect_type, "horizontal_fov");
+            let vertical_fov_id = builtin_parameter_id(effect_type, "vertical_fov");
+            let tilt_x_id = builtin_parameter_id(effect_type, "tilt_x");
+            let pan_y_id = builtin_parameter_id(effect_type, "pan_y");
+            let roll_z_id = builtin_parameter_id(effect_type, "roll_z");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                // The VR flag is lazy: it is read so that a change is authored
+                // and serialized, then intentionally discarded, because it
+                // describes the authoring workflow rather than the projection.
+                let auto_vr = match effect.evaluate_parameter(&auto_vr_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(
+                            "vr rotate sphere auto vr must be a boolean".to_owned(),
+                        ));
+                    }
+                    None => false,
+                };
+                let _ = auto_vr;
+                let layout = match effect.evaluate_parameter(&frame_layout_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::VrFrameLayout::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "vr rotate sphere frame layout {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "vr rotate sphere frame layout must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::VrFrameLayout::Monoscopic,
+                };
+                let horizontal_fov = effect.evaluate_f32_parameter(
+                    &horizontal_fov_id,
+                    context.time,
+                    crate::VR_ROTATE_SPHERE_MAX_HORIZONTAL_FOV_DEGREES,
+                );
+                let vertical_fov = effect.evaluate_f32_parameter(
+                    &vertical_fov_id,
+                    context.time,
+                    crate::VR_ROTATE_SPHERE_MAX_VERTICAL_FOV_DEGREES,
+                );
+                let tilt_x = effect.evaluate_f32_parameter(&tilt_x_id, context.time, 0.0);
+                let pan_y = effect.evaluate_f32_parameter(&pan_y_id, context.time, 0.0);
+                let roll_z = effect.evaluate_f32_parameter(&roll_z_id, context.time, 0.0);
+                let invert = match effect.evaluate_parameter(&invert_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(
+                            "vr rotate sphere invert must be a boolean".to_owned(),
+                        ));
+                    }
+                    None => false,
+                };
+                let grade = crate::VrRotateSphereGrade::new(
+                    f64::from(horizontal_fov),
+                    f64::from(vertical_fov),
+                    f64::from(tilt_x),
+                    f64::from(pan_y),
+                    f64::from(roll_z),
+                    layout,
+                    invert,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // Zero rotation is the identity, so no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::VrRotateSphere { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::WireRemoval => {
             let point_a_x_id = builtin_parameter_id(effect_type, "point_a_x");
             let point_a_y_id = builtin_parameter_id(effect_type, "point_a_y");
@@ -16851,6 +17048,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Warp => "弯曲",
         EffectType::GridWarp => "网格变形",
         EffectType::BezierWarp => "贝塞尔曲线变形",
+        EffectType::VrRotateSphere => "VR 旋转球面",
         EffectType::WireRemoval => "祛线",
         EffectType::Median => "中间值",
         EffectType::SelectiveColor => "可选颜色",
@@ -18196,6 +18394,7 @@ mod tests {
             EffectType::Magnify,
             EffectType::DustScratches,
             EffectType::BezierWarp,
+            EffectType::VrRotateSphere,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -21943,6 +22142,129 @@ mod tests {
         let grade = spherize_op(&graph).expect("spherize op");
         assert!((grade.radius_pixels() - 88.0).abs() < 1.0e-5);
         assert_eq!(grade.centre()[1], -16.0);
+    }
+
+    fn vr_rotate_sphere_op(graph: &EffectRenderGraph) -> Option<crate::VrRotateSphereGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::VrRotateSphere { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_vr_rotate_sphere(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::VrRotateSphere)
+            .expect("registered vr rotate sphere definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::VrRotateSphere.property_path(parameter),
+                value,
+            })
+            .expect("authors vr rotate sphere parameter");
+        effect
+    }
+
+    fn vr_rotate_sphere_grade() -> crate::VrRotateSphereGrade {
+        crate::VrRotateSphereGrade::new(
+            360.0,
+            180.0,
+            10.0,
+            20.0,
+            30.0,
+            crate::VrFrameLayout::Monoscopic,
+            false,
+        )
+        .expect("valid vr rotate sphere grade")
+    }
+
+    #[test]
+    fn vr_rotate_sphere_default_graph_has_no_node() {
+        let effect = instantiate_effect_node(EffectType::VrRotateSphere)
+            .expect("registered vr rotate sphere definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds vr rotate sphere graph");
+        assert!(vr_rotate_sphere_op(&graph).is_none());
+    }
+
+    #[test]
+    fn a_nonzero_tilt_appends_exactly_one_node() {
+        let identity = instantiate_effect_node(EffectType::VrRotateSphere)
+            .expect("registered vr rotate sphere definition");
+        let identity_graph = build_effect_render_graph(&[identity], tt(0), TEST_WORKING_SPACE)
+            .expect("builds identity vr rotate sphere graph");
+        let effect = author_vr_rotate_sphere("tilt_x", PropertyValue::Float(10.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds tilted vr rotate sphere graph");
+        assert_eq!(graph.nodes.len(), identity_graph.nodes.len() + 1);
+        let grade = vr_rotate_sphere_op(&graph).expect("vr rotate sphere op");
+        assert_eq!(grade.tilt_x_degrees(), 10.0);
+        assert_eq!(grade.pan_y_degrees(), 0.0);
+        assert_eq!(grade.roll_z_degrees(), 0.0);
+    }
+
+    #[test]
+    fn the_shape_tag_is_100_and_the_hash_tag_is_99() {
+        // The design's numbers are stale: DST-15 already owns hash 99 and shape
+        // 100, so VR rotate sphere lands on hash 100 and shape 101.
+        let grade = vr_rotate_sphere_grade();
+        let op = EffectRenderOp::VrRotateSphere { grade };
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            101
+        );
+        let mut actual = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual);
+        let mut expected = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&100u8, &mut expected);
+        let (params, extra, aces, extra1) = grade.gpu_controls();
+        for value in params.into_iter().chain(extra).chain(aces).chain(extra1) {
+            std::hash::Hash::hash(&value.to_bits(), &mut expected);
+        }
+        assert_eq!(
+            std::hash::Hasher::finish(&actual),
+            std::hash::Hasher::finish(&expected)
+        );
+    }
+
+    #[test]
+    fn render_op_requirements_reports_full_frame_and_both_modes() {
+        let op = EffectRenderOp::VrRotateSphere { grade: vr_rotate_sphere_grade() };
+        let requirements = crate::graph::render_op_requirements(&op);
+        assert!(requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Cpu,
+            crate::EffectWorkingPrecision::Float32,
+        ));
+        assert!(requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Gpu,
+            crate::EffectWorkingPrecision::Float32,
+        ));
+        assert!(!requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Cpu,
+            crate::EffectWorkingPrecision::NormalizedU8,
+        ));
+        assert!(!requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Gpu,
+            crate::EffectWorkingPrecision::NormalizedU8,
+        ));
+        assert_eq!(
+            requirements.roi_from_effect_input,
+            crate::EffectRoiPropagation::FullFrame
+        );
+    }
+
+    #[test]
+    fn toggling_auto_vr_leaves_the_graph_bit_identical() {
+        let off = author_vr_rotate_sphere("auto_vr", PropertyValue::Bool(false));
+        let on = author_vr_rotate_sphere("auto_vr", PropertyValue::Bool(true));
+        let off_graph = build_effect_render_graph(&[off], tt(0), TEST_WORKING_SPACE)
+            .expect("builds auto vr off graph");
+        let on_graph = build_effect_render_graph(&[on], tt(0), TEST_WORKING_SPACE)
+            .expect("builds auto vr on graph");
+        assert_eq!(format!("{off_graph:?}"), format!("{on_graph:?}"));
+        assert!(vr_rotate_sphere_op(&off_graph).is_none());
+        assert!(vr_rotate_sphere_op(&on_graph).is_none());
     }
 
     fn dent_op(graph: &EffectRenderGraph) -> Option<crate::DentGrade> {

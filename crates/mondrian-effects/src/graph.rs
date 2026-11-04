@@ -1007,12 +1007,12 @@ pub(crate) struct EffectGraphBuilderCheckpoint {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct EffectImplementationRequirements {
-    execution_modes: EffectExecutionModes,
-    determinism: EffectDeterminism,
-    temporal_input: EffectTemporalInputExtent,
-    roi_from_effect_input: EffectRoiPropagation,
-    resource_lifetime: EffectResourceLifetime,
+pub(crate) struct EffectImplementationRequirements {
+    pub(crate) execution_modes: EffectExecutionModes,
+    pub(crate) determinism: EffectDeterminism,
+    pub(crate) temporal_input: EffectTemporalInputExtent,
+    pub(crate) roi_from_effect_input: EffectRoiPropagation,
+    pub(crate) resource_lifetime: EffectResourceLifetime,
 }
 
 impl EffectImplementationRequirements {
@@ -1639,7 +1639,7 @@ impl EffectGraphBuilderState {
     }
 }
 
-fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequirements {
+pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequirements {
     let cpu_float = EffectImplementationRequirements {
         execution_modes: EffectExecutionModes::CPU_U8.union(EffectExecutionModes::CPU_F32),
         determinism: EffectDeterminism::Deterministic,
@@ -1732,6 +1732,11 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             ..cpu_float
         },
         EffectRenderOp::BezierWarp { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
+        EffectRenderOp::VrRotateSphere { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
