@@ -500,6 +500,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             })
         }
+        EffectRenderOp::Magnify { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "magnify",
+                parameter: "requires_float32",
+            })
+        }
         EffectRenderOp::Dent { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "dent",
@@ -1110,6 +1116,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Offset { .. } => 0,
         EffectRenderOp::Twirl { .. } => 0,
         EffectRenderOp::Spherize { .. } => 0,
+        // The kernel snapshots the straight frame, premultiplies a copy, and
+        // samples that copy, so it must never write the source in place.
+        EffectRenderOp::Magnify { .. } => 1,
         EffectRenderOp::Dent { .. } => 0,
         EffectRenderOp::Warp { .. } => 1,
         EffectRenderOp::GridWarp { .. } => 1,
@@ -1730,6 +1739,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             checkpoint,
         ),
         EffectRenderOp::Spherize { grade } => crate::spherize::apply_spherize_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            *grade,
+            checkpoint,
+        ),
+        EffectRenderOp::Magnify { grade } => crate::magnify::apply_magnify_f32_controlled(
             working,
             region.width as usize,
             region.height as usize,

@@ -87,6 +87,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored spherize parameters.
         grade: crate::SpherizeGrade,
     },
+    /// Lens-shaped magnification around a centre.
+    Magnify {
+        /// Authored magnify parameters.
+        grade: crate::MagnifyGrade,
+    },
     /// Circular dent or bulge remap.
     Dent {
         /// Authored dent parameters.
@@ -239,6 +244,7 @@ impl EffectGpuSpatialPass {
             Self::Offset { .. } => "offset",
             Self::Twirl { .. } => "twirl",
             Self::Spherize { .. } => "spherize",
+            Self::Magnify { .. } => "magnify",
             Self::Dent { .. } => "dent",
             Self::Warp { .. } => "warp",
             Self::GridWarp { .. } => "grid_warp",
@@ -307,6 +313,9 @@ impl EffectGpuSpatialPass {
             | Self::WireRemoval { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
+            // The lens contracts the inverse map, so unlike the group above its
+            // reach is the authored radius plus the bilinear tap.
+            Self::Magnify { grade } => magnify_halo(grade),
             // A flare reads only the pixel it writes, so it needs no neighbour.
             Self::LensDistortion { .. } => u32::MAX,
             Self::Flip { .. } => u32::MAX,
@@ -373,6 +382,8 @@ impl EffectGpuSpatialPass {
             | Self::WireRemoval { .. }
             | Self::Mirror { .. }
             | Self::PolarCoordinates { .. } => u32::MAX,
+            // Same reach as the horizontal halo.
+            Self::Magnify { grade } => magnify_halo(grade),
             Self::LensDistortion { .. } => u32::MAX,
             Self::Flip { .. } => u32::MAX,
             Self::Ripple { .. } => u32::MAX,
@@ -415,6 +426,17 @@ impl EffectGpuSpatialPass {
 /// the two pixels the doubling search can overshoot the profile by.
 fn stroke_halo(grade: crate::StrokeGrade) -> u32 {
     ((grade.brush_size() * 0.5).ceil() as u32 + 2).min(102)
+}
+
+/// Reach of the magnify kernel in source pixels.
+///
+/// The inverse map is a contraction by `magnification >= 1`, so the sample of
+/// any pixel inside the lens stays within the authored radius, and the
+/// bilinear tap reaches one further texel. Unlike the other remapping kernels
+/// this halo is therefore finite, and it is capped at the largest raster the
+/// spatial driver admits so a huge authored diameter cannot overflow it.
+fn magnify_halo(grade: crate::MagnifyGrade) -> u32 {
+    (grade.radius_pixels().ceil() as u32).saturating_add(2).min(8192)
 }
 
 /// One stage of the GPU pipeline, in graph order.
@@ -671,6 +693,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Spherize { grade } => {
             Some(EffectGpuSpatialPass::Spherize { grade: *grade })
         }
+        EffectRenderOp::Magnify { grade } => Some(EffectGpuSpatialPass::Magnify { grade: *grade }),
         EffectRenderOp::Dent { grade } => Some(EffectGpuSpatialPass::Dent { grade: *grade }),
         EffectRenderOp::Warp { grade } => Some(EffectGpuSpatialPass::Warp { grade: *grade }),
         EffectRenderOp::GridWarp { grade } => {

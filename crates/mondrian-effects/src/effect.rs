@@ -1063,6 +1063,10 @@ pub enum EffectRenderOp {
     Spherize {
         grade: crate::SpherizeGrade,
     },
+    /// Magnify: enlarges a lens-shaped region around a centre (DST-07).
+    Magnify {
+        grade: crate::MagnifyGrade,
+    },
     /// Dent: pulls pixels towards (or pushes them away from) a circular
     /// control point (DST-16).
     Dent {
@@ -1451,6 +1455,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Twirl { grade } => formatter.debug_struct("Twirl").field("grade", grade).finish(),
             Self::Spherize { grade } => {
                 formatter.debug_struct("Spherize").field("grade", grade).finish()
+            }
+            Self::Magnify { grade } => {
+                formatter.debug_struct("Magnify").field("grade", grade).finish()
             }
             Self::Dent { grade } => formatter.debug_struct("Dent").field("grade", grade).finish(),
             Self::Warp { grade } => formatter.debug_struct("Warp").field("grade", grade).finish(),
@@ -2317,6 +2324,13 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::Magnify { grade } => {
+                98u8.hash(state);
+                let (params, extra, aces, extra1) = grade.gpu_controls();
+                for value in params.into_iter().chain(extra).chain(aces).chain(extra1) {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::Dent { grade } => {
                 82u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2540,6 +2554,7 @@ impl EffectRenderOp {
             EffectRenderOp::Twirl { .. } => 3,
             EffectRenderOp::Noise { .. } => 1,
             EffectRenderOp::Spherize { .. } => 3,
+            EffectRenderOp::Magnify { .. } => 4,
             EffectRenderOp::Dent { .. } => 3,
             EffectRenderOp::Warp { .. } => 3,
             EffectRenderOp::GridWarp { .. } => 3,
@@ -3096,7 +3111,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 97] {
+fn builtin_effect_types() -> [EffectType; 98] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3194,6 +3209,7 @@ fn builtin_effect_types() -> [EffectType; 97] {
         EffectType::CircleEllipse,
         EffectType::Stroke,
         EffectType::Fill,
+        EffectType::Magnify,
         EffectType::DustScratches,
     ]
 }
@@ -7298,6 +7314,178 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Magnify => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "shape",
+                "放大",
+                "形状",
+                "circle",
+                vec![
+                    ParameterEnumOption::new(
+                        "circle",
+                        "圆形",
+                        "mondrian.effect.magnify.shape.circle",
+                    ),
+                    ParameterEnumOption::new(
+                        "square",
+                        "方形",
+                        "mondrian.effect.magnify.shape.square",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_x",
+                "放大",
+                "中心 X",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_y",
+                "放大",
+                "中心 Y",
+                PropertyValue::Float(128.0),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "magnification",
+                "放大",
+                "放大率",
+                PropertyValue::Float(150.0),
+                Some(100.0),
+                Some(20_000.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "link",
+                "放大",
+                "链接",
+                "independent",
+                vec![
+                    ParameterEnumOption::new(
+                        "independent",
+                        "独立",
+                        "mondrian.effect.magnify.link.independent",
+                    ),
+                    ParameterEnumOption::new(
+                        "follow_magnification",
+                        "跟随放大率",
+                        "mondrian.effect.magnify.link.follow_magnification",
+                    ),
+                    ParameterEnumOption::new(
+                        "inverse_magnification",
+                        "反向跟随",
+                        "mondrian.effect.magnify.link.inverse_magnification",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "size",
+                "放大",
+                "大小",
+                PropertyValue::Float(100.0),
+                Some(crate::MAGNIFY_MIN_DIAMETER_PIXELS as f64),
+                Some(crate::MAGNIFY_MAX_DIAMETER_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather",
+                "放大",
+                "羽化",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::MAGNIFY_MAX_FEATHER_PIXELS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "放大",
+                "不透明度",
+                PropertyValue::Float(100.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "scaling",
+                "放大",
+                "缩放",
+                "bilinear",
+                vec![
+                    ParameterEnumOption::new(
+                        "bilinear",
+                        "双线性",
+                        "mondrian.effect.magnify.scaling.bilinear",
+                    ),
+                    ParameterEnumOption::new(
+                        "supersample_2",
+                        "2×2 超采样",
+                        "mondrian.effect.magnify.scaling.supersample_2",
+                    ),
+                    ParameterEnumOption::new(
+                        "supersample_4",
+                        "4×4 超采样",
+                        "mondrian.effect.magnify.scaling.supersample_4",
+                    ),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "blend_mode",
+                "放大",
+                "混合模式",
+                crate::fractal_noise::blend_mode_key(mondrian_core::BlendMode::Normal),
+                mondrian_core::display_labels::blend_mode_options()
+                    .iter()
+                    .filter_map(|option| {
+                        let mode = option.mode?;
+                        if !crate::magnify::is_declared_blend_mode(mode) {
+                            return None;
+                        }
+                        let key = crate::fractal_noise::blend_mode_key(mode);
+                        Some(ParameterEnumOption::new(
+                            key,
+                            option.label,
+                            format!("mondrian.effect.magnify.blend_mode.{key}"),
+                        ))
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "resize_layer",
+                "放大",
+                "调整图层大小",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+        }
         EffectType::ColorEmboss => {
             define_builtin_property(
                 &mut properties,
@@ -10343,6 +10531,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Spherize, "radius") => ParameterUnit::Pixels,
         (EffectType::Spherize, "centre_x") => ParameterUnit::Pixels,
         (EffectType::Spherize, "centre_y") => ParameterUnit::Pixels,
+        (EffectType::Magnify, "centre_x" | "centre_y" | "size" | "feather") => {
+            ParameterUnit::Pixels
+        }
+        (EffectType::Magnify, "magnification" | "opacity") => ParameterUnit::Percent,
+        (EffectType::Magnify, "resize_layer") => ParameterUnit::Normalized,
         (EffectType::Dent, "centre_x" | "centre_y") => ParameterUnit::Pixels,
         (EffectType::Dent, "size" | "strength") => ParameterUnit::Normalized,
         (EffectType::Warp, "bend" | "horizontal_distortion" | "vertical_distortion") => {
@@ -10836,6 +11029,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::Spherize => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Magnify => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -14000,6 +14198,133 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Magnify => {
+            let shape_id = builtin_parameter_id(effect_type, "shape");
+            let centre_x_id = builtin_parameter_id(effect_type, "centre_x");
+            let centre_y_id = builtin_parameter_id(effect_type, "centre_y");
+            let magnification_id = builtin_parameter_id(effect_type, "magnification");
+            let link_id = builtin_parameter_id(effect_type, "link");
+            let size_id = builtin_parameter_id(effect_type, "size");
+            let feather_id = builtin_parameter_id(effect_type, "feather");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let scaling_id = builtin_parameter_id(effect_type, "scaling");
+            let blend_mode_id = builtin_parameter_id(effect_type, "blend_mode");
+            let resize_layer_id = builtin_parameter_id(effect_type, "resize_layer");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let enumeration =
+                    |parameter_id: &ParameterId,
+                     label: &str|
+                     -> Result<Option<String>, EffectGraphBuildError> {
+                        match effect.evaluate_parameter(parameter_id, context.time) {
+                            Some(PropertyValue::Enum(key)) => Ok(Some(key)),
+                            Some(_) => {
+                                Err(invalid(format!("magnify {label} must be an enumeration")))
+                            }
+                            None => Ok(None),
+                        }
+                    };
+                let shape = match enumeration(&shape_id, "shape")? {
+                    Some(key) => crate::MagnifyShape::from_key(&key).ok_or_else(|| {
+                        invalid(format!("magnify shape {key} is not a declared option"))
+                    })?,
+                    None => crate::MagnifyShape::Circle,
+                };
+                let link = match enumeration(&link_id, "link")? {
+                    Some(key) => crate::MagnifyLink::from_key(&key).ok_or_else(|| {
+                        invalid(format!("magnify link {key} is not a declared option"))
+                    })?,
+                    None => crate::MagnifyLink::Independent,
+                };
+                let scaling = match enumeration(&scaling_id, "scaling")? {
+                    Some(key) => crate::MagnifyScaling::from_key(&key).ok_or_else(|| {
+                        invalid(format!("magnify scaling {key} is not a declared option"))
+                    })?,
+                    None => crate::MagnifyScaling::Bilinear,
+                };
+                let blend_mode = match enumeration(&blend_mode_id, "blend mode")? {
+                    Some(key) => {
+                        let mode =
+                            crate::fractal_noise::blend_mode_from_key(&key).ok_or_else(|| {
+                                invalid(format!(
+                                    "magnify blend mode {key} is not a declared option"
+                                ))
+                            })?;
+                        if !crate::magnify::is_declared_blend_mode(mode) {
+                            return Err(invalid(format!(
+                                "magnify blend mode {key} is not one of the declared lens modes"
+                            )));
+                        }
+                        mode
+                    }
+                    None => mondrian_core::BlendMode::Normal,
+                };
+                let centre_x = effect.evaluate_f32_parameter(&centre_x_id, context.time, 128.0);
+                let centre_y = effect.evaluate_f32_parameter(&centre_y_id, context.time, 128.0);
+                if !centre_x.is_finite() || !centre_y.is_finite() {
+                    return Err(invalid("magnify centre must be a finite point".to_owned()));
+                }
+                let magnification_percent =
+                    effect.evaluate_f32_parameter(&magnification_id, context.time, 150.0);
+                if !(100.0..=20_000.0).contains(&magnification_percent) {
+                    return Err(invalid(format!(
+                        "magnify magnification {magnification_percent} is outside 100..=20000"
+                    )));
+                }
+                let magnification = magnification_percent / 100.0;
+                let size = effect.evaluate_f32_parameter(&size_id, context.time, 100.0);
+                if !(crate::MAGNIFY_MIN_DIAMETER_PIXELS..=crate::MAGNIFY_MAX_DIAMETER_PIXELS)
+                    .contains(&size)
+                {
+                    return Err(invalid(format!(
+                        "magnify size {size} is outside {}..={}",
+                        crate::MAGNIFY_MIN_DIAMETER_PIXELS,
+                        crate::MAGNIFY_MAX_DIAMETER_PIXELS
+                    )));
+                }
+                let feather = effect.evaluate_f32_parameter(&feather_id, context.time, 0.0);
+                if !(0.0..=crate::MAGNIFY_MAX_FEATHER_PIXELS).contains(&feather) {
+                    return Err(invalid(format!(
+                        "magnify feather {feather} is outside 0..={}",
+                        crate::MAGNIFY_MAX_FEATHER_PIXELS
+                    )));
+                }
+                let opacity = effect.evaluate_f32_parameter(&opacity_id, context.time, 100.0);
+                if !(0.0..=100.0).contains(&opacity) {
+                    return Err(invalid(format!(
+                        "magnify opacity {opacity} is outside 0..=100"
+                    )));
+                }
+                // The layer resize is lazy: the parameter is read so that a
+                // change is authored and serialized, then intentionally
+                // discarded, because the lens never grows the frame.
+                let _resize_layer =
+                    effect.evaluate_f32_parameter(&resize_layer_id, context.time, 0.0);
+                let grade = crate::MagnifyGrade::new(
+                    [centre_x, centre_y],
+                    link.diameter_for(size, magnification),
+                    magnification,
+                    feather,
+                    opacity / 100.0,
+                    shape,
+                    scaling,
+                    blend_mode,
+                );
+                let Ok(grade) = grade else {
+                    return Err(invalid(
+                        "magnify parameters are outside the declared range".to_owned(),
+                    ));
+                };
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Magnify { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Twirl => {
             let angle_id = builtin_parameter_id(effect_type, "angle");
             let radius_id = builtin_parameter_id(effect_type, "radius");
@@ -16334,6 +16659,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Offset => "偏移",
         EffectType::Twirl => "旋转扭曲",
         EffectType::Spherize => "球面化",
+        EffectType::Magnify => "放大",
         EffectType::Noise => "噪点",
         EffectType::Mirror => "镜像",
         EffectType::PolarCoordinates => "极坐标",
@@ -17716,6 +18042,7 @@ mod tests {
             EffectType::CircleEllipse,
             EffectType::Stroke,
             EffectType::Fill,
+            EffectType::Magnify,
             EffectType::DustScratches,
         ]
         .into_iter()
@@ -28433,6 +28760,210 @@ mod tests {
             .expect("builds restored radial blur graph");
         let grade = radial_blur_op(&graph).expect("radial blur op");
         assert_eq!(grade.mode(), crate::RadialBlurMode::Zoom);
+    }
+    fn magnify_op(graph: &EffectRenderGraph) -> Option<crate::MagnifyGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Magnify { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_magnify(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Magnify).expect("registered magnify definition");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Magnify.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("authors magnify parameter");
+        }
+        effect
+    }
+
+    fn magnify_source_frame(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = x as f32 / width as f32;
+                let v = y as f32 / height as f32;
+                pixels.push([0.1 + 0.8 * u, 0.2 + 0.6 * v, 0.3 + 0.5 * u * v, 1.0]);
+            }
+        }
+        pixels
+    }
+
+    fn render_magnify_op(op: &EffectRenderOp, width: u32, height: u32, pixels: &mut Vec<[f32; 4]>) {
+        let supported = crate::adjustment::apply_render_op_f32_region_controlled(
+            pixels,
+            crate::adjustment::EffectRasterRegion::full_frame(width, height),
+            op,
+            0,
+            &mut || Ok::<(), std::convert::Infallible>(()),
+        )
+        .expect("executes the magnify op");
+        assert!(supported, "the magnify op must be supported on Float32");
+    }
+
+    #[test]
+    fn magnify_at_one_hundred_percent_compiles_to_identity() {
+        let effect = author_magnify(&[("magnification", PropertyValue::Float(100.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds the identity magnify graph");
+        assert!(
+            magnify_op(&graph).is_none(),
+            "one hundred percent with a normal blend is the identity"
+        );
+    }
+
+    #[test]
+    fn magnify_with_multiply_survives_at_one_hundred_percent() {
+        let effect = author_magnify(&[
+            ("magnification", PropertyValue::Float(100.0)),
+            ("blend_mode", PropertyValue::Enum("multiply".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds the multiply magnify graph");
+        let grade = magnify_op(&graph).expect("a multiply lens is never the identity");
+        assert_eq!(grade.magnification(), 1.0);
+        assert_eq!(grade.blend_mode(), mondrian_core::BlendMode::Multiply);
+    }
+
+    #[test]
+    fn magnify_rejects_an_undeclared_shape_option() {
+        let effect = author_magnify(&[("magnification", PropertyValue::Float(200.0))]);
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the magnify node");
+        overwrite_static_value(
+            &mut document,
+            "magnify.shape",
+            serde_json::json!({"Enum": "hexagon"}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the magnify node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("hexagon is not a declared lens shape");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        assert!(format!("{error:?}").contains("hexagon"));
+
+        // The same guard rejects authored scalars outside their declared ranges:
+        // the grade only ever sees the diameter resolved through the link mode, so
+        // the authored `1..=4000` size bound can only be proven here.
+        for (parameter, value) in [
+            ("magnify.size", serde_json::json!({"Float": 4_001.0})),
+            (
+                "magnify.magnification",
+                serde_json::json!({"Float": 20_001.0}),
+            ),
+            ("magnify.feather", serde_json::json!({"Float": -0.1})),
+            ("magnify.opacity", serde_json::json!({"Float": 100.1})),
+        ] {
+            let mut document = serde_json::to_value(&effect).expect("serialize the magnify node");
+            overwrite_static_value(&mut document, parameter, value);
+            let tampered: EffectNode =
+                serde_json::from_value(document).expect("reopen the magnify node");
+            let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+                .expect_err("an out-of-range scalar must not compile");
+            assert!(matches!(
+                error,
+                EffectGraphBuildError::InvalidAuthorState {
+                    effect_id: reported,
+                    ..
+                } if reported == effect_id
+            ));
+        }
+    }
+
+    #[test]
+    fn magnify_region_offsets_match_a_whole_frame_render() {
+        let effect = author_magnify(&[
+            ("magnification", PropertyValue::Float(250.0)),
+            ("size", PropertyValue::Float(60.0)),
+            ("centre_x", PropertyValue::Float(11.0)),
+            ("centre_y", PropertyValue::Float(9.0)),
+            ("feather", PropertyValue::Float(6.0)),
+            ("blend_mode", PropertyValue::Enum("screen".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds the magnify graph");
+        let grade = magnify_op(&graph).expect("authored magnify op");
+        let op = EffectRenderOp::Magnify { grade };
+        let (width, height) = (24_u32, 18_u32);
+        let source = magnify_source_frame(width, height);
+
+        let mut through_region = source.clone();
+        render_magnify_op(&op, width, height, &mut through_region);
+        let mut through_kernel = source.clone();
+        let mut checkpoint = || Ok::<(), std::convert::Infallible>(());
+        assert!(crate::magnify::apply_magnify_f32_controlled(
+            &mut through_kernel,
+            width as usize,
+            height as usize,
+            grade,
+            &mut checkpoint,
+        )
+        .expect("runs the magnify kernel"));
+        assert_eq!(
+            through_region, through_kernel,
+            "the region entry point must reproduce the kernel bit for bit"
+        );
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(&op), 1);
+
+        // The effect is declared FullFrame, so a pixel crop never reaches the
+        // kernel: an incomplete region is reported unsupported instead of being
+        // rendered at a stale offset.
+        let mut cropped = source.clone();
+        let supported = crate::adjustment::apply_render_op_f32_region_controlled(
+            &mut cropped,
+            crate::adjustment::EffectRasterRegion::new(width, height, 0, 6, width, 6),
+            &op,
+            0,
+            &mut || Ok::<(), std::convert::Infallible>(()),
+        )
+        .expect("the cropped region is rejected without running the kernel");
+        assert!(!supported);
+        assert_eq!(
+            cropped, source,
+            "an unsupported region must leave the frame untouched"
+        );
+    }
+
+    #[test]
+    fn resize_layer_does_not_change_a_single_bit() {
+        let (width, height) = (21_u32, 17_u32);
+        let mut frames = Vec::new();
+        for resize_layer in [0.0_f32, 1.0] {
+            let effect = author_magnify(&[
+                ("magnification", PropertyValue::Float(400.0)),
+                ("size", PropertyValue::Float(80.0)),
+                ("feather", PropertyValue::Float(10.0)),
+                ("resize_layer", PropertyValue::Float(resize_layer)),
+            ]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("builds the magnify graph");
+            let grade = magnify_op(&graph).expect("authored magnify op");
+            let mut pixels = magnify_source_frame(width, height);
+            render_magnify_op(
+                &EffectRenderOp::Magnify { grade },
+                width,
+                height,
+                &mut pixels,
+            );
+            frames.push(pixels);
+        }
+        assert_eq!(
+            frames[0], frames[1],
+            "resize_layer is lazy and must not touch the rendered frame"
+        );
     }
 }
 

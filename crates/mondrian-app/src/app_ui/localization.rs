@@ -296,6 +296,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "抠像" => Some("parameter-group-chroma-key"),
         "拼贴" => Some("parameter-group-motion-tile"),
         "提取" => Some("parameter-group-extract"),
+        "放大" => Some("parameter-group-magnify"),
         "散射" => Some("parameter-group-scatter"),
         "斜面与浮雕" => Some("parameter-group-bevel"),
         "方向模糊" => Some("parameter-group-directional-blur"),

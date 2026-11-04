@@ -2790,6 +2790,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Stroke { .. } => 96,
         EffectRenderOp::Fill { .. } => 97,
         EffectRenderOp::DustScratches { .. } => 98,
+        EffectRenderOp::Magnify { .. } => 99,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4887,6 +4888,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Twirl { .. }
             | crate::EffectRenderOp::Noise { .. }
             | crate::EffectRenderOp::Spherize { .. }
+            | crate::EffectRenderOp::Magnify { .. }
             | crate::EffectRenderOp::Dent { .. }
             | crate::EffectRenderOp::Warp { .. }
             | crate::EffectRenderOp::GridWarp { .. }

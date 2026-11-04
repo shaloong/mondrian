@@ -1043,6 +1043,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Offset { .. } => "offset",
         EffectRenderOp::Twirl { .. } => "twirl",
         EffectRenderOp::Spherize { .. } => "spherize",
+        EffectRenderOp::Magnify { .. } => "magnify",
         EffectRenderOp::Dent { .. } => "dent",
         EffectRenderOp::Warp { .. } => "warp",
         EffectRenderOp::GridWarp { .. } => "grid_warp",

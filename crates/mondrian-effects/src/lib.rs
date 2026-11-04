@@ -117,6 +117,7 @@ pub mod lens_distortion;
 pub mod lens_flare;
 pub mod levels;
 pub mod linear_color_key;
+pub mod magnify;
 pub mod median;
 pub mod minimax;
 pub mod mirror;
@@ -371,6 +372,11 @@ pub use linear_color_key::{
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,
     LutPreparationCacheDiagnostics,
+};
+pub use magnify::{
+    is_declared_blend_mode, magnify_frame_f32, MagnifyError, MagnifyGrade, MagnifyLink,
+    MagnifyScaling, MagnifyShape, MAGNIFY_MAX_DIAMETER_PIXELS, MAGNIFY_MAX_FEATHER_PIXELS,
+    MAGNIFY_MIN_DIAMETER_PIXELS,
 };
 pub use mask::{
     BezierPoint, MaskComponent, MaskEvaluation, MaskId, MaskOp, MaskShape, MaskShapeInterpolation,
