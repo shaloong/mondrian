@@ -49,6 +49,7 @@ pub(crate) struct EffectSpatialGpu {
     offset: wgpu::RenderPipeline,
     twirl: wgpu::RenderPipeline,
     spherize: wgpu::RenderPipeline,
+    magnify: wgpu::RenderPipeline,
     dent: wgpu::RenderPipeline,
     warp: wgpu::RenderPipeline,
     grid_warp: wgpu::RenderPipeline,
@@ -383,6 +384,36 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_spherize"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let magnify = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.magnify"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_magnify"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -1699,6 +1730,7 @@ impl EffectSpatialGpu {
             offset,
             twirl,
             spherize,
+            magnify,
             dent,
             warp,
             grid_warp,
@@ -2275,6 +2307,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Offset { .. }
             | EffectGpuSpatialPass::Twirl { .. }
             | EffectGpuSpatialPass::Spherize { .. }
+            | EffectGpuSpatialPass::Magnify { .. }
             | EffectGpuSpatialPass::Dent { .. }
             | EffectGpuSpatialPass::Warp { .. }
             | EffectGpuSpatialPass::GridWarp { .. }
@@ -2458,6 +2491,21 @@ impl EffectSpatialGpu {
                     device,
                     encoder,
                     grade.gpu_controls(),
+                    source,
+                    destination,
+                    width,
+                    height,
+                );
+            }
+            EffectGpuSpatialPass::Magnify { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let (params, extra, aces, _) = grade.gpu_controls();
+                return self.record_magnify(
+                    device,
+                    encoder,
+                    params,
+                    extra,
+                    aces,
                     source,
                     destination,
                     width,
@@ -3050,6 +3098,49 @@ impl EffectSpatialGpu {
             device,
             encoder,
             &self.spherize,
+            &input_view,
+            &output_view,
+            &uniform,
+        );
+        Ok(destination.clone())
+    }
+    /// Records the lens magnification.
+    ///
+    /// `params` carries `[centre_x, centre_y, radius, magnification]`, `extra`
+    /// carries `[feather, opacity, shape_flag, supersample_factor]` and `aces.x`
+    /// carries the engine blend-mode index. The shader accumulates the
+    /// supersampled footprint in premultiplied space, un-premultiplies once and
+    /// composites in the same order as `blend_rgba_f32_pixel`, so the pass
+    /// matches the CPU kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_magnify(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        params: [f32; 4],
+        extra: [f32; 4],
+        aces: [f32; 4],
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if width == 0 || height == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        let uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.magnify,
             &input_view,
             &output_view,
             &uniform,
@@ -5450,6 +5541,7 @@ fn fs_spherize(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
     let sample_y = centre.y + delta.y * scale;
     return unpremultiply(sample_bilinear_premultiplied(sample_x, sample_y));
 }
+
 fn dent_radius() -> f32 {
     return uniforms.params.z * min(uniforms.size.x, uniforms.size.y);
 }
@@ -6770,7 +6862,195 @@ fn fs_radial_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f
         sum = sum + sample_bilinear_premultiplied(sample_at.x, sample_at.y);
     }
     return unpremultiply(sum * weight);
-}"#;
+}
+
+// The blend helpers below mirror the compositor's WGSL helpers in
+// `crates/mondrian-renderer/src/gpu_compositor.rs` and the CPU
+// `blend_mode_rgb` they were written against; they must stay in sync.
+fn blend_lum(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+fn clip_blend_color(color: vec3<f32>) -> vec3<f32> {
+    let luminance = blend_lum(color);
+    let minimum = min(color.r, min(color.g, color.b));
+    let maximum = max(color.r, max(color.g, color.b));
+    if (minimum < 0.0) {
+        let factor = luminance / (luminance - minimum);
+        return vec3<f32>(luminance) + (color - vec3<f32>(luminance)) * factor;
+    }
+    if (maximum > 1.0) {
+        let factor = (1.0 - luminance) / (maximum - luminance);
+        return vec3<f32>(luminance) + (color - vec3<f32>(luminance)) * factor;
+    }
+    return color;
+}
+
+fn set_blend_lum(color: vec3<f32>, target_lum: f32) -> vec3<f32> {
+    return clip_blend_color(color + vec3<f32>(target_lum - blend_lum(color)));
+}
+
+fn blend_sat(color: vec3<f32>) -> f32 {
+    return max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
+}
+
+fn set_blend_sat(color: vec3<f32>, target_sat: f32) -> vec3<f32> {
+    var result = vec3<f32>(0.0);
+    let minimum = min(color.r, min(color.g, color.b));
+    let maximum = max(color.r, max(color.g, color.b));
+    if (maximum <= minimum) {
+        return result;
+    }
+    let scale = target_sat / (maximum - minimum);
+    if (color.r <= color.g && color.r <= color.b) {
+        if (color.g <= color.b) {
+            result = vec3<f32>(0.0, (color.g - minimum) * scale, target_sat);
+        } else {
+            result = vec3<f32>(0.0, target_sat, (color.b - minimum) * scale);
+        }
+    } else if (color.g <= color.r && color.g <= color.b) {
+        if (color.r <= color.b) {
+            result = vec3<f32>((color.r - minimum) * scale, 0.0, target_sat);
+        } else {
+            result = vec3<f32>(target_sat, 0.0, (color.b - minimum) * scale);
+        }
+    } else if (color.r <= color.g) {
+        result = vec3<f32>((color.r - minimum) * scale, target_sat, 0.0);
+    } else {
+        result = vec3<f32>(target_sat, (color.g - minimum) * scale, 0.0);
+    }
+    return result;
+}
+
+fn blend_channel(mode: u32, base: f32, blend: f32) -> f32 {
+    if (mode == 2u) { return base * blend; }
+    if (mode == 3u) { return 1.0 - (1.0 - base) * (1.0 - blend); }
+    if (mode == 4u) {
+        return select(1.0 - 2.0 * (1.0 - base) * (1.0 - blend), 2.0 * base * blend, base <= 0.5);
+    }
+    if (mode == 5u) { return min(base, blend); }
+    if (mode == 6u) { return max(base, blend); }
+    if (mode == 7u) {
+        if (blend >= 0.999) { return 1.0; }
+        return clamp(base / (1.0 - blend), 0.0, 1.0);
+    }
+    if (mode == 8u) {
+        if (blend <= 0.001) { return 0.0; }
+        return clamp(1.0 - (1.0 - base) / blend, 0.0, 1.0);
+    }
+    if (mode == 9u) {
+        return select(1.0 - 2.0 * (1.0 - base) * (1.0 - blend), 2.0 * base * blend, blend <= 0.5);
+    }
+    if (mode == 10u) {
+        if (blend <= 0.5) { return base - (1.0 - 2.0 * blend) * base * (1.0 - base); }
+        var curved = ((16.0 * base - 12.0) * base + 4.0) * base;
+        if (base > 0.25) { curved = sqrt(base); }
+        return base + (2.0 * blend - 1.0) * (curved - base);
+    }
+    if (mode == 11u) { return abs(base - blend); }
+    if (mode == 12u) { return base + blend - 2.0 * base * blend; }
+    if (mode == 13u) { return clamp(base - blend, 0.0, 1.0); }
+    if (mode == 16u) { return clamp(base + blend - 1.0, 0.0, 1.0); }
+    if (mode == 17u) { return clamp(base + blend, 0.0, 1.0); }
+    if (mode == 18u) {
+        if (blend <= 0.5) {
+            if (blend <= 0.001) { return 0.0; }
+            return clamp(1.0 - (1.0 - base) / (2.0 * blend), 0.0, 1.0);
+        }
+        if (blend >= 0.999) { return 1.0; }
+        return clamp(base / (2.0 * (1.0 - blend)), 0.0, 1.0);
+    }
+    if (mode == 19u) { return clamp(base + 2.0 * blend - 1.0, 0.0, 1.0); }
+    if (mode == 20u) { return select(max(base, 2.0 * (blend - 0.5)), min(base, 2.0 * blend), blend <= 0.5); }
+    if (mode == 21u) { return select(1.0, 0.0, base + blend < 1.0); }
+    if (mode == 22u) {
+        if (blend <= 0.001) { return 1.0; }
+        return clamp(base / blend, 0.0, 1.0);
+    }
+    return blend;
+}
+
+fn blend_rgb(mode: u32, base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    if (mode == 14u) { return select(base, blend, blend_lum(blend) < blend_lum(base)); }
+    if (mode == 15u) { return select(base, blend, blend_lum(blend) > blend_lum(base)); }
+    if (mode == 23u) { return set_blend_lum(set_blend_sat(blend, blend_sat(base)), blend_lum(base)); }
+    if (mode == 24u) { return set_blend_lum(set_blend_sat(base, blend_sat(blend)), blend_lum(base)); }
+    if (mode == 25u) { return set_blend_lum(blend, blend_lum(base)); }
+    if (mode == 26u) { return set_blend_lum(base, blend_lum(blend)); }
+    return vec3<f32>(
+        blend_channel(mode, base.r, blend.r),
+        blend_channel(mode, base.g, blend.g),
+        blend_channel(mode, base.b, blend.b),
+    );
+}
+
+// The magnify lens mirrors `apply_magnify_f32_controlled`: the inverse map is a
+// contraction by the magnification, the feather ramps inward from the rim, and
+// the supersampled footprint is averaged in premultiplied space before one
+// un-premultiply and the same blend composite the CPU path performs.
+@fragment
+fn fs_magnify(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(position.xy);
+    let base = load_clamped(pixel);
+    let centre = uniforms.params.xy;
+    let radius = uniforms.params.z;
+    let magnification = uniforms.params.w;
+    let feather = uniforms.extra.x;
+    let opacity = uniforms.extra.y;
+    let square = uniforms.extra.z > 0.5;
+    let authored_density = u32(round(uniforms.extra.w));
+    let density = clamp(authored_density, 1u, 4u);
+    let delta = vec2<f32>(f32(pixel.x), f32(pixel.y)) - centre;
+    let distance = select(
+        sqrt(delta.x * delta.x + delta.y * delta.y),
+        max(abs(delta.x), abs(delta.y)),
+        square,
+    );
+    var weight = 0.0;
+    if (feather <= 0.0) {
+        if (distance < radius) {
+            weight = 1.0;
+        }
+    } else {
+        let t = clamp((radius - distance) / feather, 0.0, 1.0);
+        weight = t * t * (3.0 - 2.0 * t);
+    }
+    let blend_opacity = clamp(opacity * weight, 0.0, 1.0);
+    if (weight <= 0.0 || radius <= 0.0 || magnification <= 0.0 || blend_opacity <= 0.0) {
+        return base;
+    }
+    let inverse_magnification = 1.0 / magnification;
+    var accumulated = vec4<f32>(0.0);
+    let taps = f32(density * density);
+    for (var index_x = 0u; index_x < density; index_x = index_x + 1u) {
+        for (var index_y = 0u; index_y < density; index_y = index_y + 1u) {
+            let offset_x = (f32(index_x) + 0.5) / f32(density) - 0.5;
+            let offset_y = (f32(index_y) + 0.5) / f32(density) - 0.5;
+            let tap_x = centre.x + (delta.x + offset_x) * inverse_magnification;
+            let tap_y = centre.y + (delta.y + offset_y) * inverse_magnification;
+            accumulated = accumulated + sample_bilinear_premultiplied(tap_x, tap_y);
+        }
+    }
+    let magnified = unpremultiply(accumulated / taps);
+    let base_alpha = clamp(base.a, 0.0, 1.0);
+    let magnified_alpha = clamp(magnified.a * blend_opacity, 0.0, 1.0);
+    if (magnified_alpha <= 0.0) {
+        return base;
+    }
+    if (base_alpha <= 0.0) {
+        return vec4<f32>(magnified.rgb, magnified_alpha);
+    }
+    let mode = u32(round(uniforms.aces.x));
+    let blended = blend_rgb(mode, base.rgb, magnified.rgb);
+    let out_alpha = magnified_alpha + base_alpha * (1.0 - magnified_alpha);
+    if (out_alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let out_rgb =
+        (blended * magnified_alpha + base.rgb * base_alpha * (1.0 - magnified_alpha)) / out_alpha;
+    return vec4<f32>(out_rgb, out_alpha);
+}
+"#;
 
 /// Shader for passes that need the original frame and one auxiliary texture.
 ///
@@ -8403,6 +8683,17 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             mondrian_effects::TwirlGrade::new(180.0, 60.0, [7.5, 6.0]).expect("valid twirl grade");
         let spherize =
             mondrian_effects::SpherizeGrade::new(4.0, [6.0, 5.5]).expect("valid spherize grade");
+        let magnify = mondrian_effects::MagnifyGrade::new(
+            [7.0, 6.0],
+            8.0,
+            1.5,
+            2.0,
+            0.8,
+            mondrian_effects::MagnifyShape::Circle,
+            mondrian_effects::MagnifyScaling::Bilinear,
+            mondrian_core::BlendMode::Normal,
+        )
+        .expect("valid magnify grade");
         let dent = mondrian_effects::DentGrade::new(
             0.6,
             0.5,
@@ -8658,6 +8949,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             },
             mondrian_effects::EffectGpuSpatialPass::Twirl { grade: twirl },
             mondrian_effects::EffectGpuSpatialPass::Spherize { grade: spherize },
+            mondrian_effects::EffectGpuSpatialPass::Magnify { grade: magnify },
             mondrian_effects::EffectGpuSpatialPass::Warp { grade: warp },
             mondrian_effects::EffectGpuSpatialPass::GridWarp { grade: grid_warp },
             mondrian_effects::EffectGpuSpatialPass::WireRemoval { grade: wire_removal },
@@ -8681,7 +8973,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
         ];
         // One stage per spatial pass the renderer can lower, so a new pass has to
         // extend this chain as well as the dispatch arms.
-        assert_eq!(passes.len(), 26, "the spatial chain must cover every pass");
+        assert_eq!(passes.len(), 27, "the spatial chain must cover every pass");
 
         let mut cpu = pixels.clone();
         assert!(mondrian_effects::median_frame_f32(
@@ -8717,6 +9009,12 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             width as usize,
             height as usize,
             spherize,
+        ));
+        assert!(mondrian_effects::magnify_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            magnify,
         ));
         assert!(mondrian_effects::warp_frame_f32(
             &mut cpu,
@@ -11836,6 +12134,152 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                     );
                 }
             }
+        }
+    }
+
+    /// GPU coverage for the magnify lens (DST-07).
+    mod gpu_magnify {
+        use super::*;
+        use crate::spatial_pass_gpu::{EffectSpatialGpu, SPATIAL_EFFECT_SHADER};
+        use pollster::block_on;
+
+        #[test]
+        fn spatial_magnify_shader_validates() {
+            let module = naga::front::wgsl::parse_str(SPATIAL_EFFECT_SHADER)
+                .expect("spatial effect shader parses");
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .expect("spatial effect shader validates");
+            assert!(
+                module.entry_points.iter().any(|entry| entry.name == "fs_magnify"),
+                "the magnify fragment entry point must survive validation"
+            );
+        }
+
+        #[test]
+        fn gpu_magnify_matches_the_cpu_kernel() {
+            let Ok(context) = block_on(crate::GpuContext::new()) else {
+                eprintln!("skipping GPU magnify parity test: no GPU adapter available");
+                return;
+            };
+            let width = 256_u32;
+            let height = 256_u32;
+            let mut pixels = vec![[0.0_f32, 0.0, 0.0, 1.0]; (width * height) as usize];
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let u = x as f32 / (width - 1) as f32;
+                    let v = y as f32 / (height - 1) as f32;
+                    pixels[y * width as usize + x] =
+                        [0.15 + 0.7 * u, 0.1 + 0.65 * v, 0.2 + 0.5 * u * v, 1.0];
+                }
+            }
+            let cases = [
+                mondrian_effects::MagnifyGrade::new(
+                    [128.0, 128.0],
+                    120.0,
+                    1.5,
+                    0.0,
+                    1.0,
+                    mondrian_effects::MagnifyShape::Circle,
+                    mondrian_effects::MagnifyScaling::Bilinear,
+                    mondrian_core::BlendMode::Normal,
+                )
+                .expect("magnify grade"),
+                mondrian_effects::MagnifyGrade::new(
+                    [96.5, 140.25],
+                    180.0,
+                    2.0,
+                    24.0,
+                    0.75,
+                    mondrian_effects::MagnifyShape::Circle,
+                    mondrian_effects::MagnifyScaling::Supersample2,
+                    mondrian_core::BlendMode::Normal,
+                )
+                .expect("feathered magnify grade"),
+                mondrian_effects::MagnifyGrade::new(
+                    [128.0, 128.0],
+                    160.0,
+                    1.75,
+                    32.0,
+                    0.5,
+                    mondrian_effects::MagnifyShape::Square,
+                    mondrian_effects::MagnifyScaling::Supersample2,
+                    mondrian_core::BlendMode::Multiply,
+                )
+                .expect("square magnify grade"),
+            ];
+            for grade in cases {
+                let mut cpu = pixels.clone();
+                assert!(mondrian_effects::magnify_frame_f32(
+                    &mut cpu,
+                    width as usize,
+                    height as usize,
+                    grade,
+                ));
+                let executor = EffectSpatialGpu::new(&context.device);
+                let source = upload(&context, &pixels, width, height);
+                let destination = scratch(&context, width, height, 1);
+                let (params, extra, aces, _) = grade.gpu_controls();
+                let mut encoder =
+                    context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("mondrian.effect-spatial.magnify-encoder"),
+                    });
+                let output = executor
+                    .record_magnify(
+                        &context.device,
+                        &mut encoder,
+                        params,
+                        extra,
+                        aces,
+                        &source,
+                        &destination[0],
+                        width,
+                        height,
+                    )
+                    .expect("recorded magnify");
+                context.queue.submit(Some(encoder.finish()));
+                let gpu = readback(&context, &output, width, height);
+                for (index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                    for channel in 0..4 {
+                        let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                        assert!(
+                            difference <= 1.0e-4,
+                            "pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn magnify_lowers_to_its_own_spatial_stage() {
+            let grade = mondrian_effects::MagnifyGrade::new(
+                [128.0, 128.0],
+                200.0,
+                2.0,
+                8.0,
+                1.0,
+                mondrian_effects::MagnifyShape::Circle,
+                mondrian_effects::MagnifyScaling::Bilinear,
+                mondrian_core::BlendMode::Normal,
+            )
+            .expect("magnify grade");
+            let op = mondrian_effects::EffectRenderOp::Magnify { grade };
+            let pass = mondrian_effects::gpu_pipeline::spatial_pass_for(&op)
+                .expect("magnify must lower to a spatial stage");
+            assert_eq!(pass.name(), "magnify");
+            assert!(matches!(
+                pass,
+                mondrian_effects::EffectGpuSpatialPass::Magnify { .. }
+            ));
+            let expected = (grade.radius_pixels().ceil() as u32).saturating_add(2);
+            assert_eq!(pass.horizontal_halo(), expected);
+            assert_eq!(pass.vertical_halo(), expected);
+            assert_ne!(pass.horizontal_halo(), u32::MAX);
+            assert_ne!(pass.vertical_halo(), u32::MAX);
         }
     }
     #[test]

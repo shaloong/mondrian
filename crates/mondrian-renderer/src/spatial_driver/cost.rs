@@ -362,6 +362,8 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "convolution" | "glow" | "matte_refine" | "deband" => 0.9,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
+        // Magnify adds the blend-mode branch on top of the same bilinear read.
+        "magnify" => 0.8,
         // Wire removal reads up to two bilinear taps and writes one pixel.
         "wire_removal" => 0.6,
         // Roughen edges folds a two-octave fractal field, one bilinear tap and
@@ -395,6 +397,9 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "directional_blur" | "convolution" | "glow" | "fractal_noise" | "deband" => 3.0,
         "twirl" | "spherize" | "dent" | "polar_coordinates" | "lens_distortion" => 2.0,
         "warp" => 2.0,
+        // Includes the blend-mode branch, roughly fifty percent above a pure
+        // remap of the same footprint.
+        "magnify" => 3.0,
         // Up to two bilinear taps averaged behind a per-row band test.
         "wire_removal" => 2.0,
         // Two fractal octaves, a central difference and a bilinear tap.
