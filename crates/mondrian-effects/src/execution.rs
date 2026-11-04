@@ -2353,6 +2353,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
         EffectRenderOp::CellPattern { .. } => "cell_pattern",
+        EffectRenderOp::Fractal { .. } => "fractal",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

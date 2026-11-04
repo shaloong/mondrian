@@ -3128,3 +3128,52 @@ parameter-mondrian-effect-builtin-hdr-tone-mapping-gamma-label = Display Gamma
 parameter-mondrian-effect-builtin-hdr-tone-mapping-mode-label = Tone Mapping Mode
 parameter-mondrian-effect-hdr-tone-mapping-mode-hable = Hable Filmic
 parameter-mondrian-effect-hdr-tone-mapping-mode-reinhard = Reinhard
+
+## Fractal 分形
+effect-fractal = Fractal
+parameter-group-fractal = Fractal
+parameter-group-mandelbrot = Mandelbrot
+parameter-group-julia = Julia
+parameter-group-post-inversion-offset = Post-Inversion Offset
+parameter-group-color = Colour
+parameter-group-quality = High Quality
+parameter-mondrian-effect-builtin-fractal-set-choice-label = Set Choice
+parameter-mondrian-effect-builtin-fractal-equation-label = Equation
+parameter-mondrian-effect-builtin-fractal-mandelbrot-x-label = Mandelbrot X (Real)
+parameter-mondrian-effect-builtin-fractal-mandelbrot-y-label = Mandelbrot Y (Imaginary)
+parameter-mondrian-effect-builtin-fractal-mandelbrot-magnification-label = Mandelbrot Magnification
+parameter-mondrian-effect-builtin-fractal-mandelbrot-escape-limit-label = Mandelbrot Escape Limit
+parameter-mondrian-effect-builtin-fractal-julia-x-label = Julia X (Real)
+parameter-mondrian-effect-builtin-fractal-julia-y-label = Julia Y (Imaginary)
+parameter-mondrian-effect-builtin-fractal-julia-magnification-label = Julia Magnification
+parameter-mondrian-effect-builtin-fractal-julia-escape-limit-label = Julia Escape Limit
+parameter-mondrian-effect-builtin-fractal-post-inversion-offset-x-label = Post-Inversion Offset X (Real)
+parameter-mondrian-effect-builtin-fractal-post-inversion-offset-y-label = Post-Inversion Offset Y (Imaginary)
+parameter-mondrian-effect-builtin-fractal-overlay-label = Overlay
+parameter-mondrian-effect-builtin-fractal-transparency-label = Transparency
+parameter-mondrian-effect-builtin-fractal-palette-label = Palette
+parameter-mondrian-effect-builtin-fractal-hue-label = Hue
+parameter-mondrian-effect-builtin-fractal-cycle-steps-label = Cycle Steps
+parameter-mondrian-effect-builtin-fractal-cycle-offset-label = Cycle Offset
+parameter-mondrian-effect-builtin-fractal-edge-highlight-label = Edge Highlight (Force LQ)
+parameter-mondrian-effect-builtin-fractal-oversample-method-label = Oversample Method
+parameter-mondrian-effect-builtin-fractal-oversample-factor-label = Oversample Factor
+parameter-mondrian-effect-fractal-set-choice-mandelbrot = Mandelbrot
+parameter-mondrian-effect-fractal-set-choice-mandelbrot-inverse = Mandelbrot Inverse
+parameter-mondrian-effect-fractal-set-choice-mandelbrot-over-julia = Mandelbrot over Julia
+parameter-mondrian-effect-fractal-set-choice-mandelbrot-inverse-over-julia = Mandelbrot Inverse over Julia
+parameter-mondrian-effect-fractal-set-choice-julia = Julia
+parameter-mondrian-effect-fractal-set-choice-julia-inverse = Julia Inverse
+parameter-mondrian-effect-fractal-equation-power-2 = z = z² + c
+parameter-mondrian-effect-fractal-equation-power-3 = z = z³ + c
+parameter-mondrian-effect-fractal-equation-power-5 = z = z⁵ + c
+parameter-mondrian-effect-fractal-equation-power-7 = z = z⁷ + c
+parameter-mondrian-effect-fractal-palette-lightness-gradient = Lightness Gradient
+parameter-mondrian-effect-fractal-palette-hue-wheel = Hue Wheel
+parameter-mondrian-effect-fractal-palette-black-white = Black & White
+parameter-mondrian-effect-fractal-palette-solid-color = Solid Colour
+parameter-mondrian-effect-fractal-palette-escape-angle = Escape Angle
+parameter-mondrian-effect-fractal-palette-grayscale = Grayscale
+parameter-mondrian-effect-fractal-palette-apple-ii = Apple ][
+parameter-mondrian-effect-fractal-oversample-method-edge-detect = Edge Detect (Fast, May Miss Pixels)
+parameter-mondrian-effect-fractal-oversample-method-brute-force = Brute Force (Slow, Per-Pixel)

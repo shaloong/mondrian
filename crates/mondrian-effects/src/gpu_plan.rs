@@ -172,6 +172,10 @@ pub enum EffectGpuPointOp {
     CellPattern {
         grade: crate::CellPatternGrade,
     },
+    /// Fractal: paints an escape-time set with oversampling and a palette.
+    Fractal {
+        grade: crate::FractalGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         grade: crate::GridGrade,
@@ -922,6 +926,7 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::CellPattern { grade } => {
             Ok(EffectGpuPointOp::CellPattern { grade: *grade })
         }
+        EffectRenderOp::Fractal { grade } => Ok(EffectGpuPointOp::Fractal { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1038,6 +1043,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
         EffectRenderOp::CellPattern { .. } => "cell_pattern",
+        EffectRenderOp::Fractal { .. } => "fractal",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

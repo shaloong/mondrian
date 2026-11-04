@@ -398,6 +398,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Fractal { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "fractal",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Grid { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "grid",
@@ -1114,6 +1120,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::FourColorGradient { .. } => 0,
         EffectRenderOp::Checkerboard { .. } => 0,
         EffectRenderOp::CellPattern { .. } => 0,
+        EffectRenderOp::Fractal { .. } => 0,
         EffectRenderOp::Grid { .. } => 0,
         EffectRenderOp::CircleEllipse { .. } => 0,
         EffectRenderOp::Fill { .. } => 0,
@@ -1692,6 +1699,20 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 region.y as usize,
                 region.width as usize,
                 region.height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::Fractal { grade } => {
+            crate::fractal::apply_fractal_f32_region_controlled(
+                working,
+                region.x as usize,
+                region.y as usize,
+                region.width as usize,
+                region.height as usize,
+                region.frame_width() as usize,
+                region.frame_height() as usize,
                 grade,
                 checkpoint,
             )?;

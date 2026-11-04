@@ -368,6 +368,12 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "描边" => Some("parameter-group-stroke"),
         "填充" => Some("parameter-group-fill"),
         "单元格图案" => Some("parameter-group-cell-pattern"),
+        "分形" => Some("parameter-group-fractal"),
+        "曼德布罗特" => Some("parameter-group-mandelbrot"),
+        "朱莉娅" => Some("parameter-group-julia"),
+        "反转后偏移" => Some("parameter-group-post-inversion-offset"),
+        "颜色" => Some("parameter-group-color"),
+        "高品质" => Some("parameter-group-quality"),
         "蒙尘与划痕" => Some("parameter-group-dust-scratches"),
         _ => None,
     }

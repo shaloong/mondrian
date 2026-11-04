@@ -1192,6 +1192,11 @@ pub enum EffectRenderOp {
         /// Authored cell type, field shaping, evolution and tiling.
         grade: crate::CellPatternGrade,
     },
+    /// Fractal: paints an escape-time set with oversampling and a palette.
+    Fractal {
+        /// Authored set mode, equation, viewport, palette and quality.
+        grade: crate::FractalGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         /// Authored anchor, cell sizing, border, feathering, colour and blend
@@ -1449,6 +1454,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::CellPattern { grade } => {
                 formatter.debug_struct("CellPattern").field("grade", grade).finish()
+            }
+            Self::Fractal { grade } => {
+                formatter.debug_struct("Fractal").field("grade", grade).finish()
             }
             Self::Grid { grade } => formatter.debug_struct("Grid").field("grade", grade).finish(),
             Self::CircleEllipse { grade } => {
@@ -2297,6 +2305,20 @@ impl EffectRenderOp {
                 grade.tiling().hash(state);
                 grade.cycle_evolution().hash(state);
             }
+            EffectRenderOp::Fractal { grade } => {
+                105u8.hash(state);
+                // The set, equation and effective iteration count live in the
+                // uniform header and are therefore hashed explicitly here.
+                grade.set_choice().index().hash(state);
+                grade.equation().index().hash(state);
+                grade.effective_iterations().hash(state);
+                let (params, color, extra0, extra1, extra2) = grade.gpu_controls();
+                for value in
+                    params.into_iter().chain(color).chain(extra0).chain(extra1).chain(extra2)
+                {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::Grid { grade } => {
                 93u8.hash(state);
                 let (params, color, extra0, extra1) = grade.gpu_controls();
@@ -2666,6 +2688,9 @@ impl EffectRenderOp {
             EffectRenderOp::EyedropperFill { .. } => 5,
             EffectRenderOp::Checkerboard { .. } => 1,
             EffectRenderOp::CellPattern { .. } => 4,
+            EffectRenderOp::Fractal { grade } => {
+                1 + grade.effective_iterations() / 8 + grade.oversample_side().pow(2) / 4
+            }
             EffectRenderOp::Grid { .. } => 1,
             EffectRenderOp::CircleEllipse { .. } => 1,
             EffectRenderOp::Stroke { .. } => 5,
@@ -3213,7 +3238,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 104] {
+fn builtin_effect_types() -> [EffectType; 105] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3319,6 +3344,7 @@ fn builtin_effect_types() -> [EffectType; 104] {
         EffectType::VrProject2D,
         EffectType::HdrToneMapping,
         EffectType::CellPattern,
+        EffectType::Fractal,
     ]
 }
 
@@ -9712,6 +9738,276 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Fractal => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "set_choice",
+                "分形",
+                "设置选项",
+                crate::FractalSetChoice::Mandelbrot.key(),
+                crate::FractalSetChoice::ALL
+                    .iter()
+                    .map(|choice| {
+                        ParameterEnumOption::new(
+                            choice.key(),
+                            choice.display_label(),
+                            format!(
+                                "mondrian.effect.fractal.set_choice.{}",
+                                choice.label_suffix()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "equation",
+                "分形",
+                "等式",
+                crate::FractalEquation::Power2.key(),
+                crate::FractalEquation::ALL
+                    .iter()
+                    .map(|equation| {
+                        ParameterEnumOption::new(
+                            equation.key(),
+                            equation.display_label(),
+                            format!(
+                                "mondrian.effect.fractal.equation.{}",
+                                equation.label_suffix()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mandelbrot_x",
+                "曼德布罗特",
+                "曼德布罗特·X（真实的）",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_MANDELBROT_X),
+                None,
+                None,
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mandelbrot_y",
+                "曼德布罗特",
+                "曼德布罗特·Y（虚构的）",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_MANDELBROT_Y),
+                None,
+                None,
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mandelbrot_magnification",
+                "曼德布罗特",
+                "曼德布罗特·放大率",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_MANDELBROT_MAGNIFICATION),
+                Some(-29.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mandelbrot_escape_limit",
+                "曼德布罗特",
+                "曼德布罗特·扩展限制",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_ESCAPE_LIMIT),
+                Some(1.0),
+                Some(1_000_000.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "julia_x",
+                "朱莉娅",
+                "朱莉娅·X（真实的）",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_JULIA_X),
+                None,
+                None,
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "julia_y",
+                "朱莉娅",
+                "朱莉娅·Y（虚构的）",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_JULIA_Y),
+                None,
+                None,
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "julia_magnification",
+                "朱莉娅",
+                "朱莉娅·放大率",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_JULIA_MAGNIFICATION),
+                Some(-29.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "julia_escape_limit",
+                "朱莉娅",
+                "朱莉娅·扩展限制",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_ESCAPE_LIMIT),
+                Some(1.0),
+                Some(1_000_000.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "post_inversion_offset_x",
+                "反转后偏移",
+                "反转后偏移·X（真实的）",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_POST_INVERSION_OFFSET[0]),
+                None,
+                None,
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "post_inversion_offset_y",
+                "反转后偏移",
+                "反转后偏移·Y（虚构的）",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_POST_INVERSION_OFFSET[1]),
+                None,
+                None,
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "overlay",
+                "颜色",
+                "叠加",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_OVERLAY),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "transparency",
+                "颜色",
+                "透明度",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_TRANSPARENCY),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "palette",
+                "颜色",
+                "调板",
+                crate::FractalPalette::LightnessGradient.key(),
+                crate::FractalPalette::ALL
+                    .iter()
+                    .map(|palette| {
+                        ParameterEnumOption::new(
+                            palette.key(),
+                            palette.display_label(),
+                            format!("mondrian.effect.fractal.palette.{}", palette.label_suffix()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "hue",
+                "颜色",
+                "色相",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_HUE),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle_steps",
+                "颜色",
+                "循环步骤",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_CYCLE_STEPS),
+                Some(1.0),
+                Some(32_768.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle_offset",
+                "颜色",
+                "循环位移",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_CYCLE_OFFSET),
+                None,
+                None,
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_highlight",
+                "高品质",
+                "边缘高亮（强制 LQ）",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_EDGE_HIGHLIGHT),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "oversample_method",
+                "高品质",
+                "过采样方法",
+                crate::FractalOversampleMethod::EdgeDetect.key(),
+                crate::FractalOversampleMethod::ALL
+                    .iter()
+                    .map(|method| {
+                        ParameterEnumOption::new(
+                            method.key(),
+                            method.display_label(),
+                            format!(
+                                "mondrian.effect.fractal.oversample_method.{}",
+                                method.label_suffix()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "oversample_factor",
+                "高品质",
+                "过采样因素",
+                PropertyValue::Float(crate::FRACTAL_DEFAULT_OVERSAMPLE_FACTOR),
+                Some(2.0),
+                Some(16.0),
+                Some(1.0),
+            );
+        }
         EffectType::Grid => {
             define_builtin_property(
                 &mut properties,
@@ -10902,6 +11198,8 @@ fn define_builtin_property(
         });
         descriptor = descriptor
             .with_numeric_contract(builtin_parameter_unit(effect_type, parameter), numeric);
+    } else {
+        descriptor = descriptor.with_unit(builtin_parameter_unit(effect_type, parameter));
     }
     if matches!(effect_type, EffectType::Lut3D) && parameter == "path" {
         descriptor = descriptor
@@ -11121,6 +11419,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         ) => ParameterUnit::Pixels,
         (EffectType::Checkerboard, "opacity") => ParameterUnit::Percent,
         (EffectType::CellPattern, "size" | "offset") => ParameterUnit::Pixels,
+        (EffectType::Fractal, "hue" | "cycle_offset") => ParameterUnit::Degrees,
+        (EffectType::Fractal, "overlay" | "transparency" | "edge_highlight") => {
+            ParameterUnit::Normalized
+        }
         (
             EffectType::Grid,
             "anchor" | "corner" | "width" | "height" | "border" | "feather_width"
@@ -11565,6 +11867,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::CellPattern => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::Fractal => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -16369,6 +16675,192 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Fractal => {
+            let set_choice_id = builtin_parameter_id(effect_type, "set_choice");
+            let equation_id = builtin_parameter_id(effect_type, "equation");
+            let mandelbrot_x_id = builtin_parameter_id(effect_type, "mandelbrot_x");
+            let mandelbrot_y_id = builtin_parameter_id(effect_type, "mandelbrot_y");
+            let mandelbrot_magnification_id =
+                builtin_parameter_id(effect_type, "mandelbrot_magnification");
+            let mandelbrot_escape_limit_id =
+                builtin_parameter_id(effect_type, "mandelbrot_escape_limit");
+            let julia_x_id = builtin_parameter_id(effect_type, "julia_x");
+            let julia_y_id = builtin_parameter_id(effect_type, "julia_y");
+            let julia_magnification_id = builtin_parameter_id(effect_type, "julia_magnification");
+            let julia_escape_limit_id = builtin_parameter_id(effect_type, "julia_escape_limit");
+            let post_inversion_offset_x_id =
+                builtin_parameter_id(effect_type, "post_inversion_offset_x");
+            let post_inversion_offset_y_id =
+                builtin_parameter_id(effect_type, "post_inversion_offset_y");
+            let overlay_id = builtin_parameter_id(effect_type, "overlay");
+            let transparency_id = builtin_parameter_id(effect_type, "transparency");
+            let palette_id = builtin_parameter_id(effect_type, "palette");
+            let hue_id = builtin_parameter_id(effect_type, "hue");
+            let cycle_steps_id = builtin_parameter_id(effect_type, "cycle_steps");
+            let cycle_offset_id = builtin_parameter_id(effect_type, "cycle_offset");
+            let edge_highlight_id = builtin_parameter_id(effect_type, "edge_highlight");
+            let oversample_method_id = builtin_parameter_id(effect_type, "oversample_method");
+            let oversample_factor_id = builtin_parameter_id(effect_type, "oversample_factor");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let set_choice = match effect.evaluate_parameter(&set_choice_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::FractalSetChoice::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("fractal set choice {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "fractal set choice must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::FractalSetChoice::Mandelbrot,
+                };
+                let equation = match effect.evaluate_parameter(&equation_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::FractalEquation::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("fractal equation {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "fractal equation must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::FractalEquation::Power2,
+                };
+                let palette = match effect.evaluate_parameter(&palette_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::FractalPalette::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!("fractal palette {key} is not a declared option"))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid("fractal palette must be an enumeration".to_owned()));
+                    }
+                    None => crate::FractalPalette::LightnessGradient,
+                };
+                let oversample_method =
+                    match effect.evaluate_parameter(&oversample_method_id, context.time) {
+                        Some(PropertyValue::Enum(key)) => {
+                            crate::FractalOversampleMethod::from_key(&key).ok_or_else(|| {
+                                invalid(format!(
+                                    "fractal oversample method {key} is not a declared option"
+                                ))
+                            })?
+                        }
+                        Some(_) => {
+                            return Err(invalid(
+                                "fractal oversample method must be an enumeration".to_owned(),
+                            ));
+                        }
+                        None => crate::FractalOversampleMethod::EdgeDetect,
+                    };
+                let grade = crate::FractalGrade::new(
+                    set_choice.index(),
+                    equation.index(),
+                    [
+                        effect.evaluate_f32_parameter(
+                            &mandelbrot_x_id,
+                            context.time,
+                            crate::FRACTAL_DEFAULT_MANDELBROT_X,
+                        ),
+                        effect.evaluate_f32_parameter(
+                            &mandelbrot_y_id,
+                            context.time,
+                            crate::FRACTAL_DEFAULT_MANDELBROT_Y,
+                        ),
+                    ],
+                    effect.evaluate_f32_parameter(
+                        &mandelbrot_magnification_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_MANDELBROT_MAGNIFICATION,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &mandelbrot_escape_limit_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_ESCAPE_LIMIT,
+                    ),
+                    [
+                        effect.evaluate_f32_parameter(
+                            &julia_x_id,
+                            context.time,
+                            crate::FRACTAL_DEFAULT_JULIA_X,
+                        ),
+                        effect.evaluate_f32_parameter(
+                            &julia_y_id,
+                            context.time,
+                            crate::FRACTAL_DEFAULT_JULIA_Y,
+                        ),
+                    ],
+                    effect.evaluate_f32_parameter(
+                        &julia_magnification_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_JULIA_MAGNIFICATION,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &julia_escape_limit_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_ESCAPE_LIMIT,
+                    ),
+                    [
+                        effect.evaluate_f32_parameter(
+                            &post_inversion_offset_x_id,
+                            context.time,
+                            crate::FRACTAL_DEFAULT_POST_INVERSION_OFFSET[0],
+                        ),
+                        effect.evaluate_f32_parameter(
+                            &post_inversion_offset_y_id,
+                            context.time,
+                            crate::FRACTAL_DEFAULT_POST_INVERSION_OFFSET[1],
+                        ),
+                    ],
+                    effect.evaluate_f32_parameter(
+                        &overlay_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_OVERLAY,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &transparency_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_TRANSPARENCY,
+                    ),
+                    palette.index(),
+                    effect.evaluate_f32_parameter(
+                        &hue_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_HUE,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &cycle_steps_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_CYCLE_STEPS,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &cycle_offset_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_CYCLE_OFFSET,
+                    ),
+                    effect.evaluate_f32_parameter(
+                        &edge_highlight_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_EDGE_HIGHLIGHT,
+                    ),
+                    oversample_method.index(),
+                    effect.evaluate_f32_parameter(
+                        &oversample_factor_id,
+                        context.time,
+                        crate::FRACTAL_DEFAULT_OVERSAMPLE_FACTOR,
+                    ),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Fractal { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::CircleEllipse => {
             let center_id = builtin_parameter_id(effect_type, "center");
             let radius_id = builtin_parameter_id(effect_type, "radius");
@@ -17823,6 +18315,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::EyedropperFill => "吸管填充",
         EffectType::Checkerboard => "棋盘",
         EffectType::CellPattern => "单元格图案",
+        EffectType::Fractal => "分形",
         EffectType::Grid => "网格",
         EffectType::CircleEllipse => "圆形与椭圆",
         EffectType::Stroke => "描边",
@@ -19167,6 +19660,7 @@ mod tests {
             EffectType::VrProject2D,
             EffectType::HdrToneMapping,
             EffectType::CellPattern,
+            EffectType::Fractal,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -28170,6 +28664,480 @@ mod tests {
         );
     }
 
+    fn fractal_op(graph: &EffectRenderGraph) -> Option<crate::FractalGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Fractal { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Fractal { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_fractal(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Fractal)
+            .expect("the fractal effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Fractal.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the fractal parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn fractal_g1_defaults_append_exactly_one_generator_node() {
+        let effect = instantiate_effect_node(EffectType::Fractal)
+            .expect("the fractal effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default fractal should compile");
+        assert_eq!(graph.nodes.len(), 2);
+        let mut effect_nodes = 0;
+        for node in &graph.nodes {
+            if let EffectGraphNodeKind::UnaryEffect { .. }
+            | EffectGraphNodeKind::DomainEffect { .. } = &node.kind
+            {
+                effect_nodes += 1;
+            }
+        }
+        assert_eq!(effect_nodes, 1);
+        let grade = fractal_op(&graph).expect("the default parameters emit the generator");
+        assert_eq!(
+            grade.gpu_controls(),
+            (
+                [-0.703, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [29.0, 0.0, 0.0, 1.0],
+                [4.0, 1.4],
+            )
+        );
+        assert_eq!(grade.effective_iterations(), 300);
+        assert_eq!(grade.set_choice(), crate::FractalSetChoice::Mandelbrot);
+        assert_eq!(grade.equation(), crate::FractalEquation::Power2);
+        assert_eq!(grade.palette(), crate::FractalPalette::LightnessGradient);
+        assert!(!grade.is_identity());
+        let compiled = crate::compile_reference_render_graph(graph).expect("compile the generator");
+        assert_eq!(
+            compiled.execution_envelope().aggregate().roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal
+        );
+
+        // Measured against the tree at HEAD 385def04: hash 104 (cell pattern)
+        // and shape 105 were the maxima, so the fractal takes hash 105, shape
+        // 106 and the 105th effect-library slot.
+        let op = EffectRenderOp::Fractal { grade };
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            106
+        );
+        assert_eq!(crate::effect::builtin_effect_types().len(), 105);
+        let mut actual = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual);
+        let mut expected = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&105u8, &mut expected);
+        std::hash::Hash::hash(&grade.set_choice().index(), &mut expected);
+        std::hash::Hash::hash(&grade.equation().index(), &mut expected);
+        std::hash::Hash::hash(&grade.effective_iterations(), &mut expected);
+        let (params, color, extra0, extra1, extra2) = grade.gpu_controls();
+        for value in params.into_iter().chain(color).chain(extra0).chain(extra1).chain(extra2) {
+            std::hash::Hash::hash(&value.to_bits(), &mut expected);
+        }
+        assert_eq!(
+            std::hash::Hasher::finish(&actual),
+            std::hash::Hasher::finish(&expected)
+        );
+    }
+
+    #[test]
+    fn fractal_g2_schema_has_the_designed_twenty_one_properties() {
+        let effect_type = EffectType::Fractal;
+        let properties = default_properties_for(effect_type.clone());
+        assert_eq!(properties.iter().count(), 21);
+        struct Expected {
+            id: &'static str,
+            label: &'static str,
+            group: &'static str,
+            default: f32,
+            range: Option<(f64, f64)>,
+            step: f64,
+            unit: ParameterUnit,
+        }
+        let expected = [
+            Expected {
+                id: "set_choice",
+                label: "设置选项",
+                group: "分形",
+                default: 1.0,
+                range: None,
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "equation",
+                label: "等式",
+                group: "分形",
+                default: 1.0,
+                range: None,
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "mandelbrot_x",
+                label: "曼德布罗特·X（真实的）",
+                group: "曼德布罗特",
+                default: -0.703,
+                range: None,
+                step: 0.001,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "mandelbrot_y",
+                label: "曼德布罗特·Y（虚构的）",
+                group: "曼德布罗特",
+                default: 0.0,
+                range: None,
+                step: 0.001,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "mandelbrot_magnification",
+                label: "曼德布罗特·放大率",
+                group: "曼德布罗特",
+                default: 0.0,
+                range: Some((-29.0, 100.0)),
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "mandelbrot_escape_limit",
+                label: "曼德布罗特·扩展限制",
+                group: "曼德布罗特",
+                default: 300.0,
+                range: Some((1.0, 1_000_000.0)),
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "julia_x",
+                label: "朱莉娅·X（真实的）",
+                group: "朱莉娅",
+                default: 0.0,
+                range: None,
+                step: 0.001,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "julia_y",
+                label: "朱莉娅·Y（虚构的）",
+                group: "朱莉娅",
+                default: 0.0,
+                range: None,
+                step: 0.001,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "julia_magnification",
+                label: "朱莉娅·放大率",
+                group: "朱莉娅",
+                default: 0.0,
+                range: Some((-29.0, 100.0)),
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "julia_escape_limit",
+                label: "朱莉娅·扩展限制",
+                group: "朱莉娅",
+                default: 300.0,
+                range: Some((1.0, 1_000_000.0)),
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "post_inversion_offset_x",
+                label: "反转后偏移·X（真实的）",
+                group: "反转后偏移",
+                default: 0.0,
+                range: None,
+                step: 0.001,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "post_inversion_offset_y",
+                label: "反转后偏移·Y（虚构的）",
+                group: "反转后偏移",
+                default: 0.0,
+                range: None,
+                step: 0.001,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "overlay",
+                label: "叠加",
+                group: "颜色",
+                default: 0.0,
+                range: Some((0.0, 1.0)),
+                step: 1.0,
+                unit: ParameterUnit::Normalized,
+            },
+            Expected {
+                id: "transparency",
+                label: "透明度",
+                group: "颜色",
+                default: 0.0,
+                range: Some((0.0, 1.0)),
+                step: 1.0,
+                unit: ParameterUnit::Normalized,
+            },
+            Expected {
+                id: "palette",
+                label: "调板",
+                group: "颜色",
+                default: 1.0,
+                range: None,
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "hue",
+                label: "色相",
+                group: "颜色",
+                default: 0.0,
+                range: None,
+                step: 1.0,
+                unit: ParameterUnit::Degrees,
+            },
+            Expected {
+                id: "cycle_steps",
+                label: "循环步骤",
+                group: "颜色",
+                default: 29.0,
+                range: Some((1.0, 32_768.0)),
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "cycle_offset",
+                label: "循环位移",
+                group: "颜色",
+                default: 0.0,
+                range: None,
+                step: 1.0,
+                unit: ParameterUnit::Degrees,
+            },
+            Expected {
+                id: "edge_highlight",
+                label: "边缘高亮（强制 LQ）",
+                group: "高品质",
+                default: 0.0,
+                range: Some((0.0, 1.0)),
+                step: 1.0,
+                unit: ParameterUnit::Normalized,
+            },
+            Expected {
+                id: "oversample_method",
+                label: "过采样方法",
+                group: "高品质",
+                default: 1.0,
+                range: None,
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+            Expected {
+                id: "oversample_factor",
+                label: "过采样因素",
+                group: "高品质",
+                default: 4.0,
+                range: Some((2.0, 16.0)),
+                step: 1.0,
+                unit: ParameterUnit::Unitless,
+            },
+        ];
+        for (order, expected) in expected.iter().enumerate() {
+            let path = effect_type.property_path(expected.id);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{} should be defined", expected.id));
+            assert_eq!(
+                property.descriptor.schema.parameter_id.as_str(),
+                format!("mondrian.effect.builtin.fractal.{}", expected.id)
+            );
+            assert_eq!(property.descriptor.display_name, expected.label);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some(expected.group)
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+            let enum_default = match expected.id {
+                "set_choice" => Some("mandelbrot"),
+                "equation" => Some("power_2"),
+                "palette" => Some("lightness_gradient"),
+                "oversample_method" => Some("edge_detect"),
+                _ => None,
+            };
+            match enum_default {
+                Some(key) => assert_eq!(
+                    property.evaluate(tt(0)),
+                    PropertyValue::Enum(key.to_owned()),
+                    "{} default",
+                    expected.id
+                ),
+                None => assert_eq!(
+                    property.evaluate(tt(0)),
+                    PropertyValue::Float(expected.default),
+                    "{} default",
+                    expected.id
+                ),
+            }
+            assert_eq!(property.descriptor.schema.unit, expected.unit);
+            match property.descriptor.schema.numeric.as_ref() {
+                Some(numeric) => {
+                    let contract = numeric.first().expect("one numeric contract");
+                    let (min, max) = expected.range.expect("bounded parameter");
+                    assert_eq!(contract.hard_range.min, min, "{} minimum", expected.id);
+                    assert_eq!(contract.hard_range.max, max, "{} maximum", expected.id);
+                    assert_eq!(contract.step, Some(expected.step), "{} step", expected.id);
+                }
+                None => assert!(
+                    expected.range.is_none(),
+                    "{} should be unbounded",
+                    expected.id
+                ),
+            }
+        }
+        let options = |id: &str| {
+            properties
+                .property(&effect_type.property_path(id))
+                .expect("menu parameter")
+                .descriptor
+                .schema
+                .enum_options
+                .clone()
+        };
+        let set_choices = options("set_choice");
+        assert_eq!(set_choices.len(), 6);
+        assert_eq!(set_choices[0].key, "mandelbrot");
+        assert_eq!(set_choices[5].key, "julia_inverse");
+        let equations = options("equation");
+        assert_eq!(equations.len(), 4);
+        assert_eq!(equations[0].key, "power_2");
+        assert_eq!(equations[3].key, "power_7");
+        let palettes = options("palette");
+        assert_eq!(palettes.len(), 7);
+        assert_eq!(palettes[0].key, "lightness_gradient");
+        assert_eq!(palettes[6].key, "apple_ii");
+        let methods = options("oversample_method");
+        assert_eq!(methods.len(), 2);
+        assert_eq!(methods[0].key, "edge_detect");
+        assert_eq!(methods[1].key, "brute_force");
+        assert_eq!(
+            set_choices[2].message_id,
+            "mondrian.effect.fractal.set_choice.mandelbrot-over-julia"
+        );
+        assert_eq!(
+            equations[1].message_id,
+            "mondrian.effect.fractal.equation.power-3"
+        );
+        assert_eq!(
+            palettes[4].message_id,
+            "mondrian.effect.fractal.palette.escape-angle"
+        );
+        assert_eq!(
+            methods[1].message_id,
+            "mondrian.effect.fractal.oversample_method.brute-force"
+        );
+    }
+
+    #[test]
+    fn fractal_g3_key_lookup_is_exact() {
+        assert_eq!(EffectType::Fractal.key(), "builtin.fractal");
+        assert_eq!(EffectType::from_key("builtin.fractal"), EffectType::Fractal);
+        assert_ne!(
+            EffectType::from_key("builtin.fractal_"),
+            EffectType::Fractal
+        );
+        assert_ne!(
+            EffectType::from_key("builtin.fractal_noise"),
+            EffectType::Fractal
+        );
+        assert_eq!(
+            EffectType::from_key("builtin.fractal_noise"),
+            EffectType::FractalNoise
+        );
+    }
+
+    #[test]
+    fn fractal_g4_metadata_matches_the_generator_family() {
+        assert_eq!(EffectType::Fractal.display_name(), "分形");
+        assert_eq!(EffectType::Fractal.category_path(), vec!["生成器"]);
+        assert_eq!(EffectType::Fractal.property_namespace(), "fractal");
+        assert_eq!(builtin_display_name(&EffectType::Fractal), "分形");
+    }
+
+    #[test]
+    fn fractal_g5_cost_and_monotonicity() {
+        let effect = instantiate_effect_node(EffectType::Fractal)
+            .expect("the fractal effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default fractal should compile");
+        let grade = fractal_op(&graph).expect("default generator");
+        assert_eq!(EffectRenderOp::Fractal { grade }.estimated_cost(), 42);
+
+        let high = author_fractal(&[
+            ("mandelbrot_escape_limit", PropertyValue::Float(1_000_000.0)),
+            ("oversample_factor", PropertyValue::Float(4.0)),
+        ]);
+        let graph = build_effect_render_graph(&[high], tt(0), TEST_WORKING_SPACE)
+            .expect("the high-quality fractal should compile");
+        let grade = fractal_op(&graph).expect("high generator");
+        assert_eq!(grade.effective_iterations(), 2_048);
+        assert_eq!(grade.oversample_side(), 2);
+        assert_eq!(EffectRenderOp::Fractal { grade }.estimated_cost(), 258);
+
+        let low = author_fractal(&[
+            ("mandelbrot_escape_limit", PropertyValue::Float(32.0)),
+            ("oversample_factor", PropertyValue::Float(2.0)),
+        ]);
+        let graph = build_effect_render_graph(&[low], tt(0), TEST_WORKING_SPACE)
+            .expect("the low-quality fractal should compile");
+        assert!(
+            EffectRenderOp::Fractal { grade: fractal_op(&graph).expect("low generator") }
+                .estimated_cost()
+                < 258
+        );
+    }
+
+    #[test]
+    fn fractal_g6_builder_rejects_out_of_range_set_choice() {
+        let effect = instantiate_effect_node(EffectType::Fractal)
+            .expect("the fractal effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the fractal");
+        overwrite_static_value(
+            &mut document,
+            "fractal.set_choice",
+            serde_json::json!({"Enum": "7"}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the fractal node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a seventh set choice cannot be authored");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+    }
+
     fn cell_pattern_op(graph: &EffectRenderGraph) -> Option<crate::CellPatternGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {
@@ -28286,15 +29254,15 @@ mod tests {
             crate::EffectRoiPropagation::PixelLocal
         );
 
-        // Tags were measured against the tree at HEAD 0630abd3: hash 103 and
-        // shape 104 were the maxima (HDR tone mapping), so the cell pattern
-        // takes hash 104, shape 105 and the 104th effect-library slot.
+        // Measured against the tree at HEAD 385def04: hash 104 and shape 105
+        // were the maxima (HDR tone mapping and cell pattern), so the cell
+        // pattern took hash 104, shape 105 and the 104th effect-library slot.
         let op = EffectRenderOp::CellPattern { grade };
         assert_eq!(
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 104);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 105);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();

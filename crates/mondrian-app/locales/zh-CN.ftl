@@ -3060,3 +3060,52 @@ parameter-mondrian-effect-builtin-hdr-tone-mapping-gamma-label = 显示 Gamma
 parameter-mondrian-effect-builtin-hdr-tone-mapping-mode-label = 色调映射方式
 parameter-mondrian-effect-hdr-tone-mapping-mode-hable = Hable 电影曲线
 parameter-mondrian-effect-hdr-tone-mapping-mode-reinhard = Reinhard
+
+## Fractal 分形
+effect-fractal = 分形
+parameter-group-fractal = 分形
+parameter-group-mandelbrot = 曼德布罗特
+parameter-group-julia = 朱莉娅
+parameter-group-post-inversion-offset = 反转后偏移
+parameter-group-color = 颜色
+parameter-group-quality = 高品质
+parameter-mondrian-effect-builtin-fractal-set-choice-label = 设置选项
+parameter-mondrian-effect-builtin-fractal-equation-label = 等式
+parameter-mondrian-effect-builtin-fractal-mandelbrot-x-label = 曼德布罗特·X（真实的）
+parameter-mondrian-effect-builtin-fractal-mandelbrot-y-label = 曼德布罗特·Y（虚构的）
+parameter-mondrian-effect-builtin-fractal-mandelbrot-magnification-label = 曼德布罗特·放大率
+parameter-mondrian-effect-builtin-fractal-mandelbrot-escape-limit-label = 曼德布罗特·扩展限制
+parameter-mondrian-effect-builtin-fractal-julia-x-label = 朱莉娅·X（真实的）
+parameter-mondrian-effect-builtin-fractal-julia-y-label = 朱莉娅·Y（虚构的）
+parameter-mondrian-effect-builtin-fractal-julia-magnification-label = 朱莉娅·放大率
+parameter-mondrian-effect-builtin-fractal-julia-escape-limit-label = 朱莉娅·扩展限制
+parameter-mondrian-effect-builtin-fractal-post-inversion-offset-x-label = 反转后偏移·X（真实的）
+parameter-mondrian-effect-builtin-fractal-post-inversion-offset-y-label = 反转后偏移·Y（虚构的）
+parameter-mondrian-effect-builtin-fractal-overlay-label = 叠加
+parameter-mondrian-effect-builtin-fractal-transparency-label = 透明度
+parameter-mondrian-effect-builtin-fractal-palette-label = 调板
+parameter-mondrian-effect-builtin-fractal-hue-label = 色相
+parameter-mondrian-effect-builtin-fractal-cycle-steps-label = 循环步骤
+parameter-mondrian-effect-builtin-fractal-cycle-offset-label = 循环位移
+parameter-mondrian-effect-builtin-fractal-edge-highlight-label = 边缘高亮（强制 LQ）
+parameter-mondrian-effect-builtin-fractal-oversample-method-label = 过采样方法
+parameter-mondrian-effect-builtin-fractal-oversample-factor-label = 过采样因素
+parameter-mondrian-effect-fractal-set-choice-mandelbrot = 曼德布罗特
+parameter-mondrian-effect-fractal-set-choice-mandelbrot-inverse = 曼德布罗特反向
+parameter-mondrian-effect-fractal-set-choice-mandelbrot-over-julia = 曼德布罗特在朱莉娅上
+parameter-mondrian-effect-fractal-set-choice-mandelbrot-inverse-over-julia = 曼德布罗特反向在朱莉娅上
+parameter-mondrian-effect-fractal-set-choice-julia = 朱莉娅
+parameter-mondrian-effect-fractal-set-choice-julia-inverse = 朱莉娅反向
+parameter-mondrian-effect-fractal-equation-power-2 = z = z² + c
+parameter-mondrian-effect-fractal-equation-power-3 = z = z³ + c
+parameter-mondrian-effect-fractal-equation-power-5 = z = z⁵ + c
+parameter-mondrian-effect-fractal-equation-power-7 = z = z⁷ + c
+parameter-mondrian-effect-fractal-palette-lightness-gradient = 亮度渐变
+parameter-mondrian-effect-fractal-palette-hue-wheel = 色相轮
+parameter-mondrian-effect-fractal-palette-black-white = 黑白
+parameter-mondrian-effect-fractal-palette-solid-color = 纯色
+parameter-mondrian-effect-fractal-palette-escape-angle = 扩展角度
+parameter-mondrian-effect-fractal-palette-grayscale = 灰度
+parameter-mondrian-effect-fractal-palette-apple-ii = 苹果 ][
+parameter-mondrian-effect-fractal-oversample-method-edge-detect = 边缘检测（快，可能遗漏像素）
+parameter-mondrian-effect-fractal-oversample-method-brute-force = 强力（慢，逐像素）

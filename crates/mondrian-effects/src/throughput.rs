@@ -15,6 +15,7 @@ use crate::channel_mixer::ChannelMixerGrade;
 use crate::convolution::convolution_frame_f32;
 use crate::convolution::ConvolutionGrade;
 use crate::drop_shadow::DropShadowGrade;
+use crate::fractal::{fractal_frame_f32, FractalGrade};
 use crate::hue_saturation::HueSaturationGrade;
 use crate::lens_flare::lens_flare_frame_f32;
 use crate::lens_flare::{LensFlareGrade, LensFlareType};
@@ -293,5 +294,33 @@ fn report_kernel_throughput() {
     time("point: noise rgb amount=50%", || {
         buffer.copy_from_slice(&source);
         noise_frame_f32(&mut buffer, WIDTH, HEIGHT, noise)
+    });
+
+    // `edge_highlight > 0` forces one sample per pixel, so this row measures
+    // the documented p=2 / 300-iteration / one-sample reference workload.
+    let fractal = FractalGrade::new(
+        1,
+        1,
+        [-0.703, 0.0],
+        0.0,
+        300.0,
+        [0.0, 0.0],
+        0.0,
+        300.0,
+        [0.0, 0.0],
+        0.0,
+        0.0,
+        1,
+        0.0,
+        29.0,
+        0.0,
+        0.5,
+        1,
+        4.0,
+    )
+    .expect("valid fractal");
+    time("point: fractal p=2 300 iter 1 sample", || {
+        buffer.copy_from_slice(&source);
+        fractal_frame_f32(&mut buffer, WIDTH, HEIGHT, &fractal)
     });
 }

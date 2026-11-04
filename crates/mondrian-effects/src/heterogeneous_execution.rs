@@ -2770,6 +2770,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::BroadcastSafe { .. } => 76,
         EffectRenderOp::HdrToneMapping { .. } => 104,
         EffectRenderOp::CellPattern { .. } => 105,
+        EffectRenderOp::Fractal { .. } => 106,
         EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::ColorBalance { .. } => 79,
@@ -4882,6 +4883,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::FourColorGradient { .. }
             | crate::EffectRenderOp::Checkerboard { .. }
             | crate::EffectRenderOp::CellPattern { .. }
+            | crate::EffectRenderOp::Fractal { .. }
             | crate::EffectRenderOp::Grid { .. }
             | crate::EffectRenderOp::CircleEllipse { .. }
             | crate::EffectRenderOp::Stroke { .. }
