@@ -111,6 +111,8 @@ pub enum EffectType {
     LeaveColor,
     /// Broadcast safe: pulls the signal back inside the authored IRE amplitude.
     BroadcastSafe,
+    /// HDR tone mapping: compresses scene-linear values onto the display range.
+    HdrToneMapping,
     /// Choker: erodes or dilates the frame alpha without touching the colour.
     Choker,
     /// Test signals: generates a calibration frame from pixel position alone.
@@ -255,6 +257,7 @@ impl EffectType {
             Self::Arithmetic => "builtin.arithmetic".to_string(),
             Self::LeaveColor => "builtin.leave_color".to_string(),
             Self::BroadcastSafe => "builtin.broadcast_safe".to_string(),
+            Self::HdrToneMapping => "builtin.hdr_tone_mapping".to_string(),
             Self::Choker => "builtin.choker".to_string(),
             Self::TestSignals => "builtin.test_signals".to_string(),
             Self::FourColorGradient => "builtin.four_color_gradient".to_string(),
@@ -363,6 +366,7 @@ impl EffectType {
             "builtin.arithmetic" => Self::Arithmetic,
             "builtin.leave_color" => Self::LeaveColor,
             "builtin.broadcast_safe" => Self::BroadcastSafe,
+            "builtin.hdr_tone_mapping" => Self::HdrToneMapping,
             "builtin.choker" => Self::Choker,
             "builtin.test_signals" => Self::TestSignals,
             "builtin.four_color_gradient" => Self::FourColorGradient,
@@ -471,6 +475,7 @@ impl EffectType {
             Self::Arithmetic => "算术",
             Self::LeaveColor => "保留颜色",
             Self::BroadcastSafe => "广播安全",
+            Self::HdrToneMapping => "HDR 色调映射",
             Self::Choker => "阻塞收缩",
             Self::TestSignals => "彩条与测试信号",
             Self::FourColorGradient => "四色渐变",
@@ -509,6 +514,7 @@ impl EffectType {
             | Self::Lut3D
             | Self::ColorWheel
             | Self::HdrGrading
+            | Self::HdrToneMapping
             | Self::AscCdl
             | Self::Curves
             | Self::GamutCompression
@@ -685,6 +691,7 @@ impl EffectType {
             Self::Arithmetic => "arithmetic".to_string(),
             Self::LeaveColor => "leave_color".to_string(),
             Self::BroadcastSafe => "broadcast_safe".to_string(),
+            Self::HdrToneMapping => "hdr_tone_mapping".to_string(),
             Self::Choker => "choker".to_string(),
             Self::TestSignals => "test_signals".to_string(),
             Self::FourColorGradient => "four_color_gradient".to_string(),
@@ -983,6 +990,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::Lut3D
             | Self::ColorWheel
             | Self::HdrGrading
+            | Self::HdrToneMapping
             | Self::AscCdl
             | Self::Curves
             | Self::GamutCompression

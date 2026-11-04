@@ -2348,6 +2348,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::LeaveColor { .. } => "leave_color",
         EffectRenderOp::ChangeToColor { .. } => "change_to_color",
         EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
+        EffectRenderOp::HdrToneMapping { .. } => "hdr_tone_mapping",
         EffectRenderOp::TestSignals { .. } => "test_signals",
         EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         EffectRenderOp::Checkerboard { .. } => "checkerboard",

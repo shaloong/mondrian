@@ -2830,6 +2830,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::LeaveColor { .. } => "leave_color",
         crate::EffectRenderOp::ChangeToColor { .. } => "change_to_color",
         crate::EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
+        crate::EffectRenderOp::HdrToneMapping { .. } => "hdr_tone_mapping",
         crate::EffectRenderOp::TestSignals { .. } => "test_signals",
         crate::EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         crate::EffectRenderOp::Checkerboard { .. } => "checkerboard",

@@ -1906,6 +1906,10 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float
         },
+        EffectRenderOp::HdrToneMapping { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_float
+        },
         EffectRenderOp::TestSignals { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float

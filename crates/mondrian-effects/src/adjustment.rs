@@ -362,6 +362,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::HdrToneMapping { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "hdr_tone_mapping",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Choker { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "choker",
@@ -1097,6 +1103,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::LeaveColor { .. } => 0,
         EffectRenderOp::ChangeToColor { .. } => 0,
         EffectRenderOp::BroadcastSafe { .. } => 0,
+        EffectRenderOp::HdrToneMapping { .. } => 0,
         EffectRenderOp::TestSignals { .. } => 0,
         EffectRenderOp::FourColorGradient { .. } => 0,
         EffectRenderOp::Checkerboard { .. } => 0,
@@ -1579,6 +1586,12 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::BroadcastSafe { grade } => {
             crate::broadcast_safe::apply_broadcast_safe_f32_controlled(working, grade, checkpoint)?;
+            Ok(true)
+        }
+        EffectRenderOp::HdrToneMapping { grade } => {
+            crate::hdr_tone_mapping::apply_hdr_tone_mapping_f32_controlled(
+                working, grade, checkpoint,
+            )?;
             Ok(true)
         }
         EffectRenderOp::Choker { grade } => {

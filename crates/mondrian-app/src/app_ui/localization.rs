@@ -294,6 +294,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "噪点" => Some("parameter-group-noise"),
         "基础校正" => Some("parameter-group-basic-correction"),
         "广播安全" => Some("parameter-group-broadcast-safe"),
+        "HDR 色调映射" => Some("parameter-group-hdr-tone-mapping"),
         "径向模糊" => Some("parameter-group-radial-blur"),
         "投影" => Some("parameter-group-drop-shadow"),
         "抠像" => Some("parameter-group-chroma-key"),

@@ -985,6 +985,10 @@ pub enum EffectRenderOp {
     BroadcastSafe {
         grade: crate::BroadcastSafeGrade,
     },
+    /// HDR tone mapping: compresses scene-linear values onto the display range.
+    HdrToneMapping {
+        grade: crate::HdrToneMappingGrade,
+    },
     /// Choker: erodes or dilates the frame alpha and leaves the colour untouched.
     Choker {
         grade: crate::ChokerGrade,
@@ -1398,6 +1402,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::BroadcastSafe { grade } => {
                 formatter.debug_struct("BroadcastSafe").field("grade", grade).finish()
+            }
+            Self::HdrToneMapping { grade } => {
+                formatter.debug_struct("HdrToneMapping").field("grade", grade).finish()
             }
             Self::Choker { grade } => {
                 formatter.debug_struct("Choker").field("grade", grade).finish()
@@ -2192,6 +2199,12 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra0.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::HdrToneMapping { grade } => {
+                103u8.hash(state);
+                let (params, extra0) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra0.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::Choker { grade } => {
                 76u8.hash(state);
                 grade.hash_state(state);
@@ -2594,6 +2607,7 @@ impl EffectRenderOp {
             EffectRenderOp::LeaveColor { .. } => 2,
             EffectRenderOp::ChangeToColor { .. } => 2,
             EffectRenderOp::BroadcastSafe { .. } => 1,
+            EffectRenderOp::HdrToneMapping { .. } => 2,
             EffectRenderOp::Choker { .. } => 2,
             EffectRenderOp::TestSignals { .. } => 1,
             EffectRenderOp::FourColorGradient { .. } => 1,
@@ -3175,7 +3189,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 102] {
+fn builtin_effect_types() -> [EffectType; 103] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3279,6 +3293,7 @@ fn builtin_effect_types() -> [EffectType; 102] {
         EffectType::VrRotateSphere,
         EffectType::VrSphereToPlane,
         EffectType::VrProject2D,
+        EffectType::HdrToneMapping,
     ]
 }
 
@@ -8592,6 +8607,48 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::HdrToneMapping => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "mode",
+                "HDR 色调映射",
+                "色调映射方式",
+                crate::ToneMapMode::Reinhard.as_key(),
+                crate::ToneMapMode::ALL
+                    .into_iter()
+                    .map(|mode| {
+                        ParameterEnumOption::new(
+                            mode.as_key(),
+                            mode.label(),
+                            format!("mondrian.effect.hdr_tone_mapping.mode.{}", mode.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "gain",
+                "HDR 色调映射",
+                "曝光增益",
+                PropertyValue::Float(1.0),
+                Some(f64::from(crate::HDR_TONE_MAPPING_MIN_GAIN)),
+                Some(f64::from(crate::HDR_TONE_MAPPING_MAX_GAIN)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "gamma",
+                "HDR 色调映射",
+                "显示 Gamma",
+                PropertyValue::Float(1.0),
+                Some(f64::from(crate::HDR_TONE_MAPPING_MIN_GAMMA)),
+                Some(f64::from(crate::HDR_TONE_MAPPING_MAX_GAMMA)),
+                Some(0.01),
+            );
+        }
         EffectType::Choker => {
             define_builtin_property(
                 &mut properties,
@@ -11280,6 +11337,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::BroadcastSafe => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::HdrToneMapping => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
@@ -15576,6 +15637,43 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::HdrToneMapping => {
+            let mode_id = builtin_parameter_id(effect_type, "mode");
+            let gain_id = builtin_parameter_id(effect_type, "gain");
+            let gamma_id = builtin_parameter_id(effect_type, "gamma");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let mode = match effect.evaluate_parameter(&mode_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::ToneMapMode::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "hdr tone mapping mode {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "hdr tone mapping mode must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::ToneMapMode::Reinhard,
+                };
+                let grade = crate::HdrToneMappingGrade::new(
+                    mode,
+                    effect.evaluate_f32_parameter(&gain_id, context.time, 1.0),
+                    effect.evaluate_f32_parameter(&gamma_id, context.time, 1.0),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // Tone mapping has no identity configuration: both curves
+                // compress every positive value, even at the documented
+                // defaults, so the operation is always appended.
+                graph.append_unary(EffectRenderOp::HdrToneMapping { grade });
+                Ok(())
+            }))
+        }
         EffectType::Choker => {
             let choke_id = builtin_parameter_id(effect_type, "choke");
             Some(Arc::new(move |effect, context, graph| {
@@ -17403,6 +17501,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Arithmetic => "算术",
         EffectType::LeaveColor => "保留颜色",
         EffectType::BroadcastSafe => "广播安全",
+        EffectType::HdrToneMapping => "HDR 色调映射",
         EffectType::Choker => "阻塞收缩",
         EffectType::TestSignals => "彩条与测试信号",
         EffectType::FourColorGradient => "四色渐变",
@@ -18765,6 +18864,7 @@ mod tests {
             EffectType::VrRotateSphere,
             EffectType::VrSphereToPlane,
             EffectType::VrProject2D,
+            EffectType::HdrToneMapping,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -27023,6 +27123,152 @@ mod tests {
         assert_eq!(grade.mode(), crate::BroadcastSafeMode::ClampRgb);
         assert_eq!(grade.ire(), 120.0);
         assert_eq!(grade.limit(), 1.2);
+    }
+
+    fn hdr_tone_mapping_op(graph: &EffectRenderGraph) -> Option<crate::HdrToneMappingGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::HdrToneMapping { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::HdrToneMapping { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_hdr_tone_mapping(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::HdrToneMapping)
+            .expect("the hdr tone mapping effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::HdrToneMapping.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the hdr tone mapping parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn hdr_tone_mapping_defaults_still_append_exactly_one_node() {
+        // Tone mapping has no identity configuration: both curves compress every
+        // positive value even at the documented defaults, so the builder must
+        // append the operation instead of eliding it.
+        let effect = instantiate_effect_node(EffectType::HdrToneMapping)
+            .expect("the hdr tone mapping effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default hdr tone mapping should compile");
+        // An identity-elided effect leaves only the source node behind, so the
+        // graph here is the source plus exactly one tone mapping node.
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one tone mapping node"
+        );
+        let mapping_nodes = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.kind,
+                    EffectGraphNodeKind::UnaryEffect {
+                        op: EffectRenderOp::HdrToneMapping { .. },
+                        ..
+                    } | EffectGraphNodeKind::DomainEffect {
+                        op: EffectRenderOp::HdrToneMapping { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            mapping_nodes, 1,
+            "the default parameters must append exactly one node"
+        );
+        let grade = hdr_tone_mapping_op(&graph).expect("the default parameters emit a node");
+        assert!(!grade.is_identity());
+        assert_eq!(grade.mode(), crate::ToneMapMode::Reinhard);
+        assert_eq!(grade.gain(), 1.0);
+        assert_eq!(grade.gamma(), 1.0);
+        let (params, extra0) = grade.gpu_controls();
+        assert_eq!(
+            params,
+            [1.0, 1.0, 1.0, crate::HDR_TONE_MAPPING_WHITE_POINT_INVERSE]
+        );
+        assert_eq!(extra0, [0.0; 4]);
+    }
+
+    #[test]
+    fn hdr_tone_mapping_authored_configuration_reaches_the_operation() {
+        let effect = author_hdr_tone_mapping(&[
+            ("mode", PropertyValue::Enum("hable".to_string())),
+            ("gain", PropertyValue::Float(2.5)),
+            ("gamma", PropertyValue::Float(2.2)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored graph should build");
+        let grade = hdr_tone_mapping_op(&graph).expect("the authored graph emits a node");
+        assert_eq!(grade.mode(), crate::ToneMapMode::Hable);
+        assert_eq!(grade.gain(), 2.5);
+        assert_eq!(grade.gamma(), 2.2);
+        // The fused point uniform carries the one-based mode code, the exposure,
+        // the display gamma and the CPU-computed white-point inverse: the shader
+        // never re-derives `hable(11.2)`.
+        let (params, extra0) = grade.gpu_controls();
+        assert_eq!(
+            params,
+            [2.0, 2.5, 2.2, crate::HDR_TONE_MAPPING_WHITE_POINT_INVERSE]
+        );
+        assert_eq!(extra0, [0.0; 4]);
+    }
+
+    #[test]
+    fn hdr_tone_mapping_out_of_range_controls_are_rejected_at_authoring() {
+        for (parameter, value, upper_bound) in
+            [("gain", 100.5_f32, ", 100]"), ("gamma", 11.0_f32, ", 10]")]
+        {
+            let mut effect = instantiate_effect_node(EffectType::HdrToneMapping)
+                .expect("the hdr tone mapping effect should instantiate");
+            let error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::HdrToneMapping.property_path(parameter),
+                    value: PropertyValue::Float(value),
+                })
+                .expect_err("an out-of-range control must be rejected");
+            let rendered = format!("{error:?}");
+            assert!(
+                rendered.contains(&format!("effect.hdr_tone_mapping.{parameter}")),
+                "{parameter}: {rendered}"
+            );
+            assert!(rendered.contains("is outside ["), "{parameter}: {rendered}");
+            assert!(rendered.contains(upper_bound), "{parameter}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn hdr_tone_mapping_authored_state_survives_project_serialization_round_trip() {
+        let effect = author_hdr_tone_mapping(&[
+            ("mode", PropertyValue::Enum("hable".to_string())),
+            ("gain", PropertyValue::Float(0.5)),
+            ("gamma", PropertyValue::Float(0.45)),
+        ]);
+        let wire = serde_json::to_string(&effect).expect("serialize the hdr tone mapping node");
+        let restored: EffectNode =
+            serde_json::from_str(&wire).expect("restore the hdr tone mapping node");
+        assert_eq!(restored.effect_type, EffectType::HdrToneMapping);
+        assert_eq!(restored, effect);
+
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the restored hdr tone mapping node");
+        let grade = hdr_tone_mapping_op(&graph).expect("restored state reaches the op");
+        assert_eq!(grade.mode(), crate::ToneMapMode::Hable);
+        assert_eq!(grade.gain(), 0.5);
+        assert_eq!(grade.gamma(), 0.45);
+        assert_eq!(grade.gpu_controls().0[0], 2.0);
     }
 
     fn test_signals_op(graph: &EffectRenderGraph) -> Option<crate::TestSignalsGrade> {

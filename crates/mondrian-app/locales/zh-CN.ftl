@@ -3019,3 +3019,12 @@ parameter-mondrian-effect-builtin-vr-project-2d-projection-roll-z-label = 投影
 parameter-mondrian-effect-vr-project-2d-frame-layout-monoscopic = 单眼
 parameter-mondrian-effect-vr-project-2d-frame-layout-over-under = 上下
 parameter-mondrian-effect-vr-project-2d-frame-layout-side-by-side = 左右
+
+## HDR Tone Mapping HDR 色调映射
+effect-hdr-tone-mapping = HDR 色调映射
+parameter-group-hdr-tone-mapping = HDR 色调映射
+parameter-mondrian-effect-builtin-hdr-tone-mapping-gain-label = 曝光增益
+parameter-mondrian-effect-builtin-hdr-tone-mapping-gamma-label = 显示 Gamma
+parameter-mondrian-effect-builtin-hdr-tone-mapping-mode-label = 色调映射方式
+parameter-mondrian-effect-hdr-tone-mapping-mode-hable = Hable 电影曲线
+parameter-mondrian-effect-hdr-tone-mapping-mode-reinhard = Reinhard

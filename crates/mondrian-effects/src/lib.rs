@@ -86,6 +86,7 @@ pub mod graph;
 pub mod grid;
 pub mod grid_warp;
 pub mod hdr_grading;
+pub mod hdr_tone_mapping;
 pub mod heterogeneous_execution;
 pub mod hsl;
 pub(crate) mod hsl_space;
@@ -337,6 +338,11 @@ pub use hdr_grading::{
     HdrGradingAuthoring, HdrGradingError, HdrGradingZone, HdrZoneControl, PreparedHdrGrading,
     HDR_GRADING_MAX_STOPS, HDR_GRADING_MIN_STOPS, HDR_GRADING_SAMPLE_COUNT,
     HDR_GRADING_SAMPLE_ROWS, HDR_GRADING_ZONE_COUNT,
+};
+pub use hdr_tone_mapping::{
+    hdr_tone_mapping_frame_f32, HdrToneMappingError, HdrToneMappingGrade, ToneMapMode,
+    HDR_TONE_MAPPING_MAX_GAIN, HDR_TONE_MAPPING_MAX_GAMMA, HDR_TONE_MAPPING_MIN_GAIN,
+    HDR_TONE_MAPPING_MIN_GAMMA, HDR_TONE_MAPPING_MODE_COUNT, HDR_TONE_MAPPING_WHITE_POINT_INVERSE,
 };
 pub use heterogeneous_execution::{
     plan_effect_graph_value_execution, CompiledEffectValueExecutionPlan,

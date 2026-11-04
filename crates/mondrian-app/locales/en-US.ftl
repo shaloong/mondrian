@@ -3087,3 +3087,12 @@ parameter-mondrian-effect-builtin-vr-project-2d-projection-roll-z-label = Projec
 parameter-mondrian-effect-vr-project-2d-frame-layout-monoscopic = Monoscopic
 parameter-mondrian-effect-vr-project-2d-frame-layout-over-under = Over-Under
 parameter-mondrian-effect-vr-project-2d-frame-layout-side-by-side = Side-by-Side
+
+## HDR Tone Mapping HDR 色调映射
+effect-hdr-tone-mapping = HDR Tone Mapping
+parameter-group-hdr-tone-mapping = HDR Tone Mapping
+parameter-mondrian-effect-builtin-hdr-tone-mapping-gain-label = Exposure Gain
+parameter-mondrian-effect-builtin-hdr-tone-mapping-gamma-label = Display Gamma
+parameter-mondrian-effect-builtin-hdr-tone-mapping-mode-label = Tone Mapping Mode
+parameter-mondrian-effect-hdr-tone-mapping-mode-hable = Hable Filmic
+parameter-mondrian-effect-hdr-tone-mapping-mode-reinhard = Reinhard

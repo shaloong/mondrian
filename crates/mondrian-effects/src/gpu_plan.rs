@@ -152,6 +152,10 @@ pub enum EffectGpuPointOp {
     BroadcastSafe {
         grade: crate::BroadcastSafeGrade,
     },
+    /// HDR tone mapping: compresses scene-linear values onto the display range.
+    HdrToneMapping {
+        grade: crate::HdrToneMappingGrade,
+    },
     /// Test signals: generates a calibration frame from the pixel position alone.
     TestSignals {
         grade: crate::TestSignalsGrade,
@@ -899,6 +903,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::BroadcastSafe { grade } => {
             Ok(EffectGpuPointOp::BroadcastSafe { grade: *grade })
         }
+        EffectRenderOp::HdrToneMapping { grade } => {
+            Ok(EffectGpuPointOp::HdrToneMapping { grade: *grade })
+        }
         EffectRenderOp::TestSignals { grade } => {
             Ok(EffectGpuPointOp::TestSignals { grade: *grade })
         }
@@ -1019,6 +1026,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::LeaveColor { .. } => "leave_color",
         EffectRenderOp::ChangeToColor { .. } => "change_to_color",
         EffectRenderOp::BroadcastSafe { .. } => "broadcast_safe",
+        EffectRenderOp::HdrToneMapping { .. } => "hdr_tone_mapping",
         EffectRenderOp::TestSignals { .. } => "test_signals",
         EffectRenderOp::FourColorGradient { .. } => "four_color_gradient",
         EffectRenderOp::Checkerboard { .. } => "checkerboard",
