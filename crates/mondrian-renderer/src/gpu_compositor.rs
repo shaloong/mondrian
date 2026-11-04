@@ -1879,6 +1879,27 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                     );
                 }
             }
+        } else if (effect.header.x == 40u) {
+            // `HdrToneMappingGrade`: params is [mode code, gain, gamma,
+            // 1 / hable(11.2)] and the extras are zero. The white-point inverse
+            // was resolved on the CPU, so the shader never re-derives hable(11.2).
+            // The mode code is one-based: 1 is Reinhard and 2 is Hable. The order
+            // is fixed: exposure in, negative clamp, tone curve, then the inverse
+            // gamma display encoding, all per channel. The filmic result is pinned
+            // to one at the white point so the output stays display-referred,
+            // exactly like the CPU kernel. Alpha passes through and a pixel
+            // without coverage is left exactly as it arrived.
+            if (pixel.a > 0.0) {
+                let x = max(pixel.rgb * effect.params.y, vec3<f32>(0.0));
+                let reinhard = x / (1.0 + x);
+                let filmic = min(
+                    (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)
+                        * effect.params.w,
+                    vec3<f32>(1.0),
+                );
+                let y = select(reinhard, filmic, effect.params.x > 1.5);
+                pixel = vec4<f32>(pow(y, vec3<f32>(1.0 / effect.params.z)), pixel.a);
+            }
         } else if (effect.header.x == 23u) {
             // `NoiseGrade`: params.x is the amount as a fraction of the full
             // signed range, params.y the grain type and params.z the clipping
@@ -6062,6 +6083,18 @@ fn effect_uniforms_for_ops(
                     extra3: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::HdrToneMapping { grade } => {
+                let (params, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [40, 0, 0, 0],
+                    params,
+                    color: [0.0; 4],
+                    extra0,
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::TestSignals { grade } => {
                 let (params, extra0) = grade.gpu_controls();
                 GpuEffectUniform {
@@ -10130,6 +10163,118 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU broadcast safe accuracy budget exceeded for {grade:?}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_hdr_tone_mapping_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            HdrToneMappingGrade, ToneMapMode,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU hdr tone mapping parity test: no GPU adapter available");
+            return;
+        };
+        // A 64x64 gradient in scene-linear light: red sweeps from a negative
+        // channel up to 8.5, green from zero to 12 (past the 11.2 white point) and
+        // blue over a 2D cross term. Four alpha levels ride the pixel index so
+        // every row sees full, partial and zero coverage. The transparent pixels
+        // keep a zero colour because compositing a zero-coverage layer onto a
+        // transparent target discards their rgb, so the composite only observes
+        // their alpha; the kernel's bit-identical skip is covered by the unit
+        // tests.
+        let width = 64_u32;
+        let height = 64_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = x as f32 / (width - 1) as f32;
+                let v = y as f32 / (height - 1) as f32;
+                let alpha = match (y * width + x) % 4 {
+                    0 => 0.0,
+                    1 => 0.25,
+                    2 => 0.75,
+                    _ => 1.0,
+                };
+                data.push([9.0 * u - 0.5, 12.0 * v, 0.05 + 4.0 * u * v, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        for (mode, gain, gamma) in [
+            // The global compression with a display encoding on top.
+            (ToneMapMode::Reinhard, 2.0_f32, 2.2_f32),
+            // The filmic curve with its white point pinned to one.
+            (ToneMapMode::Hable, 4.0, 0.5),
+        ] {
+            let grade =
+                HdrToneMappingGrade::new(mode, gain, gamma).expect("valid hdr tone mapping grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::HdrToneMapping { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(width, height),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let expected_pixels: Vec<[f32; 4]> = expected
+                .pixels()
+                .iter()
+                .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
+                .collect();
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected_pixels,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-6, 1.0e-6, 1.0e-6),
+                    alpha: LinearAccuracyBudget::finite(1.0e-6, 1.0e-6, 1.0e-6),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU hdr tone mapping accuracy budget exceeded for {grade:?}: {report:#?}"
             );
         }
     }
