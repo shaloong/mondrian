@@ -298,6 +298,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "提取" => Some("parameter-group-extract"),
         "放大" => Some("parameter-group-magnify"),
         "散射" => Some("parameter-group-scatter"),
+        "贝塞尔曲线变形" => Some("parameter-group-bezier-warp"),
         "斜面与浮雕" => Some("parameter-group-bevel"),
         "方向模糊" => Some("parameter-group-directional-blur"),
         "方框模糊" => Some("parameter-group-box-blur"),

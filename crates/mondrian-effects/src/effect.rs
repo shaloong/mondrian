@@ -1082,6 +1082,11 @@ pub enum EffectRenderOp {
     GridWarp {
         grade: crate::GridWarpGrade,
     },
+    /// Bezier warp: remaps the layer through an authored Coons patch whose four
+    /// edges are cubic Bezier curves (DST-15).
+    BezierWarp {
+        grade: crate::BezierWarpGrade,
+    },
     /// Wire removal: clones pixels from a parallel displacement across an
     /// authored line (RES-07).
     WireRemoval {
@@ -1463,6 +1468,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Warp { grade } => formatter.debug_struct("Warp").field("grade", grade).finish(),
             Self::GridWarp { grade } => {
                 formatter.debug_struct("GridWarp").field("grade", grade).finish()
+            }
+            Self::BezierWarp { grade } => {
+                formatter.debug_struct("BezierWarp").field("grade", grade).finish()
             }
             Self::WireRemoval { grade } => {
                 formatter.debug_struct("WireRemoval").field("grade", grade).finish()
@@ -2351,6 +2359,13 @@ impl EffectRenderOp {
                 grade.rows().hash(state);
                 grade.quality().hash(state);
             }
+            EffectRenderOp::BezierWarp { grade } => {
+                99u8.hash(state);
+                for cell in grade.gpu_controls().0 {
+                    cell.map(f32::to_bits).hash(state);
+                }
+                grade.quality().hash(state);
+            }
             EffectRenderOp::WireRemoval { grade } => {
                 86u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2558,6 +2573,7 @@ impl EffectRenderOp {
             EffectRenderOp::Dent { .. } => 3,
             EffectRenderOp::Warp { .. } => 3,
             EffectRenderOp::GridWarp { .. } => 3,
+            EffectRenderOp::BezierWarp { .. } => 6,
             EffectRenderOp::WireRemoval { .. } => 4,
             EffectRenderOp::Median { .. } => 4,
             EffectRenderOp::SelectiveColor { .. } => 2,
@@ -3111,7 +3127,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 98] {
+fn builtin_effect_types() -> [EffectType; 99] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3211,6 +3227,7 @@ fn builtin_effect_types() -> [EffectType; 98] {
         EffectType::Fill,
         EffectType::Magnify,
         EffectType::DustScratches,
+        EffectType::BezierWarp,
     ]
 }
 
@@ -10138,6 +10155,73 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::BezierWarp => {
+            // Dump order: the twelve points run clockwise from the top-left
+            // corner, two tangents between each pair of corners; the grade
+            // stores them in exactly this order.
+            const POINTS: [(&str, &str); 24] = [
+                ("vertex-top-left-x", "上左顶点 X"),
+                ("vertex-top-left-y", "上左顶点 Y"),
+                ("top-handle-left-x", "上左切点 X"),
+                ("top-handle-left-y", "上左切点 Y"),
+                ("top-handle-right-x", "上右切点 X"),
+                ("top-handle-right-y", "上右切点 Y"),
+                ("vertex-top-right-x", "右上顶点 X"),
+                ("vertex-top-right-y", "右上顶点 Y"),
+                ("right-handle-top-x", "右上切点 X"),
+                ("right-handle-top-y", "右上切点 Y"),
+                ("right-handle-bottom-x", "右下切点 X"),
+                ("right-handle-bottom-y", "右下切点 Y"),
+                ("vertex-bottom-right-x", "下右顶点 X"),
+                ("vertex-bottom-right-y", "下右顶点 Y"),
+                ("bottom-handle-right-x", "下右切点 X"),
+                ("bottom-handle-right-y", "下右切点 Y"),
+                ("bottom-handle-left-x", "下左切点 X"),
+                ("bottom-handle-left-y", "下左切点 Y"),
+                ("vertex-bottom-left-x", "左下顶点 X"),
+                ("vertex-bottom-left-y", "左下顶点 Y"),
+                ("left-handle-bottom-x", "左下切点 X"),
+                ("left-handle-bottom-y", "左下切点 Y"),
+                ("left-handle-top-x", "左上切点 X"),
+                ("left-handle-top-y", "左上切点 Y"),
+            ];
+            for (index, (parameter, name)) in POINTS.into_iter().enumerate() {
+                let point = crate::bezier_warp::BEZIER_WARP_DEFAULT_REFERENCE_POINTS[index / 2];
+                let default = if index % 2 == 0 { point[0] } else { point[1] };
+                // The reference box is advisory: an author may drag a point past
+                // it (the kernel only rejects coordinates beyond four boxes), so
+                // these stay unitless, unbounded, and stepped by whole reference
+                // pixels.
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "贝塞尔曲线变形",
+                    name,
+                    PropertyValue::Float(default),
+                    None,
+                    None,
+                    Some(1.0),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "quality",
+                "贝塞尔曲线变形",
+                "品质",
+                &crate::BEZIER_WARP_DEFAULT_QUALITY.to_string(),
+                (crate::BEZIER_WARP_MIN_QUALITY..=crate::BEZIER_WARP_MAX_QUALITY)
+                    .map(|quality| {
+                        ParameterEnumOption::new(
+                            quality.to_string(),
+                            quality.to_string(),
+                            format!("mondrian.effect.bezier_warp.quality.{quality}"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::WireRemoval => {
             for (parameter, name, default) in [
                 ("point_a_x", "起点 A X", 128.0),
@@ -10623,6 +10707,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Fill, "all_masks" | "opacity") => ParameterUnit::Normalized,
         (EffectType::DustScratches, "radius") => ParameterUnit::Pixels,
         (EffectType::DustScratches, "threshold") => ParameterUnit::Normalized,
+        // The patch points are authored in a reference box, not in frame pixels,
+        // and the quality option is an iteration count, so neither carries a unit.
+        (EffectType::BezierWarp, _) => ParameterUnit::Unitless,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -11048,6 +11135,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::GridWarp => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::BezierWarp => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -16382,6 +16474,64 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::BezierWarp => {
+            // Twelve points, each authored as an x/y pair, in dump order.
+            const POINTS: [&str; 12] = [
+                "vertex-top-left",
+                "top-handle-left",
+                "top-handle-right",
+                "vertex-top-right",
+                "right-handle-top",
+                "right-handle-bottom",
+                "vertex-bottom-right",
+                "bottom-handle-right",
+                "bottom-handle-left",
+                "vertex-bottom-left",
+                "left-handle-bottom",
+                "left-handle-top",
+            ];
+            let mut point_ids = Vec::with_capacity(24);
+            for point in POINTS {
+                point_ids.push(builtin_parameter_id(effect_type, &format!("{point}-x")));
+                point_ids.push(builtin_parameter_id(effect_type, &format!("{point}-y")));
+            }
+            let quality_id = builtin_parameter_id(effect_type, "quality");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let quality = match effect.evaluate_parameter(&quality_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => key.parse::<u32>().map_err(|_| {
+                        invalid(format!(
+                            "bezier warp quality {key} is not a declared option"
+                        ))
+                    })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "bezier warp quality must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::BEZIER_WARP_DEFAULT_QUALITY,
+                };
+                let mut points = [[0.0_f32; 2]; 12];
+                for (index, id) in point_ids.iter().enumerate() {
+                    let fallback = crate::bezier_warp::BEZIER_WARP_DEFAULT_REFERENCE_POINTS
+                        [index / 2][index % 2];
+                    points[index / 2][index % 2] =
+                        effect.evaluate_f32_parameter(id, context.time, fallback);
+                }
+                let grade = crate::BezierWarpGrade::from_reference_points(points, quality)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // The untouched default patch is the identity, so no node is
+                // appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::BezierWarp { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::WireRemoval => {
             let point_a_x_id = builtin_parameter_id(effect_type, "point_a_x");
             let point_a_y_id = builtin_parameter_id(effect_type, "point_a_y");
@@ -16700,6 +16850,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Dent => "凹痕",
         EffectType::Warp => "弯曲",
         EffectType::GridWarp => "网格变形",
+        EffectType::BezierWarp => "贝塞尔曲线变形",
         EffectType::WireRemoval => "祛线",
         EffectType::Median => "中间值",
         EffectType::SelectiveColor => "可选颜色",
@@ -18044,6 +18195,7 @@ mod tests {
             EffectType::Fill,
             EffectType::Magnify,
             EffectType::DustScratches,
+            EffectType::BezierWarp,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -21897,6 +22049,71 @@ mod tests {
         assert!((grade.size_fraction() - 0.8).abs() < 1.0e-6);
         assert_eq!(grade.centre()[1], -16.0);
         assert_eq!(grade.kind(), crate::DentKind::Bulge);
+    }
+
+    fn bezier_warp_op(graph: &EffectRenderGraph) -> Option<crate::BezierWarpGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::BezierWarp { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_bezier_warp(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::BezierWarp)
+            .expect("registered bezier warp definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::BezierWarp.property_path(parameter),
+                value,
+            })
+            .expect("authors bezier warp parameter");
+        effect
+    }
+
+    #[test]
+    fn bezier_warp_defaults_compile_to_identity() {
+        let effect = instantiate_effect_node(EffectType::BezierWarp)
+            .expect("registered bezier warp definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds bezier warp graph");
+        assert!(bezier_warp_op(&graph).is_none());
+    }
+
+    #[test]
+    fn bezier_warp_with_a_bent_edge_appends_one_stage() {
+        let effect = author_bezier_warp("top-handle-left-y", PropertyValue::Float(40.0));
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds bezier warp graph");
+        let grade = bezier_warp_op(&graph).expect("bezier warp op");
+        assert!(!grade.is_identity());
+        assert!((grade.points()[1][1] - 40.0 / crate::BEZIER_WARP_REFERENCE_EXTENT).abs() < 1.0e-6);
+        let stages = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.kind,
+                    EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::BezierWarp { .. }, .. }
+                )
+            })
+            .count();
+        assert_eq!(stages, 1);
+    }
+
+    #[test]
+    fn bezier_warp_rejects_an_undeclared_quality() {
+        for quality in ["0", "11"] {
+            let mut effect = instantiate_effect_node(EffectType::BezierWarp)
+                .expect("registered bezier warp definition");
+            let _error = effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::BezierWarp.property_path("quality"),
+                    value: PropertyValue::Enum(quality.to_owned()),
+                })
+                .expect_err("rejects an undeclared quality option");
+        }
     }
 
     fn warp_op(graph: &EffectRenderGraph) -> Option<crate::WarpGrade> {

@@ -133,6 +133,8 @@ pub enum EffectType {
     Warp,
     /// Grid warp: displaces a checkerboard of cell corners along the cell diagonals.
     GridWarp,
+    /// Bezier warp: remaps the layer through an authored Coons patch of cubic edges.
+    BezierWarp,
     /// Wire removal: clones pixels from a parallel displacement across an authored line.
     WireRemoval,
     /// Median: replaces every pixel with the per-channel median of its window.
@@ -255,6 +257,7 @@ impl EffectType {
             Self::ChangeToColor => "builtin.change_to_color".to_string(),
             Self::Warp => "builtin.warp".to_string(),
             Self::GridWarp => "builtin.grid_warp".to_string(),
+            Self::BezierWarp => "builtin.bezier_warp".to_string(),
             Self::WireRemoval => "builtin.wire_removal".to_string(),
             Self::Median => "builtin.median".to_string(),
             Self::SelectiveColor => "builtin.selective_color".to_string(),
@@ -359,6 +362,7 @@ impl EffectType {
             "builtin.change_to_color" => Self::ChangeToColor,
             "builtin.warp" => Self::Warp,
             "builtin.grid_warp" => Self::GridWarp,
+            "builtin.bezier_warp" => Self::BezierWarp,
             "builtin.wire_removal" => Self::WireRemoval,
             "builtin.median" => Self::Median,
             "builtin.selective_color" => Self::SelectiveColor,
@@ -463,6 +467,7 @@ impl EffectType {
             Self::ChangeToColor => "定向改色",
             Self::Warp => "弯曲",
             Self::GridWarp => "网格变形",
+            Self::BezierWarp => "贝塞尔曲线变形",
             Self::WireRemoval => "祛线",
             Self::Median => "中间值",
             Self::SelectiveColor => "可选颜色",
@@ -565,6 +570,7 @@ impl EffectType {
             Self::ChangeToColor => vec!["颜色", "调色"],
             Self::Warp => vec!["变形"],
             Self::GridWarp => vec!["变形"],
+            Self::BezierWarp => vec!["变形"],
             Self::WireRemoval => vec!["修复"],
             Self::Median => vec!["颜色", "模糊与锐化"],
             Self::SelectiveColor => vec!["颜色", "调色"],
@@ -669,6 +675,7 @@ impl EffectType {
             Self::ChangeToColor => "change_to_color".to_string(),
             Self::Warp => "warp".to_string(),
             Self::GridWarp => "grid_warp".to_string(),
+            Self::BezierWarp => "bezier_warp".to_string(),
             Self::WireRemoval => "wire_removal".to_string(),
             Self::Median => "median".to_string(),
             Self::SelectiveColor => "selective_color".to_string(),
@@ -1022,6 +1029,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ChangeToColor => Ok(()),
             Self::Warp => Ok(()),
             Self::GridWarp => Ok(()),
+            Self::BezierWarp => Ok(()),
             Self::WireRemoval => Ok(()),
             Self::Median => Ok(()),
             Self::SelectiveColor => Ok(()),

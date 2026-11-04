@@ -1047,6 +1047,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Dent { .. } => "dent",
         EffectRenderOp::Warp { .. } => "warp",
         EffectRenderOp::GridWarp { .. } => "grid_warp",
+        EffectRenderOp::BezierWarp { .. } => "bezier_warp",
         EffectRenderOp::WireRemoval { .. } => "wire_removal",
         EffectRenderOp::RoughenEdges { .. } => "roughen_edges",
         EffectRenderOp::EyedropperFill { .. } => "eyedropper_fill",

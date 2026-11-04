@@ -109,6 +109,7 @@ pub use processor_residency::{
     PreparedEffectProcessorInput,
 };
 pub mod bevel;
+pub mod bezier_warp;
 pub mod broadcast_safe;
 pub mod brush_strokes;
 pub mod kaleidoscope;
@@ -186,6 +187,11 @@ pub use color_emboss::{
 };
 
 pub use bevel::{bevel_frame_f32, BevelError, BevelGrade, BEVEL_HALO_PIXELS, BEVEL_MAX_THICKNESS};
+pub use bezier_warp::{
+    apply_bezier_warp_f32_controlled, bezier_warp_frame_f32, BezierWarpControls, BezierWarpError,
+    BezierWarpGrade, BEZIER_WARP_DEFAULT_QUALITY, BEZIER_WARP_MAX_QUALITY, BEZIER_WARP_MIN_QUALITY,
+    BEZIER_WARP_REFERENCE_EXTENT,
+};
 pub use brush_strokes::{
     brush_strokes_frame_f32, BrushStrokesError, BrushStrokesGrade, BRUSH_STROKES_MAX_DENSITY,
     BRUSH_STROKES_MAX_LENGTH, BRUSH_STROKES_MAX_RANDOMNESS, BRUSH_STROKES_MAX_SIZE,
