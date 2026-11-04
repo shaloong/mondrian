@@ -2863,6 +2863,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::BezierWarp { .. } => "bezier_warp",
         crate::EffectRenderOp::VrRotateSphere { .. } => "vr_rotate_sphere",
         crate::EffectRenderOp::VrSphereToPlane { .. } => "vr_sphere_to_plane",
+        crate::EffectRenderOp::VrProject2D { .. } => "vr_project_2d",
         crate::EffectRenderOp::WireRemoval { .. } => "wire_removal",
         crate::EffectRenderOp::RoughenEdges { .. } => "roughen_edges",
         crate::EffectRenderOp::EyedropperFill { .. } => "eyedropper_fill",

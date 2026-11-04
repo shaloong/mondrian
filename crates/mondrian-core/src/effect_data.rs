@@ -167,6 +167,9 @@ pub enum EffectType {
     /// VR sphere to plane: projects an equirectangular frame through a
     /// virtual camera with a horizontal field of view and projection tilt.
     VrSphereToPlane,
+    /// VR project 2D: projects a flat card onto an equirectangular frame at an
+    /// authored angular scale, with separate source and projection poses.
+    VrProject2D,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -278,6 +281,7 @@ impl EffectType {
             Self::DustScratches => "builtin.dust_scratches".to_string(),
             Self::VrRotateSphere => "builtin.vr_rotate_sphere".to_string(),
             Self::VrSphereToPlane => "builtin.vr_sphere_to_plane".to_string(),
+            Self::VrProject2D => "builtin.vr_project_2d".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -385,6 +389,7 @@ impl EffectType {
             "builtin.dust_scratches" => Self::DustScratches,
             "builtin.vr_rotate_sphere" => Self::VrRotateSphere,
             "builtin.vr_sphere_to_plane" => Self::VrSphereToPlane,
+            "builtin.vr_project_2d" => Self::VrProject2D,
             other => Self::External(other.to_string()),
         }
     }
@@ -492,6 +497,7 @@ impl EffectType {
             Self::DustScratches => "蒙尘与划痕",
             Self::VrRotateSphere => "VR 旋转球面",
             Self::VrSphereToPlane => "VR 球面到平面",
+            Self::VrProject2D => "VR 平面到球面",
             Self::External(name) => name,
         }
     }
@@ -597,6 +603,7 @@ impl EffectType {
             Self::DustScratches => vec!["修复"],
             Self::VrRotateSphere => vec!["变形"],
             Self::VrSphereToPlane => vec!["变形"],
+            Self::VrProject2D => vec!["变形"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -704,6 +711,7 @@ impl EffectType {
             Self::DustScratches => "dust_scratches".to_string(),
             Self::VrRotateSphere => "vr_rotate_sphere".to_string(),
             Self::VrSphereToPlane => "vr_sphere_to_plane".to_string(),
+            Self::VrProject2D => "vr_project_2d".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1060,6 +1068,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::DustScratches => Ok(()),
             Self::VrRotateSphere => Ok(()),
             Self::VrSphereToPlane => Ok(()),
+            Self::VrProject2D => Ok(()),
         }
     }
 }

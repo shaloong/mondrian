@@ -3067,3 +3067,23 @@ parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-x-label = P
 parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-y-label = Projection Tilt (Y Axis)
 parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-z-label = Projection Tilt (Z Axis)
 parameter-mondrian-effect-builtin-vr-sphere-to-plane-invert-label = Invert Rotation
+
+## VR Project 2D VR 平面到球面
+effect-vr-project-2d = VR Project 2D
+parameter-group-vr-project-2d = VR Project 2D
+parameter-mondrian-effect-builtin-vr-project-2d-auto-vr-label = Auto VR Properties
+parameter-mondrian-effect-builtin-vr-project-2d-frame-layout-label = Frame Layout
+parameter-mondrian-effect-builtin-vr-project-2d-horizontal-fov-label = Horizontal FOV
+parameter-mondrian-effect-builtin-vr-project-2d-vertical-fov-label = Vertical FOV
+parameter-mondrian-effect-builtin-vr-project-2d-scale-label = Scale (Degrees)
+parameter-mondrian-effect-builtin-vr-project-2d-stereo-disparity-label = Stereo Disparity (Degrees)
+parameter-mondrian-effect-builtin-vr-project-2d-feather-label = Feather
+parameter-mondrian-effect-builtin-vr-project-2d-source-tilt-x-label = Source Tilt (X Axis)
+parameter-mondrian-effect-builtin-vr-project-2d-source-pan-y-label = Source Pan (Y Axis)
+parameter-mondrian-effect-builtin-vr-project-2d-source-roll-z-label = Source Roll (Z Axis)
+parameter-mondrian-effect-builtin-vr-project-2d-projection-tilt-x-label = Projection Tilt (X Axis)
+parameter-mondrian-effect-builtin-vr-project-2d-projection-pan-y-label = Projection Pan (Y Axis)
+parameter-mondrian-effect-builtin-vr-project-2d-projection-roll-z-label = Projection Roll (Z Axis)
+parameter-mondrian-effect-vr-project-2d-frame-layout-monoscopic = Monoscopic
+parameter-mondrian-effect-vr-project-2d-frame-layout-over-under = Over-Under
+parameter-mondrian-effect-vr-project-2d-frame-layout-side-by-side = Side-by-Side

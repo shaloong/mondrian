@@ -2794,6 +2794,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::BezierWarp { .. } => 100,
         EffectRenderOp::VrRotateSphere { .. } => 101,
         EffectRenderOp::VrSphereToPlane { .. } => 102,
+        EffectRenderOp::VrProject2D { .. } => 103,
         EffectRenderOp::LinearColorKey { .. } => 56,
         EffectRenderOp::Convolution { .. } => 46,
         EffectRenderOp::Offset { .. } => 47,
@@ -4898,6 +4899,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::BezierWarp { .. }
             | crate::EffectRenderOp::VrRotateSphere { .. }
             | crate::EffectRenderOp::VrSphereToPlane { .. }
+            | crate::EffectRenderOp::VrProject2D { .. }
             | crate::EffectRenderOp::WireRemoval { .. }
             | crate::EffectRenderOp::RoughenEdges { .. }
             | crate::EffectRenderOp::EyedropperFill { .. }

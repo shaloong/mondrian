@@ -2999,3 +2999,23 @@ parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-x-label = �
 parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-y-label = 投影倾斜 (Y 轴)
 parameter-mondrian-effect-builtin-vr-sphere-to-plane-projection-tilt-z-label = 投影倾斜 (Z 轴)
 parameter-mondrian-effect-builtin-vr-sphere-to-plane-invert-label = 反旋转
+
+## VR 平面到球面
+effect-vr-project-2d = VR 平面到球面
+parameter-group-vr-project-2d = VR 平面到球面
+parameter-mondrian-effect-builtin-vr-project-2d-auto-vr-label = 自动 VR 属性
+parameter-mondrian-effect-builtin-vr-project-2d-frame-layout-label = 帧布局
+parameter-mondrian-effect-builtin-vr-project-2d-horizontal-fov-label = 水平视角
+parameter-mondrian-effect-builtin-vr-project-2d-vertical-fov-label = 垂直视角
+parameter-mondrian-effect-builtin-vr-project-2d-scale-label = 缩放 (度)
+parameter-mondrian-effect-builtin-vr-project-2d-stereo-disparity-label = 立体视差 (度)
+parameter-mondrian-effect-builtin-vr-project-2d-feather-label = 羽化
+parameter-mondrian-effect-builtin-vr-project-2d-source-tilt-x-label = 源倾斜 (X 轴)
+parameter-mondrian-effect-builtin-vr-project-2d-source-pan-y-label = 源平移 (Y 轴)
+parameter-mondrian-effect-builtin-vr-project-2d-source-roll-z-label = 源滚动 (Z 轴)
+parameter-mondrian-effect-builtin-vr-project-2d-projection-tilt-x-label = 投影倾斜 (X 轴)
+parameter-mondrian-effect-builtin-vr-project-2d-projection-pan-y-label = 投影平移 (Y 轴)
+parameter-mondrian-effect-builtin-vr-project-2d-projection-roll-z-label = 投影滚动 (Z 轴)
+parameter-mondrian-effect-vr-project-2d-frame-layout-monoscopic = 单眼
+parameter-mondrian-effect-vr-project-2d-frame-layout-over-under = 上下
+parameter-mondrian-effect-vr-project-2d-frame-layout-side-by-side = 左右

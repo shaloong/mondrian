@@ -1746,6 +1746,11 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        EffectRenderOp::VrProject2D { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::WireRemoval { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,

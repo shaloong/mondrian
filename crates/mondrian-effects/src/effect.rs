@@ -1097,6 +1097,11 @@ pub enum EffectRenderOp {
     VrSphereToPlane {
         grade: crate::VrSphereToPlaneGrade,
     },
+    /// VR project 2D: projects a flat card onto an equirectangular frame at an
+    /// authored angular scale, with separate source and projection poses.
+    VrProject2D {
+        grade: crate::VrProject2DGrade,
+    },
     /// Wire removal: clones pixels from a parallel displacement across an
     /// authored line (RES-07).
     WireRemoval {
@@ -1487,6 +1492,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::VrSphereToPlane { grade } => {
                 formatter.debug_struct("VrSphereToPlane").field("grade", grade).finish()
+            }
+            Self::VrProject2D { grade } => {
+                formatter.debug_struct("VrProject2D").field("grade", grade).finish()
             }
             Self::WireRemoval { grade } => {
                 formatter.debug_struct("WireRemoval").field("grade", grade).finish()
@@ -2396,6 +2404,13 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::VrProject2D { grade } => {
+                102u8.hash(state);
+                let (params, extra, aces, extra1) = grade.gpu_controls();
+                for value in params.into_iter().chain(extra).chain(aces).chain(extra1) {
+                    value.to_bits().hash(state);
+                }
+            }
             EffectRenderOp::WireRemoval { grade } => {
                 86u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2606,6 +2621,7 @@ impl EffectRenderOp {
             EffectRenderOp::BezierWarp { .. } => 6,
             EffectRenderOp::VrRotateSphere { .. } => 5,
             EffectRenderOp::VrSphereToPlane { .. } => 5,
+            EffectRenderOp::VrProject2D { .. } => 6,
             EffectRenderOp::WireRemoval { .. } => 4,
             EffectRenderOp::Median { .. } => 4,
             EffectRenderOp::SelectiveColor { .. } => 2,
@@ -3159,7 +3175,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 101] {
+fn builtin_effect_types() -> [EffectType; 102] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3262,6 +3278,7 @@ fn builtin_effect_types() -> [EffectType; 101] {
         EffectType::BezierWarp,
         EffectType::VrRotateSphere,
         EffectType::VrSphereToPlane,
+        EffectType::VrProject2D,
     ]
 }
 
@@ -10474,6 +10491,119 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::VrProject2D => {
+            // Display order is the author-visible order: the VR bookkeeping,
+            // the frame layout, the two fields of view, the patch scale and
+            // disparity, the feather, then the source pose and the projection
+            // pose.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "auto_vr",
+                "VR 平面到球面",
+                "自动 VR 属性",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "frame_layout",
+                "VR 平面到球面",
+                "帧布局",
+                crate::VrFrameLayout::Monoscopic.key(),
+                crate::VrFrameLayout::ALL
+                    .into_iter()
+                    .map(|layout| {
+                        ParameterEnumOption::new(
+                            layout.key(),
+                            layout.label(),
+                            format!(
+                                "mondrian.effect.vr_project_2d.frame_layout.{}",
+                                layout.key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "horizontal_fov",
+                "VR 平面到球面",
+                "水平视角",
+                PropertyValue::Float(360.0),
+                Some(f64::from(crate::VR_PROJECT_2D_MIN_HORIZONTAL_FOV_DEGREES)),
+                Some(f64::from(crate::VR_PROJECT_2D_MAX_HORIZONTAL_FOV_DEGREES)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "vertical_fov",
+                "VR 平面到球面",
+                "垂直视角",
+                PropertyValue::Float(180.0),
+                Some(f64::from(crate::VR_PROJECT_2D_MIN_VERTICAL_FOV_DEGREES)),
+                Some(f64::from(crate::VR_PROJECT_2D_MAX_VERTICAL_FOV_DEGREES)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "scale",
+                "VR 平面到球面",
+                "缩放 (度)",
+                PropertyValue::Float(60.0),
+                Some(f64::from(crate::VR_PROJECT_2D_MIN_SCALE_DEGREES)),
+                Some(f64::from(crate::VR_PROJECT_2D_MAX_SCALE_DEGREES)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "stereo_disparity",
+                "VR 平面到球面",
+                "立体视差 (度)",
+                PropertyValue::Float(0.0),
+                Some(f64::from(crate::VR_PROJECT_2D_MIN_STEREO_DISPARITY_DEGREES)),
+                Some(f64::from(crate::VR_PROJECT_2D_MAX_STEREO_DISPARITY_DEGREES)),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather",
+                "VR 平面到球面",
+                "羽化",
+                PropertyValue::Float(10.0),
+                Some(f64::from(crate::VR_PROJECT_2D_MIN_FEATHER_PERCENT)),
+                Some(f64::from(crate::VR_PROJECT_2D_MAX_FEATHER_PERCENT)),
+                Some(1.0),
+            );
+            for (parameter, name) in [
+                ("source_tilt_x", "源倾斜 (X 轴)"),
+                ("source_pan_y", "源平移 (Y 轴)"),
+                ("source_roll_z", "源滚动 (Z 轴)"),
+                ("projection_tilt_x", "投影倾斜 (X 轴)"),
+                ("projection_pan_y", "投影平移 (Y 轴)"),
+                ("projection_roll_z", "投影滚动 (Z 轴)"),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "VR 平面到球面",
+                    name,
+                    PropertyValue::Float(0.0),
+                    None,
+                    None,
+                    Some(1.0),
+                );
+            }
+        }
         EffectType::External(_) => {}
     }
 
@@ -10887,6 +11017,14 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             "horizontal_fov" | "projection_tilt_x" | "projection_tilt_y" | "projection_tilt_z",
         ) => ParameterUnit::Degrees,
         (EffectType::VrSphereToPlane, _) => ParameterUnit::Unitless,
+        (
+            EffectType::VrProject2D,
+            "horizontal_fov" | "vertical_fov" | "scale" | "stereo_disparity" | "source_tilt_x"
+            | "source_pan_y" | "source_roll_z" | "projection_tilt_x" | "projection_pan_y"
+            | "projection_roll_z",
+        ) => ParameterUnit::Degrees,
+        (EffectType::VrProject2D, "feather") => ParameterUnit::Percent,
+        (EffectType::VrProject2D, _) => ParameterUnit::Unitless,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -11327,6 +11465,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::VrSphereToPlane => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::VrProject2D => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -16846,6 +16989,112 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::VrProject2D => {
+            let auto_vr_id = builtin_parameter_id(effect_type, "auto_vr");
+            let frame_layout_id = builtin_parameter_id(effect_type, "frame_layout");
+            let horizontal_fov_id = builtin_parameter_id(effect_type, "horizontal_fov");
+            let vertical_fov_id = builtin_parameter_id(effect_type, "vertical_fov");
+            let scale_id = builtin_parameter_id(effect_type, "scale");
+            let stereo_disparity_id = builtin_parameter_id(effect_type, "stereo_disparity");
+            let feather_id = builtin_parameter_id(effect_type, "feather");
+            let source_tilt_x_id = builtin_parameter_id(effect_type, "source_tilt_x");
+            let source_pan_y_id = builtin_parameter_id(effect_type, "source_pan_y");
+            let source_roll_z_id = builtin_parameter_id(effect_type, "source_roll_z");
+            let projection_tilt_x_id = builtin_parameter_id(effect_type, "projection_tilt_x");
+            let projection_pan_y_id = builtin_parameter_id(effect_type, "projection_pan_y");
+            let projection_roll_z_id = builtin_parameter_id(effect_type, "projection_roll_z");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                // The VR flag is lazy: it is read so that a change is authored
+                // and serialized, then intentionally discarded, because it
+                // describes the authoring workflow rather than the projection.
+                let auto_vr = match effect.evaluate_parameter(&auto_vr_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(
+                            "vr project 2d auto vr must be a boolean".to_owned(),
+                        ));
+                    }
+                    None => false,
+                };
+                let _ = auto_vr;
+                let layout = match effect.evaluate_parameter(&frame_layout_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => crate::VrFrameLayout::from_key(&key)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "vr project 2d frame layout {key} is not a declared option"
+                            ))
+                        })?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "vr project 2d frame layout must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::VrFrameLayout::Monoscopic,
+                };
+                let horizontal_fov = effect.evaluate_f32_parameter(
+                    &horizontal_fov_id,
+                    context.time,
+                    crate::VR_PROJECT_2D_DEFAULT_HORIZONTAL_FOV_DEGREES,
+                );
+                let vertical_fov = effect.evaluate_f32_parameter(
+                    &vertical_fov_id,
+                    context.time,
+                    crate::VR_PROJECT_2D_DEFAULT_VERTICAL_FOV_DEGREES,
+                );
+                let scale = effect.evaluate_f32_parameter(
+                    &scale_id,
+                    context.time,
+                    crate::VR_PROJECT_2D_DEFAULT_SCALE_DEGREES,
+                );
+                let stereo_disparity = effect.evaluate_f32_parameter(
+                    &stereo_disparity_id,
+                    context.time,
+                    crate::VR_PROJECT_2D_DEFAULT_STEREO_DISPARITY_DEGREES,
+                );
+                let feather = effect.evaluate_f32_parameter(
+                    &feather_id,
+                    context.time,
+                    crate::VR_PROJECT_2D_DEFAULT_FEATHER_PERCENT,
+                );
+                let source_tilt_x =
+                    effect.evaluate_f32_parameter(&source_tilt_x_id, context.time, 0.0);
+                let source_pan_y =
+                    effect.evaluate_f32_parameter(&source_pan_y_id, context.time, 0.0);
+                let source_roll_z =
+                    effect.evaluate_f32_parameter(&source_roll_z_id, context.time, 0.0);
+                let projection_tilt_x =
+                    effect.evaluate_f32_parameter(&projection_tilt_x_id, context.time, 0.0);
+                let projection_pan_y =
+                    effect.evaluate_f32_parameter(&projection_pan_y_id, context.time, 0.0);
+                let projection_roll_z =
+                    effect.evaluate_f32_parameter(&projection_roll_z_id, context.time, 0.0);
+                let grade = crate::VrProject2DGrade::new(
+                    f64::from(horizontal_fov),
+                    f64::from(vertical_fov),
+                    f64::from(scale),
+                    f64::from(stereo_disparity),
+                    f64::from(feather),
+                    f64::from(source_tilt_x),
+                    f64::from(source_pan_y),
+                    f64::from(source_roll_z),
+                    f64::from(projection_tilt_x),
+                    f64::from(projection_pan_y),
+                    f64::from(projection_roll_z),
+                    layout,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // A 60 degree card at the centre is the normal result, so the
+                // pass is appended even for the default parameters: there is no
+                // identity.
+                graph.append_unary(EffectRenderOp::VrProject2D { grade });
+                Ok(())
+            }))
+        }
         EffectType::WireRemoval => {
             let point_a_x_id = builtin_parameter_id(effect_type, "point_a_x");
             let point_a_y_id = builtin_parameter_id(effect_type, "point_a_y");
@@ -17167,6 +17416,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BezierWarp => "贝塞尔曲线变形",
         EffectType::VrRotateSphere => "VR 旋转球面",
         EffectType::VrSphereToPlane => "VR 球面到平面",
+        EffectType::VrProject2D => "VR 平面到球面",
         EffectType::WireRemoval => "祛线",
         EffectType::Median => "中间值",
         EffectType::SelectiveColor => "可选颜色",
@@ -18514,6 +18764,7 @@ mod tests {
             EffectType::BezierWarp,
             EffectType::VrRotateSphere,
             EffectType::VrSphereToPlane,
+            EffectType::VrProject2D,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -22526,6 +22777,144 @@ mod tests {
             requirements.roi_from_effect_input,
             crate::EffectRoiPropagation::FullFrame
         );
+    }
+
+    fn vr_project_2d_op(graph: &EffectRenderGraph) -> Option<crate::VrProject2DGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::VrProject2D { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_vr_project_2d(parameter: &str, value: PropertyValue) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::VrProject2D)
+            .expect("registered vr project 2d definition");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::VrProject2D.property_path(parameter),
+                value,
+            })
+            .expect("authors vr project 2d parameter");
+        effect
+    }
+
+    fn vr_project_2d_grade() -> crate::VrProject2DGrade {
+        crate::VrProject2DGrade::new(
+            120.0,
+            90.0,
+            45.0,
+            10.0,
+            20.0,
+            5.0,
+            -10.0,
+            15.0,
+            20.0,
+            30.0,
+            40.0,
+            crate::VrFrameLayout::SideBySide,
+        )
+        .expect("valid vr project 2d grade")
+    }
+
+    #[test]
+    fn vr_project_2d_default_graph_appends_one_node() {
+        // A 60 degree card at the centre is the normal result, so the default
+        // parameters are not the identity and the pass must still run.
+        let effect = instantiate_effect_node(EffectType::VrProject2D)
+            .expect("registered vr project 2d definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("builds vr project 2d graph");
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|node| matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::VrProject2D { .. }, .. }
+                ))
+                .count(),
+            1,
+            "the default card must still append the projection pass"
+        );
+        let grade = vr_project_2d_op(&graph).expect("vr project 2d op");
+        assert_eq!(grade.horizontal_fov_degrees(), 360.0);
+        assert_eq!(grade.vertical_fov_degrees(), 180.0);
+        assert_eq!(grade.scale_degrees(), 60.0);
+        assert_eq!(grade.stereo_disparity_degrees(), 0.0);
+        assert_eq!(grade.feather_percent(), 10.0);
+        assert_eq!(grade.source_tilt_x_degrees(), 0.0);
+        assert_eq!(grade.source_pan_y_degrees(), 0.0);
+        assert_eq!(grade.source_roll_z_degrees(), 0.0);
+        assert_eq!(grade.projection_tilt_x_degrees(), 0.0);
+        assert_eq!(grade.projection_pan_y_degrees(), 0.0);
+        assert_eq!(grade.projection_roll_z_degrees(), 0.0);
+        assert_eq!(grade.layout(), crate::VrFrameLayout::Monoscopic);
+        assert!(grade.placement_is_identity());
+    }
+
+    #[test]
+    fn the_vr_project_2d_shape_tag_is_103_and_the_hash_tag_is_102() {
+        // VR sphere to plane owns hash 101 / shape 102, so the next pass lands
+        // on hash 102 / shape 103.
+        let grade = vr_project_2d_grade();
+        let op = EffectRenderOp::VrProject2D { grade };
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            103
+        );
+        let mut actual = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual);
+        let mut expected = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&102u8, &mut expected);
+        let (params, extra, aces, extra1) = grade.gpu_controls();
+        for value in params.into_iter().chain(extra).chain(aces).chain(extra1) {
+            std::hash::Hash::hash(&value.to_bits(), &mut expected);
+        }
+        assert_eq!(
+            std::hash::Hasher::finish(&actual),
+            std::hash::Hasher::finish(&expected)
+        );
+    }
+
+    #[test]
+    fn vr_project_2d_requirements_report_full_frame_and_both_modes() {
+        let op = EffectRenderOp::VrProject2D { grade: vr_project_2d_grade() };
+        let requirements = crate::graph::render_op_requirements(&op);
+        assert!(requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Cpu,
+            crate::EffectWorkingPrecision::Float32,
+        ));
+        assert!(requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Gpu,
+            crate::EffectWorkingPrecision::Float32,
+        ));
+        assert!(!requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Cpu,
+            crate::EffectWorkingPrecision::NormalizedU8,
+        ));
+        assert!(!requirements.execution_modes.contains(
+            crate::EffectProcessingBackend::Gpu,
+            crate::EffectWorkingPrecision::NormalizedU8,
+        ));
+        assert_eq!(
+            requirements.roi_from_effect_input,
+            crate::EffectRoiPropagation::FullFrame
+        );
+    }
+
+    #[test]
+    fn toggling_auto_vr_leaves_the_vr_project_2d_graph_bit_identical() {
+        let off = author_vr_project_2d("auto_vr", PropertyValue::Bool(false));
+        let on = author_vr_project_2d("auto_vr", PropertyValue::Bool(true));
+        let off_graph = build_effect_render_graph(&[off], tt(0), TEST_WORKING_SPACE)
+            .expect("builds auto vr off graph");
+        let on_graph = build_effect_render_graph(&[on], tt(0), TEST_WORKING_SPACE)
+            .expect("builds auto vr on graph");
+        assert_eq!(format!("{off_graph:?}"), format!("{on_graph:?}"));
+        assert!(vr_project_2d_op(&off_graph).is_some());
+        assert!(vr_project_2d_op(&on_graph).is_some());
     }
 
     fn dent_op(graph: &EffectRenderGraph) -> Option<crate::DentGrade> {

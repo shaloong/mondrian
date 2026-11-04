@@ -1050,6 +1050,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::BezierWarp { .. } => "bezier_warp",
         EffectRenderOp::VrRotateSphere { .. } => "vr_rotate_sphere",
         EffectRenderOp::VrSphereToPlane { .. } => "vr_sphere_to_plane",
+        EffectRenderOp::VrProject2D { .. } => "vr_project_2d",
         EffectRenderOp::WireRemoval { .. } => "wire_removal",
         EffectRenderOp::RoughenEdges { .. } => "roughen_edges",
         EffectRenderOp::EyedropperFill { .. } => "eyedropper_fill",

@@ -62,6 +62,7 @@ pub mod transform;
 pub mod tritone;
 pub mod twirl;
 pub mod vibrance;
+pub mod vr_project_2d;
 pub mod vr_rotate_sphere;
 pub mod vr_sphere_to_plane;
 pub mod warp;
@@ -499,6 +500,17 @@ pub use unsharp_mask::{
     UNSHARP_MASK_AUTHOR_MIN_RADIUS_PIXELS,
 };
 pub use vibrance::{vibrance_frame_f32, VibranceError, VibranceGrade};
+pub use vr_project_2d::{
+    vr_project_2d_frame_f32, VrProject2DControls, VrProject2DError, VrProject2DGrade,
+    VR_PROJECT_2D_DEFAULT_FEATHER_PERCENT, VR_PROJECT_2D_DEFAULT_HORIZONTAL_FOV_DEGREES,
+    VR_PROJECT_2D_DEFAULT_SCALE_DEGREES, VR_PROJECT_2D_DEFAULT_STEREO_DISPARITY_DEGREES,
+    VR_PROJECT_2D_DEFAULT_VERTICAL_FOV_DEGREES, VR_PROJECT_2D_MAX_FEATHER_PERCENT,
+    VR_PROJECT_2D_MAX_HORIZONTAL_FOV_DEGREES, VR_PROJECT_2D_MAX_SCALE_DEGREES,
+    VR_PROJECT_2D_MAX_STEREO_DISPARITY_DEGREES, VR_PROJECT_2D_MAX_VERTICAL_FOV_DEGREES,
+    VR_PROJECT_2D_MIN_FEATHER_PERCENT, VR_PROJECT_2D_MIN_HORIZONTAL_FOV_DEGREES,
+    VR_PROJECT_2D_MIN_SCALE_DEGREES, VR_PROJECT_2D_MIN_STEREO_DISPARITY_DEGREES,
+    VR_PROJECT_2D_MIN_VERTICAL_FOV_DEGREES,
+};
 pub use vr_rotate_sphere::{
     vr_rotate_sphere_frame_f32, VrFrameLayout, VrRotateSphereControls, VrRotateSphereError,
     VrRotateSphereGrade, VR_ROTATE_SPHERE_MAX_HORIZONTAL_FOV_DEGREES,
