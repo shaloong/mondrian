@@ -1081,6 +1081,435 @@ fn four_color_gradient_noise(x: u32, y: u32) -> f32 {
     let bits = (four_color_gradient_hash(x, y, FOUR_COLOR_GRADIENT_DITHER_SALT) >> 8u) & 65535u;
     return f32(bits) / 65535.0 * 2.0 - 1.0;
 }
+
+// GEN-06 cell pattern: the field, the jitter hash and the overflow remap mirror
+// `cell_pattern.rs` bit for bit, including the base-cell-local site offsets that
+// keep the tiling bit-identical across a period shift. `header.y` is the cell
+// type, `header.z` the overflow mode and `header.w` the invert/tiling/cycle
+// flags; `params` packs size/offset/disperse, `color` the cell counts, evolution
+// and contrast, and `extra0` the seed and the cycle length.
+const CELL_PATTERN_EVOLUTION_BASE: u32 = 1048576u;
+const CELL_PATTERN_SALT_JITTER: u32 = 0x6A09E667u;
+const CELL_PATTERN_SALT_ID: u32 = 0xBB67AE85u;
+const CELL_PATTERN_SALT_MIXED: u32 = 0x3C6EF372u;
+const CELL_PATTERN_SALT_STRIDE: u32 = 0x9E3779B9u;
+
+struct CellPatternField {
+    f1: f32,
+    f2: f32,
+    winner_x: i32,
+    winner_y: i32,
+};
+
+fn cell_pattern_hash(x: i32, y: i32, salt: u32) -> u32 {
+    var hash = bitcast<u32>(x) * 0x9E3779B9u ^ bitcast<u32>(y) * 0x85EBCA6Bu ^ salt;
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x846CA68Bu;
+    hash = hash ^ (hash >> 16u);
+    return hash;
+}
+
+fn cell_pattern_unit16(hash: u32) -> f32 {
+    return f32(hash & 65535u) / 65535.0;
+}
+
+fn cell_pattern_seed_mix(seed: f32) -> u32 {
+    return u32(floor(clamp(seed, 0.0, 100000.0))) * 0x9E3779B9u;
+}
+
+fn cell_pattern_jitter_at(x: i32, y: i32, salt: u32, step: u32) -> vec2<f32> {
+    let hash = cell_pattern_hash(x, y, salt ^ (step * CELL_PATTERN_SALT_STRIDE));
+    return vec2<f32>(
+        cell_pattern_unit16(hash) * 2.0 - 1.0,
+        cell_pattern_unit16(hash >> 16u) * 2.0 - 1.0,
+    );
+}
+
+fn cell_pattern_jitter(x: i32, y: i32, salt: u32, step: u32, weight: f32) -> vec2<f32> {
+    let first = cell_pattern_jitter_at(x, y, salt, step);
+    if (weight <= 0.0) { return first; }
+    let next = cell_pattern_jitter_at(x, y, salt, step + 1u);
+    return first + (next - first) * weight;
+}
+
+fn cell_pattern_wrap(index: i32, period: i32) -> i32 {
+    if (period <= 0) { return index; }
+    var wrapped = index % period;
+    if (wrapped < 0) { wrapped = wrapped + period; }
+    return wrapped;
+}
+
+fn cell_pattern_field(
+    q: vec2<f32>,
+    frequency: f32,
+    metric: u32,
+    step: u32,
+    weight: f32,
+    jitter_salt: u32,
+    cells_h: f32,
+    cells_v: f32,
+    tiling: bool,
+    disperse: f32,
+) -> CellPatternField {
+    let base_x = i32(clamp(floor(q.x), -8388608.0, 8388607.0));
+    let base_y = i32(clamp(floor(q.y), -8388608.0, 8388607.0));
+    let local = q - vec2<f32>(f32(base_x), f32(base_y));
+    var period_x = 0;
+    var period_y = 0;
+    if (tiling) {
+        period_x = i32(max(round(cells_h * frequency), 1.0));
+        period_y = i32(max(round(cells_v * frequency), 1.0));
+    }
+    var f1 = 1.0e9;
+    var f2 = 1.0e9;
+    var winner_x = base_x;
+    var winner_y = base_y;
+    for (var oy = -1; oy <= 1; oy = oy + 1) {
+        for (var ox = -1; ox <= 1; ox = ox + 1) {
+            let cell_x = base_x + ox;
+            let cell_y = base_y + oy;
+            var hash_x = cell_x;
+            var hash_y = cell_y;
+            if (tiling) {
+                hash_x = cell_pattern_wrap(cell_x, period_x);
+                hash_y = cell_pattern_wrap(cell_y, period_y);
+            }
+            let jitter = cell_pattern_jitter(hash_x, hash_y, jitter_salt, step, weight);
+            let dx = local.x - (f32(ox) + 0.5 + disperse * jitter.x);
+            let dy = local.y - (f32(oy) + 0.5 + disperse * jitter.y);
+            var distance = sqrt(dx * dx + dy * dy);
+            if (metric == 1u) { distance = abs(dx) + abs(dy); }
+            if (distance < f1) {
+                f2 = f1;
+                f1 = distance;
+                winner_x = hash_x;
+                winner_y = hash_y;
+            } else if (distance < f2) {
+                f2 = distance;
+            }
+        }
+    }
+    return CellPatternField(f1, f2, winner_x, winner_y);
+}
+
+fn cell_pattern_luminance(x: i32, y: i32, seed_salt: u32, step: u32) -> f32 {
+    return cell_pattern_unit16(
+        cell_pattern_hash(
+            x,
+            y,
+            CELL_PATTERN_SALT_ID ^ seed_salt ^ (step * CELL_PATTERN_SALT_STRIDE),
+        ),
+    );
+}
+
+fn cell_pattern_overflow(value: f32, mode: u32) -> f32 {
+    if (mode == 1u) {
+        if (value < 0.0) {
+            let distance = -value;
+            return distance / (1.0 + distance);
+        }
+        if (value > 1.0) {
+            let distance = value - 1.0;
+            return 1.0 - distance / (1.0 + distance);
+        }
+        return value;
+    }
+    if (mode == 2u) {
+        let folded = value - 2.0 * floor(value * 0.5);
+        return clamp(select(2.0 - folded, folded, folded <= 1.0), 0.0, 1.0);
+    }
+    return clamp(value, 0.0, 1.0);
+}
+
+fn cell_pattern_bubbles(
+    q: vec2<f32>,
+    frequency: f32,
+    metric: u32,
+    step: u32,
+    weight: f32,
+    seed_salt: u32,
+    cells_h: f32,
+    cells_v: f32,
+    tiling: bool,
+    disperse: f32,
+    scale: f32,
+    gain: f32,
+    mode: u32,
+) -> f32 {
+    let field = cell_pattern_field(
+        q,
+        frequency,
+        metric,
+        step,
+        weight,
+        CELL_PATTERN_SALT_JITTER ^ seed_salt,
+        cells_h,
+        cells_v,
+        tiling,
+        disperse,
+    );
+    let luminance = cell_pattern_luminance(field.winner_x, field.winner_y, seed_salt, step);
+    let raw = 0.5 + (0.55 + 0.30 * luminance - field.f1) * scale * gain;
+    return cell_pattern_overflow(raw, mode);
+}
+
+fn cell_pattern_plates(
+    q: vec2<f32>,
+    frequency: f32,
+    step: u32,
+    weight: f32,
+    seed_salt: u32,
+    cells_h: f32,
+    cells_v: f32,
+    tiling: bool,
+    disperse: f32,
+    ramp: f32,
+    frozen: bool,
+) -> f32 {
+    let field = cell_pattern_field(
+        q,
+        frequency,
+        2u,
+        step,
+        weight,
+        CELL_PATTERN_SALT_JITTER ^ seed_salt,
+        cells_h,
+        cells_v,
+        tiling,
+        disperse,
+    );
+    var luminance = cell_pattern_luminance(field.winner_x, field.winner_y, seed_salt, step);
+    if (frozen) {
+        luminance = cell_pattern_unit16(cell_pattern_hash(
+            field.winner_x,
+            field.winner_y,
+            CELL_PATTERN_SALT_ID ^ seed_salt,
+        ));
+    }
+    return luminance * clamp((field.f2 - field.f1) / ramp, 0.0, 1.0);
+}
+
+fn cell_pattern_crystallize(
+    q: vec2<f32>,
+    frequency: f32,
+    step: u32,
+    weight: f32,
+    seed_salt: u32,
+    cells_h: f32,
+    cells_v: f32,
+    tiling: bool,
+    disperse: f32,
+    edge_width: f32,
+    frozen: bool,
+) -> f32 {
+    let field = cell_pattern_field(
+        q,
+        frequency,
+        2u,
+        step,
+        weight,
+        CELL_PATTERN_SALT_JITTER ^ seed_salt,
+        cells_h,
+        cells_v,
+        tiling,
+        disperse,
+    );
+    if (field.f2 - field.f1 > edge_width) {
+        if (frozen) {
+            return cell_pattern_unit16(cell_pattern_hash(
+                field.winner_x,
+                field.winner_y,
+                CELL_PATTERN_SALT_ID ^ seed_salt,
+            ));
+        }
+        return cell_pattern_luminance(field.winner_x, field.winner_y, seed_salt, step);
+    }
+    return 0.0;
+}
+
+fn cell_pattern_mixed(
+    q: vec2<f32>,
+    step: u32,
+    weight: f32,
+    seed_salt: u32,
+    cells_h: f32,
+    cells_v: f32,
+    tiling: bool,
+    disperse: f32,
+    ramp: f32,
+    gain: f32,
+    mode: u32,
+) -> f32 {
+    let plates = cell_pattern_field(
+        q,
+        1.0,
+        2u,
+        step,
+        weight,
+        CELL_PATTERN_SALT_JITTER ^ seed_salt,
+        cells_h,
+        cells_v,
+        tiling,
+        disperse,
+    );
+    let crystals = cell_pattern_field(
+        q,
+        1.0,
+        1u,
+        step,
+        weight,
+        CELL_PATTERN_SALT_JITTER ^ seed_salt,
+        cells_h,
+        cells_v,
+        tiling,
+        disperse,
+    );
+    let pick = (cell_pattern_hash(
+        plates.winner_x,
+        plates.winner_y,
+        CELL_PATTERN_SALT_MIXED ^ seed_salt,
+    ) >> 16u) & 1u;
+    if (pick == 1u) {
+        let luminance = cell_pattern_luminance(crystals.winner_x, crystals.winner_y, seed_salt, step);
+        return cell_pattern_overflow(
+            0.5 + (0.55 + 0.30 * luminance - crystals.f1) * 6.0 * gain,
+            mode,
+        );
+    }
+    let luminance = cell_pattern_luminance(plates.winner_x, plates.winner_y, seed_salt, step);
+    return cell_pattern_overflow(
+        luminance * clamp((plates.f2 - plates.f1) / ramp, 0.0, 1.0),
+        mode,
+    );
+}
+
+fn cell_pattern_value(effect: EffectUniform, centre: vec2<f32>) -> f32 {
+    let kind = effect.header.y;
+    let mode = effect.header.z;
+    let flags = effect.header.w;
+    let invert = (flags & 1u) != 0u;
+    let tiling = (flags & 2u) != 0u;
+    let cycle = (flags & 4u) != 0u;
+    let size = effect.params.x;
+    let offset = effect.params.yz;
+    let disperse = effect.params.w;
+    let cells_h = effect.color.x;
+    let cells_v = effect.color.y;
+    let evolution = effect.color.z;
+    let contrast = effect.color.w;
+    let seed = effect.extra0.x;
+    let revolutions = effect.extra0.y;
+    let gain = contrast * 0.01;
+    let edge_width = 8.0 / max(contrast, 1.0);
+    let ramp = min(edge_width, 0.5);
+    var step = CELL_PATTERN_EVOLUTION_BASE;
+    var weight = 0.0;
+    // Indices 3 (static plates) and 8 (static plates HQ) freeze the whole field.
+    if (kind != 3u && kind != 8u) {
+        var phase = evolution;
+        if (cycle) { phase = phase - revolutions * floor(phase / revolutions); }
+        phase = clamp(phase, -1048576.0, 1048576.0);
+        let index = floor(phase);
+        let fraction = phase - index;
+        weight = fraction * fraction * (3.0 - 2.0 * fraction);
+        step = u32(index + 1048576.0);
+    }
+    let seed_salt = cell_pattern_seed_mix(seed);
+    let p = (centre - offset) / size;
+    let second = p * 2.0 + vec2<f32>(0.5);
+    var shaped = 0.0;
+    if (kind == 0u) {
+        shaped = cell_pattern_bubbles(
+            p, 1.0, 2u, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, 4.0, gain, mode,
+        );
+    } else if (kind == 1u) {
+        shaped = cell_pattern_bubbles(
+            p, 1.0, 1u, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, 6.0, gain, mode,
+        );
+    } else if (kind == 2u) {
+        shaped = clamp(cell_pattern_plates(
+            p, 1.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, ramp, false,
+        ), 0.0, 1.0);
+    } else if (kind == 3u) {
+        shaped = clamp(cell_pattern_plates(
+            p, 1.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, ramp, true,
+        ), 0.0, 1.0);
+    } else if (kind == 4u) {
+        shaped = clamp(cell_pattern_crystallize(
+            p, 1.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, edge_width, false,
+        ), 0.0, 1.0);
+    } else if (kind == 5u) {
+        let field = cell_pattern_field(
+            p,
+            1.0,
+            2u,
+            step,
+            weight,
+            CELL_PATTERN_SALT_JITTER ^ seed_salt,
+            cells_h,
+            cells_v,
+            tiling,
+            disperse,
+        );
+        shaped = cell_pattern_overflow(0.5 + (0.62 - field.f1 * field.f1) * 2.5 * gain, mode);
+    } else if (kind == 6u) {
+        let first = cell_pattern_bubbles(
+            p, 1.0, 1u, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, 6.0, gain, mode,
+        );
+        let next = cell_pattern_bubbles(
+            second, 2.0, 1u, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, 6.0, gain, mode,
+        );
+        shaped = 0.65 * first + 0.35 * next;
+    } else if (kind == 7u) {
+        let first = cell_pattern_plates(
+            p, 1.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, ramp, false,
+        );
+        let next = cell_pattern_plates(
+            second, 2.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, ramp, false,
+        );
+        shaped = clamp(0.65 * first + 0.35 * next, 0.0, 1.0);
+    } else if (kind == 8u) {
+        let first = cell_pattern_plates(
+            p, 1.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, ramp, true,
+        );
+        let next = cell_pattern_plates(
+            second, 2.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, ramp, true,
+        );
+        shaped = clamp(0.65 * first + 0.35 * next, 0.0, 1.0);
+    } else if (kind == 9u) {
+        let first = cell_pattern_crystallize(
+            p, 1.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, edge_width, false,
+        );
+        let next = cell_pattern_crystallize(
+            second, 2.0, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, edge_width, false,
+        );
+        shaped = clamp(0.65 * first + 0.35 * next, 0.0, 1.0);
+    } else if (kind == 10u) {
+        shaped = cell_pattern_mixed(
+            p, step, weight, seed_salt, cells_h, cells_v, tiling, disperse, ramp, gain, mode,
+        );
+    } else {
+        let field = cell_pattern_field(
+            p,
+            1.0,
+            2u,
+            step,
+            weight,
+            CELL_PATTERN_SALT_JITTER ^ seed_salt,
+            cells_h,
+            cells_v,
+            tiling,
+            disperse,
+        );
+        let gap = field.f2 - field.f1;
+        shaped = cell_pattern_overflow(0.5 + (0.40 - abs(gap - 0.18) * 5.0) * gain, mode);
+    }
+    if (invert) { shaped = 1.0 - shaped; }
+    return clamp(shaped, 0.0, 1.0);
+}
+
 // `ExtractGrade`: params.x is the channel, params.y the black point,
 // params.z the white point and params.w the invert toggle; extra0.xy are the
 // softness around each point.
@@ -1359,6 +1788,9 @@ fn effects_author_coverage() -> bool {
         // The fill is the last generator: its coverage comes from the inset
         // feather ramp, so a transparent source pixel must not skip it either.
         if (effect.header.x == 39u) { return true; }
+        // The cell pattern is a generator as well: it always writes opaque
+        // coverage, so a transparent source pixel must not skip it.
+        if (effect.header.x == 41u) { return true; }
     }
     return false;
 }
@@ -2275,6 +2707,15 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 0u,
                 index,
             );
+        } else if (effect.header.x == 41u) {
+            // `CellPatternGrade`: params is [size, offset.x, offset.y, disperse],
+            // colour is [cells_h, cells_v, evolution, contrast], extra0 is
+            // [seed, cycle_revolutions, 0, 0]. header.y is the cell type,
+            // header.z the overflow mode and header.w the invert/tiling/cycle
+            // flags. The generator replaces the pixel outright at full coverage.
+            let centre = floor(max(position, vec2<f32>(0.0))) + vec2<f32>(0.5);
+            let value = cell_pattern_value(effect, centre);
+            pixel = vec4<f32>(value, value, value, 1.0);
         } else if (effect.header.x == 34u) {
             // `ChangeToColorGrade`: params is [hue amount, lightness amount,
             // saturation amount, softness], colour is [to r, to g, to b, 0], and
@@ -6205,6 +6646,26 @@ fn effect_uniforms_for_ops(
                     params,
                     color,
                     extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::CellPattern { grade } => {
+                let (params, color, extra0, _extra1) = grade.gpu_controls();
+                GpuEffectUniform {
+                    // The cell type, the overflow mode and the invert/tiling/
+                    // cycle flags share the header; the twelve unused scalars
+                    // of the shared point uniform stay zero.
+                    header: [
+                        41,
+                        grade.pattern().index(),
+                        grade.overflow().index(),
+                        grade.header_flags(),
+                    ],
+                    params,
+                    color,
+                    extra0,
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
@@ -11461,6 +11922,151 @@ mod tests {
         assert!(
             report.within_budget,
             "GPU fill accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    fn cell_pattern_parity_pixels(
+        context: &crate::GpuContext,
+        width: u32,
+        height: u32,
+        data: &[[f32; 4]],
+        grade: mondrian_effects::CellPatternGrade,
+    ) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: data.to_vec(),
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::CellPattern { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 1);
+        // The cell pattern shares the seven-cell point uniform: kind 41 in
+        // `header.x`, the cell type and the overflow mode beside it, and the
+        // invert/tiling/cycle flags in `header.w`. Only four cells are used, so
+        // the other twelve scalars stay zero.
+        let uniforms =
+            effect_uniforms_for_ops(plan.operations(), None).expect("the pattern packs a uniform");
+        let (expected_params, expected_color, expected_extra0, _extra1) = grade.gpu_controls();
+        assert_eq!(
+            uniforms[0].header,
+            [
+                41,
+                grade.pattern().index(),
+                grade.overflow().index(),
+                grade.header_flags(),
+            ]
+        );
+        assert_eq!(uniforms[0].params, expected_params);
+        assert_eq!(uniforms[0].color, expected_color);
+        assert_eq!(uniforms[0].extra0, expected_extra0);
+        for cell in [uniforms[0].extra1, uniforms[0].extra2, uniforms[0].extra3] {
+            assert_eq!(cell, [0.0; 4]);
+        }
+
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            context,
+            &[layer],
+            width,
+            height,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 1);
+        (expected.pixels().to_vec(), actual)
+    }
+
+    #[tokio::test]
+    async fn gpu_cell_pattern_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{CellPatternGrade, CellPatternOverflow, CellPatternType};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU cell pattern parity test: no GPU adapter available");
+            return;
+        };
+        let width = 8_u32;
+        let height = 6_u32;
+        // The first pixel is fully transparent: without the author-coverage
+        // registration the fused pass would short-circuit it and leave black.
+        let mut data = vec![[0.25, 0.25, 0.25, 1.0]; (width * height) as usize];
+        data[0] = [0.0; 4];
+        let grade = CellPatternGrade::new(
+            CellPatternType::Bubbles,
+            false,
+            100.0,
+            CellPatternOverflow::Clip,
+            1.0,
+            60.0,
+            [128.0, 128.0],
+            true,
+            2.0,
+            2.0,
+            0.0,
+            false,
+            1.0,
+            0.0,
+        )
+        .expect("valid cell pattern grade");
+        let (expected_pixels, actual) =
+            cell_pattern_parity_pixels(&context, width, height, &data, grade);
+
+        assert_eq!(
+            actual[0][3], 1.0,
+            "the generator must author full coverage over a transparent pixel"
+        );
+        assert!(
+            actual[0][0] > 0.0,
+            "the transparent pixel must be painted, got {:?}",
+            actual[0]
+        );
+        assert!(expected_pixels[0][0] > 0.0);
+
+        let report = compare_linear_rgba(
+            &expected_pixels,
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU cell pattern accuracy budget exceeded: {report:#?}"
         );
     }
 
