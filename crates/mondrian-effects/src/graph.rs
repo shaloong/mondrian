@@ -19,6 +19,282 @@ pub struct EffectGraphNodeId(pub u32);
 
 pub type EffectGraphValue = EffectGraphNodeId;
 
+/// Slot sentinel for a declared auxiliary input that no host raster can fill.
+///
+/// A graph that declares this slot is refused at compile time rather than
+/// materializing an empty second input at execution time.
+pub const UNBOUND_AUXILIARY_SLOT: u32 = u32::MAX;
+
+/// Declared participation of one auxiliary image in an effect.
+///
+/// The role selects requirement tiers and the default sampling policy, but it
+/// never selects a pixel formula. An operation that reads a
+/// [`AuxiliaryRole::Map`] interprets the auxiliary channels itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryRole {
+    /// Coverage-only second input, such as an image or garbage matte.
+    Matte,
+    /// Non-color sample data, such as a displacement or depth map.
+    Map,
+    /// A complete picture composited as a layer.
+    Layer,
+}
+
+impl AuxiliaryRole {
+    /// Stable code used by the graph identity byte stream.
+    pub const fn identity_code(self) -> u8 {
+        match self {
+            Self::Matte => 0,
+            Self::Map => 1,
+            Self::Layer => 2,
+        }
+    }
+
+    /// Most conservative sampling default for this role.
+    pub const fn default_sampling(self) -> AuxiliarySampling {
+        match self {
+            Self::Matte | Self::Layer => AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
+            Self::Map => AuxiliarySampling::PRIMARY_GRID_NEAREST_CLAMP,
+        }
+    }
+
+    /// ROI tier this role demands from its consumer.
+    pub const fn roi_requirement(self) -> EffectRoiPropagation {
+        match self {
+            Self::Matte | Self::Layer => EffectRoiPropagation::PixelLocal,
+            Self::Map => EffectRoiPropagation::FullFrame,
+        }
+    }
+}
+
+/// Reconstruction filter used when sampling the auxiliary raster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryFilter {
+    /// Take the single nearest texel.
+    Nearest,
+    /// Blend the four neighbouring texel centres bilinearly.
+    Linear,
+}
+
+impl AuxiliaryFilter {
+    /// Stable code used by the graph identity byte stream.
+    pub const fn identity_code(self) -> u8 {
+        match self {
+            Self::Nearest => 0,
+            Self::Linear => 1,
+        }
+    }
+}
+
+/// Behavior when a sample position falls outside the auxiliary extent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryOutOfBounds {
+    /// Clamp the sampled position to the nearest border texel.
+    Clamp,
+    /// Return fully transparent black.
+    Transparent,
+}
+
+impl AuxiliaryOutOfBounds {
+    /// Stable code used by the graph identity byte stream.
+    pub const fn identity_code(self) -> u8 {
+        match self {
+            Self::Clamp => 0,
+            Self::Transparent => 1,
+        }
+    }
+}
+
+/// Mapping from a primary pixel centre to auxiliary pixel coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryCoordinateMapping {
+    /// The host registered the auxiliary on the primary pixel grid.
+    PrimaryGrid,
+    /// Apply the execution frame's affine transform to the primary centre.
+    FrameTransform,
+}
+
+impl AuxiliaryCoordinateMapping {
+    /// Stable code used by the graph identity byte stream.
+    pub const fn identity_code(self) -> u8 {
+        match self {
+            Self::PrimaryGrid => 0,
+            Self::FrameTransform => 1,
+        }
+    }
+}
+
+/// Complete sampling declaration of one auxiliary input.
+///
+/// The sampler in [`crate::auxiliary`] is the single implementation of these
+/// semantics; a future GPU pass must mirror that module, not redefine it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuxiliarySampling {
+    /// Coordinate mapping applied before filtering.
+    pub mapping: AuxiliaryCoordinateMapping,
+    /// Reconstruction filter.
+    pub filter: AuxiliaryFilter,
+    /// Out-of-extent behavior.
+    pub out_of_bounds: AuxiliaryOutOfBounds,
+}
+
+impl AuxiliarySampling {
+    /// Registered, smoothed, clamped reading (matte and layer default).
+    pub const PRIMARY_GRID_LINEAR_CLAMP: Self = Self {
+        mapping: AuxiliaryCoordinateMapping::PrimaryGrid,
+        filter: AuxiliaryFilter::Linear,
+        out_of_bounds: AuxiliaryOutOfBounds::Clamp,
+    };
+
+    /// Registered, exact-texel, clamped reading (map default).
+    pub const PRIMARY_GRID_NEAREST_CLAMP: Self = Self {
+        mapping: AuxiliaryCoordinateMapping::PrimaryGrid,
+        filter: AuxiliaryFilter::Nearest,
+        out_of_bounds: AuxiliaryOutOfBounds::Clamp,
+    };
+
+    /// Construct an explicit sampling declaration.
+    pub const fn new(
+        mapping: AuxiliaryCoordinateMapping,
+        filter: AuxiliaryFilter,
+        out_of_bounds: AuxiliaryOutOfBounds,
+    ) -> Self {
+        Self { mapping, filter, out_of_bounds }
+    }
+
+    /// Stable codes `(mapping, filter, out_of_bounds)` for the identity stream.
+    pub const fn identity_codes(self) -> (u8, u8, u8) {
+        (
+            self.mapping.identity_code(),
+            self.filter.identity_code(),
+            self.out_of_bounds.identity_code(),
+        )
+    }
+}
+
+/// One required auxiliary input of a compiled graph.
+///
+/// Collected while compiling so executors can request exactly the raster set a
+/// graph samples, without re-deriving it from frame-varying nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AuxiliaryInputSpec {
+    slot: u32,
+    format: crate::EffectValueFormat,
+    alpha: mondrian_core::ColorFrameAlphaFormats,
+    domain: EffectColorDomainContract,
+    role: AuxiliaryRole,
+    sampling: AuxiliarySampling,
+    required: bool,
+}
+
+impl AuxiliaryInputSpec {
+    /// Declare one required host auxiliary input.
+    pub const fn new(
+        slot: u32,
+        format: crate::EffectValueFormat,
+        alpha: mondrian_core::ColorFrameAlphaFormats,
+        domain: EffectColorDomainContract,
+        role: AuxiliaryRole,
+        sampling: AuxiliarySampling,
+        required: bool,
+    ) -> Self {
+        Self {
+            slot,
+            format,
+            alpha,
+            domain,
+            role,
+            sampling,
+            required,
+        }
+    }
+
+    /// Host slot this raster is bound to.
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+
+    /// Declared sample format of the delivered raster.
+    pub const fn format(self) -> crate::EffectValueFormat {
+        self.format
+    }
+
+    /// Declared alpha formats the host may supply.
+    pub const fn alpha(self) -> mondrian_core::ColorFrameAlphaFormats {
+        self.alpha
+    }
+
+    /// Processing-domain contract the host must convert the raster to.
+    pub const fn domain(self) -> EffectColorDomainContract {
+        self.domain
+    }
+
+    /// Declared role of the raster.
+    pub const fn role(self) -> AuxiliaryRole {
+        self.role
+    }
+
+    /// Declared sampling of the raster.
+    pub const fn sampling(self) -> AuxiliarySampling {
+        self.sampling
+    }
+
+    /// Whether execution refuses to run without this raster.
+    pub const fn required(self) -> bool {
+        self.required
+    }
+}
+
+/// Structural auxiliary-input failure, detected while compiling a graph.
+///
+/// These errors are deliberately separate from
+/// [`crate::EffectGraphBuildError`]: they describe an ill-formed graph rather
+/// than a failed definition, and every one of them fails closed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EffectGraphError {
+    /// A declared slot can never be filled by a host raster.
+    #[error("auxiliary input slot {slot} is unbound")]
+    MissingAuxiliaryInput {
+        /// Declared slot.
+        slot: u32,
+    },
+    /// A slot is declared by an ExternalInput node but no AuxiliaryEffect reads it.
+    #[error("auxiliary input slot {slot} is declared but never sampled")]
+    EmptyAuxiliaryInput {
+        /// Declared slot.
+        slot: u32,
+    },
+    /// One node uses its own primary value as its auxiliary input.
+    #[error("graph node {node:?} uses itself as its auxiliary input")]
+    SelfAuxiliaryInput {
+        /// Offending node.
+        node: EffectGraphNodeId,
+    },
+    /// Two ExternalInput nodes declare the same slot.
+    #[error("auxiliary input slot {slot} is declared more than once")]
+    DuplicateAuxiliarySlot {
+        /// Duplicated slot.
+        slot: u32,
+    },
+    /// The same slot is sampled with incompatible role or sampling declarations.
+    #[error("auxiliary input slot {slot} is sampled with conflicting role or sampling")]
+    ConflictingAuxiliaryInput {
+        /// Conflicted slot.
+        slot: u32,
+    },
+    /// An auxiliary branch is not produced by an ExternalInput node.
+    #[error("graph node {node:?} does not read an ExternalInput node as its auxiliary input")]
+    NonExternalAuxiliaryInput {
+        /// Offending node.
+        node: EffectGraphNodeId,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub enum EffectGraphNodeKind {
     Source,
@@ -87,6 +363,43 @@ pub enum EffectGraphNodeKind {
         blend_mode: BlendMode,
         opacity: f32,
     },
+    /// Zero-input producer for this layer's auxiliary (second) image.
+    ///
+    /// The host binds `slot` to one raster and materializes it in `format`.
+    /// `domain` declares the processing domain the host must convert the
+    /// raster to; the graph never inserts a second domain conversion for it.
+    /// `time_offset` is the exact constant retime of that raster relative to
+    /// the primary frame; runtime- and curve-driven retimes are not
+    /// representable in v1.
+    ExternalInput {
+        /// Host binding slot; v1 supports one slot per layer.
+        slot: u32,
+        /// Declared sample format of the delivered raster.
+        format: crate::EffectValueFormat,
+        /// Alpha formats the host may supply.
+        alpha: mondrian_core::ColorFrameAlphaFormats,
+        /// Processing-domain contract the host must deliver.
+        domain: EffectColorDomainContract,
+        /// Exact constant retime of the auxiliary raster.
+        time_offset: TimelineTime,
+    },
+    /// Apply one operation to a primary branch while reading an auxiliary branch.
+    ///
+    /// `op` runs on `input`; the kernel samples `auxiliary` through `sampling`
+    /// and `role`. The auxiliary branch is normally the value of an
+    /// [`EffectGraphNodeKind::ExternalInput`] node.
+    AuxiliaryEffect {
+        /// Primary picture branch.
+        input: EffectGraphNodeId,
+        /// Auxiliary picture branch.
+        auxiliary: EffectGraphNodeId,
+        /// Operation applied to the primary branch.
+        op: EffectRenderOp,
+        /// Declared participation of the auxiliary branch.
+        role: AuxiliaryRole,
+        /// Declared sampling of the auxiliary branch.
+        sampling: AuxiliarySampling,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +420,10 @@ impl EffectGraphNode {
             EffectGraphNodeKind::MaskCombine { left, right, .. } => vec![left, right],
             EffectGraphNodeKind::MatteMix { base, graded, matte } => vec![base, graded, matte],
             EffectGraphNodeKind::MultiInput { ref inputs, .. } => inputs.clone(),
+            EffectGraphNodeKind::ExternalInput { .. } => Vec::new(),
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
+                vec![input, auxiliary]
+            }
         }
     }
 }
@@ -199,6 +516,28 @@ impl EffectGraphIdentity {
                     inputs.hash(&mut writer);
                     blend_mode.hash(&mut writer);
                     opacity.to_bits().hash(&mut writer);
+                }
+                EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset } => {
+                    13u8.hash(&mut writer);
+                    slot.hash(&mut writer);
+                    working_precision_identity_code(format.precision()).hash(&mut writer);
+                    format.domain().hash(&mut writer);
+                    format.alpha().identity_code().hash(&mut writer);
+                    alpha.identity_code().hash(&mut writer);
+                    domain.hash(&mut writer);
+                    time_offset.numerator().hash(&mut writer);
+                    time_offset.denominator().hash(&mut writer);
+                }
+                EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
+                    14u8.hash(&mut writer);
+                    input.hash(&mut writer);
+                    auxiliary.hash(&mut writer);
+                    hash_render_op(op, &mut writer);
+                    role.identity_code().hash(&mut writer);
+                    let (mapping, filter, out_of_bounds) = sampling.identity_codes();
+                    mapping.hash(&mut writer);
+                    filter.hash(&mut writer);
+                    out_of_bounds.hash(&mut writer);
                 }
             }
         }
@@ -318,7 +657,11 @@ impl EffectRenderGraph {
                 EffectGraphNodeKind::MultiInput { inputs, .. } => {
                     inputs.capacity().saturating_mul(std::mem::size_of::<EffectGraphNodeId>())
                 }
-                EffectGraphNodeKind::Source
+                EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
+                    render_op_retained_bytes_estimate(op)
+                }
+                EffectGraphNodeKind::ExternalInput { .. }
+                | EffectGraphNodeKind::Source
                 | EffectGraphNodeKind::Blend { .. }
                 | EffectGraphNodeKind::Mask { .. }
                 | EffectGraphNodeKind::MaskCombine { .. }
@@ -348,6 +691,15 @@ fn render_op_retained_bytes_estimate(op: &EffectRenderOp) -> usize {
                 .saturating_add(processor.as_ref().map_or(0, |_| 512))
         }
         _ => std::mem::size_of::<EffectRenderOp>(),
+    }
+}
+
+/// Stable code for one working precision inside the identity byte stream.
+fn working_precision_identity_code(precision: crate::EffectWorkingPrecision) -> u8 {
+    match precision {
+        crate::EffectWorkingPrecision::NormalizedU8 => 0,
+        crate::EffectWorkingPrecision::Float16 => 1,
+        crate::EffectWorkingPrecision::Float32 => 2,
     }
 }
 
@@ -487,6 +839,8 @@ pub struct CompiledEffectGraph {
     estimated_cost: u32,
     output_cache_enabled: bool,
     signature_hash: u64,
+    /// Required host auxiliary rasters, in declaration order.
+    auxiliary_inputs: Arc<[AuxiliaryInputSpec]>,
     /// Explicit domain transitions and blockers required by this graph.
     domain_plan: CompiledEffectDomainPlan,
     /// Definition-bound or conservatively implementation-derived execution
@@ -604,6 +958,16 @@ impl CompiledEffectGraph {
         self.signature_hash
     }
 
+    /// Complete set of auxiliary rasters this graph samples.
+    ///
+    /// The slice is fixed at compile time and ordered by the graph's node
+    /// order. Callers must supply exactly these slots to
+    /// [`crate::EffectExecutionSession::apply_compiled_rgba8_with_auxiliary`]; an empty slice means the
+    /// graph never reads a second input.
+    pub fn auxiliary_inputs(&self) -> &[AuxiliaryInputSpec] {
+        &self.auxiliary_inputs
+    }
+
     /// Explicit processing-domain transitions and blockers.
     pub const fn domain_plan(&self) -> &CompiledEffectDomainPlan {
         &self.domain_plan
@@ -642,6 +1006,11 @@ impl CompiledEffectGraph {
         std::mem::size_of::<Self>()
             .saturating_add(self.graph.retained_bytes_estimate())
             .saturating_add(self.identity.retained_bytes_estimate())
+            .saturating_add(
+                self.auxiliary_inputs
+                    .len()
+                    .saturating_mul(std::mem::size_of::<AuxiliaryInputSpec>()),
+            )
             .saturating_add(
                 self.schedule
                     .ordered_nodes
@@ -790,6 +1159,14 @@ enum EffectGraphNodeShape {
         id: EffectGraphNodeId,
         inputs: Vec<EffectGraphNodeId>,
     },
+    ExternalInput {
+        id: EffectGraphNodeId,
+    },
+    Auxiliary {
+        id: EffectGraphNodeId,
+        input: EffectGraphNodeId,
+        auxiliary: EffectGraphNodeId,
+    },
 }
 
 impl PreparedEffectGraphTopology {
@@ -882,6 +1259,7 @@ impl PreparedEffectGraphTopology {
         if !reachable_custom_processor_snapshots_are_complete(&graph, &self.schedule) {
             return None;
         }
+        let auxiliary_inputs = collect_auxiliary_inputs(&graph).ok()?;
         let (execution_envelope, stage_bindings) = execution_evidence
             .or_else(|| implementation_execution_evidence(&graph, &self.schedule))?;
         let node_execution_modes = compile_node_execution_modes(
@@ -908,6 +1286,7 @@ impl PreparedEffectGraphTopology {
             estimated_cost,
             output_cache_enabled,
             domain_plan: self.domain_plan.clone(),
+            auxiliary_inputs,
             execution_envelope,
             stage_bindings,
             node_execution_modes,
@@ -1102,6 +1481,14 @@ fn derive_implementation_requirements<'a>(
                 .reduce(EffectImplementationRequirements::merge_branches)
                 .unwrap_or(EffectImplementationRequirements::IDENTITY)
                 .compose_node(compositing_node_requirements()),
+            EffectGraphNodeKind::ExternalInput { format, time_offset, .. } => {
+                external_input_node_requirements(*format, *time_offset)
+            }
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, .. } => {
+                requirement_for(*input, &requirements)
+                    .merge_branches(requirement_for(*auxiliary, &requirements))
+                    .compose_node(auxiliary_effect_node_requirements(op, *role))
+            }
         };
         requirements.insert(node.id, derived);
     }
@@ -1179,6 +1566,12 @@ fn raw_node_implementation_requirements(
         EffectGraphNodeKind::MatteMix { .. } => Some(gpu_blend_node_requirements()),
         EffectGraphNodeKind::MaskSource { .. } | EffectGraphNodeKind::MultiInput { .. } => {
             Some(compositing_node_requirements())
+        }
+        EffectGraphNodeKind::ExternalInput { format, time_offset, .. } => {
+            Some(external_input_node_requirements(*format, *time_offset))
+        }
+        EffectGraphNodeKind::AuxiliaryEffect { op, role, .. } => {
+            Some(auxiliary_effect_node_requirements(op, *role))
         }
     }
 }
@@ -1589,6 +1982,75 @@ impl EffectGraphBuilderState {
             kind: EffectGraphNodeKind::MatteMix { base, graded, matte },
         });
         id
+    }
+
+    /// Declare a host auxiliary raster for this layer.
+    ///
+    /// The returned value is a zero-input producer; it must be consumed by
+    /// [`Self::add_auxiliary_effect`] or compilation refuses the graph. The
+    /// alpha declaration is derived from `format`; use
+    /// [`Self::append_external_input_with`] to widen it or to retime the raster.
+    pub fn append_external_input(
+        &mut self,
+        slot: u32,
+        format: crate::EffectValueFormat,
+        domain: EffectColorDomainContract,
+    ) -> EffectGraphNodeId {
+        self.append_external_input_with(
+            slot,
+            format,
+            mondrian_core::ColorFrameAlphaFormats::only(format.alpha()),
+            domain,
+            TimelineTime::ZERO,
+        )
+    }
+
+    /// Declare a host auxiliary raster with an explicit alpha set and retime.
+    pub fn append_external_input_with(
+        &mut self,
+        slot: u32,
+        format: crate::EffectValueFormat,
+        alpha: mondrian_core::ColorFrameAlphaFormats,
+        domain: EffectColorDomainContract,
+        time_offset: TimelineTime,
+    ) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset },
+        });
+        id
+    }
+
+    /// Apply `op` to `input` while reading `auxiliary`.
+    ///
+    /// `auxiliary` must be the value of an
+    /// [`EffectGraphNodeKind::ExternalInput`] node and must not equal `input`.
+    pub fn add_auxiliary_effect(
+        &mut self,
+        input: EffectGraphNodeId,
+        auxiliary: EffectGraphNodeId,
+        op: EffectRenderOp,
+        role: AuxiliaryRole,
+        sampling: AuxiliarySampling,
+    ) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling },
+        });
+        id
+    }
+
+    /// Apply `op` to `input` while reading `auxiliary` with its role defaults.
+    pub fn add_auxiliary_effect_with_role(
+        &mut self,
+        input: EffectGraphNodeId,
+        auxiliary: EffectGraphNodeId,
+        op: EffectRenderOp,
+        role: AuxiliaryRole,
+    ) -> EffectGraphNodeId {
+        self.add_auxiliary_effect(input, auxiliary, op, role, role.default_sampling())
     }
 
     pub fn set_current_output(&mut self, node_id: EffectGraphNodeId) {
@@ -2222,6 +2684,56 @@ fn temporal_input_extent_for_sample_offset(
     }
 }
 
+/// Requirements of one zero-input host raster producer.
+///
+/// The host must already have retimed the raster to `time_offset`, so the node
+/// itself only reads current-frame data; the retime shows up as the declared
+/// temporal input extent that contract admission must cover.
+fn external_input_node_requirements(
+    format: crate::EffectValueFormat,
+    time_offset: TimelineTime,
+) -> EffectImplementationRequirements {
+    EffectImplementationRequirements {
+        execution_modes: external_input_execution_modes(format),
+        determinism: EffectDeterminism::Deterministic,
+        temporal_input: temporal_input_extent_for_sample_offset(time_offset),
+        roi_from_effect_input: EffectRoiPropagation::PixelLocal,
+        resource_lifetime: EffectResourceLifetime::Frame,
+    }
+}
+
+fn external_input_execution_modes(format: crate::EffectValueFormat) -> EffectExecutionModes {
+    match format.precision() {
+        crate::EffectWorkingPrecision::NormalizedU8 => EffectExecutionModes::CPU_U8,
+        // M1's host binding carries encoded bytes only. Float bindings must
+        // acquire a real executor before compilation can admit those modes.
+        crate::EffectWorkingPrecision::Float16 | crate::EffectWorkingPrecision::Float32 => {
+            EffectExecutionModes::NONE
+        }
+    }
+}
+
+/// Requirements of one operation that reads a second input.
+///
+/// The auxiliary kernel exists only on the CPU in M1, so the node never
+/// inherits an operation's GPU modes; the role raises the ROI tier to
+/// full-frame for maps even when the operation itself is pixel-local.
+fn auxiliary_effect_node_requirements(
+    op: &EffectRenderOp,
+    role: AuxiliaryRole,
+) -> EffectImplementationRequirements {
+    EffectImplementationRequirements {
+        execution_modes: render_op_requirements(op)
+            .execution_modes
+            .intersection(EffectExecutionModes::CPU_U8),
+        roi_from_effect_input: merge_roi(
+            render_op_requirements(op).roi_from_effect_input,
+            role.roi_requirement(),
+        ),
+        ..render_op_requirements(op)
+    }
+}
+
 fn compositing_node_requirements() -> EffectImplementationRequirements {
     EffectImplementationRequirements {
         execution_modes: EffectExecutionModes::CPU_U8.union(EffectExecutionModes::CPU_F32),
@@ -2462,6 +2974,20 @@ pub(crate) fn compile_effect_domain_plan(
                 }
                 target_domain
             }
+            EffectGraphNodeKind::ExternalInput { domain, .. } => domain.output,
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
+                let input_domain = *plan.node_output_domains.get(input)?;
+                let auxiliary_domain = *plan.node_output_domains.get(auxiliary)?;
+                plan_domain_edge(
+                    &mut plan,
+                    Some(node.id),
+                    *auxiliary,
+                    auxiliary_domain,
+                    input_domain,
+                    EffectDomainBlockerKind::NonRgbDomainTransition,
+                );
+                input_domain
+            }
         };
         plan.node_output_domains.insert(node.id, output_domain);
     }
@@ -2566,6 +3092,16 @@ fn compile_node_alpha_contracts(
                 | EffectGraphNodeKind::MultiInput { blend_mode: BlendMode::Normal, .. } => {
                     crate::EffectAlphaContract::NORMAL_OVER
                 }
+                EffectGraphNodeKind::ExternalInput { format, alpha, .. } => {
+                    if !alpha.contains(format.alpha()) {
+                        return None;
+                    }
+                    let contract = crate::EffectAlphaContract::new(
+                        mondrian_core::ColorFrameAlphaFormats::NONE,
+                        crate::EffectAlphaOutputContract::Negotiated(*alpha),
+                    );
+                    return contract.is_valid_source().then_some((*id, contract));
+                }
                 _ => crate::EffectAlphaContract::COVERAGE_OPERATION,
             };
             contract.is_valid().then_some((*id, contract))
@@ -2579,6 +3115,7 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
     if !reachable_custom_processor_snapshots_are_complete(&graph, &schedule) {
         return None;
     }
+    let auxiliary_inputs = collect_auxiliary_inputs(&graph).ok()?;
     let domain_plan = compile_effect_domain_plan(&graph, &schedule)?;
     let (execution_envelope, stage_bindings) =
         implementation_execution_evidence(&graph, &schedule)?;
@@ -2599,6 +3136,7 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
         output_cache_enabled,
         signature_hash: identity.diagnostic_hash(),
         identity,
+        auxiliary_inputs,
         domain_plan,
         execution_envelope,
         stage_bindings,
@@ -2608,6 +3146,94 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
         graph,
         schedule,
     })
+}
+
+/// Refuse a graph whose auxiliary wiring cannot be satisfied at execution time.
+///
+/// This validates the structural contract only: every declared slot must be
+/// bound, read, uniquely declared, and read with one consistent role and
+/// sampling. Host availability is resolved later by the caller that owns the
+/// slot bindings.
+pub fn validate_auxiliary_graph(graph: &EffectRenderGraph) -> Result<(), EffectGraphError> {
+    use std::collections::hash_map::Entry;
+
+    let mut slots = HashMap::<u32, EffectGraphNodeId>::new();
+    for node in &graph.nodes {
+        if let EffectGraphNodeKind::ExternalInput { slot, .. } = &node.kind {
+            if *slot == UNBOUND_AUXILIARY_SLOT {
+                return Err(EffectGraphError::MissingAuxiliaryInput { slot: *slot });
+            }
+            if slots.insert(*slot, node.id).is_some() {
+                return Err(EffectGraphError::DuplicateAuxiliarySlot { slot: *slot });
+            }
+        }
+    }
+
+    let mut consumed = HashSet::<EffectGraphNodeId>::new();
+    let mut declarations = HashMap::<u32, (AuxiliaryRole, AuxiliarySampling)>::new();
+    for node in &graph.nodes {
+        let EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, role, sampling, .. } =
+            &node.kind
+        else {
+            continue;
+        };
+        if *auxiliary == *input || *auxiliary == node.id {
+            return Err(EffectGraphError::SelfAuxiliaryInput { node: node.id });
+        }
+        let Some(auxiliary_node) = graph.node(*auxiliary) else {
+            return Err(EffectGraphError::NonExternalAuxiliaryInput { node: node.id });
+        };
+        let EffectGraphNodeKind::ExternalInput { slot, .. } = &auxiliary_node.kind else {
+            return Err(EffectGraphError::NonExternalAuxiliaryInput { node: node.id });
+        };
+        consumed.insert(*auxiliary);
+        match declarations.entry(*slot) {
+            Entry::Vacant(entry) => {
+                entry.insert((*role, *sampling));
+            }
+            Entry::Occupied(entry) => {
+                if *entry.get() != (*role, *sampling) {
+                    return Err(EffectGraphError::ConflictingAuxiliaryInput { slot: *slot });
+                }
+            }
+        }
+    }
+
+    for (slot, node) in &slots {
+        if !consumed.contains(node) {
+            return Err(EffectGraphError::EmptyAuxiliaryInput { slot: *slot });
+        }
+    }
+    Ok(())
+}
+
+/// Collect one required input spec per declared auxiliary slot.
+pub fn collect_auxiliary_inputs(
+    graph: &EffectRenderGraph,
+) -> Result<Arc<[AuxiliaryInputSpec]>, EffectGraphError> {
+    validate_auxiliary_graph(graph)?;
+    let mut specs = Vec::new();
+    for node in &graph.nodes {
+        let EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, .. } = &node.kind
+        else {
+            continue;
+        };
+        let consumer = graph.nodes.iter().find_map(|candidate| match &candidate.kind {
+            EffectGraphNodeKind::AuxiliaryEffect { auxiliary, role, sampling, .. }
+                if *auxiliary == node.id =>
+            {
+                Some((*role, *sampling))
+            }
+            _ => None,
+        });
+        let Some((role, sampling)) = consumer else {
+            continue;
+        };
+        specs.push(AuxiliaryInputSpec::new(
+            *slot, *format, *alpha, *domain, role, sampling, true,
+        ));
+    }
+    Ok(specs.into())
 }
 
 /// Return the process-wide compiled identity effect graph.
@@ -2745,6 +3371,16 @@ fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
             }
             EffectGraphNodeKind::MultiInput { inputs, .. } => {
                 EffectGraphNodeShape::MultiInput { id: node.id, inputs: inputs.clone() }
+            }
+            EffectGraphNodeKind::ExternalInput { .. } => {
+                EffectGraphNodeShape::ExternalInput { id: node.id }
+            }
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
+                EffectGraphNodeShape::Auxiliary {
+                    id: node.id,
+                    input: *input,
+                    auxiliary: *auxiliary,
+                }
             }
         })
         .collect();
@@ -3067,6 +3703,58 @@ pub(crate) fn compile_effect_node_profiles(
                         && estimated_cost >= 8,
                 }
             }
+            EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset } => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                13u8.hash(&mut hasher);
+                slot.hash(&mut hasher);
+                working_precision_identity_code(format.precision()).hash(&mut hasher);
+                format.domain().hash(&mut hasher);
+                format.alpha().identity_code().hash(&mut hasher);
+                alpha.identity_code().hash(&mut hasher);
+                domain.hash(&mut hasher);
+                time_offset.numerator().hash(&mut hasher);
+                time_offset.denominator().hash(&mut hasher);
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy: EffectCachePolicy::Deterministic,
+                    estimated_cost: 0,
+                    output_cache_enabled: false,
+                }
+            }
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
+                let input_profile = profiles.get(input)?;
+                let auxiliary_profile = profiles.get(auxiliary)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                14u8.hash(&mut hasher);
+                input_profile.subtree_signature.hash(&mut hasher);
+                auxiliary_profile.subtree_signature.hash(&mut hasher);
+                op.hash_signature(&mut hasher);
+                role.identity_code().hash(&mut hasher);
+                let (mapping, filter, out_of_bounds) = sampling.identity_codes();
+                mapping.hash(&mut hasher);
+                filter.hash(&mut hasher);
+                out_of_bounds.hash(&mut hasher);
+                let cache_policy = input_profile
+                    .cache_policy
+                    .combine(auxiliary_profile.cache_policy)
+                    .combine(op.cache_policy());
+                let estimated_cost = input_profile
+                    .estimated_cost
+                    .saturating_add(auxiliary_profile.estimated_cost)
+                    .saturating_add(op.estimated_cost())
+                    .saturating_add(2);
+                let output_cache_enabled = cache_policy.permits_cross_call_reuse()
+                    && (estimated_cost >= 7
+                        || (estimated_cost >= 6
+                            && (use_counts.get(&node.id).copied().unwrap_or(0) > 1
+                                || graph.output == Some(node.id))));
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy,
+                    estimated_cost,
+                    output_cache_enabled,
+                }
+            }
         };
         profiles.insert(node.id, profile);
     }
@@ -3138,6 +3826,165 @@ fn shape_variant_hash(shape: &crate::mask::MaskShape, state: &mut impl std::hash
 mod tests {
     use super::*;
     use crate::{EffectProcessingBackend, EffectTemporalSpan, EffectWorkingPrecision};
+
+    fn second_input_builder(
+        slot: u32,
+        role: AuxiliaryRole,
+        sampling: AuxiliarySampling,
+        offset: TimelineTime,
+    ) -> (EffectGraphBuilderState, EffectGraphBuilderCheckpoint) {
+        let mut builder = EffectGraphBuilderState::new();
+        let checkpoint = builder.checkpoint();
+        let format = crate::EffectValueFormat::new(
+            EffectWorkingPrecision::NormalizedU8,
+            EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        );
+        let auxiliary = builder.append_external_input_with(
+            slot,
+            format,
+            mondrian_core::ColorFrameAlphaFormats::only(format.alpha()),
+            EffectColorDomainContract::SCENE_LINEAR,
+            offset,
+        );
+        let output = builder.add_auxiliary_effect(
+            builder.source(),
+            auxiliary,
+            EffectRenderOp::GaussianBlur { radius: 0.0 },
+            role,
+            sampling,
+        );
+        builder.set_current_output(output);
+        (builder, checkpoint)
+    }
+
+    fn second_input_contract() -> EffectExecutionContract {
+        EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_U8,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            topology: EffectGraphTopology::GeneralDag,
+            ..EffectExecutionContract::IDENTITY
+        }
+    }
+
+    #[test]
+    fn second_input_graph_identity_is_stable() {
+        let compile = |slot, sampling| {
+            let (builder, _) =
+                second_input_builder(slot, AuxiliaryRole::Map, sampling, TimelineTime::ZERO);
+            compile_reference_render_graph(builder.finish()).expect("second-input graph")
+        };
+        let sampling = AuxiliaryRole::Map.default_sampling();
+        let first = compile(0, sampling);
+        assert_eq!(first.identity(), compile(0, sampling).identity());
+        assert_ne!(first.identity(), compile(1, sampling).identity());
+        let changed = AuxiliarySampling { filter: AuxiliaryFilter::Linear, ..sampling };
+        assert_ne!(first.identity(), compile(0, changed).identity());
+        assert_eq!(first.auxiliary_inputs().len(), 1);
+    }
+
+    #[test]
+    fn an_auxiliary_effect_declared_pixel_local_fails_roi_coverage() {
+        let (builder, checkpoint) = second_input_builder(
+            0,
+            AuxiliaryRole::Map,
+            AuxiliaryRole::Map.default_sampling(),
+            TimelineTime::ZERO,
+        );
+        let declared = EffectExecutionContract {
+            roi_propagation: EffectRoiPropagation::PixelLocal,
+            ..second_input_contract()
+        };
+        assert!(matches!(
+            builder.validate_execution_contract_since(checkpoint, declared),
+            Err(EffectExecutionContractViolation::RoiTooOptimistic { .. })
+        ));
+    }
+
+    #[test]
+    fn a_gpu_declared_auxiliary_effect_without_a_gpu_kernel_is_rejected() {
+        for precision in [
+            EffectWorkingPrecision::Float16,
+            EffectWorkingPrecision::Float32,
+        ] {
+            let format = crate::EffectValueFormat::new(
+                precision,
+                EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            );
+            assert_eq!(
+                external_input_execution_modes(format),
+                EffectExecutionModes::NONE
+            );
+        }
+        let (builder, checkpoint) = second_input_builder(
+            0,
+            AuxiliaryRole::Matte,
+            AuxiliaryRole::Matte.default_sampling(),
+            TimelineTime::ZERO,
+        );
+        let declared = EffectExecutionContract {
+            execution_modes: EffectExecutionModes::GPU_F32,
+            ..second_input_contract()
+        };
+        assert!(matches!(
+            builder.validate_execution_contract_since(checkpoint, declared),
+            Err(EffectExecutionContractViolation::ExecutionModesTooOptimistic { .. })
+        ));
+    }
+
+    #[test]
+    fn a_offset_second_input_outside_the_declared_temporal_extent_is_rejected() {
+        for numerator in [-1, 1] {
+            let (builder, checkpoint) = second_input_builder(
+                0,
+                AuxiliaryRole::Matte,
+                AuxiliaryRole::Matte.default_sampling(),
+                TimelineTime::new(numerator, 2).unwrap(),
+            );
+            assert!(matches!(
+                builder.validate_execution_contract_since(checkpoint, second_input_contract()),
+                Err(EffectExecutionContractViolation::TemporalExtentTooOptimistic { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_empty_auxiliary_slot_is_refused_at_compile_time() {
+        let (builder, _) = second_input_builder(
+            UNBOUND_AUXILIARY_SLOT,
+            AuxiliaryRole::Matte,
+            AuxiliaryRole::Matte.default_sampling(),
+            TimelineTime::ZERO,
+        );
+        let graph = builder.finish();
+        assert!(matches!(
+            validate_auxiliary_graph(&graph),
+            Err(EffectGraphError::MissingAuxiliaryInput { .. })
+        ));
+        assert!(compile_reference_render_graph(graph).is_none());
+    }
+
+    #[test]
+    fn an_auxiliary_node_cannot_use_itself_as_auxiliary() {
+        let (builder, _) = second_input_builder(
+            0,
+            AuxiliaryRole::Matte,
+            AuxiliaryRole::Matte.default_sampling(),
+            TimelineTime::ZERO,
+        );
+        let mut graph = builder.finish();
+        let node = graph.nodes.last_mut().unwrap();
+        let EffectGraphNodeKind::AuxiliaryEffect { auxiliary, .. } = &mut node.kind else {
+            panic!("auxiliary node")
+        };
+        *auxiliary = node.id;
+        assert!(matches!(
+            validate_auxiliary_graph(&graph),
+            Err(EffectGraphError::SelfAuxiliaryInput { .. })
+        ));
+        assert!(compile_reference_render_graph(graph).is_none());
+    }
 
     #[test]
     fn signed_temporal_sample_offsets_derive_exact_directional_extents() {

@@ -2039,6 +2039,18 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                 kind: "custom_source",
                             })
                         }
+                        EffectGraphNodeKind::ExternalInput { .. } => {
+                            return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                                node_id,
+                                kind: "external_input",
+                            })
+                        }
+                        EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+                            return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                                node_id,
+                                kind: "auxiliary_effect",
+                            })
+                        }
                         EffectGraphNodeKind::Source => {
                             return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
                                 reason:

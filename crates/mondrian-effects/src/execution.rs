@@ -171,6 +171,20 @@ pub enum EffectExecutionError {
     /// The definition-bound program cannot enter this single-frame executor.
     #[error(transparent)]
     ExecutionContract(#[from] EffectExecutionAdmissionError),
+    /// The graph samples an auxiliary slot that the caller did not bind.
+    #[error("auxiliary input slot {slot} has no host raster bound")]
+    AuxiliaryFrameMissing {
+        /// Required auxiliary slot.
+        slot: u32,
+    },
+    /// A bound auxiliary raster cannot be sampled.
+    #[error("auxiliary input slot {slot} is invalid: {reason}")]
+    InvalidAuxiliaryFrame {
+        /// Required auxiliary slot.
+        slot: u32,
+        /// Stable machine-readable reason.
+        reason: &'static str,
+    },
 }
 
 impl EffectExecutionError {
@@ -377,10 +391,48 @@ fn execute_effect_graph(
     node_use_counts: &HashMap<EffectGraphNodeId, usize>,
     compiled: Option<&CompiledEffectGraph>,
     frame_seed: i64,
+    session: Option<&mut EffectExecutionSession>,
+) -> std::result::Result<Vec<u8>, EffectExecutionError> {
+    execute_effect_graph_with_auxiliary(
+        input,
+        width,
+        height,
+        graph,
+        schedule,
+        node_use_counts,
+        compiled,
+        frame_seed,
+        session,
+        None,
+    )
+}
+
+/// Execute a graph that may read a host-supplied auxiliary raster.
+///
+/// `auxiliary` is the encoded RGBA8 raster for graph slot 0. Passing `None` is
+/// only valid when the graph declares no auxiliary input; a graph that declares
+/// one fails closed with [`EffectExecutionError::AuxiliaryFrameMissing`].
+#[allow(clippy::too_many_arguments)]
+fn execute_effect_graph_with_auxiliary(
+    input: &[u8],
+    width: u32,
+    height: u32,
+    graph: &EffectRenderGraph,
+    schedule: &EffectExecutionSchedule,
+    node_use_counts: &HashMap<EffectGraphNodeId, usize>,
+    compiled: Option<&CompiledEffectGraph>,
+    frame_seed: i64,
     mut session: Option<&mut EffectExecutionSession>,
+    auxiliary: Option<&crate::AuxiliaryFrame<'_>>,
 ) -> std::result::Result<Vec<u8>, EffectExecutionError> {
     let required_len = width as usize * height as usize * 4;
-    let source_input_fingerprint = compiled.map(|_| frame_buffer_fingerprint(input));
+    let source_input_fingerprint = compiled.map(|_| {
+        let primary = frame_buffer_fingerprint(input);
+        match auxiliary {
+            Some(frame) => combine_input_fingerprints(primary, auxiliary_frame_fingerprint(frame)),
+            None => primary,
+        }
+    });
     let mut outputs = HashMap::<EffectGraphNodeId, Vec<u8>>::with_capacity(graph.nodes.len());
     let mut remaining_uses = node_use_counts.clone();
     let mut buffer_pool = Vec::<Vec<u8>>::new();
@@ -398,6 +450,108 @@ fn execute_effect_graph(
                 return Err(EffectExecutionError::CustomProcessorUnavailable {
                     key: "float_source".to_owned(),
                 });
+            }
+            EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                let Some(frame) = (*slot == 0).then_some(auxiliary).flatten() else {
+                    return Err(EffectExecutionError::AuxiliaryFrameMissing { slot: *slot });
+                };
+                validate_auxiliary_frame(frame, *slot, width, height)?;
+                outputs.insert(node.id, frame.pixels.to_vec());
+            }
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input: input_id,
+                auxiliary: auxiliary_id,
+                op,
+                sampling,
+                ..
+            } => {
+                let Some(auxiliary_node) = graph.node(*auxiliary_id) else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                let EffectGraphNodeKind::ExternalInput { slot, .. } = &auxiliary_node.kind else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                let Some(frame) = (*slot == 0).then_some(auxiliary).flatten() else {
+                    return Err(EffectExecutionError::AuxiliaryFrameMissing { slot: *slot });
+                };
+                validate_auxiliary_frame(frame, *slot, width, height)?;
+                if let (Some(compiled), Some(input_fingerprint)) =
+                    (compiled, source_input_fingerprint)
+                    && let Some(cached) = session.as_deref_mut().and_then(|session| {
+                        get_cached_node_output(
+                            session,
+                            compiled,
+                            *node_id,
+                            width,
+                            height,
+                            input_fingerprint,
+                            frame_seed,
+                        )
+                    })
+                {
+                    release_consumed_node_inputs(
+                        node,
+                        &mut outputs,
+                        &mut remaining_uses,
+                        &mut buffer_pool,
+                        required_len,
+                    );
+                    outputs.insert(node.id, cached);
+                    continue;
+                }
+                let Some(mut primary) = take_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *input_id,
+                    required_len,
+                ) else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                let Some(auxiliary_buffer) = take_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *auxiliary_id,
+                    frame.pixels.len(),
+                ) else {
+                    return Err(EffectExecutionError::InvalidGraph);
+                };
+                let applied = {
+                    let auxiliary_view = crate::AuxiliaryFrame {
+                        pixels: &auxiliary_buffer,
+                        extent: frame.extent,
+                        transform: frame.transform,
+                        policy: frame.policy,
+                    };
+                    crate::auxiliary::apply_auxiliary_effect(
+                        &mut primary,
+                        width,
+                        height,
+                        op,
+                        &auxiliary_view,
+                        *sampling,
+                        frame_seed,
+                    )
+                };
+                release_execution_buffer(&mut buffer_pool, auxiliary_buffer);
+                applied?;
+                if let (Some(compiled), Some(input_fingerprint)) =
+                    (compiled, source_input_fingerprint)
+                    && let Some(session) = session.as_deref_mut()
+                {
+                    put_cached_node_output(
+                        session,
+                        compiled,
+                        *node_id,
+                        width,
+                        height,
+                        input_fingerprint,
+                        frame_seed,
+                        &primary,
+                    );
+                }
+                outputs.insert(node.id, primary);
             }
             EffectGraphNodeKind::UnaryEffect { input: input_id, op }
             | EffectGraphNodeKind::DomainEffect { input: input_id, op, .. } => {
@@ -732,32 +886,89 @@ impl EffectExecutionSession {
         compiled: &CompiledEffectGraph,
         frame_seed: i64,
     ) -> std::result::Result<Vec<u8>, EffectExecutionError> {
+        self.apply_compiled_rgba8_with_auxiliary(input, width, height, compiled, None, frame_seed)
+    }
+
+    /// Execute a compiled graph that may sample a host auxiliary raster.
+    ///
+    /// The bound raster participates in both the effect-output and node-output
+    /// cache identities, so a different auxiliary raster can never reuse a
+    /// cached result computed for another one.
+    pub fn apply_compiled_rgba8_with_auxiliary(
+        &mut self,
+        input: &[u8],
+        width: u32,
+        height: u32,
+        compiled: &CompiledEffectGraph,
+        auxiliary: Option<&crate::AuxiliaryFrame<'_>>,
+        frame_seed: i64,
+    ) -> std::result::Result<Vec<u8>, EffectExecutionError> {
         admit_single_frame_execution(
             compiled,
             EffectProcessingBackend::Cpu,
             EffectWorkingPrecision::NormalizedU8,
         )?;
         validate_encoded_effect_domain_plan(compiled.domain_plan())?;
-        if let Some(cached) =
-            get_cached_effect_output(self, input, width, height, compiled, frame_seed)
-        {
+        let input_fingerprint = combined_input_fingerprint(input, auxiliary);
+        if let Some(cached) = get_cached_effect_output(
+            self,
+            &input_fingerprint,
+            width,
+            height,
+            compiled,
+            frame_seed,
+        ) {
             return Ok(cached);
         }
 
-        let output = execute_effect_graph(
-            input,
+        let output = if auxiliary.is_none() {
+            execute_effect_graph(
+                input,
+                width,
+                height,
+                compiled.graph(),
+                compiled.schedule(),
+                compiled.node_use_counts(),
+                Some(compiled),
+                frame_seed,
+                Some(self),
+            )?
+        } else {
+            execute_effect_graph_with_auxiliary(
+                input,
+                width,
+                height,
+                compiled.graph(),
+                compiled.schedule(),
+                compiled.node_use_counts(),
+                Some(compiled),
+                frame_seed,
+                Some(self),
+                auxiliary,
+            )?
+        };
+
+        put_cached_effect_output(
+            self,
+            &input_fingerprint,
             width,
             height,
-            compiled.graph(),
-            compiled.schedule(),
-            compiled.node_use_counts(),
-            Some(compiled),
+            compiled,
             frame_seed,
-            Some(self),
-        )?;
-
-        put_cached_effect_output(self, input, width, height, compiled, frame_seed, &output);
+            &output,
+        );
         Ok(output)
+    }
+}
+
+fn combined_input_fingerprint(
+    input: &[u8],
+    auxiliary: Option<&crate::AuxiliaryFrame<'_>>,
+) -> EffectInputContentFingerprint {
+    let primary = frame_buffer_fingerprint(input);
+    match auxiliary {
+        Some(frame) => combine_input_fingerprints(primary, auxiliary_frame_fingerprint(frame)),
+        None => primary,
     }
 }
 
@@ -1235,6 +1446,13 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         frame,
                     ),
                 );
+            }
+            EffectGraphNodeKind::ExternalInput { .. }
+            | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+                return Err(unsupported_float_graph_node(
+                    node.id,
+                    "auxiliary_requires_cpu_path",
+                ));
             }
             EffectGraphNodeKind::CustomSource { op, domain_contract } => {
                 // Cold sizing precedes this allocation. Reuse the scalar pool,
@@ -2091,33 +2309,34 @@ impl EffectExecutionSession {
 
 fn get_cached_effect_output(
     session: &mut EffectExecutionSession,
-    input: &[u8],
+    input_fingerprint: &EffectInputContentFingerprint,
     width: u32,
     height: u32,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
 ) -> Option<Vec<u8>> {
-    let key = effect_output_cache_key(input, width, height, compiled, frame_seed)?;
+    let key = effect_output_cache_key(input_fingerprint, width, height, compiled, frame_seed)?;
     session.get_encoded_output(&key)
 }
 
 fn put_cached_effect_output(
     session: &mut EffectExecutionSession,
-    input: &[u8],
+    input_fingerprint: &EffectInputContentFingerprint,
     width: u32,
     height: u32,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
     output: &[u8],
 ) {
-    let Some(key) = effect_output_cache_key(input, width, height, compiled, frame_seed) else {
+    let Some(key) = effect_output_cache_key(input_fingerprint, width, height, compiled, frame_seed)
+    else {
         return;
     };
     session.put_encoded_output(key, output.to_vec());
 }
 
 fn effect_output_cache_key(
-    input: &[u8],
+    input_fingerprint: &EffectInputContentFingerprint,
     width: u32,
     height: u32,
     compiled: &CompiledEffectGraph,
@@ -2125,7 +2344,6 @@ fn effect_output_cache_key(
 ) -> Option<EffectOutputCacheKey> {
     if !compiled.output_cache_enabled()
         || !compiled.output_cache_policy().permits_cross_call_reuse()
-        || input.is_empty()
         || width == 0
         || height == 0
     {
@@ -2134,7 +2352,7 @@ fn effect_output_cache_key(
 
     Some(EffectOutputCacheKey {
         graph_identity: compiled.identity().clone(),
-        input_fingerprint: frame_buffer_fingerprint(input),
+        input_fingerprint: *input_fingerprint,
         width,
         height,
         frame_seed: compiled.output_cache_policy().requires_frame_seed().then_some(frame_seed),
@@ -2245,6 +2463,13 @@ fn validate_float_effect_graph_shape(
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {}
+            EffectGraphNodeKind::ExternalInput { .. }
+            | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+                return Err(unsupported_float_graph_node(
+                    node.id,
+                    "auxiliary_requires_cpu_path",
+                ));
+            }
             EffectGraphNodeKind::CustomSource { op, .. }
             | EffectGraphNodeKind::UnaryEffect { op, .. }
             | EffectGraphNodeKind::DomainEffect { op, .. } => {
@@ -2420,6 +2645,58 @@ fn frame_buffer_fingerprint(buffer: &[u8]) -> EffectInputContentFingerprint {
     hasher.update((buffer.len() as u64).to_le_bytes());
     hasher.update(buffer);
     hasher.finalize().into()
+}
+
+/// Fingerprint the exact auxiliary raster a call bound to slot 0.
+///
+/// Extent, transform, delivery policy and pixels all participate: two calls that
+/// differ in any of them must not share cached effect or node output.
+fn auxiliary_frame_fingerprint(frame: &crate::AuxiliaryFrame<'_>) -> EffectInputContentFingerprint {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.effect-auxiliary.rgba8.v1");
+    hasher.update((frame.extent.width() as u64).to_le_bytes());
+    hasher.update((frame.extent.height() as u64).to_le_bytes());
+    for component in frame.transform {
+        hasher.update(component.to_bits().to_le_bytes());
+    }
+    hasher.update([frame.policy.resolution().identity_code()]);
+    hasher.update((frame.pixels.len() as u64).to_le_bytes());
+    hasher.update(frame.pixels);
+    hasher.finalize().into()
+}
+
+fn combine_input_fingerprints(
+    primary: EffectInputContentFingerprint,
+    auxiliary: EffectInputContentFingerprint,
+) -> EffectInputContentFingerprint {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.effect-input.rgba8-with-auxiliary.v1");
+    hasher.update(primary);
+    hasher.update(auxiliary);
+    hasher.finalize().into()
+}
+
+fn validate_auxiliary_frame(
+    frame: &crate::AuxiliaryFrame<'_>,
+    slot: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), EffectExecutionError> {
+    if !frame.is_valid() {
+        return Err(EffectExecutionError::InvalidAuxiliaryFrame {
+            slot,
+            reason: "encoded_size_mismatch",
+        });
+    }
+    if frame.policy.resolution() == crate::AuxiliaryResolution::MatchPrimary
+        && !frame.matches_extent(width, height)
+    {
+        return Err(EffectExecutionError::InvalidAuxiliaryFrame {
+            slot,
+            reason: "resolution_mismatch",
+        });
+    }
+    Ok(())
 }
 
 fn frame_buffer_fingerprint_f32(buffer: &[[f32; 4]]) -> EffectInputContentFingerprint {

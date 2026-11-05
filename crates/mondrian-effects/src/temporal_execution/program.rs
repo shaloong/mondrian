@@ -215,6 +215,18 @@ impl TemporalProgramBuilder<'_> {
                     kind: "custom_source",
                 })
             }
+            EffectGraphNodeKind::ExternalInput { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                    node_id,
+                    kind: "external_input",
+                })
+            }
+            EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                    node_id,
+                    kind: "auxiliary_effect",
+                })
+            }
             EffectGraphNodeKind::UnaryEffect { input, op }
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
                 let input_address = self.visit_graph_value(context, input)?;

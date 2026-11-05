@@ -1665,6 +1665,24 @@ fn remap_graph_node_kind(
             graded: remap(*graded)?,
             matte: remap(*matte)?,
         },
+        EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset } => {
+            EffectGraphNodeKind::ExternalInput {
+                slot: *slot,
+                format: *format,
+                alpha: *alpha,
+                domain: *domain,
+                time_offset: *time_offset,
+            }
+        }
+        EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input: remap(*input)?,
+                auxiliary: remap(*auxiliary)?,
+                op: op.clone(),
+                role: *role,
+                sampling: *sampling,
+            }
+        }
         EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
             EffectGraphNodeKind::MultiInput {
                 inputs: inputs.iter().map(|id| remap(*id)).collect::<Result<Vec<_>, _>>()?,

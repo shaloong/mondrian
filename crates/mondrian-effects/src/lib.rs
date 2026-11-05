@@ -3,6 +3,7 @@
 //! 高级效果系统：LUT 调色 / 滤镜 / 转场 / 蒙版
 
 pub mod adjustment;
+pub mod auxiliary;
 pub use mondrian_core::EffectPassBlendPolicy;
 pub mod alpha_contract;
 pub mod arithmetic;
@@ -222,6 +223,10 @@ pub use fractal::{
     FRACTAL_MAX_SAMPLES, FRACTAL_MIN_BAILOUT_R2, FRACTAL_MIN_INVERSION_R2,
 };
 
+pub use auxiliary::{
+    render_op_auxiliary_scratch_frames, sample_auxiliary, AuxiliaryFrame, AuxiliaryPolicy,
+    AuxiliaryResolution, BILINEAR_TAPS, IDENTITY_AFFINE, PIXEL_CENTRE,
+};
 pub use bevel::{bevel_frame_f32, BevelError, BevelGrade, BEVEL_HALO_PIXELS, BEVEL_MAX_THICKNESS};
 pub use bezier_warp::{
     apply_bezier_warp_f32_controlled, bezier_warp_frame_f32, BezierWarpControls, BezierWarpError,
@@ -358,12 +363,15 @@ pub use gpu_plan::{
     EffectGpuPlanBlocker, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS,
 };
 pub use graph::{
-    compile_reference_effect_graph, compile_reference_effect_graph_in_domain,
-    compile_reference_render_graph, identity_compiled_effect_graph, prepare_effect_graph_topology,
-    CompiledEffectDomainPlan, CompiledEffectGraph, CompiledEffectStageBinding, EffectDomainBlocker,
-    EffectDomainBlockerKind, EffectDomainTransition, EffectGraphBuilderState, EffectGraphNode,
+    collect_auxiliary_inputs, compile_reference_effect_graph,
+    compile_reference_effect_graph_in_domain, compile_reference_render_graph,
+    identity_compiled_effect_graph, prepare_effect_graph_topology, validate_auxiliary_graph,
+    AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryInputSpec, AuxiliaryOutOfBounds,
+    AuxiliaryRole, AuxiliarySampling, CompiledEffectDomainPlan, CompiledEffectGraph,
+    CompiledEffectStageBinding, EffectDomainBlocker, EffectDomainBlockerKind,
+    EffectDomainTransition, EffectGraphBuilderState, EffectGraphError, EffectGraphNode,
     EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
-    PreparedEffectGraphTopology,
+    PreparedEffectGraphTopology, UNBOUND_AUXILIARY_SLOT,
 };
 pub use grid::{
     grid_frame_f32, grid_pixel, GridControls, GridError, GridGrade, GridSizeFrom,

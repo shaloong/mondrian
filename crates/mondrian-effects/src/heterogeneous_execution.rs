@@ -2697,6 +2697,13 @@ fn hash_effect_operation_shape(
                 },
             );
         }
+        EffectGraphNodeKind::ExternalInput { .. } | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+            return Err(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "shape_identity_contains_auxiliary_input",
+                },
+            );
+        }
     };
     Ok(())
 }
@@ -3885,7 +3892,10 @@ fn execute_cpu_dag_prefix(
                     output,
                 )?
             }
-            EffectGraphNodeKind::Source | EffectGraphNodeKind::CustomSource { .. } => {
+            EffectGraphNodeKind::Source
+            | EffectGraphNodeKind::CustomSource { .. }
+            | EffectGraphNodeKind::ExternalInput { .. }
+            | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
                 return Err(
                     PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
                         node: dispatch.node,
@@ -4944,6 +4954,10 @@ fn cpu_node_scratch_frames(
         | EffectGraphNodeKind::MaskSource { .. }
         | EffectGraphNodeKind::MaskCombine { .. }
         | EffectGraphNodeKind::MatteMix { .. } => Ok(0),
+        EffectGraphNodeKind::ExternalInput { .. } => Ok(0),
+        EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
+            Ok(crate::render_op_auxiliary_scratch_frames(op))
+        }
         EffectGraphNodeKind::MultiInput { inputs, .. } if !inputs.is_empty() => Ok(0),
         EffectGraphNodeKind::Source
         | EffectGraphNodeKind::CustomSource { .. }
