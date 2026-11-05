@@ -2355,6 +2355,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CellPattern { .. } => "cell_pattern",
         EffectRenderOp::Fractal { .. } => "fractal",
         EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
+        EffectRenderOp::PhotoFilter { .. } => "photo_filter",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

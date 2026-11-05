@@ -1230,6 +1230,11 @@ pub enum EffectRenderOp {
         /// Authored matte background and the clip switch.
         grade: crate::RemoveColorMattingGrade,
     },
+    /// Photo filter: tints the frame with a photographic gel.
+    PhotoFilter {
+        /// Authored gel colour, density and the preserve-luminosity switch.
+        grade: crate::PhotoFilterGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1569,6 +1574,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .finish(),
             Self::RemoveColorMatting { grade } => {
                 formatter.debug_struct("RemoveColorMatting").field("grade", grade).finish()
+            }
+            Self::PhotoFilter { grade } => {
+                formatter.debug_struct("PhotoFilter").field("grade", grade).finish()
             }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
@@ -2565,6 +2573,16 @@ impl EffectRenderOp {
                 // color payload, so the cache has to see it separately.
                 grade.clip().hash(state);
             }
+            EffectRenderOp::PhotoFilter { grade } => {
+                107u8.hash(state);
+                // The gain is a pure function of the colour and the density, so
+                // hashing it as well would only make the signature more fragile.
+                grade.colour().map(f32::to_bits).hash(state);
+                grade.density().to_bits().hash(state);
+                // The switch is a uniform header flag rather than part of the
+                // color payload, so the cache has to see it separately.
+                grade.preserve_luminosity().hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2732,6 +2750,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChromaticAberration { .. } => 4,
             EffectRenderOp::TemporalFrameBlend { .. } => 2,
             EffectRenderOp::RemoveColorMatting { .. } => 1,
+            EffectRenderOp::PhotoFilter { .. } => 1,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3258,7 +3277,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 106] {
+fn builtin_effect_types() -> [EffectType; 107] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3366,6 +3385,7 @@ fn builtin_effect_types() -> [EffectType; 106] {
         EffectType::CellPattern,
         EffectType::Fractal,
         EffectType::RemoveColorMatting,
+        EffectType::PhotoFilter,
     ]
 }
 
@@ -11205,6 +11225,69 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::PhotoFilter => {
+            // The default is deliberately not the identity: warming 85 at 25%
+            // tints the frame as soon as the effect is added, which is what the
+            // filter is for. The identity is still elided by the graph builder
+            // when the computed gain is exactly one.
+            let default_color = crate::PHOTO_FILTER_DEFAULT_COLOR;
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "filter",
+                "照片滤镜",
+                "滤镜",
+                crate::PhotoFilterPreset::WarmingFilter85.as_key(),
+                crate::PhotoFilterPreset::ALL
+                    .into_iter()
+                    .map(|preset| {
+                        ParameterEnumOption::new(
+                            preset.as_key(),
+                            preset.label(),
+                            format!("mondrian.effect.photo_filter.filter.{}", preset.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color",
+                "照片滤镜",
+                "颜色",
+                PropertyValue::Color(Color {
+                    r: default_color[0],
+                    g: default_color[1],
+                    b: default_color[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "density",
+                "照片滤镜",
+                "密度",
+                PropertyValue::Float(crate::PHOTO_FILTER_DEFAULT_DENSITY),
+                Some(f64::from(crate::PHOTO_FILTER_MIN_DENSITY)),
+                Some(f64::from(crate::PHOTO_FILTER_MAX_DENSITY)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "preserve_luminosity",
+                "照片滤镜",
+                "保持发光度",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -11633,6 +11716,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         ) => ParameterUnit::Degrees,
         (EffectType::VrProject2D, "feather") => ParameterUnit::Percent,
         (EffectType::VrProject2D, _) => ParameterUnit::Unitless,
+        (EffectType::PhotoFilter, "density") => ParameterUnit::Percent,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -11899,6 +11983,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // One sample in, one sample out: the grade never reads a neighbour,
             // so the contract keeps the pixel-local ROI default.
+            ..cpu_linear
+        },
+        EffectType::PhotoFilter => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // A point multiply, so the pixel-local ROI default is exact; the
+            // preserve-luminosity rescale reads the same sample only.
             ..cpu_linear
         },
         EffectType::Choker => EffectExecutionContract {
@@ -18303,6 +18393,77 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::PhotoFilter => {
+            let filter_id = builtin_parameter_id(effect_type, "filter");
+            let color_id = builtin_parameter_id(effect_type, "color");
+            let density_id = builtin_parameter_id(effect_type, "density");
+            let preserve_id = builtin_parameter_id(effect_type, "preserve_luminosity");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let preset = match effect.evaluate_parameter(&filter_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        // Fail closed: an unknown preset is an authoring error,
+                        // never a silent fallback to the default gel.
+                        crate::PhotoFilterPreset::from_key(&key).ok_or_else(|| {
+                            invalid(format!(
+                                "photo filter preset {key} is not a declared option"
+                            ))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid(
+                            "photo filter filter must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::PhotoFilterPreset::WarmingFilter85,
+                };
+                // Only `custom` reads the colour. A named preset always uses its
+                // own swatch, so a stale colour value cannot change the pixels;
+                // the unused parameter is deliberately not even type-checked.
+                let color = match preset.swatch() {
+                    Some(swatch) => swatch,
+                    None => match effect.evaluate_parameter(&color_id, context.time) {
+                        Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                        Some(_) => {
+                            return Err(invalid(crate::PhotoFilterError::Color.to_string()));
+                        }
+                        None => crate::PHOTO_FILTER_DEFAULT_COLOR,
+                    },
+                };
+                let density = match effect.evaluate_parameter(&density_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(crate::PhotoFilterError::Density.to_string()));
+                    }
+                    None => crate::PHOTO_FILTER_DEFAULT_DENSITY,
+                };
+                let preserve_luminosity = match effect
+                    .evaluate_parameter(&preserve_id, context.time)
+                {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(
+                            "photo filter preserve luminosity switch must be a boolean".to_owned(),
+                        ));
+                    }
+                    None => false,
+                };
+                let grade = crate::PhotoFilterGrade::new(color, density, preserve_luminosity)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // The default parameters are *not* the identity — warming 85 at
+                // 25% tints the frame — but a zero density and a white gel at
+                // full density are, and those are elided so pulling the effect
+                // back to nothing leaves no node behind.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::PhotoFilter { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -18415,6 +18576,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::DustScratches => "蒙尘与划痕",
         EffectType::ChangeToColor => "定向改色",
         EffectType::RemoveColorMatting => "移除颜色遮罩",
+        EffectType::PhotoFilter => "照片滤镜",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -19755,6 +19917,7 @@ mod tests {
             EffectType::CellPattern,
             EffectType::Fractal,
             EffectType::RemoveColorMatting,
+            EffectType::PhotoFilter,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -28828,7 +28991,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 106);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 107);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -29356,7 +29519,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 106);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 107);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -32063,8 +32226,9 @@ mod tests {
 
         // Measured against the tree at HEAD c4d26520: the hash tags stopped at
         // 105, the shape tags at 106 and the library held 105 entries, so the
-        // matte removal takes hash 106, shape 107 and the 106th slot.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 106);
+        // matte removal takes hash 106, shape 107 and the 106th slot. The photo
+        // filter that landed later took 107/108, bringing the library to 107.
+        assert_eq!(crate::effect::builtin_effect_types().len(), 107);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -32275,6 +32439,278 @@ mod tests {
             "移除颜色遮罩"
         );
         assert!(effect_definition(&EffectType::RemoveColorMatting).is_some());
+    }
+
+    fn photo_filter_op(graph: &EffectRenderGraph) -> Option<crate::PhotoFilterGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::PhotoFilter { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::PhotoFilter { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_photo_filter(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::PhotoFilter)
+            .expect("the photo filter effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::PhotoFilter.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the photo filter parameter should be assignable");
+        }
+        effect
+    }
+
+    fn photo_filter_effect_nodes(graph: &EffectRenderGraph) -> usize {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect { .. }
+                        | EffectGraphNodeKind::DomainEffect { .. }
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn photo_filter_g1_defaults_are_not_elided_but_zero_density_is() {
+        let effect = author_photo_filter(&[]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default photo filter should compile");
+        assert_eq!(
+            photo_filter_effect_nodes(&graph),
+            1,
+            "the default 25% warming gel is not the identity"
+        );
+        let grade = photo_filter_op(&graph).expect("the default grade reaches the graph");
+        assert_eq!(grade.colour(), crate::PHOTO_FILTER_DEFAULT_COLOR);
+        assert_eq!(grade.density(), crate::PHOTO_FILTER_DEFAULT_DENSITY);
+        assert!(!grade.preserve_luminosity());
+        assert!(!grade.is_identity());
+
+        // Zero density is the exact identity, so the builder must not leave a
+        // node behind: pulling the slider back to zero returns the project to
+        // the unfiltered graph bit for bit.
+        let zero = author_photo_filter(&[("density", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[zero], tt(0), TEST_WORKING_SPACE)
+            .expect("zero density compiles");
+        assert!(photo_filter_op(&graph).is_none());
+        assert_eq!(photo_filter_effect_nodes(&graph), 0);
+    }
+
+    #[test]
+    fn photo_filter_g2_authored_state_and_tags_reach_the_operation() {
+        let effect_type = EffectType::PhotoFilter;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("filter", "滤镜", ParameterUnit::Unitless),
+            ("color", "颜色", ParameterUnit::Unitless),
+            ("density", "密度", ParameterUnit::Percent),
+            ("preserve_luminosity", "保持发光度", ParameterUnit::Unitless),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("照片滤镜")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        let filter = properties
+            .property(&effect_type.property_path("filter"))
+            .expect("the filter preset is defined");
+        assert_eq!(filter.descriptor.schema.enum_options.len(), 21);
+        assert_eq!(filter.descriptor.schema.enum_options[0].key, "warming_85");
+        assert_eq!(filter.descriptor.schema.enum_options[20].key, "custom");
+        assert_eq!(
+            filter.descriptor.schema.enum_options[0].message_id,
+            "mondrian.effect.photo_filter.filter.warming_85"
+        );
+
+        let effect = author_photo_filter(&[
+            ("filter", PropertyValue::Enum("custom".to_owned())),
+            (
+                "color",
+                PropertyValue::Color(mondrian_core::Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }),
+            ),
+            ("density", PropertyValue::Float(40.0)),
+            ("preserve_luminosity", PropertyValue::Bool(true)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("an authored custom gel should compile");
+        assert_eq!(photo_filter_effect_nodes(&graph), 1);
+        let grade = photo_filter_op(&graph).expect("the authored grade reaches the graph");
+        assert_eq!(grade.colour(), [0.2, 0.4, 0.6]);
+        assert_eq!(grade.density(), 40.0);
+        assert!(grade.preserve_luminosity());
+        assert_eq!(grade.gpu_controls().0, [44, 1, 0, 0]);
+        let (_, params, color) = grade.gpu_controls();
+        for (channel, gel) in [0.2_f32, 0.4, 0.6].iter().enumerate() {
+            assert_eq!(params[channel], 1.0 - 0.4 + 0.4 * gel);
+        }
+        assert_eq!(params[3], 0.4);
+        assert_eq!(color, [0.2, 0.4, 0.6, 0.0]);
+        // One fused point op, no scratch frame and no spatial kernel.
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&EffectRenderOp::PhotoFilter { grade }),
+            0
+        );
+        assert!(crate::spatial_pass_for(&EffectRenderOp::PhotoFilter { grade }).is_none());
+
+        // Measured against HEAD e6585a60: the hash tags stopped at 106 and the
+        // shapes at 107, so the photo filter takes hash 107 and shape 108.
+        let op = EffectRenderOp::PhotoFilter { grade };
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            108
+        );
+        let mut actual = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual);
+        let mut expected_hash = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&107u8, &mut expected_hash);
+        std::hash::Hash::hash(&grade.colour().map(f32::to_bits), &mut expected_hash);
+        std::hash::Hash::hash(&grade.density().to_bits(), &mut expected_hash);
+        std::hash::Hash::hash(&grade.preserve_luminosity(), &mut expected_hash);
+        assert_eq!(
+            std::hash::Hasher::finish(&actual),
+            std::hash::Hasher::finish(&expected_hash)
+        );
+    }
+
+    #[test]
+    fn photo_filter_g3_an_unknown_preset_fails_closed() {
+        let effect = author_photo_filter(&[]);
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the photo filter node");
+        overwrite_static_value(
+            &mut document,
+            "photo_filter.filter",
+            serde_json::json!({"Enum": "sepia_"}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the photo filter node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("an undeclared preset cannot author");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("sepia_"),
+            "the rejection names the undeclared preset: {reason}"
+        );
+
+        // The density contract rejects an out-of-range value before the builder.
+        let mut effect = instantiate_effect_node(EffectType::PhotoFilter)
+            .expect("the photo filter effect should instantiate");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::PhotoFilter.property_path("density"),
+                value: PropertyValue::Float(101.0),
+            })
+            .expect_err("101 percent is outside the declared range");
+
+        // A custom gel needs a colour; a non-colour value is an author error.
+        let effect = author_photo_filter(&[("filter", PropertyValue::Enum("custom".to_owned()))]);
+        let mut document = serde_json::to_value(&effect).expect("serialize the custom gel");
+        overwrite_static_value(
+            &mut document,
+            "photo_filter.color",
+            serde_json::json!({"Float": 0.5}),
+        );
+        let tampered: EffectNode = serde_json::from_value(document).expect("reopen the custom gel");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a float colour cannot author a custom gel");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState { .. }
+        ));
+        assert!(
+            format!("{error:?}").contains("photo_filter.color"),
+            "the rejection names the colour property: {error:?}"
+        );
+    }
+
+    #[test]
+    fn photo_filter_g4_authoring_round_trips_and_key_lookup() {
+        assert_eq!(EffectType::PhotoFilter.key(), "builtin.photo_filter");
+        assert_eq!(
+            EffectType::from_key("builtin.photo_filter"),
+            EffectType::PhotoFilter
+        );
+        assert_eq!(EffectType::PhotoFilter.display_name(), "照片滤镜");
+        assert_eq!(EffectType::PhotoFilter.category_path(), vec!["颜色"]);
+        assert_eq!(EffectType::PhotoFilter.property_namespace(), "photo_filter");
+        assert_eq!(
+            EffectType::PhotoFilter.property_path("density"),
+            "effect.photo_filter.density"
+        );
+        assert_eq!(builtin_display_name(&EffectType::PhotoFilter), "照片滤镜");
+        assert!(effect_definition(&EffectType::PhotoFilter).is_some());
+
+        let effect = author_photo_filter(&[
+            ("filter", PropertyValue::Enum("custom".to_owned())),
+            (
+                "color",
+                PropertyValue::Color(mondrian_core::Color { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }),
+            ),
+            ("density", PropertyValue::Float(40.0)),
+            ("preserve_luminosity", PropertyValue::Bool(true)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the photo filter node");
+        let reopened: EffectNode =
+            serde_json::from_value(document).expect("reopen the photo filter node");
+        let authored = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored gel compiles");
+        let restored = build_effect_render_graph(&[reopened], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened gel compiles");
+        assert_eq!(photo_filter_op(&authored), photo_filter_op(&restored));
+
+        // Two presets with the same density produce different persisted hashes,
+        // so a preset switch invalidates a cached render.
+        let red = author_photo_filter(&[("filter", PropertyValue::Enum("red".to_owned()))]);
+        let blue = author_photo_filter(&[("filter", PropertyValue::Enum("blue".to_owned()))]);
+        let red_graph = build_effect_render_graph(&[red], tt(0), TEST_WORKING_SPACE)
+            .expect("the red gel compiles");
+        let blue_graph = build_effect_render_graph(&[blue], tt(0), TEST_WORKING_SPACE)
+            .expect("the blue gel compiles");
+        let mut red_hash = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::PhotoFilter {
+            grade: photo_filter_op(&red_graph).expect("red reaches the graph"),
+        }
+        .hash_signature(&mut red_hash);
+        let mut blue_hash = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::PhotoFilter {
+            grade: photo_filter_op(&blue_graph).expect("blue reaches the graph"),
+        }
+        .hash_signature(&mut blue_hash);
+        assert_ne!(
+            std::hash::Hasher::finish(&red_hash),
+            std::hash::Hasher::finish(&blue_hash),
+            "the preset gel is part of the persisted signature"
+        );
     }
 }
 

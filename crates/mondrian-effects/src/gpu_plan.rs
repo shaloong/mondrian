@@ -180,6 +180,10 @@ pub enum EffectGpuPointOp {
     RemoveColorMatting {
         grade: crate::RemoveColorMattingGrade,
     },
+    /// Photo filter: tints the frame with a photographic gel.
+    PhotoFilter {
+        grade: crate::PhotoFilterGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         grade: crate::GridGrade,
@@ -934,6 +938,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::RemoveColorMatting { grade } => {
             Ok(EffectGpuPointOp::RemoveColorMatting { grade: *grade })
         }
+        EffectRenderOp::PhotoFilter { grade } => {
+            Ok(EffectGpuPointOp::PhotoFilter { grade: *grade })
+        }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1052,6 +1059,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CellPattern { .. } => "cell_pattern",
         EffectRenderOp::Fractal { .. } => "fractal",
         EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
+        EffectRenderOp::PhotoFilter { .. } => "photo_filter",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

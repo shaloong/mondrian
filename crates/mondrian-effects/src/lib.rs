@@ -133,6 +133,7 @@ pub mod motion_tile;
 pub mod noise;
 pub mod offset;
 pub(crate) mod parallel;
+pub mod photo_filter;
 pub mod polar_coordinates;
 pub mod posterize;
 pub mod qualifier;
@@ -441,6 +442,11 @@ pub use noise::{
 };
 pub use offset::{
     offset_frame_f32, OffsetError, OffsetGrade, OFFSET_MAX_BLEND_PERCENT, OFFSET_MAX_SHIFT_PIXELS,
+};
+pub use photo_filter::{
+    photo_filter_frame_f32, PhotoFilterError, PhotoFilterGrade, PhotoFilterPreset,
+    PHOTO_FILTER_DEFAULT_COLOR, PHOTO_FILTER_DEFAULT_DENSITY, PHOTO_FILTER_MAX_DENSITY,
+    PHOTO_FILTER_MIN_DENSITY,
 };
 pub use polar_coordinates::{
     polar_coordinates_frame_f32, PolarConversion, PolarCoordinatesGrade, PolarInterpolation,

@@ -333,6 +333,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "色调" => Some("parameter-group-tint"),
         "色调分离" => Some("parameter-group-posterize"),
         "色阶" => Some("parameter-group-levels"),
+        "照片滤镜" => Some("parameter-group-photo-filter"),
         "转换通道" => Some("parameter-group-shift-channels"),
         "输出" => Some("parameter-group-output"),
         "边角定位" => Some("parameter-group-corner-pin"),

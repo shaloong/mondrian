@@ -156,6 +156,8 @@ pub enum EffectType {
     /// Remove color matting: recovers a straight-alpha sample from the matte
     /// background it was composited over.
     RemoveColorMatting,
+    /// Photo filter: tints the frame with a photographic gel.
+    PhotoFilter,
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid,
     /// Circle and ellipse: paints a pixel-local soft-edged circle. The ellipse
@@ -286,6 +288,7 @@ impl EffectType {
             Self::CellPattern => "builtin.cell_pattern".to_string(),
             Self::Fractal => "builtin.fractal".to_string(),
             Self::RemoveColorMatting => "builtin.remove_color_matting".to_string(),
+            Self::PhotoFilter => "builtin.photo_filter".to_string(),
             Self::Grid => "builtin.grid".to_string(),
             Self::CircleEllipse => "builtin.circle_ellipse".to_string(),
             Self::Stroke => "builtin.stroke".to_string(),
@@ -398,6 +401,7 @@ impl EffectType {
             "builtin.cell_pattern" => Self::CellPattern,
             "builtin.fractal" => Self::Fractal,
             "builtin.remove_color_matting" => Self::RemoveColorMatting,
+            "builtin.photo_filter" => Self::PhotoFilter,
             "builtin.grid" => Self::Grid,
             "builtin.circle_ellipse" => Self::CircleEllipse,
             "builtin.stroke" => Self::Stroke,
@@ -510,6 +514,7 @@ impl EffectType {
             Self::CellPattern => "单元格图案",
             Self::Fractal => "分形",
             Self::RemoveColorMatting => "移除颜色遮罩",
+            Self::PhotoFilter => "照片滤镜",
             Self::Grid => "网格",
             Self::CircleEllipse => "圆形与椭圆",
             Self::Stroke => "描边",
@@ -620,6 +625,7 @@ impl EffectType {
             Self::CellPattern => vec!["生成器"],
             Self::Fractal => vec!["生成器"],
             Self::RemoveColorMatting => vec!["通道"],
+            Self::PhotoFilter => vec!["颜色"],
             Self::Grid => vec!["生成器"],
             Self::CircleEllipse => vec!["生成器"],
             Self::Stroke => vec!["生成器"],
@@ -732,6 +738,7 @@ impl EffectType {
             Self::CellPattern => "cell_pattern".to_string(),
             Self::Fractal => "fractal".to_string(),
             Self::RemoveColorMatting => "remove_color_matting".to_string(),
+            Self::PhotoFilter => "photo_filter".to_string(),
             Self::Grid => "grid".to_string(),
             Self::CircleEllipse => "circle_ellipse".to_string(),
             Self::Stroke => "stroke".to_string(),
@@ -1093,6 +1100,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::CellPattern => Ok(()),
             Self::Fractal => Ok(()),
             Self::RemoveColorMatting => Ok(()),
+            Self::PhotoFilter => Ok(()),
             Self::Grid => Ok(()),
             Self::CircleEllipse => Ok(()),
             Self::Stroke => Ok(()),

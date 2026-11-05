@@ -410,6 +410,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::PhotoFilter { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "photo_filter",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Grid { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "grid",
@@ -1128,6 +1134,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::CellPattern { .. } => 0,
         EffectRenderOp::Fractal { .. } => 0,
         EffectRenderOp::RemoveColorMatting { .. } => 0,
+        EffectRenderOp::PhotoFilter { .. } => 0,
         EffectRenderOp::Grid { .. } => 0,
         EffectRenderOp::CircleEllipse { .. } => 0,
         EffectRenderOp::Fill { .. } => 0,
@@ -1619,6 +1626,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             crate::remove_color_matting::apply_remove_color_matting_f32_controlled(
                 working, grade, checkpoint,
             )?;
+            Ok(true)
+        }
+        EffectRenderOp::PhotoFilter { grade } => {
+            crate::photo_filter::apply_photo_filter_f32_controlled(working, grade, checkpoint)?;
             Ok(true)
         }
         EffectRenderOp::Choker { grade } => {
