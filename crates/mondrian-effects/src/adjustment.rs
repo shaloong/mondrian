@@ -422,6 +422,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Colorama { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "colorama",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Grid { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "grid",
@@ -1142,6 +1148,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::RemoveColorMatting { .. } => 0,
         EffectRenderOp::PhotoFilter { .. } => 0,
         EffectRenderOp::JpegDamage { .. } => 0,
+        EffectRenderOp::Colorama { .. } => 0,
         EffectRenderOp::Grid { .. } => 0,
         EffectRenderOp::CircleEllipse { .. } => 0,
         EffectRenderOp::Fill { .. } => 0,
@@ -1649,6 +1656,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 grade,
                 checkpoint,
             )?;
+            Ok(true)
+        }
+        EffectRenderOp::Colorama { grade } => {
+            crate::colorama::apply_colorama_f32_controlled(working, grade, checkpoint)?;
             Ok(true)
         }
         EffectRenderOp::Choker { grade } => {

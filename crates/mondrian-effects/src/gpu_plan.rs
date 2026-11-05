@@ -188,6 +188,10 @@ pub enum EffectGpuPointOp {
     JpegDamage {
         grade: crate::JpegDamageGrade,
     },
+    /// Colour map: maps a phase derived from the pixel onto a cyclic palette.
+    Colorama {
+        grade: crate::ColoramaGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         grade: crate::GridGrade,
@@ -946,6 +950,7 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::PhotoFilter { grade: *grade })
         }
         EffectRenderOp::JpegDamage { grade } => Ok(EffectGpuPointOp::JpegDamage { grade: *grade }),
+        EffectRenderOp::Colorama { grade } => Ok(EffectGpuPointOp::Colorama { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1066,6 +1071,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
         EffectRenderOp::PhotoFilter { .. } => "photo_filter",
         EffectRenderOp::JpegDamage { .. } => "jpeg_damage",
+        EffectRenderOp::Colorama { .. } => "colorama",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

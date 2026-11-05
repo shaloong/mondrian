@@ -1240,6 +1240,11 @@ pub enum EffectRenderOp {
         /// Authored quality, grid, residual scale and scaling component.
         grade: crate::JpegDamageGrade,
     },
+    /// Colour map: maps a phase derived from the pixel onto a cyclic palette.
+    Colorama {
+        /// Authored phase, palette, write-back, match and matte controls.
+        grade: crate::ColoramaGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1585,6 +1590,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::JpegDamage { grade } => {
                 formatter.debug_struct("JpegDamage").field("grade", grade).finish()
+            }
+            Self::Colorama { grade } => {
+                formatter.debug_struct("Colorama").field("grade", grade).finish()
             }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
@@ -2602,6 +2610,30 @@ impl EffectRenderOp {
                 grade.frequency_scale().to_bits().hash(state);
                 grade.scaling_component().index().hash(state);
             }
+            EffectRenderOp::Colorama { grade } => {
+                109u8.hash(state);
+                // All nineteen authored controls reach the kernel; none is a
+                // pure function of another, so the cache sees every one.
+                grade.get_phase_from().index().hash(state);
+                grade.add_phase().to_bits().hash(state);
+                grade.add_phase_from().index().hash(state);
+                grade.add_mode().index().hash(state);
+                grade.phase_shift().to_bits().hash(state);
+                grade.preset_palette().index().hash(state);
+                grade.cycle_repetitions().to_bits().hash(state);
+                grade.interpolate().hash(state);
+                grade.modify().index().hash(state);
+                grade.modify_alpha().to_bits().hash(state);
+                grade.change_empty_pixels().to_bits().hash(state);
+                grade.matching_color().map(f32::to_bits).hash(state);
+                grade.matching_tolerance().to_bits().hash(state);
+                grade.matching_softness().to_bits().hash(state);
+                grade.matching_mode().index().hash(state);
+                grade.mask_layer().to_bits().hash(state);
+                grade.mask_mode().index().hash(state);
+                grade.composite_on_layer().to_bits().hash(state);
+                grade.blend_with_original().to_bits().hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2771,6 +2803,7 @@ impl EffectRenderOp {
             EffectRenderOp::RemoveColorMatting { .. } => 1,
             EffectRenderOp::PhotoFilter { .. } => 1,
             EffectRenderOp::JpegDamage { .. } => 1,
+            EffectRenderOp::Colorama { .. } => 2,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3297,7 +3330,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 108] {
+fn builtin_effect_types() -> [EffectType; 109] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3407,6 +3440,7 @@ fn builtin_effect_types() -> [EffectType; 108] {
         EffectType::RemoveColorMatting,
         EffectType::PhotoFilter,
         EffectType::JpegDamage,
+        EffectType::Colorama,
     ]
 }
 
@@ -11378,6 +11412,288 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Colorama => {
+            // The default is hue_cycle at one repetition, which is the
+            // documented colour map immediately after the effect is added.
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "get_phase_from",
+                "输入相位",
+                "来源",
+                crate::COLORAMA_DEFAULT_PHASE_SOURCE.as_key(),
+                crate::ColoramaPhaseSource::ALL
+                    .iter()
+                    .map(|source| {
+                        let key = source.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            source.label(),
+                            format!("mondrian.effect.colorama.get_phase_from.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "add_phase",
+                "输入相位",
+                "添加相位",
+                PropertyValue::Float(0.0),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "add_phase_from",
+                "输入相位",
+                "添加来源",
+                crate::COLORAMA_DEFAULT_PHASE_SOURCE.as_key(),
+                crate::ColoramaPhaseSource::ALL
+                    .iter()
+                    .map(|source| {
+                        let key = source.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            source.label(),
+                            format!("mondrian.effect.colorama.add_phase_from.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "add_mode",
+                "输入相位",
+                "添加模式",
+                crate::ColoramaAddMode::Wrap.as_key(),
+                crate::ColoramaAddMode::ALL
+                    .iter()
+                    .map(|mode| {
+                        let key = mode.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            mode.label(),
+                            format!("mondrian.effect.colorama.add_mode.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "phase_shift",
+                "输入相位",
+                "相位偏移",
+                PropertyValue::Float(crate::COLORAMA_DEFAULT_PHASE_SHIFT),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "preset_palette",
+                "输出循环",
+                "预设调色板",
+                crate::COLORAMA_DEFAULT_PALETTE.as_key(),
+                crate::ColoramaPalette::ALL
+                    .iter()
+                    .map(|palette| {
+                        let key = palette.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            palette.label(),
+                            format!("mondrian.effect.colorama.preset_palette.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cycle_repetitions",
+                "输出循环",
+                "循环次数",
+                PropertyValue::Float(crate::COLORAMA_DEFAULT_REPETITIONS),
+                Some(0.0),
+                Some(crate::COLORAMA_MAX_REPETITIONS as f64),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "interpolate",
+                "输出循环",
+                "插值",
+                crate::ColoramaInterpolation::On.as_key(),
+                crate::ColoramaInterpolation::ALL
+                    .iter()
+                    .map(|mode| {
+                        let key = mode.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            mode.label(),
+                            format!("mondrian.effect.colorama.interpolate.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "modify",
+                "修改",
+                "修改",
+                crate::COLORAMA_DEFAULT_MODIFY.as_key(),
+                crate::ColoramaModify::ALL
+                    .iter()
+                    .map(|mode| {
+                        let key = mode.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            mode.label(),
+                            format!("mondrian.effect.colorama.modify.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "modify_alpha",
+                "修改",
+                "修改 Alpha",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "change_empty_pixels",
+                "修改",
+                "改变空像素",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "matching_color",
+                "像素选择",
+                "匹配颜色",
+                PropertyValue::Color(Color {
+                    r: crate::COLORAMA_DEFAULT_MATCH_COLOR[0],
+                    g: crate::COLORAMA_DEFAULT_MATCH_COLOR[1],
+                    b: crate::COLORAMA_DEFAULT_MATCH_COLOR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "matching_tolerance",
+                "像素选择",
+                "匹配容差",
+                PropertyValue::Float(crate::COLORAMA_DEFAULT_TOLERANCE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "matching_softness",
+                "像素选择",
+                "匹配柔化",
+                PropertyValue::Float(crate::COLORAMA_DEFAULT_SOFTNESS),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "matching_mode",
+                "像素选择",
+                "匹配模式",
+                crate::ColoramaMatchMode::Off.as_key(),
+                crate::ColoramaMatchMode::ALL
+                    .iter()
+                    .map(|mode| {
+                        let key = mode.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            mode.label(),
+                            format!("mondrian.effect.colorama.matching_mode.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mask_layer",
+                "遮罩",
+                "蒙版图层",
+                PropertyValue::Float(crate::COLORAMA_DEFAULT_MASK_LAYER),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "mask_mode",
+                "遮罩",
+                "蒙版模式",
+                crate::ColoramaMaskMode::Off.as_key(),
+                crate::ColoramaMaskMode::ALL
+                    .iter()
+                    .map(|mode| {
+                        let key = mode.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            mode.label(),
+                            format!("mondrian.effect.colorama.mask_mode.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "composite_on_layer",
+                "修改",
+                "合成到图层",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "修改",
+                "与原图混合",
+                PropertyValue::Float(crate::COLORAMA_DEFAULT_BLEND),
+                Some(0.0),
+                Some(crate::COLORAMA_MAX_BLEND as f64),
+                Some(0.1),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -11807,6 +12123,16 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::VrProject2D, "feather") => ParameterUnit::Percent,
         (EffectType::VrProject2D, _) => ParameterUnit::Unitless,
         (EffectType::PhotoFilter, "density") => ParameterUnit::Percent,
+        (EffectType::Colorama, "phase_shift") => ParameterUnit::Degrees,
+        (EffectType::Colorama, "blend_with_original") => ParameterUnit::Percent,
+        (
+            EffectType::Colorama,
+            "modify_alpha"
+            | "change_empty_pixels"
+            | "matching_tolerance"
+            | "matching_softness"
+            | "composite_on_layer",
+        ) => ParameterUnit::Normalized,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -12085,6 +12411,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // One sample in, one sample out; the position is read-only geometry,
             // so the pixel-local ROI default is exact.
+            ..cpu_linear
+        },
+        EffectType::Colorama => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // One sample in, one sample out: the phase, palette, match and matte
+            // all read the current sample only, so the ROI stays pixel-local.
             ..cpu_linear
         },
         EffectType::Choker => EffectExecutionContract {
@@ -18628,6 +18960,209 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Colorama => {
+            let get_phase_from_id = builtin_parameter_id(effect_type, "get_phase_from");
+            let add_phase_id = builtin_parameter_id(effect_type, "add_phase");
+            let add_phase_from_id = builtin_parameter_id(effect_type, "add_phase_from");
+            let add_mode_id = builtin_parameter_id(effect_type, "add_mode");
+            let phase_shift_id = builtin_parameter_id(effect_type, "phase_shift");
+            let preset_palette_id = builtin_parameter_id(effect_type, "preset_palette");
+            let cycle_repetitions_id = builtin_parameter_id(effect_type, "cycle_repetitions");
+            let interpolate_id = builtin_parameter_id(effect_type, "interpolate");
+            let modify_id = builtin_parameter_id(effect_type, "modify");
+            let modify_alpha_id = builtin_parameter_id(effect_type, "modify_alpha");
+            let change_empty_pixels_id = builtin_parameter_id(effect_type, "change_empty_pixels");
+            let matching_color_id = builtin_parameter_id(effect_type, "matching_color");
+            let matching_tolerance_id = builtin_parameter_id(effect_type, "matching_tolerance");
+            let matching_softness_id = builtin_parameter_id(effect_type, "matching_softness");
+            let matching_mode_id = builtin_parameter_id(effect_type, "matching_mode");
+            let mask_layer_id = builtin_parameter_id(effect_type, "mask_layer");
+            let mask_mode_id = builtin_parameter_id(effect_type, "mask_mode");
+            let composite_on_layer_id = builtin_parameter_id(effect_type, "composite_on_layer");
+            let blend_with_original_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let number = |id: &ParameterId,
+                              name: &str,
+                              fallback: f32|
+                 -> Result<f32, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("colorama {name} must be a number"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let option = |id: &ParameterId,
+                              name: &str,
+                              fallback: &str|
+                 -> Result<String, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Enum(key)) => Ok(key),
+                        Some(_) => Err(invalid(format!("colorama {name} must be an enumeration"))),
+                        None => Ok(fallback.to_owned()),
+                    }
+                };
+                let get_phase_from_key = option(
+                    &get_phase_from_id,
+                    "get phase from",
+                    crate::COLORAMA_DEFAULT_PHASE_SOURCE.as_key(),
+                )?;
+                let get_phase_from = crate::ColoramaPhaseSource::from_key(&get_phase_from_key)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "colorama get phase from {get_phase_from_key} is not a declared option"
+                        ))
+                    })?;
+                let add_phase_from_key = option(
+                    &add_phase_from_id,
+                    "add phase from",
+                    crate::COLORAMA_DEFAULT_PHASE_SOURCE.as_key(),
+                )?;
+                let add_phase_from = crate::ColoramaPhaseSource::from_key(&add_phase_from_key)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "colorama add phase from {add_phase_from_key} is not a declared option"
+                        ))
+                    })?;
+                let add_mode_key = option(
+                    &add_mode_id,
+                    "add mode",
+                    crate::ColoramaAddMode::Wrap.as_key(),
+                )?;
+                let add_mode =
+                    crate::ColoramaAddMode::from_key(&add_mode_key).ok_or_else(|| {
+                        invalid(format!(
+                            "colorama add mode {add_mode_key} is not a declared option"
+                        ))
+                    })?;
+                let preset_key = option(
+                    &preset_palette_id,
+                    "preset palette",
+                    crate::COLORAMA_DEFAULT_PALETTE.as_key(),
+                )?;
+                let preset_palette =
+                    crate::ColoramaPalette::from_key(&preset_key).ok_or_else(|| {
+                        invalid(format!(
+                            "colorama preset palette {preset_key} is not a declared option"
+                        ))
+                    })?;
+                let interpolate_key = option(
+                    &interpolate_id,
+                    "interpolate",
+                    crate::ColoramaInterpolation::On.as_key(),
+                )?;
+                let interpolate = crate::ColoramaInterpolation::from_key(&interpolate_key)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "colorama interpolate {interpolate_key} is not a declared option"
+                        ))
+                    })?;
+                let modify_key = option(
+                    &modify_id,
+                    "modify",
+                    crate::COLORAMA_DEFAULT_MODIFY.as_key(),
+                )?;
+                let modify = crate::ColoramaModify::from_key(&modify_key).ok_or_else(|| {
+                    invalid(format!(
+                        "colorama modify {modify_key} is not a declared option"
+                    ))
+                })?;
+                let matching_mode_key = option(
+                    &matching_mode_id,
+                    "matching mode",
+                    crate::ColoramaMatchMode::Off.as_key(),
+                )?;
+                let matching_mode = crate::ColoramaMatchMode::from_key(&matching_mode_key)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "colorama matching mode {matching_mode_key} is not a declared option"
+                        ))
+                    })?;
+                let mask_mode_key = option(
+                    &mask_mode_id,
+                    "mask mode",
+                    crate::ColoramaMaskMode::Off.as_key(),
+                )?;
+                let mask_mode =
+                    crate::ColoramaMaskMode::from_key(&mask_mode_key).ok_or_else(|| {
+                        invalid(format!(
+                            "colorama mask mode {mask_mode_key} is not a declared option"
+                        ))
+                    })?;
+                let matching_color =
+                    match effect.evaluate_parameter(&matching_color_id, context.time) {
+                        Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                        Some(_) => {
+                            return Err(invalid(
+                                "colorama matching colour must be a colour".to_owned(),
+                            ));
+                        }
+                        None => crate::COLORAMA_DEFAULT_MATCH_COLOR,
+                    };
+                let settings = crate::ColoramaSettings {
+                    get_phase_from,
+                    add_phase: number(&add_phase_id, "add phase", 0.0)?,
+                    add_phase_from,
+                    add_mode,
+                    phase_shift: number(
+                        &phase_shift_id,
+                        "phase shift",
+                        crate::COLORAMA_DEFAULT_PHASE_SHIFT,
+                    )?,
+                    preset_palette,
+                    cycle_repetitions: number(
+                        &cycle_repetitions_id,
+                        "cycle repetitions",
+                        crate::COLORAMA_DEFAULT_REPETITIONS,
+                    )?,
+                    interpolate: interpolate == crate::ColoramaInterpolation::On,
+                    modify,
+                    modify_alpha: number(&modify_alpha_id, "modify alpha", 1.0)?,
+                    change_empty_pixels: number(
+                        &change_empty_pixels_id,
+                        "change empty pixels",
+                        0.0,
+                    )?,
+                    matching_color,
+                    matching_tolerance: number(
+                        &matching_tolerance_id,
+                        "matching tolerance",
+                        crate::COLORAMA_DEFAULT_TOLERANCE,
+                    )?,
+                    matching_softness: number(
+                        &matching_softness_id,
+                        "matching softness",
+                        crate::COLORAMA_DEFAULT_SOFTNESS,
+                    )?,
+                    matching_mode,
+                    mask_layer: number(
+                        &mask_layer_id,
+                        "mask layer",
+                        crate::COLORAMA_DEFAULT_MASK_LAYER,
+                    )?,
+                    mask_mode,
+                    composite_on_layer: number(&composite_on_layer_id, "composite on layer", 1.0)?,
+                    blend_with_original: number(
+                        &blend_with_original_id,
+                        "blend with original",
+                        crate::COLORAMA_DEFAULT_BLEND,
+                    )?,
+                };
+                let grade = crate::ColoramaGrade::new(settings)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // The default is not the identity, so the node is appended
+                // unless every control has been pulled back to a neutral value.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Colorama { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -18742,6 +19277,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::RemoveColorMatting => "移除颜色遮罩",
         EffectType::PhotoFilter => "照片滤镜",
         EffectType::JpegDamage => "JPEG 损坏",
+        EffectType::Colorama => "色光",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -20084,6 +20620,7 @@ mod tests {
             EffectType::RemoveColorMatting,
             EffectType::PhotoFilter,
             EffectType::JpegDamage,
+            EffectType::Colorama,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -29157,7 +29694,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 108);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 109);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -29685,7 +30222,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 108);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 109);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -32395,7 +32932,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 108);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 109);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -33128,6 +33665,302 @@ mod tests {
             std::hash::Hasher::finish(&repeat_hash),
             "an equal grade hashes equally"
         );
+    }
+    fn author_colorama(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Colorama)
+            .expect("the colour map effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Colorama.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the colour map parameter should be assignable");
+        }
+        effect
+    }
+
+    fn colorama_op(graph: &EffectRenderGraph) -> Option<crate::ColoramaGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Colorama { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Colorama { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn colorama_effect_nodes(graph: &EffectRenderGraph) -> usize {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect { .. }
+                        | EffectGraphNodeKind::DomainEffect { .. }
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn colorama_g1_identity_configurations_elide_the_node() {
+        for (parameter, value) in [
+            ("blend_with_original", PropertyValue::Float(100.0)),
+            ("cycle_repetitions", PropertyValue::Float(0.0)),
+        ] {
+            let effect = author_colorama(&[(parameter, value)]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the identity colour map should compile");
+            assert!(
+                colorama_op(&graph).is_none(),
+                "{parameter} must not leave a node behind"
+            );
+            assert_eq!(colorama_effect_nodes(&graph), 0);
+        }
+    }
+
+    #[test]
+    fn colorama_g2_default_properties_and_grade_match_the_design() {
+        let effect_type = EffectType::Colorama;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            (
+                "get_phase_from",
+                "来源",
+                ParameterUnit::Unitless,
+                "输入相位",
+            ),
+            ("add_phase", "添加相位", ParameterUnit::Unitless, "输入相位"),
+            (
+                "add_phase_from",
+                "添加来源",
+                ParameterUnit::Unitless,
+                "输入相位",
+            ),
+            ("add_mode", "添加模式", ParameterUnit::Unitless, "输入相位"),
+            (
+                "phase_shift",
+                "相位偏移",
+                ParameterUnit::Degrees,
+                "输入相位",
+            ),
+            (
+                "preset_palette",
+                "预设调色板",
+                ParameterUnit::Unitless,
+                "输出循环",
+            ),
+            (
+                "cycle_repetitions",
+                "循环次数",
+                ParameterUnit::Unitless,
+                "输出循环",
+            ),
+            ("interpolate", "插值", ParameterUnit::Unitless, "输出循环"),
+            ("modify", "修改", ParameterUnit::Unitless, "修改"),
+            (
+                "modify_alpha",
+                "修改 Alpha",
+                ParameterUnit::Normalized,
+                "修改",
+            ),
+            (
+                "change_empty_pixels",
+                "改变空像素",
+                ParameterUnit::Normalized,
+                "修改",
+            ),
+            (
+                "matching_color",
+                "匹配颜色",
+                ParameterUnit::Unitless,
+                "像素选择",
+            ),
+            (
+                "matching_tolerance",
+                "匹配容差",
+                ParameterUnit::Normalized,
+                "像素选择",
+            ),
+            (
+                "matching_softness",
+                "匹配柔化",
+                ParameterUnit::Normalized,
+                "像素选择",
+            ),
+            (
+                "matching_mode",
+                "匹配模式",
+                ParameterUnit::Unitless,
+                "像素选择",
+            ),
+            ("mask_layer", "蒙版图层", ParameterUnit::Unitless, "遮罩"),
+            ("mask_mode", "蒙版模式", ParameterUnit::Unitless, "遮罩"),
+            (
+                "composite_on_layer",
+                "合成到图层",
+                ParameterUnit::Normalized,
+                "修改",
+            ),
+            (
+                "blend_with_original",
+                "与原图混合",
+                ParameterUnit::Percent,
+                "修改",
+            ),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit, group)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some(*group)
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        let palette = properties
+            .property(&effect_type.property_path("preset_palette"))
+            .expect("the palette is defined");
+        assert_eq!(palette.descriptor.schema.enum_options.len(), 35);
+        assert_eq!(palette.descriptor.schema.enum_options[0].key, "hue_cycle");
+        assert_eq!(palette.descriptor.schema.enum_options[34].key, "none");
+        assert_eq!(
+            palette.descriptor.schema.enum_options[0].message_id,
+            "mondrian.effect.colorama.preset_palette.hue_cycle"
+        );
+        let phase = properties
+            .property(&effect_type.property_path("get_phase_from"))
+            .expect("the phase source is defined");
+        assert_eq!(phase.descriptor.schema.enum_options.len(), 10);
+        let modify = properties
+            .property(&effect_type.property_path("modify"))
+            .expect("the modify target is defined");
+        assert_eq!(modify.descriptor.schema.enum_options.len(), 14);
+
+        let effect = author_colorama(&[]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default colour map should compile");
+        assert_eq!(colorama_effect_nodes(&graph), 1);
+        let grade = colorama_op(&graph).expect("the default grade reaches the graph");
+        assert_eq!(
+            grade,
+            crate::ColoramaGrade::new(crate::ColoramaSettings::default())
+                .expect("the defaults are finite")
+        );
+        assert_eq!(
+            grade.get_phase_from(),
+            crate::ColoramaPhaseSource::Intensity
+        );
+        assert_eq!(grade.add_phase(), 0.0);
+        assert_eq!(
+            grade.add_phase_from(),
+            crate::ColoramaPhaseSource::Intensity
+        );
+        assert_eq!(grade.add_mode(), crate::ColoramaAddMode::Wrap);
+        assert_eq!(grade.phase_shift(), 0.0);
+        assert_eq!(grade.preset_palette(), crate::ColoramaPalette::HUE_CYCLE);
+        assert_eq!(grade.cycle_repetitions(), 1.0);
+        assert!(grade.interpolate());
+        assert_eq!(grade.modify(), crate::ColoramaModify::All);
+        assert_eq!(grade.modify_alpha(), 1.0);
+        assert_eq!(grade.change_empty_pixels(), 0.0);
+        assert_eq!(grade.matching_color(), [1.0, 0.0, 0.0]);
+        assert_eq!(grade.matching_tolerance(), 0.5);
+        assert_eq!(grade.matching_softness(), 0.0);
+        assert_eq!(grade.matching_mode(), crate::ColoramaMatchMode::Off);
+        assert_eq!(grade.mask_layer(), 0.0);
+        assert_eq!(grade.mask_mode(), crate::ColoramaMaskMode::Off);
+        assert_eq!(grade.composite_on_layer(), 1.0);
+        assert_eq!(grade.blend_with_original(), 0.0);
+    }
+
+    #[test]
+    fn colorama_g3_hash_and_shape_separate_grades() {
+        let base = crate::ColoramaGrade::new(crate::ColoramaSettings::default())
+            .expect("the defaults are finite");
+        let masked_settings = crate::ColoramaSettings {
+            mask_layer: 1.0,
+            ..crate::ColoramaSettings::default()
+        };
+        let masked = crate::ColoramaGrade::new(masked_settings).expect("the grade is finite");
+        let base_op = EffectRenderOp::Colorama { grade: base };
+        let masked_op = EffectRenderOp::Colorama { grade: masked };
+        let mut base_hash = std::collections::hash_map::DefaultHasher::new();
+        base_op.hash_signature(&mut base_hash);
+        let mut masked_hash = std::collections::hash_map::DefaultHasher::new();
+        masked_op.hash_signature(&mut masked_hash);
+        assert_ne!(
+            std::hash::Hasher::finish(&base_hash),
+            std::hash::Hasher::finish(&masked_hash),
+            "a mask layer that changes the pixels is part of the signature"
+        );
+        let mut repeat_hash = std::collections::hash_map::DefaultHasher::new();
+        base_op.hash_signature(&mut repeat_hash);
+        assert_eq!(
+            std::hash::Hasher::finish(&base_hash),
+            std::hash::Hasher::finish(&repeat_hash),
+            "an equal grade hashes equally"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&base_op),
+            110
+        );
+    }
+
+    #[test]
+    fn colorama_g4_contract_flags_and_effect_type_round_trip() {
+        assert_eq!(EffectType::Colorama.key(), "builtin.colorama");
+        assert_eq!(
+            EffectType::from_key("builtin.colorama"),
+            EffectType::Colorama
+        );
+        assert_eq!(EffectType::Colorama.display_name(), "色光");
+        assert_eq!(EffectType::Colorama.category_path(), vec!["颜色", "调色"]);
+        assert_eq!(EffectType::Colorama.property_namespace(), "colorama");
+        assert_eq!(
+            EffectType::Colorama.property_path("cycle_repetitions"),
+            "effect.colorama.cycle_repetitions"
+        );
+        assert_eq!(builtin_display_name(&EffectType::Colorama), "色光");
+        assert!(effect_definition(&EffectType::Colorama).is_some());
+
+        let contract = builtin_effect_execution_contract(&EffectType::Colorama);
+        assert_eq!(
+            contract.execution_modes,
+            crate::EffectExecutionModes::CPU_F32.union(crate::EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal
+        );
+
+        let grade = crate::ColoramaGrade::new(crate::ColoramaSettings::default())
+            .expect("the defaults are finite");
+        let op = EffectRenderOp::Colorama { grade };
+        assert_eq!(op.estimated_cost(), 2);
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(&op), 0);
+        assert!(crate::spatial_pass_for(&op).is_none());
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            110
+        );
+
+        let controls = grade.gpu_controls();
+        assert_eq!(controls.header[0], crate::COLORAMA_KIND);
+        assert_eq!(controls.header[1], 0);
+        // composite on, alpha write on, change-empty off, interpolation on,
+        // matte off: bits 24, 25 and 27 are set.
+        assert_eq!(controls.header[2], 0x0B00_0000);
     }
 }
 

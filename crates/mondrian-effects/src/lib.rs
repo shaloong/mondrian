@@ -118,6 +118,7 @@ pub mod bevel;
 pub mod bezier_warp;
 pub mod broadcast_safe;
 pub mod brush_strokes;
+pub mod colorama;
 pub mod jpeg_damage;
 pub mod kaleidoscope;
 pub mod leave_color;
@@ -243,6 +244,17 @@ pub use circle_ellipse::{
 pub use color_offset::{
     color_offset_frame_f32, ColorOffsetError, ColorOffsetGrade, ColorOffsetOverflow,
     COLOR_OFFSET_MAX_PHASE_PIXELS, COLOR_OFFSET_OVERFLOW_COUNT,
+};
+pub use colorama::{
+    colorama_frame_f32, ColoramaAddMode, ColoramaError, ColoramaGpuControls, ColoramaGrade,
+    ColoramaInterpolation, ColoramaMaskMode, ColoramaMatchMode, ColoramaModify, ColoramaPalette,
+    ColoramaPhaseSource, ColoramaSettings, COLORAMA_ADD_MODE_COUNT, COLORAMA_DEFAULT_BLEND,
+    COLORAMA_DEFAULT_MASK_LAYER, COLORAMA_DEFAULT_MATCH_COLOR, COLORAMA_DEFAULT_MODIFY,
+    COLORAMA_DEFAULT_PALETTE, COLORAMA_DEFAULT_PHASE_SHIFT, COLORAMA_DEFAULT_PHASE_SOURCE,
+    COLORAMA_DEFAULT_REPETITIONS, COLORAMA_DEFAULT_SOFTNESS, COLORAMA_DEFAULT_TOLERANCE,
+    COLORAMA_INTERPOLATION_COUNT, COLORAMA_KIND, COLORAMA_MASK_MODE_COUNT,
+    COLORAMA_MATCH_MODE_COUNT, COLORAMA_MAX_BLEND, COLORAMA_MAX_REPETITIONS, COLORAMA_MODIFY_COUNT,
+    COLORAMA_PALETTE_COUNT, COLORAMA_PHASE_SOURCE_COUNT, COLORAMA_STOP_COUNT,
 };
 pub use convolution::{
     convolution_frame_f32, ConvolutionError, ConvolutionGrade, CONVOLUTION_HALO_PIXELS,
