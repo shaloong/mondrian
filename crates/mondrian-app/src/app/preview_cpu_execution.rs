@@ -130,6 +130,9 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
                 | EffectExecutionError::ProcessorUserBlocked { .. }
                 | EffectExecutionError::ImageScaleNotAdmitted { .. }
                 | EffectExecutionError::InputUnavailable { .. }
+                | EffectExecutionError::AuxiliaryFrameMissing { .. }
+                | EffectExecutionError::InvalidAuxiliaryFrame { .. }
+                | EffectExecutionError::AuxiliaryRequiresFloat32
         ),
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::UnsupportedNode { reason, .. },
@@ -139,6 +142,9 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
         ),
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::ExecutionContract(_),
+        } => true,
+        TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::AuxiliaryInput(_),
         } => true,
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::CustomProcessor(error),
@@ -650,6 +656,34 @@ fn duration_us(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
+
+    #[test]
+    fn auxiliary_input_refusals_are_blocked_without_processor_feedback() {
+        for error in [
+            EffectExecutionError::AuxiliaryFrameMissing { slot: 2 },
+            EffectExecutionError::InvalidAuxiliaryFrame { slot: 2, reason: "format_mismatch" },
+        ] {
+            for error in [
+                TimelineCompositeError::EncodedEffect(error.clone()),
+                TimelineCompositeError::FloatEffect {
+                    reason: EffectFloatExecutionError::AuxiliaryInput(error.clone()),
+                },
+            ] {
+                let error = PreviewCpuExecutionError::TimelineComposite(error);
+                assert!(error.processor_blocked().is_none());
+                let unavailable = error.unavailability();
+                assert_eq!(
+                    unavailable.disposition(),
+                    PreviewUnavailabilityDisposition::Blocked
+                );
+                assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+                assert_eq!(unavailable.code(), "preview.blocked.timeline_composite");
+            }
+        }
+        assert!(timeline_composite_is_blocked(
+            &TimelineCompositeError::EncodedEffect(EffectExecutionError::AuxiliaryRequiresFloat32,)
+        ));
+    }
 
     #[test]
     fn unit_scale_admission_is_a_blocked_capability_in_both_error_paths() {

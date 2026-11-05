@@ -23,11 +23,11 @@ pub const FILL_DEFAULT_COLOR: [f32; 3] = [1.0, 0.0, 0.0];
 pub const FILL_DEFAULT_OPACITY: f32 = 1.0;
 /// Largest accepted opacity.
 pub const FILL_MAX_OPACITY: f32 = 1.0;
-/// The dump default for the lazy mask index.
+/// The dump default for the graph-owned mask index (zero means unmasked).
 pub const FILL_DEFAULT_FILL_MASK: f32 = 0.0;
-/// The dump default for the lazy "all masks" factor.
+/// The dump default for the numeric "all masks" toggle.
 pub const FILL_DEFAULT_ALL_MASKS: f32 = 0.0;
-/// Largest accepted value of the lazy "all masks" factor.
+/// Largest accepted value of the numeric "all masks" toggle.
 pub const FILL_MAX_ALL_MASKS: f32 = 1.0;
 
 /// Opacities at or below this paint nothing at all.
@@ -98,10 +98,10 @@ pub struct FillGrade {
 impl FillGrade {
     /// Validates and builds a grade.
     ///
-    /// The lazy `fill_mask` / `all_masks` parameters are deliberately absent:
-    /// the engine has no mask contract yet, so they are authoring hints the
-    /// graph builder reads and drops. They never reach this constructor, the
-    /// uniform, or the effect cache key.
+    /// Mask selection belongs to the effect graph: `fill_mask` / `all_masks`
+    /// choose auxiliary MaskSource values while this grade describes paint.
+    /// Their geometry and selection participate in graph/cache identities;
+    /// they do not change the grade's uniform layout.
     ///
     /// # Errors
     ///

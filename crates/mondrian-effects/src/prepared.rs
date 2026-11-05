@@ -32,6 +32,10 @@ const MAX_DEFINITION_BIND_RETRIES: usize = 32;
 #[path = "prepared_input_tests.rs"]
 mod input_tests;
 
+#[cfg(test)]
+#[path = "prepared_fill_tests.rs"]
+mod fill_tests;
+
 #[derive(Clone)]
 struct PreparedEffectInstance {
     effect: EffectNode,
@@ -45,6 +49,7 @@ pub struct PreparedEffectStack {
     instances: Arc<[PreparedEffectInstance]>,
     working_color_space: WorkingColorSpace,
     frame_context: Option<EffectFrameContext>,
+    masks: Arc<[MaskComponent]>,
     execution_envelope: EffectExecutionEnvelope,
     dependencies: Arc<[EffectResourceDependency]>,
     definition_registry_revision: u64,
@@ -93,7 +98,29 @@ impl PreparedEffectStack {
         working_color_space: WorkingColorSpace,
         lut_cache: &LutPreparationCache,
     ) -> Result<Self, EffectGraphBuildError> {
-        Self::prepare_with_optional_frame_context(effects, working_color_space, None, lut_cache)
+        Self::prepare_with_optional_frame_context(
+            effects,
+            working_color_space,
+            None,
+            lut_cache,
+            &[],
+        )
+    }
+
+    /// Prepare a stack whose effects may explicitly sample authored clip masks.
+    /// This does not apply the clip's final mask mix to the stack output.
+    pub fn prepare_with_masks(
+        effects: &[EffectNode],
+        masks: &[MaskComponent],
+        working_color_space: WorkingColorSpace,
+    ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_with_optional_frame_context(
+            effects,
+            working_color_space,
+            None,
+            &LutPreparationCache::uncached(),
+            masks,
+        )
     }
 
     fn prepare_with_optional_frame_context(
@@ -101,10 +128,17 @@ impl PreparedEffectStack {
         working_color_space: WorkingColorSpace,
         frame_context: Option<EffectFrameContext>,
         lut_cache: &LutPreparationCache,
+        masks: &[MaskComponent],
     ) -> Result<Self, EffectGraphBuildError> {
         let mut concurrent_change = None;
         for _ in 0..MAX_DEFINITION_BIND_RETRIES {
-            match Self::prepare_once(effects, working_color_space, frame_context, lut_cache) {
+            match Self::prepare_once(
+                effects,
+                working_color_space,
+                frame_context,
+                lut_cache,
+                masks,
+            ) {
                 Err(error @ EffectGraphBuildError::DefinitionRegistryChanged { .. }) => {
                     concurrent_change = Some(error);
                 }
@@ -122,6 +156,7 @@ impl PreparedEffectStack {
         working_color_space: WorkingColorSpace,
         frame_context: Option<EffectFrameContext>,
         lut_cache: &LutPreparationCache,
+        masks: &[MaskComponent],
     ) -> Result<Self, EffectGraphBuildError> {
         let definition_registry_revision = effect_registry_revision();
         let mut instances = Vec::new();
@@ -159,6 +194,7 @@ impl PreparedEffectStack {
                 &definition,
                 frame_context.map(|context| context.project_geometry()),
             )?;
+            let definition = specialize_masked_fill_definition(effect, definition);
             let contract = definition.execution_contract();
             contract.validate().map_err(|error| {
                 EffectGraphBuildError::InvalidExecutionContract {
@@ -203,11 +239,19 @@ impl PreparedEffectStack {
             });
         }
         let instances: Arc<[PreparedEffectInstance]> = instances.into();
+        // Ordinary stacks retain no duplicate mask payload; only effects that
+        // explicitly sample masks need their original, unfiltered author list.
+        let masks = if instances.iter().any(|instance| fill_may_use_masks(&instance.effect)) {
+            masks
+        } else {
+            &[]
+        };
         let zero_evaluation = evaluate_instances(
             &instances,
             working_color_space,
             frame_context,
             TimelineTime::ZERO,
+            masks,
         )?;
         // Preparation proves both acyclicity and the declared topology at one
         // canonical instant. Every later evaluation repeats the per-instance
@@ -226,6 +270,7 @@ impl PreparedEffectStack {
             instances,
             working_color_space,
             frame_context,
+            masks: masks.to_vec().into(),
             execution_envelope: EffectExecutionEnvelope::new(
                 execution_contract,
                 Arc::<[EffectExecutionContract]>::from(stage_contracts),
@@ -250,6 +295,7 @@ impl PreparedEffectStack {
             self.working_color_space,
             self.frame_context,
             time,
+            &self.masks,
         )?
         .graph)
     }
@@ -269,6 +315,7 @@ impl PreparedEffectStack {
             self.working_color_space,
             self.frame_context,
             time,
+            &self.masks,
         )
     }
 
@@ -325,6 +372,11 @@ impl PreparedEffectStack {
             .map(CompiledEffectStageBinding::heap_bytes_estimate)
             .fold(0_usize, usize::saturating_add);
         std::mem::size_of::<Self>()
+            .saturating_add(self.masks.iter().fold(0usize, |bytes, mask| {
+                bytes
+                    .saturating_add(std::mem::size_of::<MaskComponent>())
+                    .saturating_add(serde_json::to_vec(mask).map_or(1024, |value| value.len()))
+            }))
             .saturating_add(
                 self.instances
                     .len()
@@ -433,13 +485,62 @@ pub(crate) fn validate_effect_schema_in_project(
     Ok(())
 }
 
+fn fill_may_use_masks(effect: &EffectNode) -> bool {
+    if effect.effect_type != crate::EffectType::Fill {
+        return false;
+    }
+    let paths = [
+        effect.effect_type.property_path("fill_mask"),
+        effect.effect_type.property_path("all_masks"),
+    ];
+    effect.properties.iter().any(|(path, property)| {
+        let Some(index) = paths.iter().position(|candidate| candidate == path) else {
+            return false;
+        };
+        (property.is_enabled() && property.is_animated())
+            || match property.static_value() {
+                mondrian_core::automation::PropertyValue::Float(value) => {
+                    if index == 0 {
+                        *value != 0.0
+                    } else {
+                        *value >= 0.5
+                    }
+                }
+                _ => true,
+            }
+    })
+}
+
+fn specialize_masked_fill_definition(
+    effect: &EffectNode,
+    definition: Arc<EffectDefinition>,
+) -> Arc<EffectDefinition> {
+    if !fill_may_use_masks(effect) {
+        return definition;
+    }
+    let contract = EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_F32,
+        topology: EffectGraphTopology::GeneralDag,
+        ..definition.execution_contract()
+    };
+    Arc::new(definition.as_ref().clone().with_execution_contract(contract))
+}
+
 fn evaluate_instances(
     instances: &[PreparedEffectInstance],
     working_color_space: WorkingColorSpace,
     frame_context: Option<EffectFrameContext>,
     time: TimelineTime,
+    masks: &[MaskComponent],
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     let mut builder = EffectGraphBuilderState::new();
+    builder.set_auxiliary_masks(
+        masks
+            .iter()
+            .map(|mask| mask.enabled.then(|| mask.evaluate_at(time)))
+            .collect::<Vec<_>>()
+            .into(),
+    );
     let mut stage_bindings = Vec::with_capacity(instances.len());
     for (stage_index, instance) in instances.iter().enumerate() {
         stage_bindings.push(
@@ -1063,6 +1164,7 @@ impl PreparedEffectProgram {
             working_color_space,
             frame_context,
             lut_cache,
+            masks,
         )?;
         let masks = masks.iter().filter(|mask| mask.enabled).cloned().collect::<Vec<_>>();
         let grade_before: Arc<[PreparedGradeGraph]> = grade_before.to_vec().into();
@@ -1529,6 +1631,7 @@ fn evaluate_input_pipeline(
         program.stack.working_color_space,
         program.stack.frame_context,
         time,
+        &program.stack.masks,
     )?;
     let stack = if matches!(origin, EffectStageOrigin::AfterGrade { .. }) {
         inject_masks(stack, &program.masks, time)

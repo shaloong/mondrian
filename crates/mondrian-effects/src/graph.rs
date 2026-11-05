@@ -1396,6 +1396,7 @@ pub struct EffectGraphBuilderState {
     current_output: EffectGraphNodeId,
     next_id: u32,
     active_domain_contract: EffectColorDomainContract,
+    auxiliary_masks: Arc<[Option<crate::MaskEvaluation>]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1676,11 +1677,20 @@ impl Default for EffectGraphBuilderState {
             current_output,
             next_id: current_output.0 + 1,
             active_domain_contract: EffectColorDomainContract::SCENE_LINEAR,
+            auxiliary_masks: Arc::from([]),
         }
     }
 }
 
 impl EffectGraphBuilderState {
+    pub(crate) fn set_auxiliary_masks(&mut self, masks: Arc<[Option<crate::MaskEvaluation>]>) {
+        self.auxiliary_masks = masks;
+    }
+
+    pub(crate) fn auxiliary_masks(&self) -> &[Option<crate::MaskEvaluation>] {
+        &self.auxiliary_masks
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

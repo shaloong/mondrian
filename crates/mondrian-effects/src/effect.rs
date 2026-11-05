@@ -10597,9 +10597,8 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             );
         }
         EffectType::Fill => {
-            // Lazy parameter: the schema exposes it and the graph builder
-            // reads it, but it never reaches the grade, the uniform or the
-            // cache key.
+            // One-based index into the clip's original authored mask list;
+            // zero keeps the existing unmasked fill path.
             define_builtin_property(
                 &mut properties,
                 &effect_type,
@@ -10611,7 +10610,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
                 None,
             );
-            // Lazy parameter: see `fill_mask`.
+            // Numeric checkbox retained for project compatibility.
             define_builtin_property(
                 &mut properties,
                 &effect_type,
@@ -17891,30 +17890,27 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     effect_id: effect.id,
                     reason,
                 };
-                // Lazy mask parameters (design §1.8): evaluate them so
-                // animations on them stay well-formed, then drop them. They
-                // deliberately do not reach the grade, the uniform or the
-                // effect cache key.
                 let fill_mask = effect.evaluate_f32_parameter(
                     &fill_mask_id,
                     context.time,
                     crate::FILL_DEFAULT_FILL_MASK,
                 );
-                debug_assert!(
-                    fill_mask.is_finite(),
-                    "fill mask index left its authoring range"
-                );
-                let _ = fill_mask;
+                if !fill_mask.is_finite() || fill_mask < 0.0 || fill_mask.fract() != 0.0 {
+                    return Err(invalid(
+                        "fill mask must be a nonnegative integer index".to_owned(),
+                    ));
+                }
                 let all_masks = effect.evaluate_f32_parameter(
                     &all_masks_id,
                     context.time,
                     crate::FILL_DEFAULT_ALL_MASKS,
                 );
-                debug_assert!(
-                    (0.0..=crate::FILL_MAX_ALL_MASKS).contains(&all_masks),
-                    "fill all-masks factor left its authoring range"
-                );
-                let _ = all_masks;
+                if !all_masks.is_finite() || !(0.0..=crate::FILL_MAX_ALL_MASKS).contains(&all_masks)
+                {
+                    return Err(invalid(
+                        "fill all-masks toggle must be within [0, 1]".to_owned(),
+                    ));
+                }
                 let colour = match effect.evaluate_parameter(&colour_id, context.time) {
                     Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
                     Some(_) => {
@@ -17949,7 +17945,46 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     ),
                 )
                 .map_err(|error| invalid(error.to_string()))?;
-                if !grade.is_identity() {
+                if fill_mask > 0.0 || all_masks >= 0.5 {
+                    let selected = if all_masks >= 0.5 {
+                        graph.auxiliary_masks().iter().flatten().cloned().collect::<Vec<_>>()
+                    } else {
+                        graph
+                            .auxiliary_masks()
+                            .get(fill_mask as usize - 1)
+                            .and_then(Option::as_ref)
+                            .cloned()
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                    };
+                    if selected.is_empty() {
+                        return Err(invalid(
+                            "fill mask reference is missing or disabled".to_owned(),
+                        ));
+                    }
+                    let input = graph.current_output();
+                    let mut matte = None;
+                    for mask in selected {
+                        let source = graph.add_mask_source_with_invert(
+                            mask.shape,
+                            mask.feather,
+                            mask.expansion,
+                            mask.opacity,
+                            mask.invert,
+                        );
+                        matte = Some(match matte {
+                            None => source,
+                            Some(left) => graph.add_mask_combine(left, source, mask.mask_op),
+                        });
+                    }
+                    let output = graph.add_auxiliary_effect_with_role(
+                        input,
+                        matte.expect("selected masks are nonempty"),
+                        EffectRenderOp::Fill { grade },
+                        crate::AuxiliaryRole::Matte,
+                    );
+                    graph.set_current_output(output);
+                } else if !grade.is_identity() {
                     graph.append_unary(EffectRenderOp::Fill { grade });
                 }
                 Ok(())
@@ -31355,7 +31390,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_lazy_parameters_are_inert() {
+    fn fill_mask_parameters_require_a_real_source() {
         use std::hash::Hasher as _;
 
         let default_effect = author_fill(&[]);
@@ -31363,24 +31398,22 @@ mod tests {
             .expect("the default fill should compile");
         let default_grade = fill_op(&default_graph).expect("the default parameters emit the fill");
 
-        // The two mask parameters are part of the schema so they show up in the
-        // UI and survive serialization, but they may change neither the uniform
-        // nor the effect cache key.
+        // A selected mask is executable authoring intent, not an inert hint.
         let lazy_effect = author_fill(&[
             ("fill_mask", PropertyValue::Float(7.0)),
             ("all_masks", PropertyValue::Float(1.0)),
         ]);
-        let lazy_graph = build_effect_render_graph(&[lazy_effect], tt(0), TEST_WORKING_SPACE)
-            .expect("the lazy parameters do not change the graph");
-        let lazy_grade = fill_op(&lazy_graph).expect("the fill is still emitted");
-        assert_eq!(lazy_grade.gpu_controls(), default_grade.gpu_controls());
+        assert!(
+            matches!(build_effect_render_graph(&[lazy_effect], tt(0), TEST_WORKING_SPACE),
+            Err(EffectGraphBuildError::InvalidAuthorState { reason, .. })
+                if reason.contains("missing or disabled"))
+        );
 
         let hash_of = |grade: crate::FillGrade| {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             EffectRenderOp::Fill { grade }.hash_signature(&mut hasher);
             hasher.finish()
         };
-        assert_eq!(hash_of(lazy_grade), hash_of(default_grade));
 
         // The same comparator does see a real edit.
         let feathered = author_fill(&[("feather_x", PropertyValue::Float(12.0))]);

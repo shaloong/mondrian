@@ -3017,8 +3017,8 @@ parameter-mondrian-effect-stroke-paint-style-reveal-original = 显示原始图�
 
 effect-fill = 填充
 parameter-group-fill = 填充
-parameter-mondrian-effect-builtin-fill-fill-mask-label = 填充蒙版
-parameter-mondrian-effect-builtin-fill-all-masks-label = 所有蒙版
+parameter-mondrian-effect-builtin-fill-fill-mask-label = 填充蒙版（0 为无）
+parameter-mondrian-effect-builtin-fill-all-masks-label = 使用所有蒙版
 parameter-mondrian-effect-builtin-fill-color-label = 颜色
 parameter-mondrian-effect-builtin-fill-invert-label = 反转
 parameter-mondrian-effect-builtin-fill-feather-x-label = 水平羽化
