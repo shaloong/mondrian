@@ -2041,6 +2041,302 @@ fn change_to_color_weight(colour: vec3<f32>, effect: EffectUniform) -> f32 {
     return 1.0 - t * t * (3.0 - 2.0 * t);
 }
 
+// COL-20 colour map helpers. The five palette stops are packed across the
+// colour and extra cells; `colorama_stop` is the one place that knows the lane
+// layout and mirrors the Rust `ColoramaGpuControls` packing one for one.
+fn colorama_stop(index: u32, effect: EffectUniform) -> vec3<f32> {
+    if (index == 0u) {
+        return vec3<f32>(effect.extra1.x, effect.extra1.y, effect.extra1.z);
+    }
+    if (index == 1u) {
+        return vec3<f32>(effect.extra1.w, effect.extra2.x, effect.extra2.y);
+    }
+    if (index == 2u) {
+        return vec3<f32>(effect.extra2.z, effect.extra2.w, effect.extra3.x);
+    }
+    if (index == 3u) {
+        return vec3<f32>(effect.extra3.y, effect.extra3.z, effect.extra3.w);
+    }
+    return vec3<f32>(effect.color.w, effect.extra0.z, effect.extra0.w);
+}
+
+fn colorama_mix(left: f32, right: f32, weight: f32) -> f32 {
+    return left * (1.0 - weight) + right * weight;
+}
+
+fn colorama_hue(rgb: vec3<f32>) -> f32 {
+    let maximum = max(rgb.x, max(rgb.y, rgb.z));
+    let minimum = min(rgb.x, min(rgb.y, rgb.z));
+    let delta = maximum - minimum;
+    if (delta == 0.0) {
+        return 0.0;
+    }
+    if (maximum == rgb.x) {
+        let sector = (rgb.y - rgb.z) / delta;
+        if (sector < 0.0) {
+            return (sector + 6.0) / 6.0;
+        }
+        return sector / 6.0;
+    }
+    if (maximum == rgb.y) {
+        return ((rgb.z - rgb.x) / delta + 2.0) / 6.0;
+    }
+    return ((rgb.x - rgb.y) / delta + 4.0) / 6.0;
+}
+
+fn colorama_saturation(rgb: vec3<f32>) -> f32 {
+    let maximum = max(rgb.x, max(rgb.y, rgb.z));
+    let minimum = min(rgb.x, min(rgb.y, rgb.z));
+    if (maximum > 0.0) {
+        return 1.0 - minimum / maximum;
+    }
+    return 0.0;
+}
+
+fn colorama_lightness(rgb: vec3<f32>) -> f32 {
+    let maximum = max(rgb.x, max(rgb.y, rgb.z));
+    let minimum = min(rgb.x, min(rgb.y, rgb.z));
+    return (maximum + minimum) * 0.5;
+}
+
+fn colorama_hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> vec3<f32> {
+    if (saturation <= 0.0) {
+        return vec3<f32>(value, value, value);
+    }
+    let h6 = fract(hue) * 6.0;
+    let sector = floor(h6);
+    let f = h6 - sector;
+    let p = value * (1.0 - saturation);
+    let q = value * (1.0 - saturation * f);
+    let t = value * (1.0 - saturation * (1.0 - f));
+    if (sector < 1.0) {
+        return vec3<f32>(value, t, p);
+    }
+    if (sector < 2.0) {
+        return vec3<f32>(q, value, p);
+    }
+    if (sector < 3.0) {
+        return vec3<f32>(p, value, t);
+    }
+    if (sector < 4.0) {
+        return vec3<f32>(p, q, value);
+    }
+    if (sector < 5.0) {
+        return vec3<f32>(t, p, value);
+    }
+    return vec3<f32>(value, p, q);
+}
+
+fn colorama_hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> vec3<f32> {
+    if (saturation <= 0.0) {
+        return vec3<f32>(lightness, lightness, lightness);
+    }
+    let chroma = (1.0 - abs(2.0 * lightness - 1.0)) * saturation;
+    let h6 = fract(hue) * 6.0;
+    let sector = floor(h6);
+    let second = chroma * (1.0 - abs(h6 - 2.0 * floor(h6 * 0.5) - 1.0));
+    var rgb = vec3<f32>(0.0, 0.0, 0.0);
+    if (sector < 1.0) {
+        rgb = vec3<f32>(chroma, second, 0.0);
+    } else if (sector < 2.0) {
+        rgb = vec3<f32>(second, chroma, 0.0);
+    } else if (sector < 3.0) {
+        rgb = vec3<f32>(0.0, chroma, second);
+    } else if (sector < 4.0) {
+        rgb = vec3<f32>(0.0, second, chroma);
+    } else if (sector < 5.0) {
+        rgb = vec3<f32>(second, 0.0, chroma);
+    } else {
+        rgb = vec3<f32>(chroma, 0.0, second);
+    }
+    let base = lightness - chroma * 0.5;
+    return rgb + vec3<f32>(base, base, base);
+}
+
+fn colorama_phase(pixel: vec4<f32>, source: u32) -> f32 {
+    if (source == 0u) {
+        return dot(pixel.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    }
+    if (source == 1u) {
+        return pixel.r;
+    }
+    if (source == 2u) {
+        return pixel.g;
+    }
+    if (source == 3u) {
+        return pixel.b;
+    }
+    if (source == 4u) {
+        return colorama_hue(pixel.rgb);
+    }
+    if (source == 5u) {
+        return colorama_lightness(pixel.rgb);
+    }
+    if (source == 6u) {
+        return colorama_saturation(pixel.rgb);
+    }
+    if (source == 7u) {
+        return max(pixel.r, max(pixel.g, pixel.b));
+    }
+    if (source == 8u) {
+        return clamp(pixel.a, 0.0, 1.0);
+    }
+    return 0.0;
+}
+
+fn colorama_add(first: f32, second: f32, mode: u32) -> f32 {
+    if (mode == 0u) {
+        return fract(first + second);
+    }
+    if (mode == 1u) {
+        return min(first + second, 1.0);
+    }
+    if (mode == 2u) {
+        return 0.5 * (first + second);
+    }
+    return 1.0 - (1.0 - first) * (1.0 - second);
+}
+
+fn colorama_palette(effect: EffectUniform, t: f32) -> vec4<f32> {
+    let x = fract(t) * 5.0;
+    let index = u32(floor(x));
+    let f = x - floor(x);
+    let first = colorama_stop(min(index, 4u), effect);
+    let second = colorama_stop((index + 1u) % 5u, effect);
+    let weight = f * f * (3.0 - 2.0 * f);
+    let hue = fract(first.x + (fract(second.x - first.x + 1.5) - 0.5) * weight);
+    let saturation = colorama_mix(first.y, second.y, weight);
+    let value = colorama_mix(first.z, second.z, weight);
+    let colour = colorama_hsv_to_rgb(hue, saturation, value);
+    let code = (effect.header.z >> 16u) & 0xFFu;
+    var alpha = 1.0;
+    // Only `Alpha Ramp` (menu index 1) carries a per-sample alpha; every other
+    // palette is fully opaque. `None` is index 34 and never reaches here.
+    if (code == 1u) {
+        alpha = t;
+    }
+    return vec4<f32>(colour, alpha);
+}
+
+fn colorama_match(effect: EffectUniform, pixel: vec4<f32>) -> f32 {
+    let mode = effect.header.y >> 24u;
+    if (mode == 0u) {
+        return 1.0;
+    }
+    var distance = 0.0;
+    if (mode == 1u) {
+        let difference = pixel.rgb - effect.color.rgb;
+        distance = min(sqrt(dot(difference, difference)) * 0.5773503, 1.0);
+    } else if (mode == 2u) {
+        let delta = abs(colorama_hue(pixel.rgb) - colorama_hue(effect.color.rgb));
+        distance = 2.0 * min(delta, 1.0 - delta);
+    } else {
+        let delta = abs(colorama_hue(pixel.rgb) - colorama_hue(effect.color.rgb));
+        let hue_distance = 2.0 * min(delta, 1.0 - delta);
+        let saturation_distance =
+            abs(colorama_saturation(pixel.rgb) - colorama_saturation(effect.color.rgb));
+        distance = min(
+            sqrt(hue_distance * hue_distance + saturation_distance * saturation_distance)
+                * 0.70710678,
+            1.0,
+        );
+    }
+    let tolerance = effect.extra0.y;
+    let softness = effect.extra0.x;
+    if (softness <= 0.0) {
+        if (distance <= tolerance) {
+            return 1.0;
+        }
+        return 0.0;
+    }
+    let ramp = clamp((distance - tolerance) / softness, 0.0, 1.0);
+    return 1.0 - ramp * ramp * (3.0 - 2.0 * ramp);
+}
+
+fn colorama_matte(effect: EffectUniform, pixel: vec4<f32>) -> f32 {
+    let mode = (effect.header.z >> 8u) & 0xFFu;
+    var weight = 1.0;
+    if (mode == 1u) {
+        weight = dot(pixel.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    } else if (mode == 2u) {
+        weight = pixel.a;
+    } else if (mode == 3u) {
+        weight = 1.0 - dot(pixel.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    } else if (mode == 4u) {
+        weight = 1.0 - pixel.a;
+    }
+    return clamp(weight, 0.0, 1.0);
+}
+
+fn colorama_modify(pixel: vec4<f32>, palette: vec4<f32>, code: u32) -> vec3<f32> {
+    let source = pixel.rgb;
+    let colour = palette.rgb;
+    if (code == 0u) {
+        return colour;
+    }
+    if (code == 1u) {
+        return vec3<f32>(colour.x, source.y, source.z);
+    }
+    if (code == 2u) {
+        return vec3<f32>(source.x, colour.y, source.z);
+    }
+    if (code == 3u) {
+        return vec3<f32>(source.x, source.y, colour.z);
+    }
+    if (code == 4u) {
+        return vec3<f32>(colour.x, colour.y, source.z);
+    }
+    if (code == 5u) {
+        return vec3<f32>(source.x, colour.y, colour.z);
+    }
+    if (code == 6u) {
+        return vec3<f32>(colour.x, source.y, colour.z);
+    }
+    if (code == 7u) {
+        return source;
+    }
+    if (code == 8u) {
+        return colorama_hsl_to_rgb(
+            colorama_hue(colour),
+            colorama_saturation(source),
+            colorama_lightness(source),
+        );
+    }
+    if (code == 9u) {
+        return colorama_hsl_to_rgb(
+            colorama_hue(source),
+            colorama_saturation(source),
+            colorama_lightness(colour),
+        );
+    }
+    if (code == 10u) {
+        return colorama_hsl_to_rgb(
+            colorama_hue(source),
+            colorama_saturation(colour),
+            colorama_lightness(source),
+        );
+    }
+    if (code == 11u) {
+        return colorama_hsl_to_rgb(
+            colorama_hue(colour),
+            colorama_saturation(source),
+            colorama_lightness(colour),
+        );
+    }
+    if (code == 12u) {
+        return colorama_hsl_to_rgb(
+            colorama_hue(source),
+            colorama_saturation(colour),
+            colorama_lightness(colour),
+        );
+    }
+    return colorama_hsl_to_rgb(
+        colorama_hue(colour),
+        colorama_saturation(colour),
+        colorama_lightness(source),
+    );
+}
+
 fn effects_author_coverage() -> bool {
     // A pixel without coverage is invisible, so every grade could skip it — and
     // that is exactly what this early return does. The exception is a chain that
@@ -2078,6 +2374,9 @@ fn effects_author_coverage() -> bool {
         // The fractal is a generator too: it authors coverage from the escape
         // field, so a transparent source pixel must not skip it.
         if (effect.header.x == 42u) { return true; }
+        // The colour map can paint coverage into an empty pixel when the
+        // authored switch is on, so its hidden colour must be computed too.
+        if (effect.header.x == 46u && (effect.header.z & 0x04000000u) != 0u) { return true; }
     }
     return false;
 }
@@ -3108,6 +3407,57 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 pixel = vec4<f32>(
                     vec3<f32>(red, green, blue) * gain + vec3<f32>(mosaic),
                     pixel.a,
+                );
+            }
+        } else if (effect.header.x == 46u) {
+            // `ColoramaGrade`: header = [46, phase source | add source << 8 |
+            // add mode << 16 | match mode << 24, modify | mask mode << 8 |
+            // palette << 16 | flags << 24, 0]; params = [repetitions, phase
+            // shift (turns), add phase, blend]; colour = [match r, match g,
+            // match b, last stop hue]; extra0 = [softness, tolerance, last
+            // stop saturation, last stop value]. The other four stops live in
+            // extra1..extra3. The chain mirrors the CPU kernel: phase, add,
+            // wrap, palette, selection, modification, composite, blend.
+            let flags = effect.header.z >> 24u;
+            let palette_code = (effect.header.z >> 16u) & 0xFFu;
+            let change_empty = (flags & 4u) != 0u;
+            if (effect.params.x != 0.0 && palette_code != 34u && (pixel.a > 0.0 || change_empty)) {
+                let source = pixel;
+                let p1 = colorama_phase(source, effect.header.y & 0xFFu);
+                let add_source = (effect.header.y >> 8u) & 0xFFu;
+                var phase = p1;
+                if (add_source != 9u) {
+                    let p2 = max(effect.params.z, 0.0) * colorama_phase(source, add_source);
+                    phase = colorama_add(p1, p2, (effect.header.y >> 16u) & 0xFFu);
+                }
+                var t = fract(phase * effect.params.x + effect.params.y);
+                if ((flags & 8u) == 0u) {
+                    t = floor(t * 256.0) / 256.0;
+                }
+                let palette = colorama_palette(effect, t);
+                var selection = colorama_match(effect, source);
+                if ((flags & 16u) != 0u) {
+                    selection = selection * colorama_matte(effect, source);
+                }
+                selection = clamp(selection, 0.0, 1.0);
+                let destination = colorama_modify(source, palette, effect.header.z & 0xFFu);
+                let destination_alpha = select(source.a, palette.a, (flags & 2u) != 0u);
+                var rgb = destination;
+                var alpha = source.a * selection;
+                if ((flags & 1u) != 0u) {
+                    rgb = vec3<f32>(
+                        colorama_mix(source.r, destination.x, selection),
+                        colorama_mix(source.g, destination.y, selection),
+                        colorama_mix(source.b, destination.z, selection),
+                    );
+                    alpha = colorama_mix(source.a, destination_alpha, selection);
+                }
+                let blend = effect.params.w;
+                pixel = vec4<f32>(
+                    colorama_mix(rgb.x, source.r, blend),
+                    colorama_mix(rgb.y, source.g, blend),
+                    colorama_mix(rgb.z, source.b, blend),
+                    colorama_mix(alpha, source.a, blend),
                 );
             }
         } else if (effect.header.x == 34u) {
@@ -6964,6 +7314,18 @@ fn effect_uniforms_for_ops(
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::Colorama { grade } => {
+                let controls = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: controls.header,
+                    params: controls.params,
+                    color: controls.color,
+                    extra0: controls.extra0,
+                    extra1: controls.extra1,
+                    extra2: controls.extra2,
+                    extra3: controls.extra3,
                 }
             }
             EffectGpuPointOp::TestSignals { grade } => {
@@ -11555,6 +11917,137 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU JPEG damage budget exceeded for grade {grade:?}: {report:#?}"
+            );
+        }
+    }
+
+    /// COL-20: the WGSL branch and the CPU kernel must agree on the packed
+    /// phase/mode lanes, the five-stop palette, the matching weight, the mask
+    /// and the composite. The 64x8 frame spans several palette cycles and
+    /// includes zero-coverage pixels, which both sides must leave untouched.
+    #[tokio::test]
+    async fn gpu_colorama_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ColoramaGrade, ColoramaMatchMode, ColoramaModify,
+            ColoramaPalette, ColoramaPhaseSource, ColoramaSettings, EffectGraphBuilderState,
+            EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU colour map parity test: no GPU adapter available");
+            return;
+        };
+        let width = 64_u32;
+        let height = 8_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let red = 0.05 + 0.90 * (x as f32 + 0.5) / width as f32;
+                let green = 0.10 + 0.80 * ((x * 3 + y * 5) % width) as f32 / width as f32;
+                let blue = 0.15 + 0.70 * ((x * 7 + y * 11) % width) as f32 / width as f32;
+                let alpha = if x % 9 == 0 { 0.0 } else { 0.65 };
+                data.push([red, green, blue, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        // Two cases: the ordinary opaque palette, and `Alpha Ramp` with the
+        // alpha switch on, which is the only palette whose samples carry a
+        // per-stop alpha (`t`). The second case is what pins the shader's
+        // palette-alpha lane; a plain multiplication would leave it at 1.
+        let cases = [
+            (
+                "fire",
+                ColoramaSettings {
+                    get_phase_from: ColoramaPhaseSource::Red,
+                    preset_palette: ColoramaPalette::FIRE,
+                    cycle_repetitions: 3.0,
+                    phase_shift: 47.0,
+                    matching_mode: ColoramaMatchMode::Rgb,
+                    matching_color: [0.45, 0.20, 0.15],
+                    matching_tolerance: 0.35,
+                    matching_softness: 0.0,
+                    modify: ColoramaModify::All,
+                    ..ColoramaSettings::default()
+                },
+            ),
+            (
+                "alpha ramp",
+                ColoramaSettings {
+                    get_phase_from: ColoramaPhaseSource::Red,
+                    preset_palette: ColoramaPalette::ALPHA_RAMP,
+                    cycle_repetitions: 2.0,
+                    modify: ColoramaModify::All,
+                    modify_alpha: 1.0,
+                    ..ColoramaSettings::default()
+                },
+            ),
+        ];
+        for (name, settings) in cases {
+            let grade = ColoramaGrade::new(settings).expect("valid colour map grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Colorama { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(width, height),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let expected_pixels: Vec<[f32; 4]> = expected
+                .pixels()
+                .iter()
+                .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
+                .collect();
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected_pixels,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                    alpha: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU colour map budget exceeded for {name}: {report:#?}"
             );
         }
     }
