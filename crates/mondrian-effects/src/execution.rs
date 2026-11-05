@@ -2368,6 +2368,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ChannelBlur { .. } => "channel_blur",
         EffectRenderOp::Median { .. } => "median",
         EffectRenderOp::DustScratches { .. } => "dust_scratches",
+        EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

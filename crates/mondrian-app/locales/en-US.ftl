@@ -2702,6 +2702,15 @@ parameter-mondrian-effect-builtin-dust-scratches-radius-label = Radius
 parameter-mondrian-effect-builtin-dust-scratches-threshold-label = Threshold
 parameter-mondrian-effect-builtin-dust-scratches-operate-on-alpha-label = Operate on Alpha Channel
 
+## Key Cleaner 键控清理
+effect-key-cleaner = Key Cleaner
+parameter-group-key-cleaner = Key Cleaner
+effect-category-edge-repair = Edge Repair
+parameter-mondrian-effect-builtin-key-cleaner-other-edge-radius-label = Other Edge Radius
+parameter-mondrian-effect-builtin-key-cleaner-reduce-chatter-label = Reduce Chatter
+parameter-mondrian-effect-builtin-key-cleaner-alpha-contrast-label = Alpha Contrast
+parameter-mondrian-effect-builtin-key-cleaner-strength-label = Strength
+
 ## Warp 弯曲
 effect-warp = Warp
 parameter-group-warp = Warp

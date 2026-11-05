@@ -1224,6 +1224,12 @@ pub enum EffectRenderOp {
         /// Authored window radius, repair threshold and the alpha toggle.
         grade: crate::DustScratchesGrade,
     },
+    /// Key cleaner: erodes, softens and re-steepens the alpha edge of a keyed
+    /// matte without touching the colour channels.
+    KeyCleaner {
+        /// Authored edge radius, chatter fraction, alpha contrast and strength.
+        grade: crate::KeyCleanerGrade,
+    },
     /// Remove color matting: recovers a straight-alpha sample from the matte
     /// background it was composited over.
     RemoveColorMatting {
@@ -1489,6 +1495,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Fill { grade } => formatter.debug_struct("Fill").field("grade", grade).finish(),
             Self::DustScratches { grade } => {
                 formatter.debug_struct("DustScratches").field("grade", grade).finish()
+            }
+            Self::KeyCleaner { grade } => {
+                formatter.debug_struct("KeyCleaner").field("grade", grade).finish()
             }
             Self::LensDistortion { grade } => {
                 formatter.debug_struct("LensDistortion").field("grade", grade).finish()
@@ -2398,6 +2407,10 @@ impl EffectRenderOp {
                 97u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::KeyCleaner { grade } => {
+                110u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::FourColorGradient { grade } => {
                 88u8.hash(state);
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
@@ -2784,6 +2797,8 @@ impl EffectRenderOp {
             EffectRenderOp::Stroke { .. } => 5,
             EffectRenderOp::Fill { .. } => 1,
             EffectRenderOp::DustScratches { .. } => 4,
+            // Three passes, four when the chatter softening is enabled.
+            EffectRenderOp::KeyCleaner { grade } => grade.cost(),
             EffectRenderOp::Mosaic { .. } => 2,
             EffectRenderOp::Posterize { .. } => 1,
             EffectRenderOp::MotionTile { .. } => 3,
@@ -3330,7 +3345,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 109] {
+fn builtin_effect_types() -> [EffectType; 110] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3441,6 +3456,7 @@ fn builtin_effect_types() -> [EffectType; 109] {
         EffectType::PhotoFilter,
         EffectType::JpegDamage,
         EffectType::Colorama,
+        EffectType::KeyCleaner,
     ]
 }
 
@@ -10657,6 +10673,54 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::KeyCleaner => {
+            for (parameter, name, value, minimum, maximum, step) in [
+                (
+                    "other_edge_radius",
+                    "其他边缘半径",
+                    crate::KEY_CLEANER_DEFAULT_EDGE_RADIUS_PIXELS,
+                    0.0_f64,
+                    f64::from(crate::KEY_CLEANER_AUTHOR_MAX_EDGE_RADIUS_PIXELS),
+                    1.0_f64,
+                ),
+                (
+                    "reduce_chatter",
+                    "减少震颤",
+                    crate::KEY_CLEANER_DEFAULT_REDUCE_CHATTER,
+                    0.0_f64,
+                    1.0_f64,
+                    0.01_f64,
+                ),
+                (
+                    "alpha_contrast",
+                    "Alpha 对比度",
+                    crate::KEY_CLEANER_DEFAULT_ALPHA_CONTRAST,
+                    0.0_f64,
+                    100.0_f64,
+                    0.1_f64,
+                ),
+                (
+                    "strength",
+                    "强度",
+                    crate::KEY_CLEANER_DEFAULT_STRENGTH,
+                    0.0_f64,
+                    100.0_f64,
+                    0.1_f64,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "键控清理",
+                    name,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -12101,6 +12165,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Fill, "all_masks" | "opacity") => ParameterUnit::Normalized,
         (EffectType::DustScratches, "radius") => ParameterUnit::Pixels,
         (EffectType::DustScratches, "threshold") => ParameterUnit::Normalized,
+        (EffectType::KeyCleaner, "other_edge_radius") => ParameterUnit::Pixels,
+        (EffectType::KeyCleaner, "reduce_chatter") => ParameterUnit::Normalized,
+        (EffectType::KeyCleaner, "alpha_contrast" | "strength") => ParameterUnit::Percent,
         // The patch points are authored in a reference box, not in frame pixels,
         // and the quality option is an iteration count, so neither carries a unit.
         (EffectType::BezierWarp, _) => ParameterUnit::Unitless,
@@ -12499,6 +12566,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The repair window can be as wide as the frame and the dedicated
             // spatial pass writes a whole-frame destination, so the
+            // definition-level envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::KeyCleaner => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The erosion window reaches 250 pixels in every direction and the
+            // dedicated spatial pass writes a whole-frame destination, so the
             // definition-level envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -18023,6 +18098,52 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::KeyCleaner => {
+            let edge_radius_id = builtin_parameter_id(effect_type, "other_edge_radius");
+            let reduce_chatter_id = builtin_parameter_id(effect_type, "reduce_chatter");
+            let alpha_contrast_id = builtin_parameter_id(effect_type, "alpha_contrast");
+            let strength_id = builtin_parameter_id(effect_type, "strength");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let edge_radius = effect.evaluate_f32_parameter(
+                    &edge_radius_id,
+                    context.time,
+                    crate::KEY_CLEANER_DEFAULT_EDGE_RADIUS_PIXELS,
+                );
+                let reduce_chatter = effect.evaluate_f32_parameter(
+                    &reduce_chatter_id,
+                    context.time,
+                    crate::KEY_CLEANER_DEFAULT_REDUCE_CHATTER,
+                );
+                let alpha_contrast = effect.evaluate_f32_parameter(
+                    &alpha_contrast_id,
+                    context.time,
+                    crate::KEY_CLEANER_DEFAULT_ALPHA_CONTRAST,
+                );
+                let strength = effect.evaluate_f32_parameter(
+                    &strength_id,
+                    context.time,
+                    crate::KEY_CLEANER_DEFAULT_STRENGTH,
+                );
+                let grade = crate::KeyCleanerGrade::new(
+                    edge_radius,
+                    reduce_chatter,
+                    alpha_contrast,
+                    strength,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                // Zero strength, or a zero radius with no chatter and no
+                // contrast, is the identity, so no node is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::KeyCleaner { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SelectiveColor => {
             let method_id = builtin_parameter_id(effect_type, "method");
             let colors_id = builtin_parameter_id(effect_type, "colors");
@@ -19278,6 +19399,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::PhotoFilter => "照片滤镜",
         EffectType::JpegDamage => "JPEG 损坏",
         EffectType::Colorama => "色光",
+        EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -20621,6 +20743,7 @@ mod tests {
             EffectType::PhotoFilter,
             EffectType::JpegDamage,
             EffectType::Colorama,
+            EffectType::KeyCleaner,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -29694,7 +29817,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 109);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 110);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -30222,7 +30345,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 109);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 110);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -32059,6 +32182,255 @@ mod tests {
         );
     }
 
+    fn key_cleaner_op(graph: &EffectRenderGraph) -> Option<crate::KeyCleanerGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::KeyCleaner { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::KeyCleaner { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_key_cleaner(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::KeyCleaner)
+            .expect("the key cleaner effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::KeyCleaner.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the key cleaner parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn key_cleaner_defaults_match_the_dump() {
+        let effect_type = EffectType::KeyCleaner;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("other_edge_radius", "其他边缘半径", ParameterUnit::Pixels),
+            ("reduce_chatter", "减少震颤", ParameterUnit::Normalized),
+            ("alpha_contrast", "Alpha 对比度", ParameterUnit::Percent),
+            ("strength", "强度", ParameterUnit::Percent),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("键控清理")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "key_cleaner",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(
+            effect_type.category_path(),
+            vec!["边缘修补"],
+            "the effect lives in its own category"
+        );
+
+        let defaults = [
+            (crate::KEY_CLEANER_DEFAULT_EDGE_RADIUS_PIXELS, 0.0, 250.0),
+            (crate::KEY_CLEANER_DEFAULT_REDUCE_CHATTER, 0.0, 1.0),
+            (crate::KEY_CLEANER_DEFAULT_ALPHA_CONTRAST, 0.0, 100.0),
+            (crate::KEY_CLEANER_DEFAULT_STRENGTH, 0.0, 100.0),
+        ];
+        for (parameter, (default, min, max)) in [
+            "other_edge_radius",
+            "reduce_chatter",
+            "alpha_contrast",
+            "strength",
+        ]
+        .into_iter()
+        .zip(defaults)
+        {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Float(default),
+                "{parameter} default"
+            );
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .unwrap_or_else(|| panic!("{parameter} should declare a numeric contract"));
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, min, "{parameter} minimum");
+            assert_eq!(contract.hard_range.max, max, "{parameter} maximum");
+        }
+
+        // Ten pixels of erosion at the default strength is a real cleanup, so the
+        // documented defaults are not the identity.
+        let grade = crate::KeyCleanerGrade::documented_defaults();
+        assert_eq!(grade.radius_pixels(), 10);
+        assert_eq!(grade.chatter_pixels(), 0);
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn key_cleaner_defaults_build_one_op_with_scratch() {
+        let effect = instantiate_effect_node(EffectType::KeyCleaner)
+            .expect("the key cleaner effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default key cleaner should compile");
+        let grade = key_cleaner_op(&graph).expect("the default parameters emit the cleanup");
+        assert_eq!(grade, crate::KeyCleanerGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one key cleaner node"
+        );
+        let cleaner_nodes = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.kind,
+                    EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::KeyCleaner { .. }, .. }
+                        | EffectGraphNodeKind::DomainEffect {
+                            op: EffectRenderOp::KeyCleaner { .. },
+                            ..
+                        }
+                )
+            })
+            .count();
+        assert_eq!(
+            cleaner_nodes, 1,
+            "the default effect appends exactly one node"
+        );
+        let op = EffectRenderOp::KeyCleaner { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            2,
+            "the erosion and the softening each need a matte plane"
+        );
+        assert_eq!(
+            op.estimated_cost(),
+            3,
+            "three passes without the softening box"
+        );
+    }
+
+    #[test]
+    fn key_cleaner_chatter_costs_one_more_pass() {
+        let effect = author_key_cleaner(&[
+            ("other_edge_radius", PropertyValue::Float(10.0)),
+            ("reduce_chatter", PropertyValue::Float(0.5)),
+            ("strength", PropertyValue::Float(100.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the softened key cleaner should compile");
+        let grade = key_cleaner_op(&graph).expect("a chatter fraction emits the cleanup");
+        assert_eq!(grade.chatter_pixels(), 5);
+        assert_eq!(EffectRenderOp::KeyCleaner { grade }.estimated_cost(), 4);
+    }
+
+    #[test]
+    fn key_cleaner_identity_appends_nothing() {
+        // Zero strength blends the processed matte back out, so the kernel is the
+        // identity and no node is appended.
+        let effect = author_key_cleaner(&[
+            ("other_edge_radius", PropertyValue::Float(10.0)),
+            ("alpha_contrast", PropertyValue::Float(80.0)),
+            ("strength", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity key cleaner should compile");
+        assert_eq!(key_cleaner_op(&graph), None);
+    }
+
+    #[test]
+    fn key_cleaner_zero_radius_keeps_the_contrast_curve() {
+        // A zero radius is only the identity when the contrast is neutral too:
+        // the S-curve still reshapes the alpha without any erosion.
+        let effect = author_key_cleaner(&[
+            ("other_edge_radius", PropertyValue::Float(0.0)),
+            ("alpha_contrast", PropertyValue::Float(40.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the contrast-only key cleaner should compile");
+        let grade = key_cleaner_op(&graph).expect("a non-neutral contrast emits the cleanup");
+        assert_eq!(grade.radius_pixels(), 0);
+        assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn key_cleaner_parameters_round_trip() {
+        let effect = author_key_cleaner(&[
+            ("other_edge_radius", PropertyValue::Float(12.0)),
+            ("reduce_chatter", PropertyValue::Float(0.5)),
+            ("alpha_contrast", PropertyValue::Float(40.0)),
+            ("strength", PropertyValue::Float(75.0)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened key cleaner should compile");
+        assert_eq!(
+            key_cleaner_op(&graph),
+            Some(
+                crate::KeyCleanerGrade::new(12.0, 0.5, 40.0, 75.0)
+                    .expect("the authored values are in range")
+            )
+        );
+    }
+
+    #[test]
+    fn key_cleaner_invalid_edge_radius_is_an_author_error() {
+        // The authoring boundary rejects anything outside the dump's range, but a
+        // persisted document can still carry a stale value, so the builder has
+        // its own defensive arm. Reopening a tampered node exercises it.
+        let effect = instantiate_effect_node(EffectType::KeyCleaner)
+            .expect("the key cleaner effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "key_cleaner.other_edge_radius",
+            serde_json::json!({"Float": 300.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a radius past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        // The persisted-value contract fires before the builder's own grade
+        // validation, so this is the message the author actually sees. It names
+        // the parameter and the same [0, 250] range the kernel enforces.
+        assert!(
+            reason.contains("key_cleaner.other_edge_radius") && reason.contains("outside [0, 250]"),
+            "the rejection must name the radius range: {reason}"
+        );
+    }
+
     fn spill_suppressor_op(graph: &EffectRenderGraph) -> Option<crate::SpillSuppressorGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {
@@ -32932,7 +33304,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 109);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 110);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());

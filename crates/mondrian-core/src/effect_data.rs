@@ -185,6 +185,9 @@ pub enum EffectType {
     /// VR project 2D: projects a flat card onto an equirectangular frame at an
     /// authored angular scale, with separate source and projection poses.
     VrProject2D,
+    /// Key cleaner: erodes, softens and re-steepens the alpha edge of a keyed
+    /// matte without touching the colour channels.
+    KeyCleaner,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -304,6 +307,7 @@ impl EffectType {
             Self::VrRotateSphere => "builtin.vr_rotate_sphere".to_string(),
             Self::VrSphereToPlane => "builtin.vr_sphere_to_plane".to_string(),
             Self::VrProject2D => "builtin.vr_project_2d".to_string(),
+            Self::KeyCleaner => "builtin.key_cleaner".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -419,6 +423,7 @@ impl EffectType {
             "builtin.vr_rotate_sphere" => Self::VrRotateSphere,
             "builtin.vr_sphere_to_plane" => Self::VrSphereToPlane,
             "builtin.vr_project_2d" => Self::VrProject2D,
+            "builtin.key_cleaner" => Self::KeyCleaner,
             other => Self::External(other.to_string()),
         }
     }
@@ -534,6 +539,7 @@ impl EffectType {
             Self::VrRotateSphere => "VR 旋转球面",
             Self::VrSphereToPlane => "VR 球面到平面",
             Self::VrProject2D => "VR 平面到球面",
+            Self::KeyCleaner => "键控清理",
             Self::External(name) => name,
         }
     }
@@ -647,6 +653,7 @@ impl EffectType {
             Self::VrRotateSphere => vec!["变形"],
             Self::VrSphereToPlane => vec!["变形"],
             Self::VrProject2D => vec!["变形"],
+            Self::KeyCleaner => vec!["边缘修补"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -762,6 +769,7 @@ impl EffectType {
             Self::VrRotateSphere => "vr_rotate_sphere".to_string(),
             Self::VrSphereToPlane => "vr_sphere_to_plane".to_string(),
             Self::VrProject2D => "vr_project_2d".to_string(),
+            Self::KeyCleaner => "key_cleaner".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1126,6 +1134,9 @@ impl crate::AuthoringFootprint for EffectType {
             Self::VrRotateSphere => Ok(()),
             Self::VrSphereToPlane => Ok(()),
             Self::VrProject2D => Ok(()),
+            // Alpha-only cleanup: it can only remove coverage, never invent a
+            // painted region, so it has no authoring footprint.
+            Self::KeyCleaner => Ok(()),
         }
     }
 }

@@ -94,6 +94,7 @@ pub mod hsl;
 pub(crate) mod hsl_space;
 pub mod hue_saturation;
 pub mod invert;
+pub mod key_cleaner;
 pub mod keylight;
 pub mod lut;
 pub mod mask;
@@ -665,6 +666,12 @@ pub use fractal_noise::{
     FRACTAL_MIN_CENTRE_AUXILIARY, FRACTAL_MIN_COMPLEXITY, FRACTAL_MIN_CONTRAST, FRACTAL_MIN_CYCLE,
     FRACTAL_MIN_OPACITY, FRACTAL_MIN_SCALE, FRACTAL_MIN_SUB_INFLUENCE, FRACTAL_MIN_SUB_SCALE,
     FRACTAL_NOISE_TYPE_COUNT, FRACTAL_OVERFLOW_COUNT, FRACTAL_TYPE_COUNT,
+};
+pub use key_cleaner::{
+    key_cleaner_frame_f32, KeyCleanerError, KeyCleanerGrade,
+    KEY_CLEANER_AUTHOR_MAX_EDGE_RADIUS_PIXELS, KEY_CLEANER_DEFAULT_ALPHA_CONTRAST,
+    KEY_CLEANER_DEFAULT_EDGE_RADIUS_PIXELS, KEY_CLEANER_DEFAULT_REDUCE_CHATTER,
+    KEY_CLEANER_DEFAULT_STRENGTH,
 };
 pub use keylight::{
     keylight_frame_f32, keylight_key_channel, keylight_other_channels, KeylightDisplay,

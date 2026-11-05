@@ -251,6 +251,7 @@ pub(crate) fn effect_category_message_id(category: &str) -> Option<&'static str>
         "通道" => Some("effect-category-channel"),
         "生成器" => Some("effect-category-generator"),
         "颜色/调色" => Some("effect-category-color-grading"),
+        "边缘修补" => Some("effect-category-edge-repair"),
         _ => None,
     }
 }
@@ -383,6 +384,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "颜色" => Some("parameter-group-color"),
         "高品质" => Some("parameter-group-quality"),
         "蒙尘与划痕" => Some("parameter-group-dust-scratches"),
+        "键控清理" => Some("parameter-group-key-cleaner"),
         _ => None,
     }
 }

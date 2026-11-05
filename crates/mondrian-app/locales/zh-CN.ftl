@@ -2634,6 +2634,15 @@ parameter-mondrian-effect-builtin-dust-scratches-radius-label = 半径
 parameter-mondrian-effect-builtin-dust-scratches-threshold-label = 阈值
 parameter-mondrian-effect-builtin-dust-scratches-operate-on-alpha-label = 在 Alpha 通道上运算
 
+## 键控清理 Key Cleaner
+effect-key-cleaner = 键控清理
+parameter-group-key-cleaner = 键控清理
+effect-category-edge-repair = 边缘修补
+parameter-mondrian-effect-builtin-key-cleaner-other-edge-radius-label = 其他边缘半径
+parameter-mondrian-effect-builtin-key-cleaner-reduce-chatter-label = 减少震颤
+parameter-mondrian-effect-builtin-key-cleaner-alpha-contrast-label = Alpha 对比度
+parameter-mondrian-effect-builtin-key-cleaner-strength-label = 强度
+
 ## Warp 弯曲
 effect-warp = 弯曲
 parameter-group-warp = 弯曲

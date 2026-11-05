@@ -482,6 +482,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::KeyCleaner { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "key_cleaner",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::SelectiveColor { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "selective_color",
@@ -1156,6 +1162,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // One matte plane plus the separable intermediate: the design budgets
         // two frames of scratch for the alpha morphology.
         EffectRenderOp::Choker { .. } => 2,
+        // The erosion writes one intermediate, and the softening pass needs a
+        // second matte plane while the composite still reads the source.
+        EffectRenderOp::KeyCleaner { .. } => 2,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
         EffectRenderOp::Minimax { .. } => 4,
@@ -1707,6 +1716,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 working,
                 region.width,
                 region.height,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::KeyCleaner { grade } => {
+            crate::key_cleaner::apply_key_cleaner_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
                 grade,
                 checkpoint,
             )?;

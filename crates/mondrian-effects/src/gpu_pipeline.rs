@@ -249,6 +249,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored window radius, repair threshold and the alpha toggle.
         grade: crate::DustScratchesGrade,
     },
+    KeyCleaner {
+        /// Authored edge radius, chatter fraction, alpha contrast and strength.
+        grade: crate::KeyCleanerGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -301,6 +305,7 @@ impl EffectGpuSpatialPass {
             Self::SelectiveColor { .. } => "selective_color",
             Self::Stroke { .. } => "stroke",
             Self::DustScratches { .. } => "dust_scratches",
+            Self::KeyCleaner { .. } => "key_cleaner",
         }
     }
 
@@ -380,6 +385,10 @@ impl EffectGpuSpatialPass {
             // the "may influence" reach, not the GPU admission cap: a radius
             // past three still widens the halo before the pass is refused.
             Self::DustScratches { .. } => crate::dust_scratches::DUST_SCRATCHES_MAX_RADIUS,
+            // The erosion window can reach the frame boundary in either axis,
+            // and the kernel is clipped rather than tiled, so the reach is
+            // unbounded in both directions.
+            Self::KeyCleaner { .. } => u32::MAX,
         }
     }
 
@@ -448,6 +457,8 @@ impl EffectGpuSpatialPass {
             // Same reach as the horizontal halo: the authored radius, not the
             // GPU admission cap.
             Self::DustScratches { .. } => crate::dust_scratches::DUST_SCRATCHES_MAX_RADIUS,
+            // Same reach as the horizontal halo.
+            Self::KeyCleaner { .. } => u32::MAX,
         }
     }
 }
@@ -811,6 +822,11 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::DustScratches { grade } => {
             Some(EffectGpuSpatialPass::DustScratches { grade: *grade })
         }
+        // Admission is deliberately radius-agnostic: the renderer validates the
+        // three-scratch geometry while the chain is still being planned.
+        EffectRenderOp::KeyCleaner { grade } => {
+            Some(EffectGpuSpatialPass::KeyCleaner { grade: *grade })
+        }
         _ => None,
     }
 }
@@ -955,6 +971,59 @@ mod tests {
                 "radius {radius}"
             );
         }
+    }
+
+    #[test]
+    fn key_cleaner_maps_to_the_dedicated_spatial_pass() {
+        let grade = crate::KeyCleanerGrade::new(3.0, 0.5, 40.0, 100.0).expect("valid grade");
+        let op = EffectRenderOp::KeyCleaner { grade };
+        let pass = spatial_pass_for(&op).expect("the key cleaner runs as a spatial pass");
+        assert_eq!(pass, EffectGpuSpatialPass::KeyCleaner { grade });
+        assert_eq!(pass.name(), "key_cleaner");
+        // The erosion window is clipped, not tiled, so the reach is unbounded in
+        // both directions and the renderer has to keep the whole frame.
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("key cleaner pipeline");
+        assert_eq!(
+            pipeline.stages(),
+            &[EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::KeyCleaner { grade },
+                node_id: pipeline.output_value(),
+            }]
+        );
+    }
+
+    #[test]
+    fn key_cleaner_between_point_ops_is_three_stages() {
+        let grade = crate::KeyCleanerGrade::new(3.0, 0.0, 0.0, 100.0).expect("valid grade");
+        let colorama = || {
+            crate::ColoramaGrade::new(crate::ColoramaSettings::default())
+                .expect("the documented colorama settings are valid")
+        };
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Colorama { grade: colorama() });
+        builder.append_unary(EffectRenderOp::KeyCleaner { grade });
+        builder.append_unary(EffectRenderOp::Colorama { grade: colorama() });
+        let graph = compile(builder);
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).expect("mixed pipeline");
+
+        let stages = pipeline.stages();
+        assert_eq!(stages.len(), 3);
+        assert!(matches!(stages[0], EffectGpuStage::PointOps { .. }));
+        assert_eq!(
+            stages[1],
+            EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::KeyCleaner { grade },
+                node_id: graph.schedule().ordered_nodes[2],
+            }
+        );
+        assert!(matches!(stages[2], EffectGpuStage::PointOps { .. }));
+        assert_eq!(pipeline.spatial_stage_count(), 1);
     }
 
     #[test]
