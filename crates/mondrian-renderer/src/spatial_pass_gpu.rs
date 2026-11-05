@@ -86,6 +86,7 @@ pub(crate) struct EffectSpatialGpu {
     matte_refine_composite: wgpu::RenderPipeline,
     choker_composite: wgpu::RenderPipeline,
     key_cleaner_composite: wgpu::RenderPipeline,
+    smart_blur: wgpu::RenderPipeline,
     minimax: wgpu::RenderPipeline,
     channel_blur: wgpu::RenderPipeline,
     median: wgpu::RenderPipeline,
@@ -1514,6 +1515,39 @@ impl EffectSpatialGpu {
                 multiview_mask: None,
                 cache: None,
             });
+        // Smart blur runs one separable axis per draw: the gate always reads the
+        // untouched source (binding 0) while the average reads the pass input
+        // (binding 1), so the horizontal draw binds the source twice.
+        let smart_blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.smart-blur"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_smart_blur"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         // Minimax runs one separable minimum or maximum step per pass and writes
         // straight into the scratch ping-pong: no separate composite stage.
         let minimax = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1969,6 +2003,7 @@ impl EffectSpatialGpu {
             matte_refine_composite,
             choker_composite,
             key_cleaner_composite,
+            smart_blur,
             minimax,
             channel_blur,
             median,
@@ -2590,6 +2625,13 @@ impl EffectSpatialGpu {
             // (4096x2160x16 bytes x 4 textures = 566,231,040 bytes) exceed the
             // 512 MiB spatial scratch budget; UHD (530,841,600 bytes) still fits.
             EffectGpuSpatialPass::KeyCleaner { .. } => Ok(3),
+            // One draw per axis: the horizontal pass writes the first plane and
+            // the vertical pass finishes it into the second. Two textures is the
+            // smallest pool the record method accepts, so a DCI 4K frame
+            // (4096x2160x16 bytes x 3 textures = 424,673,280 bytes) fits the
+            // 512 MiB spatial scratch budget while a three-pass declaration
+            // would not.
+            EffectGpuSpatialPass::SmartBlur { .. } => Ok(2),
             // The chain is one pass per operation step and axis: 1, 2 or 4.
             // `record_minimax` executes exactly the same table.
             EffectGpuSpatialPass::Minimax { grade } => Ok(grade.pass_count()),
@@ -3182,6 +3224,10 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::KeyCleaner { grade } => {
                 return self
                     .record_key_cleaner(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::SmartBlur { grade } => {
+                return self
+                    .record_smart_blur(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -5033,6 +5079,75 @@ impl EffectSpatialGpu {
             &composite,
         );
         Ok(scratch[0].clone())
+    }
+
+    /// Records the smart blur: one separable gated mean per draw.
+    ///
+    /// The gate always compares against the untouched source, so binding 0 is
+    /// the source on both draws while binding 1 is the pass input — the source
+    /// again on the horizontal draw, the horizontal plane on the vertical one.
+    /// The mode composite folds into the vertical draw, exactly like the CPU
+    /// kernel, so the intermediate plane stays a plain premultiplied mean.
+    fn record_smart_blur(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::SmartBlurGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        // One plane for the horizontal mean, one for the finished frame: the
+        // source has to survive both draws because the gate reads it.
+        if scratch.len() < 2 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "smart_blur_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        let (params, _) = grade.gpu_controls();
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let horizontal_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        let destination_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+
+        // `params.w` is the axis selector: 0 averages along the row, 1 along the
+        // column. The horizontal draw carries mode zero, which makes the shader
+        // return the plain premultiplied mean instead of a mode composite.
+        let horizontal = SpatialPassUniform {
+            size,
+            params: [params[0], params[1], 0.0, 0.0],
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.smart_blur,
+            &source_view,
+            &source_view,
+            &horizontal_view,
+            &horizontal,
+        );
+
+        let vertical = SpatialPassUniform {
+            size,
+            params: [params[0], params[1], params[2], 1.0],
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.smart_blur,
+            &source_view,
+            &horizontal_view,
+            &destination_view,
+            &vertical,
+        );
+        Ok(scratch[1].clone())
     }
 
     /// Records the minimax chain: one minimum or maximum step per pass.
@@ -8279,6 +8394,83 @@ fn fs_key_cleaner_composite(@builtin(position) position: vec4<f32>) -> @location
     let contrasted = softened * (1.0 - contrast) + sharpened * contrast;
     let alpha = mix(source.a, contrasted, strength);
     return vec4<f32>(source.rgb, alpha);
+}
+
+// Smart blur: one separable axis per draw. `params` carries
+// `[radius, threshold_fraction, mode, axis]`. Binding 0 is always the untouched
+// source, because both draws gate against it; binding 1 is the pass input.
+// Every expression mirrors `smart_blur.rs`: the weight is a fractional box of
+// `2*radius+1` taps, the gate is `<=`, and the divisor is the sum of the gated
+// weights (the centre tap always passes, so it can never be zero).
+fn smart_blur_weight(distance: f32, radius: f32) -> f32 {
+    let whole = floor(radius);
+    let magnitude = abs(distance);
+    if (magnitude <= whole) {
+        return 1.0;
+    }
+    if (magnitude == whole + 1.0) {
+        return radius - whole;
+    }
+    return 0.0;
+}
+
+@fragment
+fn fs_smart_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let radius = clamp(uniforms.params.x, 0.1, 100.0);
+    let threshold = clamp(uniforms.params.y, 0.001, 1.0);
+    let mode = i32(uniforms.params.z + 0.5);
+    let vertical = uniforms.params.w > 0.5;
+    let whole = i32(floor(radius));
+    let centre_luma = deband_luma(premultiply(load_clamped_from(original_texture, pixel)).rgb);
+    let source_alpha = load_clamped_from(original_texture, pixel).a;
+    var sum = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var offset = -whole - 1; offset <= whole + 1; offset = offset + 1) {
+        let weight = smart_blur_weight(f32(offset), radius);
+        if (weight <= 0.0) {
+            continue;
+        }
+        let sample_at = pixel + select(vec2<i32>(0, offset), vec2<i32>(offset, 0), !vertical);
+        let gate_luma = deband_luma(premultiply(load_clamped_from(original_texture, sample_at)).rgb);
+        let gated = select(0.0, 1.0, abs(gate_luma - centre_luma) <= threshold);
+        let combined = weight * gated;
+        // Draw A averages the source, which is straight alpha and has to be
+        // premultiplied here. Draw B averages the horizontal plane, which is
+        // already premultiplied, so premultiplying again would square the
+        // coverage and pull the edge estimate far away from the CPU kernel.
+        let sample = load_clamped_from(auxiliary_texture, sample_at);
+        sum = sum + select(premultiply(sample), sample, vertical) * combined;
+        weight_sum = weight_sum + combined;
+    }
+    let blurred = sum / weight_sum;
+    // Mode zero is reserved for the horizontal pass: it has to leave the plain
+    // premultiplied mean in the intermediate plane, so the vertical pass can
+    // finish the separable average before any composite runs.
+    if (mode == 0) {
+        return blurred;
+    }
+    let edge = clamp(4.0 * abs(centre_luma - deband_luma(blurred.rgb)), 0.0, 1.0);
+    if (mode == 2) {
+        if (source_alpha <= 0.0) {
+            return vec4<f32>(0.0);
+        }
+        return vec4<f32>(edge, edge, edge, source_alpha);
+    }
+    let alpha = clamp(blurred.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let colour = blurred.rgb / alpha;
+    if (mode == 3) {
+        return vec4<f32>(
+            colour.r + edge * (1.0 - colour.r),
+            colour.g + edge * (1.0 - colour.g),
+            colour.b + edge * (1.0 - colour.b),
+            alpha,
+        );
+    }
+    return vec4<f32>(colour, alpha);
 }
 
 // The matte refine composite writes the (optionally cleaned) source colour with

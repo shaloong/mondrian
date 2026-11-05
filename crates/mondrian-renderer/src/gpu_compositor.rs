@@ -17391,6 +17391,124 @@ mod tests {
         assert_eq!(budget_bytes, 512 * 1024 * 1024);
     }
 
+    /// A straight-alpha fixture with a bright disc on a ramp, a hard step, a
+    /// soft-alpha band and one fully transparent column, so the two passes, the
+    /// gate and all three output modes have something to act on.
+    fn smart_blur_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let mut colour = [0.15 + 0.7 * u, 0.2 + 0.55 * v, 0.35 + 0.4 * (1.0 - u)];
+                let disc = (u - 0.62) * (u - 0.62) + (v - 0.4) * (v - 0.4);
+                if disc < 0.05 {
+                    colour = [
+                        (colour[0] + 0.35).min(1.0),
+                        (colour[1] + 0.35).min(1.0),
+                        (colour[2] + 0.35).min(1.0),
+                    ];
+                }
+                if u < 0.3 {
+                    colour = [colour[0] * 0.25, colour[1] * 0.25, colour[2] * 0.25];
+                }
+                let alpha = if x == 1 {
+                    0.0
+                } else if u > 0.8 {
+                    0.4
+                } else {
+                    1.0
+                };
+                pixels.push([colour[0], colour[1], colour[2], alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_smart_blur_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            smart_blur_frame_f32, EffectGpuSpatialPass, SmartBlurGrade, SmartBlurMode,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping smart blur parity test: no GPU adapter available");
+            return;
+        };
+        let width = 16;
+        let height = 10;
+        let pixels = smart_blur_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+
+        let cases: [(&str, f32, f32, SmartBlurMode); 6] = [
+            ("default", 3.0, 25.0, SmartBlurMode::Normal),
+            ("wide", 12.0, 60.0, SmartBlurMode::Normal),
+            ("edge_only", 4.0, 30.0, SmartBlurMode::EdgeOnly),
+            ("overlay_edge", 4.0, 30.0, SmartBlurMode::OverlayEdge),
+            ("gate_open", 3.0, 100.0, SmartBlurMode::Normal),
+            ("floor", 0.1, 50.0, SmartBlurMode::Normal),
+        ];
+        for (label, radius, threshold, mode) in cases {
+            let grade = SmartBlurGrade::new(radius, threshold, mode)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let mut cpu = pixels.clone();
+            assert!(
+                smart_blur_frame_f32(&mut cpu, width as usize, height as usize, &grade),
+                "{label}: the CPU kernel must accept the frame"
+            );
+
+            let pass = EffectGpuSpatialPass::SmartBlur { grade };
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 2, "{label}: horizontal then vertical");
+            let source = key_cleaner_upload(&context, &pixels, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, passes as usize);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.smart-blur.encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label} record: {error}"));
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+
+            assert_eq!(gpu.len(), cpu.len(), "{label}: pixel count");
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 2.0e-4,
+                        "smart blur case {label} pixel {pixel_index} channel {channel}: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+                // The source alpha is zero on that column, so both sides must
+                // stay exactly cleared rather than dividing by zero.
+                if cpu_pixel[3].abs() <= f32::EPSILON && gpu_pixel[3].abs() <= f32::EPSILON {
+                    for channel in 0..3 {
+                        assert_eq!(
+                            cpu_pixel[channel], 0.0,
+                            "smart blur case {label} pixel {pixel_index}: cleared colour"
+                        );
+                        assert_eq!(
+                            gpu_pixel[channel], 0.0,
+                            "smart blur case {label} pixel {pixel_index}: cleared GPU colour"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn spatial_chain_runs_on_a_single_layer_before_compositing() {
         use mondrian_effects::{EffectRenderOp, TwirlGrade};

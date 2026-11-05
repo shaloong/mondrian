@@ -363,6 +363,10 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // The key cleaner is three separable morphology passes: one axis of
         // taps per pass, against the two reads and one write that bound it.
         "key_cleaner" => 0.9,
+        // Smart blur is up to two hundred and three taps per pixel per axis, but
+        // the gate usually short-circuits the sum; the average tap is cheaper
+        // than a convolution tap because there is no tap table to read.
+        "smart_blur" => 1.4,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
         // Magnify adds the blend-mode branch on top of the same bilinear read.
@@ -444,6 +448,9 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // Two separable minimum filters plus the softening and the composite,
         // all over a single alpha plane.
         "key_cleaner" => 2.5,
+        // Two separable passes with a luma gate per tap: the same tap count as a
+        // box blur, plus the dot product and the comparison.
+        "smart_blur" => 4.0,
         _ => 2.0,
     }
 }
