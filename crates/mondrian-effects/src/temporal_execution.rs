@@ -2838,6 +2838,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Fractal { .. } => "fractal",
         crate::EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
         crate::EffectRenderOp::PhotoFilter { .. } => "photo_filter",
+        crate::EffectRenderOp::JpegDamage { .. } => "jpeg_damage",
         crate::EffectRenderOp::Grid { .. } => "grid",
         crate::EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         crate::EffectRenderOp::Fill { .. } => "fill",

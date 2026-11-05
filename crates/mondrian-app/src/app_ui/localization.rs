@@ -266,6 +266,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "HDR · Shadows" => Some("parameter-group-hdr-shadows"),
         "HDR · Specular" => Some("parameter-group-hdr-specular"),
         "HSL" => Some("parameter-group-hsl"),
+        "JPEG 损坏" => Some("parameter-group-jpeg-damage"),
         "LUT" => Some("parameter-group-lut"),
         "Primaries" => Some("parameter-group-primaries"),
         "Qualifier" => Some("parameter-group-qualifier"),

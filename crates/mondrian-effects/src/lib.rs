@@ -118,6 +118,7 @@ pub mod bevel;
 pub mod bezier_warp;
 pub mod broadcast_safe;
 pub mod brush_strokes;
+pub mod jpeg_damage;
 pub mod kaleidoscope;
 pub mod leave_color;
 pub mod lens_distortion;
@@ -386,6 +387,13 @@ pub use heterogeneous_execution::{
 pub use hsl::{HslGrade, HslGradeError};
 pub use hue_saturation::{HueBand, HueSaturationError, HueSaturationGrade};
 pub use invert::{invert_rgba_f32, InvertChannels};
+pub use jpeg_damage::{
+    JpegDamageError, JpegDamageGrade, JpegDamageScalingComponent, JPEG_DAMAGE_BLOCK_SIZE,
+    JPEG_DAMAGE_DEFAULT_COMPONENT, JPEG_DAMAGE_DEFAULT_FREQUENCY_SCALE,
+    JPEG_DAMAGE_DEFAULT_MACROBLOCK_ASPECT, JPEG_DAMAGE_DEFAULT_QUALITY,
+    JPEG_DAMAGE_DEFAULT_RESOLUTION, JPEG_DAMAGE_KIND, JPEG_DAMAGE_MAX_MACROBLOCK_ASPECT,
+    JPEG_DAMAGE_MAX_RESOLUTION, JPEG_DAMAGE_MIN_MACROBLOCK_ASPECT,
+};
 pub use kaleidoscope::{
     kaleidoscope_frame_f32, KaleidoscopeError, KaleidoscopeGrade, KALEIDOSCOPE_MAX_MIRRORING,
     KALEIDOSCOPE_MAX_SIZE, KALEIDOSCOPE_MIN_MIRRORING, KALEIDOSCOPE_MIN_SIZE,

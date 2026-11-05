@@ -3144,3 +3144,15 @@ parameter-mondrian-effect-photo-filter-filter-deep-emerald = 翡翠绿
 parameter-mondrian-effect-photo-filter-filter-deep-yellow = 深黄
 parameter-mondrian-effect-photo-filter-filter-underwater = 水下
 parameter-mondrian-effect-photo-filter-filter-custom = 自定义
+
+## JPEG Damage JPEG 损坏
+effect-jpeg-damage = JPEG 损坏
+parameter-group-jpeg-damage = JPEG 损坏
+parameter-mondrian-effect-builtin-jpeg-damage-quality-label = 质量
+parameter-mondrian-effect-builtin-jpeg-damage-resolution-label = 分辨率
+parameter-mondrian-effect-builtin-jpeg-damage-macroblock-aspect-label = 宏块宽高比
+parameter-mondrian-effect-builtin-jpeg-damage-frequency-scale-label = 频率缩放
+parameter-mondrian-effect-builtin-jpeg-damage-scaling-component-label = 缩放组件
+parameter-mondrian-effect-jpeg-damage-scaling-component-luma = 亮度
+parameter-mondrian-effect-jpeg-damage-scaling-component-chroma = 色度
+parameter-mondrian-effect-jpeg-damage-scaling-component-both = 两者

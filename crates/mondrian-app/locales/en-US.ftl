@@ -3212,3 +3212,15 @@ parameter-mondrian-effect-photo-filter-filter-deep-emerald = Deep Emerald
 parameter-mondrian-effect-photo-filter-filter-deep-yellow = Deep Yellow
 parameter-mondrian-effect-photo-filter-filter-underwater = Underwater
 parameter-mondrian-effect-photo-filter-filter-custom = Custom
+
+## JPEG Damage JPEG 损坏
+effect-jpeg-damage = JPEG Damage
+parameter-group-jpeg-damage = JPEG Damage
+parameter-mondrian-effect-builtin-jpeg-damage-quality-label = Quality
+parameter-mondrian-effect-builtin-jpeg-damage-resolution-label = Resolution
+parameter-mondrian-effect-builtin-jpeg-damage-macroblock-aspect-label = Macroblock Aspect
+parameter-mondrian-effect-builtin-jpeg-damage-frequency-scale-label = Frequency Scale
+parameter-mondrian-effect-builtin-jpeg-damage-scaling-component-label = Scaling Component
+parameter-mondrian-effect-jpeg-damage-scaling-component-luma = Luma
+parameter-mondrian-effect-jpeg-damage-scaling-component-chroma = Chroma
+parameter-mondrian-effect-jpeg-damage-scaling-component-both = Both

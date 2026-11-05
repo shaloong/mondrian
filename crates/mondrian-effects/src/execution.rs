@@ -2356,6 +2356,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Fractal { .. } => "fractal",
         EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
         EffectRenderOp::PhotoFilter { .. } => "photo_filter",
+        EffectRenderOp::JpegDamage { .. } => "jpeg_damage",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

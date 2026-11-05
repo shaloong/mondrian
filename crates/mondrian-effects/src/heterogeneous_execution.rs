@@ -2773,6 +2773,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::Fractal { .. } => 106,
         EffectRenderOp::RemoveColorMatting { .. } => 107,
         EffectRenderOp::PhotoFilter { .. } => 108,
+        EffectRenderOp::JpegDamage { .. } => 109,
         EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::ColorBalance { .. } => 79,
@@ -4888,6 +4889,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Fractal { .. }
             | crate::EffectRenderOp::RemoveColorMatting { .. }
             | crate::EffectRenderOp::PhotoFilter { .. }
+            | crate::EffectRenderOp::JpegDamage { .. }
             | crate::EffectRenderOp::Grid { .. }
             | crate::EffectRenderOp::CircleEllipse { .. }
             | crate::EffectRenderOp::Stroke { .. }

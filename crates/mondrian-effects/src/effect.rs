@@ -1235,6 +1235,11 @@ pub enum EffectRenderOp {
         /// Authored gel colour, density and the preserve-luminosity switch.
         grade: crate::PhotoFilterGrade,
     },
+    /// JPEG damage: block quantisation, seam darkening and mosaic noise.
+    JpegDamage {
+        /// Authored quality, grid, residual scale and scaling component.
+        grade: crate::JpegDamageGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1577,6 +1582,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::PhotoFilter { grade } => {
                 formatter.debug_struct("PhotoFilter").field("grade", grade).finish()
+            }
+            Self::JpegDamage { grade } => {
+                formatter.debug_struct("JpegDamage").field("grade", grade).finish()
             }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
@@ -2583,6 +2591,17 @@ impl EffectRenderOp {
                 // color payload, so the cache has to see it separately.
                 grade.preserve_luminosity().hash(state);
             }
+            EffectRenderOp::JpegDamage { grade } => {
+                108u8.hash(state);
+                // The five fields are packed into the three uniform cells, so
+                // the cache has to see all of them; the phase grid and the
+                // derived steps are pure functions of these.
+                grade.quality().to_bits().hash(state);
+                grade.resolution().to_bits().hash(state);
+                grade.macroblock_aspect().to_bits().hash(state);
+                grade.frequency_scale().to_bits().hash(state);
+                grade.scaling_component().index().hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2751,6 +2770,7 @@ impl EffectRenderOp {
             EffectRenderOp::TemporalFrameBlend { .. } => 2,
             EffectRenderOp::RemoveColorMatting { .. } => 1,
             EffectRenderOp::PhotoFilter { .. } => 1,
+            EffectRenderOp::JpegDamage { .. } => 1,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3277,7 +3297,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 107] {
+fn builtin_effect_types() -> [EffectType; 108] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3386,6 +3406,7 @@ fn builtin_effect_types() -> [EffectType; 107] {
         EffectType::Fractal,
         EffectType::RemoveColorMatting,
         EffectType::PhotoFilter,
+        EffectType::JpegDamage,
     ]
 }
 
@@ -11288,6 +11309,75 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::JpegDamage => {
+            // The default is deliberately not the identity: quality 10 at the
+            // base grid is already a visibly damaged frame, which is what the
+            // effect is for. Pulling all four numbers back to their identity
+            // values elides the node in the graph builder.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "quality",
+                "JPEG 损坏",
+                "质量",
+                PropertyValue::Float(crate::JPEG_DAMAGE_DEFAULT_QUALITY),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "resolution",
+                "JPEG 损坏",
+                "分辨率",
+                PropertyValue::Float(crate::JPEG_DAMAGE_DEFAULT_RESOLUTION),
+                Some(1.0),
+                Some(crate::JPEG_DAMAGE_MAX_RESOLUTION as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "macroblock_aspect",
+                "JPEG 损坏",
+                "宏块宽高比",
+                PropertyValue::Float(crate::JPEG_DAMAGE_DEFAULT_MACROBLOCK_ASPECT),
+                Some(crate::JPEG_DAMAGE_MIN_MACROBLOCK_ASPECT as f64),
+                Some(crate::JPEG_DAMAGE_MAX_MACROBLOCK_ASPECT as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "frequency_scale",
+                "JPEG 损坏",
+                "频率缩放",
+                PropertyValue::Float(crate::JPEG_DAMAGE_DEFAULT_FREQUENCY_SCALE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "scaling_component",
+                "JPEG 损坏",
+                "缩放组件",
+                crate::JPEG_DAMAGE_DEFAULT_COMPONENT.as_key(),
+                crate::JpegDamageScalingComponent::ALL
+                    .iter()
+                    .map(|component| {
+                        let key = component.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            component.label(),
+                            format!("mondrian.effect.jpeg_damage.scaling_component.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -11989,6 +12079,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // A point multiply, so the pixel-local ROI default is exact; the
             // preserve-luminosity rescale reads the same sample only.
+            ..cpu_linear
+        },
+        EffectType::JpegDamage => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // One sample in, one sample out; the position is read-only geometry,
+            // so the pixel-local ROI default is exact.
             ..cpu_linear
         },
         EffectType::Choker => EffectExecutionContract {
@@ -18464,6 +18560,74 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::JpegDamage => {
+            let quality_id = builtin_parameter_id(effect_type, "quality");
+            let resolution_id = builtin_parameter_id(effect_type, "resolution");
+            let aspect_id = builtin_parameter_id(effect_type, "macroblock_aspect");
+            let frequency_id = builtin_parameter_id(effect_type, "frequency_scale");
+            let component_id = builtin_parameter_id(effect_type, "scaling_component");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let number = |id: &ParameterId,
+                              name: &str,
+                              fallback: f32|
+                 -> Result<f32, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("JPEG damage {name} must be a number"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let quality = number(&quality_id, "quality", crate::JPEG_DAMAGE_DEFAULT_QUALITY)?;
+                let resolution = number(
+                    &resolution_id,
+                    "resolution",
+                    crate::JPEG_DAMAGE_DEFAULT_RESOLUTION,
+                )?;
+                let aspect = number(
+                    &aspect_id,
+                    "macroblock aspect",
+                    crate::JPEG_DAMAGE_DEFAULT_MACROBLOCK_ASPECT,
+                )?;
+                let frequency = number(
+                    &frequency_id,
+                    "frequency scale",
+                    crate::JPEG_DAMAGE_DEFAULT_FREQUENCY_SCALE,
+                )?;
+                let component = match effect.evaluate_parameter(&component_id, context.time) {
+                    // Fail closed: an unknown component is an authoring error,
+                    // never a silent fallback to the default.
+                    Some(PropertyValue::Enum(key)) => {
+                        crate::JpegDamageScalingComponent::from_key(&key).ok_or_else(|| {
+                            invalid(format!(
+                                "JPEG damage scaling component {key} is not a declared option"
+                            ))
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(invalid(
+                            "JPEG damage scaling component must be an enumeration".to_owned(),
+                        ));
+                    }
+                    None => crate::JPEG_DAMAGE_DEFAULT_COMPONENT,
+                };
+                let grade =
+                    crate::JpegDamageGrade::new(quality, resolution, aspect, frequency, component)
+                        .map_err(|error| invalid(error.to_string()))?;
+                // The default parameters are not the identity — quality ten is
+                // visible damage — but pulling every number back to its neutral
+                // value elides the node instead of leaving a no-op behind.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::JpegDamage { grade });
+                }
+                Ok(())
+            }))
+        }
         _ => None,
     }
 }
@@ -18577,6 +18741,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChangeToColor => "定向改色",
         EffectType::RemoveColorMatting => "移除颜色遮罩",
         EffectType::PhotoFilter => "照片滤镜",
+        EffectType::JpegDamage => "JPEG 损坏",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -19918,6 +20083,7 @@ mod tests {
             EffectType::Fractal,
             EffectType::RemoveColorMatting,
             EffectType::PhotoFilter,
+            EffectType::JpegDamage,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -28991,7 +29157,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 107);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 108);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -29519,7 +29685,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 107);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 108);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -32227,8 +32393,9 @@ mod tests {
         // Measured against the tree at HEAD c4d26520: the hash tags stopped at
         // 105, the shape tags at 106 and the library held 105 entries, so the
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
-        // filter that landed later took 107/108, bringing the library to 107.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 107);
+        // filter that landed later took 107/108 and the JPEG damage 108/109,
+        // bringing the library to 108.
+        assert_eq!(crate::effect::builtin_effect_types().len(), 108);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -32710,6 +32877,256 @@ mod tests {
             std::hash::Hasher::finish(&red_hash),
             std::hash::Hasher::finish(&blue_hash),
             "the preset gel is part of the persisted signature"
+        );
+    }
+
+    fn author_jpeg_damage(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::JpegDamage)
+            .expect("the JPEG damage effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::JpegDamage.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the JPEG damage parameter should be assignable");
+        }
+        effect
+    }
+
+    fn jpeg_damage_op(graph: &EffectRenderGraph) -> Option<crate::JpegDamageGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::JpegDamage { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::JpegDamage { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn jpeg_damage_g1_identity_grade_elides_the_node() {
+        let effect = author_jpeg_damage(&[
+            ("quality", PropertyValue::Float(100.0)),
+            ("resolution", PropertyValue::Float(1.0)),
+            ("macroblock_aspect", PropertyValue::Float(1.0)),
+            ("frequency_scale", PropertyValue::Float(1.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity JPEG damage should compile");
+        assert!(
+            jpeg_damage_op(&graph).is_none(),
+            "an exact identity must not leave a node behind"
+        );
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|node| matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect { .. }
+                        | EffectGraphNodeKind::DomainEffect { .. }
+                ))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn jpeg_damage_g2_default_parameters_append_one_jpeg_damage_node() {
+        let effect_type = EffectType::JpegDamage;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("quality", "质量", ParameterUnit::Unitless),
+            ("resolution", "分辨率", ParameterUnit::Unitless),
+            ("macroblock_aspect", "宏块宽高比", ParameterUnit::Unitless),
+            ("frequency_scale", "频率缩放", ParameterUnit::Unitless),
+            ("scaling_component", "缩放组件", ParameterUnit::Unitless),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("JPEG 损坏")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        let component = properties
+            .property(&effect_type.property_path("scaling_component"))
+            .expect("the scaling component is defined");
+        let keys: Vec<&str> = component
+            .descriptor
+            .schema
+            .enum_options
+            .iter()
+            .map(|option| option.key.as_str())
+            .collect();
+        assert_eq!(keys, ["luma", "chroma", "both"]);
+        assert_eq!(
+            component.descriptor.schema.enum_options[1].message_id,
+            "mondrian.effect.jpeg_damage.scaling_component.chroma"
+        );
+
+        let effect = author_jpeg_damage(&[]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default JPEG damage should compile");
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|node| matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::JpegDamage { .. }, .. }
+                ))
+                .count(),
+            1,
+            "the default is not the identity and must reach the graph once"
+        );
+        let grade = jpeg_damage_op(&graph).expect("the default grade reaches the graph");
+        assert_eq!(grade.quality(), crate::JPEG_DAMAGE_DEFAULT_QUALITY);
+        assert_eq!(grade.resolution(), crate::JPEG_DAMAGE_DEFAULT_RESOLUTION);
+        assert_eq!(
+            grade.macroblock_aspect(),
+            crate::JPEG_DAMAGE_DEFAULT_MACROBLOCK_ASPECT
+        );
+        assert_eq!(
+            grade.frequency_scale(),
+            crate::JPEG_DAMAGE_DEFAULT_FREQUENCY_SCALE
+        );
+        assert_eq!(
+            grade.scaling_component(),
+            crate::JPEG_DAMAGE_DEFAULT_COMPONENT
+        );
+        assert!(!grade.is_identity());
+        // One fused point op, no scratch frame and no spatial kernel.
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&EffectRenderOp::JpegDamage { grade }),
+            0
+        );
+        assert!(crate::spatial_pass_for(&EffectRenderOp::JpegDamage { grade }).is_none());
+    }
+
+    #[test]
+    fn jpeg_damage_g3_builder_coerces_enum_and_rejects_unknown_keys() {
+        let effect = author_jpeg_damage(&[]);
+        let graph = jpeg_damage_graph_with_component(&effect, serde_json::json!({"Enum": "both"}));
+        assert_eq!(
+            jpeg_damage_op(&graph)
+                .expect("the coerced component reaches the graph")
+                .scaling_component(),
+            crate::JpegDamageScalingComponent::Both
+        );
+
+        for key in ["chroma ", "BOTH", ""] {
+            let effect = author_jpeg_damage(&[]);
+            let effect_id = effect.id;
+            let mut document = serde_json::to_value(&effect).expect("serialize the node");
+            overwrite_static_value(
+                &mut document,
+                "jpeg_damage.scaling_component",
+                serde_json::json!({"Enum": key}),
+            );
+            let tampered: EffectNode = serde_json::from_value(document).expect("reopen the node");
+            let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+                .expect_err("an undeclared component cannot author");
+            assert!(matches!(
+                error,
+                EffectGraphBuildError::InvalidAuthorState {
+                    effect_id: reported,
+                    ..
+                } if reported == effect_id
+            ));
+            assert!(
+                format!("{error:?}").contains(key),
+                "the rejection names the undeclared key: {error:?}"
+            );
+        }
+
+        let effect = author_jpeg_damage(&[]);
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "jpeg_damage.scaling_component",
+            serde_json::json!({"Bool": true}),
+        );
+        let tampered: EffectNode = serde_json::from_value(document).expect("reopen the node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a boolean component cannot author");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState { .. }
+        ));
+        // The schema's type gate rejects the boolean before the builder reads
+        // it, so the reason names the property rather than the expected type.
+        assert!(
+            format!("{error:?}").contains("scaling_component"),
+            "the rejection names the component property: {error:?}"
+        );
+    }
+
+    fn jpeg_damage_graph_with_component(
+        effect: &EffectNode,
+        value: serde_json::Value,
+    ) -> EffectRenderGraph {
+        let mut document = serde_json::to_value(effect).expect("serialize the node");
+        overwrite_static_value(&mut document, "jpeg_damage.scaling_component", value);
+        let tampered: EffectNode = serde_json::from_value(document).expect("reopen the node");
+        build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect("the coerced component compiles")
+    }
+
+    #[test]
+    fn jpeg_damage_g4_effect_type_round_trips_and_hash_separates_grades() {
+        assert_eq!(EffectType::JpegDamage.key(), "builtin.jpeg_damage");
+        assert_eq!(
+            EffectType::from_key("builtin.jpeg_damage"),
+            EffectType::JpegDamage
+        );
+        assert_eq!(EffectType::JpegDamage.display_name(), "JPEG 损坏");
+        assert_eq!(EffectType::JpegDamage.category_path(), vec!["胶片质感"]);
+        assert_eq!(EffectType::JpegDamage.property_namespace(), "jpeg_damage");
+        assert_eq!(
+            EffectType::JpegDamage.property_path("quality"),
+            "effect.jpeg_damage.quality"
+        );
+        assert_eq!(builtin_display_name(&EffectType::JpegDamage), "JPEG 损坏");
+        assert!(effect_definition(&EffectType::JpegDamage).is_some());
+
+        let default_grade = crate::JpegDamageGrade::default();
+        let other_grade = crate::JpegDamageGrade::new(
+            50.0,
+            2.0,
+            0.5,
+            0.25,
+            crate::JpegDamageScalingComponent::Luma,
+        )
+        .expect("the grade is valid");
+        let mut default_hash = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::JpegDamage { grade: default_grade }.hash_signature(&mut default_hash);
+        let mut other_hash = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::JpegDamage { grade: other_grade }.hash_signature(&mut other_hash);
+        assert_ne!(
+            std::hash::Hasher::finish(&default_hash),
+            std::hash::Hasher::finish(&other_hash),
+            "the grade is part of the persisted signature"
+        );
+        let mut repeat_hash = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::JpegDamage { grade: default_grade }.hash_signature(&mut repeat_hash);
+        assert_eq!(
+            std::hash::Hasher::finish(&default_hash),
+            std::hash::Hasher::finish(&repeat_hash),
+            "an equal grade hashes equally"
         );
     }
 }

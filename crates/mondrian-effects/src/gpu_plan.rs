@@ -184,6 +184,10 @@ pub enum EffectGpuPointOp {
     PhotoFilter {
         grade: crate::PhotoFilterGrade,
     },
+    /// JPEG damage: quantises and mosaics the frame on an 8-pixel block grid.
+    JpegDamage {
+        grade: crate::JpegDamageGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         grade: crate::GridGrade,
@@ -941,6 +945,7 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::PhotoFilter { grade } => {
             Ok(EffectGpuPointOp::PhotoFilter { grade: *grade })
         }
+        EffectRenderOp::JpegDamage { grade } => Ok(EffectGpuPointOp::JpegDamage { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1060,6 +1065,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Fractal { .. } => "fractal",
         EffectRenderOp::RemoveColorMatting { .. } => "remove_color_matting",
         EffectRenderOp::PhotoFilter { .. } => "photo_filter",
+        EffectRenderOp::JpegDamage { .. } => "jpeg_damage",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

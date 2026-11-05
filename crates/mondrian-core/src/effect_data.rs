@@ -158,6 +158,8 @@ pub enum EffectType {
     RemoveColorMatting,
     /// Photo filter: tints the frame with a photographic gel.
     PhotoFilter,
+    /// JPEG damage: block quantisation, seam darkening and mosaic noise.
+    JpegDamage,
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid,
     /// Circle and ellipse: paints a pixel-local soft-edged circle. The ellipse
@@ -289,6 +291,7 @@ impl EffectType {
             Self::Fractal => "builtin.fractal".to_string(),
             Self::RemoveColorMatting => "builtin.remove_color_matting".to_string(),
             Self::PhotoFilter => "builtin.photo_filter".to_string(),
+            Self::JpegDamage => "builtin.jpeg_damage".to_string(),
             Self::Grid => "builtin.grid".to_string(),
             Self::CircleEllipse => "builtin.circle_ellipse".to_string(),
             Self::Stroke => "builtin.stroke".to_string(),
@@ -402,6 +405,7 @@ impl EffectType {
             "builtin.fractal" => Self::Fractal,
             "builtin.remove_color_matting" => Self::RemoveColorMatting,
             "builtin.photo_filter" => Self::PhotoFilter,
+            "builtin.jpeg_damage" => Self::JpegDamage,
             "builtin.grid" => Self::Grid,
             "builtin.circle_ellipse" => Self::CircleEllipse,
             "builtin.stroke" => Self::Stroke,
@@ -515,6 +519,7 @@ impl EffectType {
             Self::Fractal => "分形",
             Self::RemoveColorMatting => "移除颜色遮罩",
             Self::PhotoFilter => "照片滤镜",
+            Self::JpegDamage => "JPEG 损坏",
             Self::Grid => "网格",
             Self::CircleEllipse => "圆形与椭圆",
             Self::Stroke => "描边",
@@ -626,6 +631,7 @@ impl EffectType {
             Self::Fractal => vec!["生成器"],
             Self::RemoveColorMatting => vec!["通道"],
             Self::PhotoFilter => vec!["颜色"],
+            Self::JpegDamage => vec!["胶片质感"],
             Self::Grid => vec!["生成器"],
             Self::CircleEllipse => vec!["生成器"],
             Self::Stroke => vec!["生成器"],
@@ -739,6 +745,7 @@ impl EffectType {
             Self::Fractal => "fractal".to_string(),
             Self::RemoveColorMatting => "remove_color_matting".to_string(),
             Self::PhotoFilter => "photo_filter".to_string(),
+            Self::JpegDamage => "jpeg_damage".to_string(),
             Self::Grid => "grid".to_string(),
             Self::CircleEllipse => "circle_ellipse".to_string(),
             Self::Stroke => "stroke".to_string(),
@@ -1101,6 +1108,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Fractal => Ok(()),
             Self::RemoveColorMatting => Ok(()),
             Self::PhotoFilter => Ok(()),
+            Self::JpegDamage => Ok(()),
             Self::Grid => Ok(()),
             Self::CircleEllipse => Ok(()),
             Self::Stroke => Ok(()),

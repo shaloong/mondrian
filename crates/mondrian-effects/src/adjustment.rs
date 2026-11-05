@@ -416,6 +416,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::JpegDamage { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "jpeg_damage",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Grid { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "grid",
@@ -1135,6 +1141,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Fractal { .. } => 0,
         EffectRenderOp::RemoveColorMatting { .. } => 0,
         EffectRenderOp::PhotoFilter { .. } => 0,
+        EffectRenderOp::JpegDamage { .. } => 0,
         EffectRenderOp::Grid { .. } => 0,
         EffectRenderOp::CircleEllipse { .. } => 0,
         EffectRenderOp::Fill { .. } => 0,
@@ -1630,6 +1637,18 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::PhotoFilter { grade } => {
             crate::photo_filter::apply_photo_filter_f32_controlled(working, grade, checkpoint)?;
+            Ok(true)
+        }
+        EffectRenderOp::JpegDamage { grade } => {
+            crate::jpeg_damage::apply_jpeg_damage_f32_region_controlled(
+                working,
+                region.x as usize,
+                region.y as usize,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )?;
             Ok(true)
         }
         EffectRenderOp::Choker { grade } => {
