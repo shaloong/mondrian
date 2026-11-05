@@ -253,6 +253,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored edge radius, chatter fraction, alpha contrast and strength.
         grade: crate::KeyCleanerGrade,
     },
+    SmartBlur {
+        /// Authored radius, threshold and the output mode.
+        grade: crate::SmartBlurGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -306,6 +310,7 @@ impl EffectGpuSpatialPass {
             Self::Stroke { .. } => "stroke",
             Self::DustScratches { .. } => "dust_scratches",
             Self::KeyCleaner { .. } => "key_cleaner",
+            Self::SmartBlur { .. } => "smart_blur",
         }
     }
 
@@ -389,6 +394,9 @@ impl EffectGpuSpatialPass {
             // and the kernel is clipped rather than tiled, so the reach is
             // unbounded in both directions.
             Self::KeyCleaner { .. } => u32::MAX,
+            // The blur window is the authored radius plus the one fractional
+            // tap, so it is bounded by the authoring ceiling of 100.
+            Self::SmartBlur { grade } => smart_blur_halo(grade),
         }
     }
 
@@ -459,6 +467,8 @@ impl EffectGpuSpatialPass {
             Self::DustScratches { .. } => crate::dust_scratches::DUST_SCRATCHES_MAX_RADIUS,
             // Same reach as the horizontal halo.
             Self::KeyCleaner { .. } => u32::MAX,
+            // Same reach as the horizontal halo.
+            Self::SmartBlur { grade } => smart_blur_halo(grade),
         }
     }
 }
@@ -480,6 +490,14 @@ fn stroke_halo(grade: crate::StrokeGrade) -> u32 {
 /// spatial driver admits so a huge authored diameter cannot overflow it.
 fn magnify_halo(grade: crate::MagnifyGrade) -> u32 {
     (grade.radius_pixels().ceil() as u32).saturating_add(2).min(8192)
+}
+
+/// Reach of the smart blur window in source pixels.
+///
+/// The kernel averages every tap inside `radius`, plus the one fractional tap at
+/// `ceil(radius)`, so the authored ceiling of 100 bounds the halo at 101.
+fn smart_blur_halo(grade: crate::SmartBlurGrade) -> u32 {
+    (grade.radius().ceil() as u32).saturating_add(1).min(101)
 }
 
 /// One stage of the GPU pipeline, in graph order.
@@ -827,6 +845,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::KeyCleaner { grade } => {
             Some(EffectGpuSpatialPass::KeyCleaner { grade: *grade })
         }
+        EffectRenderOp::SmartBlur { grade } => {
+            Some(EffectGpuSpatialPass::SmartBlur { grade: *grade })
+        }
         _ => None,
     }
 }
@@ -1024,6 +1045,38 @@ mod tests {
         );
         assert!(matches!(stages[2], EffectGpuStage::PointOps { .. }));
         assert_eq!(pipeline.spatial_stage_count(), 1);
+    }
+
+    #[test]
+    fn smart_blur_maps_to_the_dedicated_spatial_pass() {
+        let grade = crate::SmartBlurGrade::new(3.0, 25.0, crate::SmartBlurMode::Normal)
+            .expect("valid grade");
+        let op = EffectRenderOp::SmartBlur { grade };
+        let pass = spatial_pass_for(&op).expect("smart blur runs as a spatial pass");
+        assert_eq!(pass, EffectGpuSpatialPass::SmartBlur { grade });
+        assert_eq!(pass.name(), "smart_blur");
+        // The window is the authored radius plus the fractional tap, and the
+        // authoring ceiling of 100 bounds it at 101.
+        assert_eq!(pass.horizontal_halo(), 4);
+        assert_eq!(pass.vertical_halo(), 4);
+        let wide = crate::SmartBlurGrade::new(100.0, 25.0, crate::SmartBlurMode::Normal)
+            .expect("valid grade");
+        assert_eq!(
+            EffectGpuSpatialPass::SmartBlur { grade: wide }.horizontal_halo(),
+            101
+        );
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("smart blur pipeline");
+        assert_eq!(
+            pipeline.stages(),
+            &[EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::SmartBlur { grade },
+                node_id: pipeline.output_value(),
+            }]
+        );
     }
 
     #[test]

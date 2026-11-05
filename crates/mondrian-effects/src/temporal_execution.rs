@@ -2852,6 +2852,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Median { .. } => "median",
         crate::EffectRenderOp::DustScratches { .. } => "dust_scratches",
         crate::EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
+        crate::EffectRenderOp::SmartBlur { .. } => "smart_blur",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",

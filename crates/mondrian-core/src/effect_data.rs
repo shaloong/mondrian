@@ -192,6 +192,9 @@ pub enum EffectType {
     /// channels, with an optional uniform RGB scale or shift for the derived
     /// luminance and lightness targets.
     ChannelCombiner,
+    /// Smart blur: a separable range-domain mean that only averages neighbours
+    /// whose luminance stays within the authored threshold.
+    SmartBlur,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -313,6 +316,7 @@ impl EffectType {
             Self::VrProject2D => "builtin.vr_project_2d".to_string(),
             Self::KeyCleaner => "builtin.key_cleaner".to_string(),
             Self::ChannelCombiner => "builtin.channel_combiner".to_string(),
+            Self::SmartBlur => "builtin.smart_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -430,6 +434,7 @@ impl EffectType {
             "builtin.vr_project_2d" => Self::VrProject2D,
             "builtin.key_cleaner" => Self::KeyCleaner,
             "builtin.channel_combiner" => Self::ChannelCombiner,
+            "builtin.smart_blur" => Self::SmartBlur,
             other => Self::External(other.to_string()),
         }
     }
@@ -547,6 +552,7 @@ impl EffectType {
             Self::VrProject2D => "VR 平面到球面",
             Self::KeyCleaner => "键控清理",
             Self::ChannelCombiner => "通道合成器",
+            Self::SmartBlur => "智能模糊",
             Self::External(name) => name,
         }
     }
@@ -662,6 +668,7 @@ impl EffectType {
             Self::VrProject2D => vec!["变形"],
             Self::KeyCleaner => vec!["边缘修补"],
             Self::ChannelCombiner => vec!["通道"],
+            Self::SmartBlur => vec!["模糊与锐化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -779,6 +786,7 @@ impl EffectType {
             Self::VrProject2D => "vr_project_2d".to_string(),
             Self::KeyCleaner => "key_cleaner".to_string(),
             Self::ChannelCombiner => "channel_combiner".to_string(),
+            Self::SmartBlur => "smart_blur".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1147,6 +1155,9 @@ impl crate::AuthoringFootprint for EffectType {
             // painted region, so it has no authoring footprint.
             Self::KeyCleaner => Ok(()),
             Self::ChannelCombiner => Ok(()),
+            // Range-domain blur: it samples and reweights existing pixels, so it
+            // can never paint a region the source left empty.
+            Self::SmartBlur => Ok(()),
         }
     }
 }

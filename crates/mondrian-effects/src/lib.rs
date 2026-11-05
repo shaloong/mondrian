@@ -146,6 +146,7 @@ pub mod remove_color_matting;
 pub mod scatter;
 pub mod selective_color;
 pub mod shift_channels;
+pub mod smart_blur;
 pub(crate) mod straight_alpha;
 pub mod temporal_execution;
 pub mod test_signals;
@@ -503,6 +504,12 @@ pub use selective_color::{
     selective_color_frame_f32, SelectiveColorError, SelectiveColorGrade, SelectiveColorMethod,
     SelectiveColorRange, CHROMA_GATE_END, CHROMA_GATE_START, LUMA_PIVOT, MIN_MAX_CHANNEL,
     SELECTIVE_COLOR_SLIDER_MAX, SELECTIVE_COLOR_SLIDER_MIN, TENT_HALF_WIDTH_DEGREES,
+};
+pub use smart_blur::{
+    smart_blur_frame_f32, SmartBlurError, SmartBlurGrade, SmartBlurMode,
+    SMART_BLUR_AUTHOR_MAX_RADIUS_PIXELS, SMART_BLUR_AUTHOR_MIN_RADIUS_PIXELS,
+    SMART_BLUR_DEFAULT_RADIUS_PIXELS, SMART_BLUR_DEFAULT_THRESHOLD, SMART_BLUR_EDGE_GAIN,
+    SMART_BLUR_MAX_THRESHOLD, SMART_BLUR_MIN_THRESHOLD,
 };
 pub use spherize::{
     spherize_frame_f32, SpherizeError, SpherizeGrade, SPHERIZE_MAX_RADIUS_PIXELS,

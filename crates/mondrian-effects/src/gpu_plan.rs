@@ -1089,6 +1089,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Median { .. } => "median",
         EffectRenderOp::DustScratches { .. } => "dust_scratches",
         EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
+        EffectRenderOp::SmartBlur { .. } => "smart_blur",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

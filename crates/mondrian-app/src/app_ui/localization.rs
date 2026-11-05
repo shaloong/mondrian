@@ -387,6 +387,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "高品质" => Some("parameter-group-quality"),
         "蒙尘与划痕" => Some("parameter-group-dust-scratches"),
         "键控清理" => Some("parameter-group-key-cleaner"),
+        "智能模糊" => Some("parameter-group-smart-blur"),
         _ => None,
     }
 }

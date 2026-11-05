@@ -3323,3 +3323,13 @@ parameter-mondrian-effect-colorama-preset-palette-skink = 石龙子
 parameter-mondrian-effect-colorama-preset-palette-sunset = 夕阳余晖
 parameter-mondrian-effect-colorama-preset-palette-ramp-cyan = 渐变青色
 parameter-mondrian-effect-colorama-preset-palette-none = 无
+
+## 智能模糊 Smart Blur
+effect-smart-blur = 智能模糊
+parameter-group-smart-blur = 智能模糊
+parameter-mondrian-effect-builtin-smart-blur-radius-label = 半径
+parameter-mondrian-effect-builtin-smart-blur-threshold-label = 阈值
+parameter-mondrian-effect-builtin-smart-blur-mode-label = 模式
+parameter-mondrian-effect-smart-blur-mode-normal = 正常
+parameter-mondrian-effect-smart-blur-mode-edge-only = 仅边缘
+parameter-mondrian-effect-smart-blur-mode-overlay-edge = 叠加边缘

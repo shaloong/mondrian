@@ -1256,6 +1256,11 @@ pub enum EffectRenderOp {
         /// Authored template, inversion, solid alpha and colour-space weights.
         grade: crate::ChannelCombinerGrade,
     },
+    /// Smart blur: a separable range-domain mean gated by luminance distance.
+    SmartBlur {
+        /// Authored radius, luminance threshold and output mode.
+        grade: crate::SmartBlurGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1610,6 +1615,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ChannelCombiner { grade } => {
                 formatter.debug_struct("ChannelCombiner").field("grade", grade).finish()
+            }
+            Self::SmartBlur { grade } => {
+                formatter.debug_struct("SmartBlur").field("grade", grade).finish()
             }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
@@ -2661,6 +2669,12 @@ impl EffectRenderOp {
                 // alpha and the colour-space weights all reach the kernel.
                 grade.hash(state);
             }
+            EffectRenderOp::SmartBlur { grade } => {
+                112u8.hash(state);
+                // Radius, threshold and mode all change the kernel weights, so
+                // they are hashed as raw bits rather than as a rounded packing.
+                grade.hash_state(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2834,6 +2848,7 @@ impl EffectRenderOp {
             EffectRenderOp::JpegDamage { .. } => 1,
             EffectRenderOp::Colorama { .. } => 2,
             EffectRenderOp::ChannelCombiner { .. } => 1,
+            EffectRenderOp::SmartBlur { .. } => 3,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3360,7 +3375,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 111] {
+fn builtin_effect_types() -> [EffectType; 112] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3473,6 +3488,7 @@ fn builtin_effect_types() -> [EffectType; 111] {
         EffectType::Colorama,
         EffectType::KeyCleaner,
         EffectType::ChannelCombiner,
+        EffectType::SmartBlur,
     ]
 }
 
@@ -11573,6 +11589,52 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::SmartBlur => {
+            // The documented default (radius 3 at threshold 25 %) already
+            // softens the frame, and even the 0.1 radius floor keeps changing
+            // pixels, so the builder always appends the node.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "radius",
+                "智能模糊",
+                "半径",
+                PropertyValue::Float(crate::SMART_BLUR_DEFAULT_RADIUS_PIXELS),
+                Some(crate::SMART_BLUR_AUTHOR_MIN_RADIUS_PIXELS as f64),
+                Some(crate::SMART_BLUR_AUTHOR_MAX_RADIUS_PIXELS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "threshold",
+                "智能模糊",
+                "阈值",
+                PropertyValue::Float(crate::SMART_BLUR_DEFAULT_THRESHOLD),
+                Some(crate::SMART_BLUR_MIN_THRESHOLD as f64),
+                Some(crate::SMART_BLUR_MAX_THRESHOLD as f64),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "mode",
+                "智能模糊",
+                "模式",
+                crate::SmartBlurGrade::documented_defaults().mode().as_key(),
+                crate::SmartBlurMode::ALL
+                    .iter()
+                    .map(|mode| {
+                        let key = mode.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            mode.label(),
+                            format!("mondrian.effect.smart_blur.mode.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::Colorama => {
             // The default is hue_cycle at one repetition, which is the
             // documented colour map immediately after the effect is added.
@@ -12265,6 +12327,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::KeyCleaner, "other_edge_radius") => ParameterUnit::Pixels,
         (EffectType::KeyCleaner, "reduce_chatter") => ParameterUnit::Normalized,
         (EffectType::KeyCleaner, "alpha_contrast" | "strength") => ParameterUnit::Percent,
+        // The window radius is in pixels and the gate is a percentage of the
+        // normalised luma range, matching the dump's "阈值 0.1–100".
+        (EffectType::SmartBlur, "radius") => ParameterUnit::Pixels,
+        (EffectType::SmartBlur, "threshold") => ParameterUnit::Percent,
         // The patch points are authored in a reference box, not in frame pixels,
         // and the quality option is an iteration count, so neither carries a unit.
         (EffectType::BezierWarp, _) => ParameterUnit::Unitless,
@@ -12678,6 +12744,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The erosion window reaches 250 pixels in every direction and the
             // dedicated spatial pass writes a whole-frame destination, so the
             // definition-level envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::SmartBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The radius reaches 100 pixels in every direction and the gate
+            // reads the source frame during both passes, so the definition-level
+            // envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -18342,6 +18416,40 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::SmartBlur => {
+            let radius_id = builtin_parameter_id(effect_type, "radius");
+            let threshold_id = builtin_parameter_id(effect_type, "threshold");
+            let mode_id = builtin_parameter_id(effect_type, "mode");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let number =
+                    |id: &ParameterId, fallback: f32| -> Result<f32, EffectGraphBuildError> {
+                        match effect.evaluate_parameter(id, context.time) {
+                            Some(PropertyValue::Float(value)) => Ok(value),
+                            Some(PropertyValue::Int(value)) => Ok(value as f32),
+                            Some(_) => Err(invalid("智能模糊的半径与阈值必须是数值".to_string())),
+                            None => Ok(fallback),
+                        }
+                    };
+                let radius = number(&radius_id, crate::SMART_BLUR_DEFAULT_RADIUS_PIXELS)?;
+                let threshold = number(&threshold_id, crate::SMART_BLUR_DEFAULT_THRESHOLD)?;
+                let mode = match effect.evaluate_enum_parameter(&mode_id, context.time) {
+                    Some(key) => crate::SmartBlurMode::from_key(&key)
+                        .ok_or_else(|| invalid("智能模糊的模式未知".to_string()))?,
+                    None => crate::SmartBlurGrade::documented_defaults().mode(),
+                };
+                let grade = crate::SmartBlurGrade::new(radius, threshold, mode)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // The floor radius still changes pixels, so there is no identity
+                // configuration to elide.
+                graph.append_unary(EffectRenderOp::SmartBlur { grade });
+                Ok(())
+            }))
+        }
         EffectType::SelectiveColor => {
             let method_id = builtin_parameter_id(effect_type, "method");
             let colors_id = builtin_parameter_id(effect_type, "colors");
@@ -19598,6 +19706,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::JpegDamage => "JPEG 损坏",
         EffectType::Colorama => "色光",
         EffectType::ChannelCombiner => "通道合成器",
+        EffectType::SmartBlur => "智能模糊",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -20944,6 +21053,7 @@ mod tests {
             EffectType::Colorama,
             EffectType::KeyCleaner,
             EffectType::ChannelCombiner,
+            EffectType::SmartBlur,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -30017,7 +30127,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 111);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 112);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -30545,7 +30655,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 111);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 112);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33504,7 +33614,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 111);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 112);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -34640,7 +34750,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 111);
+        assert_eq!(builtin_effect_types().len(), 112);
     }
 
     #[test]
@@ -34936,6 +35046,190 @@ mod tests {
             std::hash::Hasher::finish(&first),
             std::hash::Hasher::finish(&second),
             "an equal grade hashes equally"
+        );
+    }
+
+    fn smart_blur_op(graph: &EffectRenderGraph) -> Option<crate::SmartBlurGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::SmartBlur { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::SmartBlur { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_smart_blur(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::SmartBlur)
+            .expect("the smart blur effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::SmartBlur.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the smart blur parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn smart_blur_defaults_match_the_dump() {
+        let effect_type = EffectType::SmartBlur;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("radius", "半径", ParameterUnit::Pixels),
+            ("threshold", "阈值", ParameterUnit::Percent),
+            ("mode", "模式", ParameterUnit::Unitless),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("智能模糊")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "smart_blur",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["模糊与锐化"]);
+
+        let defaults = [
+            (
+                crate::SMART_BLUR_DEFAULT_RADIUS_PIXELS,
+                crate::SMART_BLUR_AUTHOR_MIN_RADIUS_PIXELS as f64,
+                crate::SMART_BLUR_AUTHOR_MAX_RADIUS_PIXELS as f64,
+            ),
+            (
+                crate::SMART_BLUR_DEFAULT_THRESHOLD,
+                crate::SMART_BLUR_MIN_THRESHOLD as f64,
+                crate::SMART_BLUR_MAX_THRESHOLD as f64,
+            ),
+        ];
+        for (parameter, (default, min, max)) in ["radius", "threshold"].into_iter().zip(defaults) {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(default));
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .expect("both numeric parameters declare a range");
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, min, "{parameter} minimum");
+            assert_eq!(contract.hard_range.max, max, "{parameter} maximum");
+        }
+
+        let mode = properties
+            .property(&effect_type.property_path("mode"))
+            .expect("the mode is defined");
+        assert_eq!(
+            mode.evaluate(tt(0)),
+            PropertyValue::Enum(
+                crate::SmartBlurGrade::documented_defaults().mode().as_key().to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn smart_blur_defaults_build_one_op_with_scratch() {
+        let effect = instantiate_effect_node(EffectType::SmartBlur)
+            .expect("the smart blur effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default smart blur should compile");
+        let grade = smart_blur_op(&graph).expect("the default parameters emit the blur");
+        assert_eq!(grade, crate::SmartBlurGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one smart blur node"
+        );
+        let op = EffectRenderOp::SmartBlur { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            2,
+            "the premultiplied snapshot and the horizontal pass each need a frame"
+        );
+        assert_eq!(op.estimated_cost(), 3);
+        assert!(crate::spatial_pass_for(&op).is_some());
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            113
+        );
+    }
+
+    #[test]
+    fn smart_blur_minimum_radius_still_appends_a_node() {
+        // No authored combination is the identity, so even the 0.1 floor emits
+        // the node; there is no is_identity() short circuit to test.
+        let effect = author_smart_blur(&[("radius", PropertyValue::Float(0.1))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the minimum radius should compile");
+        assert!(smart_blur_op(&graph).is_some());
+    }
+
+    #[test]
+    fn smart_blur_parameters_round_trip() {
+        let effect = author_smart_blur(&[
+            ("radius", PropertyValue::Float(6.5)),
+            ("threshold", PropertyValue::Float(40.0)),
+            ("mode", PropertyValue::Enum("edge_only".to_owned())),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened smart blur should compile");
+        assert_eq!(
+            smart_blur_op(&graph),
+            Some(
+                crate::SmartBlurGrade::new(6.5, 40.0, crate::SmartBlurMode::EdgeOnly)
+                    .expect("the authored values are in range")
+            )
+        );
+    }
+
+    #[test]
+    fn smart_blur_invalid_radius_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::SmartBlur)
+            .expect("the smart blur effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "smart_blur.radius",
+            serde_json::json!({"Float": 300.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a radius past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("smart_blur.radius"),
+            "the persisted value contract names the parameter: {reason}"
         );
     }
 }

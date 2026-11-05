@@ -2777,6 +2777,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::Colorama { .. } => 110,
         EffectRenderOp::KeyCleaner { .. } => 111,
         EffectRenderOp::ChannelCombiner { .. } => 112,
+        EffectRenderOp::SmartBlur { .. } => 113,
         EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::ColorBalance { .. } => 79,
@@ -4895,6 +4896,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::JpegDamage { .. }
             | crate::EffectRenderOp::Colorama { .. }
             | crate::EffectRenderOp::KeyCleaner { .. }
+            | crate::EffectRenderOp::SmartBlur { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::Grid { .. }
             | crate::EffectRenderOp::CircleEllipse { .. }
