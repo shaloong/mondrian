@@ -1044,6 +1044,23 @@ fn noise_signed_grain(x: u32, y: u32, salt: u32) -> f32 {
     return f32(bits) / 65535.0 * 2.0 - 1.0;
 }
 
+// FLM-06 JPEG damage: the quantiser and the per-cell mosaic offset mirror the
+// CPU kernel term for term, including the tie-up rounding of `floor(v/d + 0.5)`.
+fn jpeg_damage_quantize(value: f32, step: f32) -> f32 {
+    return floor(value / step + 0.5) * step;
+}
+
+fn jpeg_damage_mosaic(x: u32, y: u32) -> f32 {
+    var hash = x * 0x9E3779B9u ^ y * 0x85EBCA6Bu ^ 0x1F83D9ABu;
+    hash ^= hash >> 16u;
+    hash *= 0x7FEB352Du;
+    hash ^= hash >> 15u;
+    hash *= 0x846CA68Bu;
+    hash ^= hash >> 16u;
+    let bits = (hash >> 8u) & 65535u;
+    return f32(bits) / 65535.0 * 2.0 - 1.0;
+}
+
 // GEN-01 ramp: the scatter jitter mirrors `RampGrade::ramp_unit_noise` and
 // `noise_hash` bit for bit so a re-render is identical to the CPU kernel.
 const RAMP_DITHER_SALT: u32 = 0x9E3779B9u;
@@ -3034,6 +3051,64 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 } else {
                     pixel = vec4<f32>(filtered, pixel.a);
                 }
+            }
+        } else if (effect.header.x == 45u) {
+            // `JpegDamageGrade`: header = [45, component, block_x, block_y];
+            // params = [luma step, chroma step, attenuation strength (1 - frequency), edge amplitude];
+            // color = [mosaic amplitude, 0, 0, 0]. The grid is addressed from the
+            // absolute sample position, so splitting a layer into tiles cannot move
+            // the block boundaries. Every term is a multiply-add; neither side uses
+            // pow/exp/log.
+            if (pixel.a > 0.0) {
+                let block = effect.header.zw;
+                let sample = vec2<u32>(floor(max(position, vec2<f32>(0.0))));
+                let cell = sample / block;
+                let local = sample - cell * block;
+
+                let luma = 0.2126 * pixel.r + 0.7152 * pixel.g + 0.0722 * pixel.b;
+                let cb = pixel.b - luma;
+                let cr = pixel.r - luma;
+
+                var y_quantized = luma;
+                var cb_quantized = cb;
+                var cr_quantized = cr;
+                if (effect.params.x > 0.0) {
+                    y_quantized = jpeg_damage_quantize(luma, effect.params.x);
+                    cb_quantized = jpeg_damage_quantize(cb, effect.params.y);
+                    cr_quantized = jpeg_damage_quantize(cr, effect.params.y);
+                }
+
+                let phase_x = select(0u, 1u, local.x * 2u >= block.x);
+                let phase_y = select(0u, 1u, local.y * 2u >= block.y);
+                let attenuation = 1.0 - effect.params.z * (0.5 + 0.5 * f32(phase_x ^ phase_y));
+
+                var y_out = y_quantized;
+                var cb_out = cb_quantized;
+                var cr_out = cr_quantized;
+                if (effect.header.y != 1u) {
+                    y_out = y_quantized + (luma - y_quantized) * attenuation;
+                }
+                if (effect.header.y != 0u) {
+                    cb_out = cb_quantized * attenuation;
+                    cr_out = cr_quantized * attenuation;
+                }
+
+                let red = y_out + cr_out;
+                let blue = y_out + cb_out;
+                let green = y_out - (0.2972595 * cr_out + 0.1009519 * cb_out);
+
+                var edge = 0.0;
+                var ring = 0.0;
+                if (local.x == 0u || local.y == 0u) { edge = 1.0; }
+                if ((local.x == 1u && block.x > 1u) || (local.y == 1u && block.y > 1u)) {
+                    ring = 1.0;
+                }
+                let gain = (1.0 - effect.params.w * edge) + (0.5 * effect.params.w * ring);
+                let mosaic = jpeg_damage_mosaic(cell.x, cell.y) * effect.color.x;
+                pixel = vec4<f32>(
+                    vec3<f32>(red, green, blue) * gain + vec3<f32>(mosaic),
+                    pixel.a,
+                );
             }
         } else if (effect.header.x == 34u) {
             // `ChangeToColorGrade`: params is [hue amount, lightness amount,
@@ -6868,6 +6943,18 @@ fn effect_uniforms_for_ops(
                 }
             }
             EffectGpuPointOp::PhotoFilter { grade } => {
+                let (header, params, color) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header,
+                    params,
+                    color,
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::JpegDamage { grade } => {
                 let (header, params, color) = grade.gpu_controls();
                 GpuEffectUniform {
                     header,
@@ -11352,6 +11439,123 @@ mod tests {
                      {density}: max abs {max_abs:.9} first mismatch {mismatch:?}"
                 );
             }
+        }
+    }
+
+    /// FLM-06: the fragment shader and the CPU kernel must agree on the block
+    /// grid, the phase-dependent attenuation, the edge/ring gain and the mosaic
+    /// offset. The 7x5 frame covers the block origin, the first row and ring,
+    /// both phase quadrants and alpha 0/0.5/1. D3D12 may lower `f32(bin) / 255.0`
+    /// into a reciprocal multiply, so the budget is 1e-5 rather than bitwise.
+    #[tokio::test]
+    async fn gpu_jpeg_damage_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            JpegDamageGrade, JpegDamageScalingComponent,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU JPEG damage parity test: no GPU adapter available");
+            return;
+        };
+        // The samples stay inside [0, 1] so the composite target cannot clamp
+        // them; out-of-range passthrough is covered by the unit tests. Every
+        // seventh column and every other row carry the graded alpha.
+        let width = 7_u32;
+        let height = 5_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let alpha = if x % 7 == 0 {
+                    0.0
+                } else if y % 2 == 0 {
+                    0.5
+                } else {
+                    1.0
+                };
+                let red = 0.30 + 0.04 * x as f32 + 0.01 * y as f32;
+                let green = 0.35 + 0.03 * y as f32 + 0.02 * (x % 3) as f32;
+                let blue = 0.40 + 0.05 * (x % 2) as f32 + 0.02 * y as f32;
+                data.push([red, green, blue, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let cases = [
+            JpegDamageGrade::default(),
+            JpegDamageGrade::new(50.0, 1.0, 1.0, 0.25, JpegDamageScalingComponent::Luma)
+                .expect("valid JPEG damage grade"),
+            JpegDamageGrade::new(0.0, 2.0, 2.0, 0.0, JpegDamageScalingComponent::Both)
+                .expect("valid JPEG damage grade"),
+        ];
+        for grade in cases {
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::JpegDamage { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(width, height),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            // Compositing a zero-coverage layer onto a transparent target
+            // discards its rgb, so the composite only observes the alpha there;
+            // the kernel's untouched-pixel skip is covered by the unit tests.
+            let expected_pixels: Vec<[f32; 4]> = expected
+                .pixels()
+                .iter()
+                .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
+                .collect();
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected_pixels,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                    alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU JPEG damage budget exceeded for grade {grade:?}: {report:#?}"
+            );
         }
     }
 
