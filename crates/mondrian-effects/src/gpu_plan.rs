@@ -192,6 +192,10 @@ pub enum EffectGpuPointOp {
     Colorama {
         grade: crate::ColoramaGrade,
     },
+    /// Channel combiner: rewrites the RGBA slots from a source template.
+    ChannelCombiner {
+        grade: crate::ChannelCombinerGrade,
+    },
     /// Grid: paints pixel-local grid lines with feathered edges.
     Grid {
         grade: crate::GridGrade,
@@ -951,6 +955,9 @@ pub(crate) fn lower_point_op(
         }
         EffectRenderOp::JpegDamage { grade } => Ok(EffectGpuPointOp::JpegDamage { grade: *grade }),
         EffectRenderOp::Colorama { grade } => Ok(EffectGpuPointOp::Colorama { grade: *grade }),
+        EffectRenderOp::ChannelCombiner { grade } => {
+            Ok(EffectGpuPointOp::ChannelCombiner { grade: *grade })
+        }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1072,6 +1079,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::PhotoFilter { .. } => "photo_filter",
         EffectRenderOp::JpegDamage { .. } => "jpeg_damage",
         EffectRenderOp::Colorama { .. } => "colorama",
+        EffectRenderOp::ChannelCombiner { .. } => "channel_combiner",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

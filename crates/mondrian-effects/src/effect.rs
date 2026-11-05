@@ -1251,6 +1251,11 @@ pub enum EffectRenderOp {
         /// Authored phase, palette, write-back, match and matte controls.
         grade: crate::ColoramaGrade,
     },
+    /// Channel combiner: rewrites the RGBA slots from a source template.
+    ChannelCombiner {
+        /// Authored template, inversion, solid alpha and colour-space weights.
+        grade: crate::ChannelCombinerGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1602,6 +1607,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Colorama { grade } => {
                 formatter.debug_struct("Colorama").field("grade", grade).finish()
+            }
+            Self::ChannelCombiner { grade } => {
+                formatter.debug_struct("ChannelCombiner").field("grade", grade).finish()
             }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
@@ -2647,6 +2655,12 @@ impl EffectRenderOp {
                 grade.composite_on_layer().to_bits().hash(state);
                 grade.blend_with_original().to_bits().hash(state);
             }
+            EffectRenderOp::ChannelCombiner { grade } => {
+                111u8.hash(state);
+                // The normalized slots, the derived pair, inversion, the solid
+                // alpha and the colour-space weights all reach the kernel.
+                grade.hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2819,6 +2833,7 @@ impl EffectRenderOp {
             EffectRenderOp::PhotoFilter { .. } => 1,
             EffectRenderOp::JpegDamage { .. } => 1,
             EffectRenderOp::Colorama { .. } => 2,
+            EffectRenderOp::ChannelCombiner { .. } => 1,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3345,7 +3360,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 110] {
+fn builtin_effect_types() -> [EffectType; 111] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3457,6 +3472,7 @@ fn builtin_effect_types() -> [EffectType; 110] {
         EffectType::JpegDamage,
         EffectType::Colorama,
         EffectType::KeyCleaner,
+        EffectType::ChannelCombiner,
     ]
 }
 
@@ -10721,6 +10737,87 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 );
             }
         }
+        EffectType::ChannelCombiner => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "use_second_layer",
+                "第二图层",
+                "使用第二图层",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "source_layer",
+                "第二图层",
+                "源图层",
+                PropertyValue::Int(6),
+                Some(1.0),
+                Some(19.0),
+                Some(1.0),
+            );
+            for (parameter, name, default, channels) in [
+                (
+                    "from",
+                    "自",
+                    crate::ChannelCombinerChannel::Alpha,
+                    &crate::ChannelCombinerChannel::SOURCE_ALL[..],
+                ),
+                (
+                    "to",
+                    "至",
+                    crate::ChannelCombinerChannel::RedGreen,
+                    &crate::ChannelCombinerChannel::DESTINATION_ALL[..],
+                ),
+            ] {
+                let options = channels
+                    .iter()
+                    .map(|channel| {
+                        let key = channel.key();
+                        ParameterEnumOption::new(
+                            key,
+                            channel.label(),
+                            format!("mondrian.effect.channel_combiner.{parameter}.{key}"),
+                        )
+                    })
+                    .collect();
+                define_builtin_enum_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "通道合成器",
+                    name,
+                    default.key(),
+                    options,
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert",
+                "通道合成器",
+                "反转",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "solid_alpha",
+                "通道合成器",
+                "纯色 Alpha",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::Dent => {
             define_builtin_enum_property(
                 &mut properties,
@@ -12484,6 +12581,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // One sample in, one sample out: the phase, palette, match and matte
             // all read the current sample only, so the ROI stays pixel-local.
+            ..cpu_linear
+        },
+        EffectType::ChannelCombiner => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // One sample in, one sample out: every slot reads the current sample
+            // only, so the definition-level envelope stays pixel-local.
             ..cpu_linear
         },
         EffectType::Choker => EffectExecutionContract {
@@ -18144,6 +18247,101 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ChannelCombiner => {
+            let use_second_layer_id = builtin_parameter_id(effect_type, "use_second_layer");
+            let source_layer_id = builtin_parameter_id(effect_type, "source_layer");
+            let from_id = builtin_parameter_id(effect_type, "from");
+            let to_id = builtin_parameter_id(effect_type, "to");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            let solid_alpha_id = builtin_parameter_id(effect_type, "solid_alpha");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                // The second input layer does not exist in this build, so the
+                // authoring surface fails closed instead of silently reading the
+                // first layer twice.
+                let use_second_layer =
+                    match effect.evaluate_parameter(&use_second_layer_id, context.time) {
+                        Some(PropertyValue::Bool(value)) => value,
+                        Some(_) => {
+                            return Err(invalid(
+                                crate::ChannelCombinerError::SecondLayer.to_string(),
+                            ));
+                        }
+                        None => false,
+                    };
+                if use_second_layer {
+                    return Err(invalid(
+                        crate::ChannelCombinerError::SecondLayer.to_string(),
+                    ));
+                }
+                // `源图层` is inert without the second layer: it is validated and
+                // then dropped, so it never reaches the grade or the uniform.
+                let source_layer = match effect.evaluate_parameter(&source_layer_id, context.time) {
+                    Some(PropertyValue::Int(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(
+                            crate::ChannelCombinerError::SourceLayer.to_string(),
+                        ));
+                    }
+                    None => 6,
+                };
+                if !(1..=19).contains(&source_layer) {
+                    return Err(invalid(
+                        crate::ChannelCombinerError::SourceLayer.to_string(),
+                    ));
+                }
+                let source = effect
+                    .evaluate_enum_parameter(&from_id, context.time)
+                    .and_then(|key| {
+                        crate::ChannelCombinerChannel::SOURCE_ALL
+                            .iter()
+                            .copied()
+                            .find(|channel| channel.key() == key)
+                    })
+                    .ok_or_else(|| {
+                        invalid(crate::ChannelCombinerError::SourceChannel.to_string())
+                    })?;
+                let destination = effect
+                    .evaluate_enum_parameter(&to_id, context.time)
+                    .and_then(|key| {
+                        crate::ChannelCombinerChannel::DESTINATION_ALL
+                            .iter()
+                            .copied()
+                            .find(|channel| channel.key() == key)
+                    })
+                    .ok_or_else(|| {
+                        invalid(crate::ChannelCombinerError::DestinationChannel.to_string())
+                    })?;
+                let invert = match effect.evaluate_parameter(&invert_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => false,
+                    None => false,
+                };
+                let solid_alpha = match effect.evaluate_parameter(&solid_alpha_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value,
+                    Some(_) => {
+                        return Err(invalid(crate::ChannelCombinerError::SolidAlpha.to_string()));
+                    }
+                    None => 0.0,
+                };
+                let grade = crate::ChannelCombinerGrade::new(
+                    source,
+                    destination,
+                    invert,
+                    solid_alpha,
+                    context.working_color_space.luminance_coefficients(),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ChannelCombiner { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SelectiveColor => {
             let method_id = builtin_parameter_id(effect_type, "method");
             let colors_id = builtin_parameter_id(effect_type, "colors");
@@ -19399,6 +19597,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::PhotoFilter => "照片滤镜",
         EffectType::JpegDamage => "JPEG 损坏",
         EffectType::Colorama => "色光",
+        EffectType::ChannelCombiner => "通道合成器",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -20744,6 +20943,7 @@ mod tests {
             EffectType::JpegDamage,
             EffectType::Colorama,
             EffectType::KeyCleaner,
+            EffectType::ChannelCombiner,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -29817,7 +30017,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 110);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 111);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -30345,7 +30545,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 110);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 111);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33304,7 +33504,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 110);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 111);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -34333,6 +34533,410 @@ mod tests {
         // composite on, alpha write on, change-empty off, interpolation on,
         // matte off: bits 24, 25 and 27 are set.
         assert_eq!(controls.header[2], 0x0B00_0000);
+    }
+
+    fn author_channel_combiner(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ChannelCombiner)
+            .expect("the channel combiner should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ChannelCombiner.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the channel combiner parameter should be assignable");
+        }
+        effect
+    }
+
+    fn channel_combiner_op(graph: &EffectRenderGraph) -> Option<crate::ChannelCombinerGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ChannelCombiner { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ChannelCombiner { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn channel_combiner_effect_nodes(graph: &EffectRenderGraph) -> usize {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    EffectGraphNodeKind::UnaryEffect { .. }
+                        | EffectGraphNodeKind::DomainEffect { .. }
+                )
+            })
+            .count()
+    }
+
+    fn compile_channel_combiner(
+        parameters: &[(&str, PropertyValue)],
+    ) -> Result<EffectRenderGraph, EffectGraphBuildError> {
+        build_effect_render_graph(
+            &[author_channel_combiner(parameters)],
+            tt(0),
+            TEST_WORKING_SPACE,
+        )
+    }
+
+    fn tampered_channel_combiner(
+        parameters: &[(&str, PropertyValue)],
+        suffix: &str,
+        replacement: serde_json::Value,
+    ) -> EffectNode {
+        let effect = author_channel_combiner(parameters);
+        let mut document = serde_json::to_value(&effect).expect("serialize the channel combiner");
+        overwrite_static_value(&mut document, suffix, replacement);
+        serde_json::from_value(document).expect("reopen the channel combiner")
+    }
+
+    fn channel_combiner_invalid_reason(error: EffectGraphBuildError) -> String {
+        match error {
+            EffectGraphBuildError::InvalidAuthorState { reason, .. } => reason,
+            _ => panic!("expected an invalid author state"),
+        }
+    }
+
+    /// Drive the evaluator directly, bypassing the serialized-value contract
+    /// that the public compile path enforces first.
+    fn build_channel_combiner_directly(effect: &EffectNode) -> Result<(), EffectGraphBuildError> {
+        let builder = builtin_graph_builder_for(&EffectType::ChannelCombiner)
+            .expect("the channel combiner has a graph builder");
+        let mut state = crate::graph::EffectGraphBuilderState::new();
+        builder(
+            effect,
+            EffectEvalContext {
+                time: tt(0),
+                working_color_space: TEST_WORKING_SPACE,
+                frame_context: None,
+            },
+            &mut state,
+        )
+    }
+
+    #[test]
+    fn channel_combiner_g1_default_appends_exactly_one_node() {
+        let graph = compile_channel_combiner(&[]).expect("the default combiner should compile");
+        assert_eq!(channel_combiner_effect_nodes(&graph), 1);
+        let grade = channel_combiner_op(&graph).expect("the default grade reaches the graph");
+        let expected = crate::ChannelCombinerGrade::new(
+            crate::ChannelCombinerChannel::Alpha,
+            crate::ChannelCombinerChannel::RedGreen,
+            false,
+            0.0,
+            TEST_WORKING_SPACE.luminance_coefficients(),
+        )
+        .expect("the documented default validates");
+        assert_eq!(grade, expected);
+        assert_eq!(
+            grade.gpu_controls(),
+            ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
+        );
+        assert_eq!(builtin_effect_types().len(), 111);
+    }
+
+    #[test]
+    fn channel_combiner_g2_default_properties_and_options_match_the_design() {
+        let effect_type = EffectType::ChannelCombiner;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("use_second_layer", "使用第二图层", "第二图层"),
+            ("source_layer", "源图层", "第二图层"),
+            ("from", "自", "通道合成器"),
+            ("to", "至", "通道合成器"),
+            ("invert", "反转", "通道合成器"),
+            ("solid_alpha", "纯色 Alpha", "通道合成器"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, group)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, ParameterUnit::Unitless);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some(*group)
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        let from = properties
+            .property(&effect_type.property_path("from"))
+            .expect("the source channel is defined");
+        assert_eq!(from.descriptor.schema.enum_options.len(), 19);
+        for (index, channel) in crate::ChannelCombinerChannel::SOURCE_ALL.iter().enumerate() {
+            assert_eq!(
+                from.descriptor.schema.enum_options[index].key,
+                channel.key()
+            );
+            assert_eq!(
+                from.descriptor.schema.enum_options[index].message_id,
+                format!("mondrian.effect.channel_combiner.from.{}", channel.key())
+            );
+        }
+        let to = properties
+            .property(&effect_type.property_path("to"))
+            .expect("the destination channel is defined");
+        assert_eq!(to.descriptor.schema.enum_options.len(), 17);
+        for (index, channel) in crate::ChannelCombinerChannel::DESTINATION_ALL.iter().enumerate() {
+            assert_eq!(to.descriptor.schema.enum_options[index].key, channel.key());
+            assert_eq!(
+                to.descriptor.schema.enum_options[index].message_id,
+                format!("mondrian.effect.channel_combiner.to.{}", channel.key())
+            );
+        }
+        // The defaults are the documented alpha → red/green template.
+        let grade =
+            channel_combiner_op(&compile_channel_combiner(&[]).expect("the default compiles"))
+                .expect("the default grade reaches the graph");
+        assert_eq!(grade.source(), crate::ChannelCombinerChannel::Alpha);
+        assert_eq!(grade.destination(), crate::ChannelCombinerChannel::RedGreen);
+        assert!(!grade.invert());
+        assert_eq!(grade.solid_alpha(), 0.0);
+    }
+
+    #[test]
+    fn channel_combiner_g3_self_mapping_elides_the_node() {
+        for parameters in [
+            vec![
+                ("from", PropertyValue::Enum("red_green".to_owned())),
+                ("to", PropertyValue::Enum("red_green".to_owned())),
+            ],
+            vec![
+                ("from", PropertyValue::Enum("luminance".to_owned())),
+                ("to", PropertyValue::Enum("luminance".to_owned())),
+            ],
+        ] {
+            let graph = compile_channel_combiner(&parameters)
+                .expect("an identity configuration should compile");
+            assert!(channel_combiner_op(&graph).is_none());
+            assert_eq!(channel_combiner_effect_nodes(&graph), 0);
+        }
+    }
+
+    #[test]
+    fn channel_combiner_g4_out_of_range_solid_alpha_is_rejected_before_the_builder() {
+        let mut effect = instantiate_effect_node(EffectType::ChannelCombiner)
+            .expect("the channel combiner should instantiate");
+        assert!(effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ChannelCombiner.property_path("solid_alpha"),
+                value: PropertyValue::Float(1.5),
+            })
+            .is_err());
+        for replacement in [
+            serde_json::json!({"Float": 1.5}),
+            serde_json::json!({"Float": -0.1}),
+        ] {
+            let tampered =
+                tampered_channel_combiner(&[], "channel_combiner.solid_alpha", replacement);
+            let error = compile_clip_effect_graph(&[tampered], &[], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a stored out-of-range solid alpha is an invalid author state");
+            let reason = channel_combiner_invalid_reason(error);
+            // The persisted-value contract fires before the graph builder.
+            assert!(
+                reason.contains("effect.channel_combiner.solid_alpha"),
+                "the reason should name the parameter: {reason}"
+            );
+            assert!(
+                reason.contains("outside [0, 1]"),
+                "the reason should name the range: {reason}"
+            );
+        }
+        // A caller that bypasses the persisted-value contract still gets the
+        // kernel's own message from the builder.
+        let tampered = tampered_channel_combiner(
+            &[],
+            "channel_combiner.solid_alpha",
+            serde_json::json!({"Float": 1.5}),
+        );
+        let error = build_channel_combiner_directly(&tampered)
+            .expect_err("the builder rejects an out-of-range solid alpha on its own");
+        assert_eq!(
+            channel_combiner_invalid_reason(error),
+            crate::ChannelCombinerError::SolidAlpha.to_string()
+        );
+    }
+
+    #[test]
+    fn channel_combiner_g5_second_layer_fails_closed() {
+        let effect = author_channel_combiner(&[("use_second_layer", PropertyValue::Bool(true))]);
+        let effect_id = effect.id;
+        let error = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect_err("the second input layer is not available in this build");
+        match error {
+            EffectGraphBuildError::InvalidAuthorState { effect_id: reported, reason, .. } => {
+                assert_eq!(reported, effect_id);
+                assert!(
+                    reason.contains("第二图层"),
+                    "the reason should name the second layer: {reason}"
+                );
+            }
+            _ => panic!("expected an invalid author state"),
+        }
+    }
+
+    #[test]
+    fn channel_combiner_g6_source_layer_is_validated_but_inert() {
+        let one = compile_channel_combiner(&[("source_layer", PropertyValue::Int(1))])
+            .expect("the source layer one compiles");
+        let nine = compile_channel_combiner(&[("source_layer", PropertyValue::Int(9))])
+            .expect("the source layer nine compiles");
+        assert_eq!(channel_combiner_effect_nodes(&one), 1);
+        assert_eq!(channel_combiner_effect_nodes(&nine), 1);
+        let one_grade = channel_combiner_op(&one).expect("the grade is present");
+        let nine_grade = channel_combiner_op(&nine).expect("the grade is present");
+        assert_eq!(one_grade, nine_grade);
+        assert_eq!(one_grade.gpu_controls(), nine_grade.gpu_controls());
+        for value in [0_i64, 20_i64] {
+            let tampered = tampered_channel_combiner(
+                &[],
+                "channel_combiner.source_layer",
+                serde_json::json!({"Int": value}),
+            );
+            let error = compile_clip_effect_graph(
+                std::slice::from_ref(&tampered),
+                &[],
+                tt(0),
+                TEST_WORKING_SPACE,
+            )
+            .expect_err("an out-of-range source layer is an invalid author state");
+            assert!(matches!(
+                error,
+                EffectGraphBuildError::InvalidAuthorState { .. }
+            ));
+            // Bypassing the persisted-value contract reaches the builder's own
+            // `源图层` rejection.
+            let error = build_channel_combiner_directly(&tampered)
+                .expect_err("the builder rejects an out-of-range source layer");
+            let reason = channel_combiner_invalid_reason(error);
+            assert!(
+                reason.contains("源图层"),
+                "the reason should name the source layer: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_combiner_g7_enum_keys_round_trip_through_the_graph() {
+        let graph = compile_channel_combiner(&[
+            ("from", PropertyValue::Enum("lightness".to_owned())),
+            ("to", PropertyValue::Enum("alpha".to_owned())),
+        ])
+        .expect("a lightness to alpha combiner should compile");
+        let grade = channel_combiner_op(&graph).expect("the grade is present");
+        assert_eq!(grade.source(), crate::ChannelCombinerChannel::Lightness);
+        assert_eq!(grade.destination(), crate::ChannelCombinerChannel::Alpha);
+        let tampered = tampered_channel_combiner(
+            &[],
+            "channel_combiner.from",
+            serde_json::json!({"Enum": "ultraviolet"}),
+        );
+        let error = compile_clip_effect_graph(
+            std::slice::from_ref(&tampered),
+            &[],
+            tt(0),
+            TEST_WORKING_SPACE,
+        )
+        .expect_err("an undeclared option is an invalid author state");
+        let reason = channel_combiner_invalid_reason(error);
+        assert!(
+            reason.contains("effect.channel_combiner.from"),
+            "the reason should name the parameter: {reason}"
+        );
+        // Bypassing the persisted-value contract reaches the builder's own
+        // `源通道` rejection.
+        let error = build_channel_combiner_directly(&tampered)
+            .expect_err("the builder rejects an undeclared option");
+        let reason = channel_combiner_invalid_reason(error);
+        assert!(
+            reason.contains("源通道"),
+            "the reason should name the source channel: {reason}"
+        );
+    }
+
+    #[test]
+    fn channel_combiner_g8_contract_flags_and_determinism() {
+        assert_eq!(
+            EffectType::ChannelCombiner.key(),
+            "builtin.channel_combiner"
+        );
+        assert_eq!(
+            EffectType::from_key("builtin.channel_combiner"),
+            EffectType::ChannelCombiner
+        );
+        assert_eq!(EffectType::ChannelCombiner.display_name(), "通道合成器");
+        assert_eq!(EffectType::ChannelCombiner.category_path(), vec!["通道"]);
+        assert_eq!(
+            EffectType::ChannelCombiner.property_namespace(),
+            "channel_combiner"
+        );
+        assert_eq!(
+            EffectType::ChannelCombiner.property_path("solid_alpha"),
+            "effect.channel_combiner.solid_alpha"
+        );
+        assert_eq!(
+            builtin_display_name(&EffectType::ChannelCombiner),
+            "通道合成器"
+        );
+        assert!(effect_definition(&EffectType::ChannelCombiner).is_some());
+
+        let contract = builtin_effect_execution_contract(&EffectType::ChannelCombiner);
+        assert_eq!(
+            contract.execution_modes,
+            crate::EffectExecutionModes::CPU_F32.union(crate::EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(
+            contract.determinism,
+            crate::EffectDeterminism::Deterministic
+        );
+        assert_eq!(contract.state_model, crate::EffectStateModel::Stateless);
+        assert_eq!(
+            contract.temporal_input,
+            crate::EffectTemporalInputExtent::CURRENT_FRAME
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal
+        );
+        assert_eq!(
+            contract.resource_lifetime,
+            crate::EffectResourceLifetime::Frame
+        );
+        assert_eq!(contract.topology, crate::EffectGraphTopology::LinearChain);
+
+        let grade =
+            channel_combiner_op(&compile_channel_combiner(&[]).expect("the default compiles"))
+                .expect("the default grade reaches the graph");
+        let op = EffectRenderOp::ChannelCombiner { grade };
+        assert_eq!(op.estimated_cost(), 1);
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(&op), 0);
+        assert!(crate::spatial_pass_for(&op).is_none());
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            112
+        );
+        let mut first = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut first);
+        let mut second = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::ChannelCombiner { grade }.hash_signature(&mut second);
+        assert_eq!(
+            std::hash::Hasher::finish(&first),
+            std::hash::Hasher::finish(&second),
+            "an equal grade hashes equally"
+        );
     }
 }
 

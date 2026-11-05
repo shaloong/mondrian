@@ -428,6 +428,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::ChannelCombiner { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "channel_combiner",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Grid { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "grid",
@@ -1155,6 +1161,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::PhotoFilter { .. } => 0,
         EffectRenderOp::JpegDamage { .. } => 0,
         EffectRenderOp::Colorama { .. } => 0,
+        EffectRenderOp::ChannelCombiner { .. } => 0,
         EffectRenderOp::Grid { .. } => 0,
         EffectRenderOp::CircleEllipse { .. } => 0,
         EffectRenderOp::Fill { .. } => 0,
@@ -1669,6 +1676,12 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Colorama { grade } => {
             crate::colorama::apply_colorama_f32_controlled(working, grade, checkpoint)?;
+            Ok(true)
+        }
+        EffectRenderOp::ChannelCombiner { grade } => {
+            crate::channel_combiner::apply_channel_combiner_f32_controlled(
+                working, grade, checkpoint,
+            )?;
             Ok(true)
         }
         EffectRenderOp::Choker { grade } => {

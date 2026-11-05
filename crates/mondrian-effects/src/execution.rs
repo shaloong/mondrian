@@ -2358,6 +2358,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::PhotoFilter { .. } => "photo_filter",
         EffectRenderOp::JpegDamage { .. } => "jpeg_damage",
         EffectRenderOp::Colorama { .. } => "colorama",
+        EffectRenderOp::ChannelCombiner { .. } => "channel_combiner",
         EffectRenderOp::Grid { .. } => "grid",
         EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         EffectRenderOp::Fill { .. } => "fill",

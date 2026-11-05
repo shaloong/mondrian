@@ -193,7 +193,7 @@ impl ShiftChannelsGrade {
 }
 
 /// HSL hue in turns; neutral pixels report 0.
-fn hue_sample(rgb: [f32; 3]) -> f32 {
+pub(crate) fn hue_sample(rgb: [f32; 3]) -> f32 {
     let (high, low) = extremes(rgb);
     let chroma = high - low;
     if chroma.is_nan() || chroma <= crate::hsl_space::NEUTRAL_CHROMA {
@@ -203,7 +203,7 @@ fn hue_sample(rgb: [f32; 3]) -> f32 {
 }
 
 /// HSL chroma relative to the pixel's achievable range; neutral pixels report 0.
-fn saturation_sample(rgb: [f32; 3]) -> f32 {
+pub(crate) fn saturation_sample(rgb: [f32; 3]) -> f32 {
     let (high, low) = extremes(rgb);
     let chroma = high - low;
     let lightness = (high + low) * 0.5;

@@ -24,6 +24,7 @@ pub mod bulge;
 pub mod cell_pattern;
 pub mod change_to_color;
 pub mod channel_blur;
+pub mod channel_combiner;
 pub mod channel_mixer;
 pub mod checkerboard;
 pub mod choker;
@@ -599,6 +600,10 @@ pub use processor_question::{
 #[cfg(test)]
 mod image_scale_admission_tests;
 
+pub use channel_combiner::{
+    channel_combiner_frame_f32, ChannelCombinerChannel, ChannelCombinerDerived,
+    ChannelCombinerError, ChannelCombinerGrade, ChannelCombinerSlot,
+};
 pub use channel_mixer::{
     ChannelMixerError, ChannelMixerGrade, CHANNEL_MIXER_WEIGHT_COUNT, CHANNEL_MIXER_WEIGHT_MAX,
     CHANNEL_MIXER_WEIGHT_MIN,

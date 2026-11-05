@@ -2840,6 +2840,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::PhotoFilter { .. } => "photo_filter",
         crate::EffectRenderOp::JpegDamage { .. } => "jpeg_damage",
         crate::EffectRenderOp::Colorama { .. } => "colorama",
+        crate::EffectRenderOp::ChannelCombiner { .. } => "channel_combiner",
         crate::EffectRenderOp::Grid { .. } => "grid",
         crate::EffectRenderOp::CircleEllipse { .. } => "circle_ellipse",
         crate::EffectRenderOp::Fill { .. } => "fill",
