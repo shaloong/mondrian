@@ -3013,6 +3013,28 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                     pixel = vec4<f32>(rgb, pixel.a);
                 }
             }
+        } else if (effect.header.x == 44u) {
+            // `PhotoFilterGrade`: params is [gain r, gain g, gain b, density]
+            // and colour is [gel r, gel g, gel b, 0]. header.y is the
+            // preserve-luminosity switch. The tint is the per-channel gain
+            // (1 - d + d * F), never a lerp towards F, so full density
+            // reproduces the gel exactly. With the switch on the result is
+            // rescaled to the source Rec.709 luma; the 1e-6 guard mirrors the
+            // CPU kernel on both sides. A pixel without coverage is untouched.
+            if (pixel.a > 0.0) {
+                let filtered = pixel.rgb * effect.params.xyz;
+                if (effect.header.y == 1u) {
+                    let source_luma = dot(pixel.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+                    let filtered_luma = dot(filtered, vec3<f32>(0.2126, 0.7152, 0.0722));
+                    if (source_luma > 0.000001 && filtered_luma > 0.000001) {
+                        pixel = vec4<f32>(filtered * (source_luma / filtered_luma), pixel.a);
+                    } else {
+                        pixel = vec4<f32>(filtered, pixel.a);
+                    }
+                } else {
+                    pixel = vec4<f32>(filtered, pixel.a);
+                }
+            }
         } else if (effect.header.x == 34u) {
             // `ChangeToColorGrade`: params is [hue amount, lightness amount,
             // saturation amount, softness], colour is [to r, to g, to b, 0], and
@@ -6839,6 +6861,18 @@ fn effect_uniforms_for_ops(
                     header: header.map(|value| value as u32),
                     params,
                     color: [0.0; 4],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::PhotoFilter { grade } => {
+                let (header, params, color) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header,
+                    params,
+                    color,
                     extra0: [0.0; 4],
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
@@ -11175,6 +11209,147 @@ mod tests {
                     report.within_budget,
                     "GPU remove color matting budget exceeded for background \
                      {background:?} clip {clip}: {report:#?}"
+                );
+            }
+        }
+    }
+
+    /// P1: the fused point kernel mirrors the CPU formula. Three gels cross two
+    /// densities and both preserve-luminosity states, and every seventh column
+    /// has zero coverage so the untouched-pixel contract is exercised too.
+    ///
+    /// Without preserve-luminosity the two kernels are bit-identical on this
+    /// frame (asserted, not budgeted). With it on, the only difference the GPU
+    /// may introduce is the last-bit rounding of the reciprocal used for the
+    /// luma rescale, so the budget is one part in a million.
+    #[tokio::test]
+    async fn gpu_photo_filter_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            PhotoFilterGrade, PHOTO_FILTER_DEFAULT_COLOR,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU photo filter parity test: no GPU adapter available");
+            return;
+        };
+        // The samples stay inside [0, 1] so the composite target cannot clamp
+        // them; out-of-range passthrough is covered by the unit tests. Every
+        // seventh column is fully transparent.
+        let width = 64_u32;
+        let height = 8_u32;
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = x as f32 / (width - 1) as f32;
+                let v = y as f32 / (height - 1) as f32;
+                let alpha = if x % 7 == 0 { 0.0 } else { 0.25 + 0.75 * v };
+                data.push([0.05 + 0.9 * u, 0.1 + 0.8 * v, 0.9 - 0.85 * u * v, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let cases = [
+            (PHOTO_FILTER_DEFAULT_COLOR, 25.0_f32, false),
+            (PHOTO_FILTER_DEFAULT_COLOR, 100.0, false),
+            ([0.0, 0.28, 0.73], 60.0, false),
+            (PHOTO_FILTER_DEFAULT_COLOR, 25.0, true),
+            ([0.12, 0.7, 0.2], 80.0, true),
+        ];
+        for (color, density, preserve_luminosity) in cases {
+            let grade = PhotoFilterGrade::new(color, density, preserve_luminosity)
+                .expect("valid photo filter grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::PhotoFilter { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(width, height),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            // Compositing a zero-coverage layer onto a transparent target
+            // discards its rgb, so the composite only observes the alpha there;
+            // the kernel's untouched-pixel skip is covered by the unit tests.
+            let expected_pixels: Vec<[f32; 4]> = expected
+                .pixels()
+                .iter()
+                .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
+                .collect();
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let mut max_abs = 0.0_f32;
+            for (expected, actual) in expected_pixels.iter().zip(&actual) {
+                for channel in 0..4 {
+                    max_abs = max_abs.max((expected[channel] - actual[channel]).abs());
+                }
+            }
+            if preserve_luminosity {
+                let report = compare_linear_rgba(
+                    &expected_pixels,
+                    &actual,
+                    LinearRgbaAccuracyBudget {
+                        rgb: LinearAccuracyBudget::finite(1.0e-6, 1.0e-6, 1.0e-6),
+                        alpha: LinearAccuracyBudget::finite(0.0, 0.0, 0.0),
+                    },
+                )
+                .expect("comparable frames");
+                eprintln!(
+                    "photo filter preserve-luminosity max abs diff {max_abs:.9} \
+                     (colour {color:?} density {density})"
+                );
+                assert!(
+                    report.within_budget,
+                    "GPU photo filter budget exceeded for colour {color:?} density {density}: \
+                     max abs {max_abs:.9} {report:#?}"
+                );
+            } else {
+                let mut mismatch = None;
+                for (index, (expected, actual)) in expected_pixels.iter().zip(&actual).enumerate() {
+                    if expected.map(f32::to_bits) != actual.map(f32::to_bits) {
+                        mismatch = Some((index, *expected, *actual));
+                        break;
+                    }
+                }
+                assert!(
+                    mismatch.is_none(),
+                    "GPU photo filter is not bit-identical for colour {color:?} density \
+                     {density}: max abs {max_abs:.9} first mismatch {mismatch:?}"
                 );
             }
         }
