@@ -1026,6 +1026,32 @@ fn shift_channels_source(
     return low;
 }
 
+// CHN-08 samples one of eight source codes. Codes 0..3 are the RGBA slots and
+// reuse the CHN-07 reader verbatim, so a slot that both effects can sample
+// agrees bit for bit; 4 is luminance, 5 lightness, 6 saturation and 7 hue.
+fn channel_combiner_sample(
+    pixel: vec4<f32>,
+    code: u32,
+    coefficients: vec3<f32>,
+) -> f32 {
+    if (code <= 3u) {
+        return shift_channels_source(pixel.rgb, pixel.a, code, coefficients);
+    }
+    if (code == 4u) { return dot(pixel.rgb, coefficients); }
+    if (code == 5u) {
+        let high = max(pixel.r, max(pixel.g, pixel.b));
+        let low = min(pixel.r, min(pixel.g, pixel.b));
+        return (high + low) * 0.5;
+    }
+    if (code == 6u) {
+        return shift_channels_source(pixel.rgb, pixel.a, 6u, coefficients);
+    }
+    if (code == 7u) {
+        return shift_channels_source(pixel.rgb, pixel.a, 5u, coefficients);
+    }
+    return 0.0;
+}
+
 // FLM-02 grain: the hash constants are shared verbatim with the CPU kernel so
 // both paths produce bit-identical noise for the same pixel.
 const NOISE_SALT_RED: u32 = 0x9E3779B9u;
@@ -2377,6 +2403,13 @@ fn effects_author_coverage() -> bool {
         // The colour map can paint coverage into an empty pixel when the
         // authored switch is on, so its hidden colour must be computed too.
         if (effect.header.x == 46u && (effect.header.z & 0x04000000u) != 0u) { return true; }
+        // The channel combiner can write the alpha slot from a hidden colour
+        // channel or from the authored solid alpha, which turns an empty pixel
+        // visible, so the hidden colour has to be computed as well.
+        if (effect.header.x == 47u
+            && (((effect.header.y >> 12u) & 15u) != 15u || effect.params.x > 0.0)) {
+            return true;
+        }
     }
     return false;
 }
@@ -3510,6 +3543,48 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                     pixel = vec4<f32>(clamp(mixed, vec3<f32>(0.0), vec3<f32>(1.0)), pixel.a);
                 }
             }
+        } else if (effect.header.x == 47u) {
+            // `ChannelCombinerGrade`: params is [solid alpha, luma r, luma g,
+            // luma b]; header.y packs the four destination slot codes (four bits
+            // each, 15 keeps the incoming slot); header.z packs the derived
+            // target code (1 luminance, 2 lightness), the derived source code
+            // and the invert bit. Every written slot is sampled from the input
+            // pixel before anything is assigned, so a slot never reads a value
+            // this stage just wrote.
+            let slots = effect.header.y;
+            let flags = effect.header.z;
+            let coefficients = effect.params.yzw;
+            let inverted = (flags & 256u) != 0u;
+            var out = pixel;
+            if ((flags & 15u) != 0u) {
+                let value = channel_combiner_sample(pixel, (flags >> 4u) & 15u, coefficients);
+                let target_value = select(value, 1.0 - value, inverted);
+                if ((flags & 15u) == 1u) {
+                    let base = dot(pixel.rgb, coefficients);
+                    let scale = select(0.0, target_value / base, base > 0.0);
+                    out = vec4<f32>(pixel.rgb * scale, pixel.a);
+                } else {
+                    let high = max(pixel.r, max(pixel.g, pixel.b));
+                    let low = min(pixel.r, min(pixel.g, pixel.b));
+                    let base = (high + low) * 0.5;
+                    let shift = select(target_value - base, 0.0, base != base);
+                    out = vec4<f32>(pixel.rgb + vec3<f32>(shift), pixel.a);
+                }
+            } else {
+                let sampled = vec4<f32>(
+                    channel_combiner_sample(pixel, slots & 15u, coefficients),
+                    channel_combiner_sample(pixel, (slots >> 4u) & 15u, coefficients),
+                    channel_combiner_sample(pixel, (slots >> 8u) & 15u, coefficients),
+                    channel_combiner_sample(pixel, (slots >> 12u) & 15u, coefficients),
+                );
+                let value = select(sampled, vec4<f32>(1.0) - sampled, inverted);
+                if ((slots & 15u) != 15u) { out.r = value.x; }
+                if (((slots >> 4u) & 15u) != 15u) { out.g = value.y; }
+                if (((slots >> 8u) & 15u) != 15u) { out.b = value.z; }
+                if (((slots >> 12u) & 15u) != 15u) { out.a = value.w; }
+            }
+            if (effect.params.x > 0.0) { out.a = effect.params.x; }
+            pixel = out;
         }
     }
     return pixel;
@@ -7529,6 +7604,18 @@ fn effect_uniforms_for_ops(
                 extra2: [0.0; 4],
                 extra3: [0.0; 4],
             },
+            EffectGpuPointOp::ChannelCombiner { grade } => {
+                let (header, params) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header,
+                    params,
+                    color: [0.0; 4],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::Lut3D { lut, intensity } => {
                 let effective_intensity = intensity.clamp(0.0, 1.0);
                 let location = if effective_intensity <= 1.0e-4 {
@@ -14458,6 +14545,124 @@ mod tests {
         assert!(
             report.within_budget,
             "GPU threshold accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_channel_combiner_matches_the_cpu_reference_on_real_wgpu_device() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ChannelCombinerChannel, ChannelCombinerGrade,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU channel combiner parity test: no GPU adapter available");
+            return;
+        };
+        // The fixture carries an empty pixel (0.9, 0.1, 0.2, 0.0), which only
+        // the on-see-coverage path can reveal, and a negative-luminance HDR
+        // pixel, which exercises the unbounded arithmetic without clamping.
+        let data = vec![
+            [0.25_f32, 0.5, 0.75, 1.0],
+            [0.9, 0.1, 0.2, 0.0],
+            [0.5, 0.5, 0.5, 1.0],
+            [-0.2, 1.4, 0.35, 1.0],
+            [0.05, 0.07, 0.9, 0.6],
+            [1.6, 0.0, 0.0, 0.25],
+        ];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: 3,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let coefficients = WorkingColorSpace::LinearRec709.luminance_coefficients();
+        let mut builder = EffectGraphBuilderState::new();
+        // Per-slot rewrite with a broadcast: one source fills two destinations.
+        builder.append_unary(EffectRenderOp::ChannelCombiner {
+            grade: ChannelCombinerGrade::new(
+                ChannelCombinerChannel::Alpha,
+                ChannelCombinerChannel::RedGreen,
+                false,
+                0.0,
+                coefficients,
+            )
+            .expect("valid default grade"),
+        });
+        // Derived source that writes coverage.
+        builder.append_unary(EffectRenderOp::ChannelCombiner {
+            grade: ChannelCombinerGrade::new(
+                ChannelCombinerChannel::Hue,
+                ChannelCombinerChannel::AlphaRed,
+                false,
+                0.0,
+                coefficients,
+            )
+            .expect("valid derived-source grade"),
+        });
+        // Derived target: the luminance ratio rescales the whole RGB triple.
+        builder.append_unary(EffectRenderOp::ChannelCombiner {
+            grade: ChannelCombinerGrade::new(
+                ChannelCombinerChannel::Alpha,
+                ChannelCombinerChannel::Luminance,
+                false,
+                0.0,
+                coefficients,
+            )
+            .expect("valid derived-target grade"),
+        });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        assert_eq!(plan.operations().len(), 3);
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(3, 2),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &frame.rgba_f32().data,
+            ),
+            &graph,
+            0,
+        )
+        .expect("CPU float reference");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&frame),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            &context,
+            &[layer],
+            3,
+            2,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_point_operations, 3);
+        let report = compare_linear_rgba(
+            expected.pixels(),
+            &actual,
+            LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(3.0e-5, 1.0e-5, 2.0e-5),
+                alpha: LinearAccuracyBudget::finite(1.0e-6, 1.0e-7, 1.0e-6),
+            },
+        )
+        .expect("comparable frames");
+        assert!(
+            report.within_budget,
+            "GPU channel combiner accuracy budget exceeded: {report:#?}"
         );
     }
 
