@@ -360,6 +360,9 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "box_blur" | "channel_blur" => 0.5,
         // Neighbourhood kernels and whole-chain morphology jobs cost more.
         "convolution" | "glow" | "matte_refine" | "deband" => 0.9,
+        // The key cleaner is three separable morphology passes: one axis of
+        // taps per pass, against the two reads and one write that bound it.
+        "key_cleaner" => 0.9,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
         // Magnify adds the blend-mode branch on top of the same bilinear read.
@@ -438,6 +441,9 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "vr_project_2d" => 7.0,
         "radial_blur" | "turbulent_displace" | "keylight" | "matte_refine" => 4.0,
         "minimax" | "choker" | "find_edges" | "emboss" | "color_emboss" => 2.5,
+        // Two separable minimum filters plus the softening and the composite,
+        // all over a single alpha plane.
+        "key_cleaner" => 2.5,
         _ => 2.0,
     }
 }

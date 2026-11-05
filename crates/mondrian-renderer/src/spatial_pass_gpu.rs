@@ -85,6 +85,7 @@ pub(crate) struct EffectSpatialGpu {
     matte_refine_feather: wgpu::RenderPipeline,
     matte_refine_composite: wgpu::RenderPipeline,
     choker_composite: wgpu::RenderPipeline,
+    key_cleaner_composite: wgpu::RenderPipeline,
     minimax: wgpu::RenderPipeline,
     channel_blur: wgpu::RenderPipeline,
     median: wgpu::RenderPipeline,
@@ -1479,6 +1480,40 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // The key cleaner composite finishes the separable chain: it averages the
+        // eroded matte down the column, re-steepens it and blends it back by
+        // strength, while the source colour passes through untouched.
+        let key_cleaner_composite =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mondrian.effect-spatial.key-cleaner-composite"),
+                layout: Some(&composite_layout),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: Some("fs_key_cleaner_composite"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         // Minimax runs one separable minimum or maximum step per pass and writes
         // straight into the scratch ping-pong: no separate composite stage.
         let minimax = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1933,6 +1968,7 @@ impl EffectSpatialGpu {
             matte_refine_feather,
             matte_refine_composite,
             choker_composite,
+            key_cleaner_composite,
             minimax,
             channel_blur,
             median,
@@ -2546,6 +2582,14 @@ impl EffectSpatialGpu {
             // The choker runs one horizontal and one vertical morphology pass;
             // the composite reuses the texture the horizontal pass wrote.
             EffectGpuSpatialPass::Choker { .. } => Ok(2),
+            // Two erosion passes, the horizontal half of the softening box, and
+            // the composite. The softening pass is optional, but declaring four
+            // would cost every frame the third plane even when it is unused, so
+            // the count stays at three and `record_key_cleaner` refuses a pool
+            // that cannot hold them. That makes a DCI 4K frame
+            // (4096x2160x16 bytes x 4 textures = 566,231,040 bytes) exceed the
+            // 512 MiB spatial scratch budget; UHD (530,841,600 bytes) still fits.
+            EffectGpuSpatialPass::KeyCleaner { .. } => Ok(3),
             // The chain is one pass per operation step and axis: 1, 2 or 4.
             // `record_minimax` executes exactly the same table.
             EffectGpuSpatialPass::Minimax { grade } => Ok(grade.pass_count()),
@@ -3134,6 +3178,10 @@ impl EffectSpatialGpu {
                 return self.record_dust_scratches(
                     device, encoder, *grade, source, scratch, width, height,
                 );
+            }
+            EffectGpuSpatialPass::KeyCleaner { grade } => {
+                return self
+                    .record_key_cleaner(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BoxBlur { .. } => {}
             EffectGpuSpatialPass::DirectionalBlur { .. } => {
@@ -4871,6 +4919,120 @@ impl EffectSpatialGpu {
             &composite,
         );
         Ok(scratch[1].clone())
+    }
+
+    /// Records the key cleaner morphology chain.
+    ///
+    /// `scratch[0]` receives the horizontal minimum, `scratch[1]` the vertical
+    /// one. When the chatter softening is on, the horizontal half of the box
+    /// average writes `scratch[2]`; the composite then runs the vertical half,
+    /// the contrast curve and the strength blend, reading whichever matte plane
+    /// the chain produced. It writes into `scratch[0]` and keeps the source
+    /// colour, because the effect never reads it.
+    ///
+    /// Both erosion passes always run, even at radius zero: the one-tap window
+    /// is then just the shader's clamp to `<= 1`, which is what keeps an
+    /// out-of-range authored alpha identical on the CPU and GPU paths.
+    fn record_key_cleaner(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::KeyCleanerGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        // Two matte planes are not enough: the horizontal box would have to
+        // overwrite a plane the composite still reads.
+        if scratch.len() < 3 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "key_cleaner_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        // `[radius, 0, 0, 0]` and `[chatter_pixels, contrast, strength, 0]`.
+        let (stage, control) = grade.gpu_controls();
+        let no_extra = [0.0_f32; 4];
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let horizontal_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        let vertical_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+
+        let horizontal = SpatialPassUniform {
+            size,
+            params: [stage[0], 0.0, 0.0, 1.0],
+            extra: no_extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        self.record_pass(
+            device,
+            encoder,
+            &self.keylight_erode,
+            &source_view,
+            &horizontal_view,
+            &horizontal,
+        );
+
+        let vertical = SpatialPassUniform {
+            size,
+            params: [stage[0], 1.0, 0.0, 0.0],
+            extra: no_extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        self.record_pass(
+            device,
+            encoder,
+            &self.keylight_erode,
+            &horizontal_view,
+            &vertical_view,
+            &vertical,
+        );
+
+        let blur_pixels = control[0];
+        let softened_view = if blur_pixels > 0.0 {
+            let horizontal_box = SpatialPassUniform {
+                size,
+                // `[0, axis_horizontal, whole, fraction]`; the divisor is the
+                // same `2F+1` the composite divides the vertical sum by.
+                params: [0.0, 0.0, blur_pixels, 0.0],
+                extra: [2.0 * blur_pixels + 1.0, 1.0, 0.0, 0.0],
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            let softened_texture = scratch[2].create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_pass(
+                device,
+                encoder,
+                &self.box_blur,
+                &vertical_view,
+                &softened_texture,
+                &horizontal_box,
+            );
+            softened_texture
+        } else {
+            vertical_view
+        };
+
+        let composite = SpatialPassUniform {
+            size,
+            params: [blur_pixels, control[1], control[2], 0.0],
+            extra: no_extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let destination_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.key_cleaner_composite,
+            &source_view,
+            &softened_view,
+            &destination_view,
+            &composite,
+        );
+        Ok(scratch[0].clone())
     }
 
     /// Records the minimax chain: one minimum or maximum step per pass.
@@ -8087,6 +8249,36 @@ fn fs_choker_composite(@builtin(position) position: vec4<f32>) -> @location(0) v
     let source = load_clamped_from(original_texture, pixel);
     let matte = load_clamped_from(auxiliary_texture, pixel).x;
     return vec4<f32>(source.rgb, matte);
+}
+
+// The key cleaner composite finishes the separable chain over the eroded matte:
+// `params` carries `[blur_pixels, contrast, strength, 0]`. The vertical half of
+// the box average runs here so the eroded plane only has to be written once, and
+// the re-steepened matte is blended back against the source alpha by strength.
+// The source colour is returned verbatim, because the effect never reads it.
+//
+// Every expression mirrors `key_cleaner.rs`: the sum runs from `-blur` to
+// `+blur` with the same divisor, and the curve is the same clamp-then-smoothstep
+// so a zero-strength frame is bit-identical to the input.
+@fragment
+fn fs_key_cleaner_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped_from(original_texture, pixel);
+    let blur_pixels = i32(uniforms.params.x);
+    let contrast = uniforms.params.y;
+    let strength = uniforms.params.z;
+    var sum = 0.0;
+    for (var offset = -blur_pixels; offset <= blur_pixels; offset = offset + 1) {
+        let sample_at = pixel + vec2<i32>(0, offset);
+        sum = sum + load_clamped_from(auxiliary_texture, sample_at).x;
+    }
+    let divisor = f32(2 * blur_pixels + 1);
+    let softened = sum / divisor;
+    let t = clamp((softened - 0.25) / 0.5, 0.0, 1.0);
+    let sharpened = t * t * (3.0 - 2.0 * t);
+    let contrasted = softened * (1.0 - contrast) + sharpened * contrast;
+    let alpha = mix(source.a, contrasted, strength);
+    return vec4<f32>(source.rgb, alpha);
 }
 
 // The matte refine composite writes the (optionally cleaned) source colour with

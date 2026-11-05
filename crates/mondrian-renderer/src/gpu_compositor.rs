@@ -16877,6 +16877,315 @@ mod tests {
         out
     }
 
+    /// Uploads a straight-alpha fixture for the direct spatial-pass parity tests.
+    ///
+    /// These helpers live here rather than being shared with
+    /// `spatial_pass_gpu`'s own test module: the key cleaner parity test drives
+    /// [`crate::spatial_pass_gpu::EffectSpatialGpu::record`] directly, because the
+    /// compositor's source-over path premultiplies and would not preserve the
+    /// colour channels bit-for-bit.
+    fn key_cleaner_upload(
+        context: &crate::GpuContext,
+        pixels: &[[f32; 4]],
+        width: u32,
+        height: u32,
+    ) -> wgpu::Texture {
+        let bytes: Vec<u8> = pixels
+            .iter()
+            .flat_map(|pixel| pixel.iter().flat_map(|value| value.to_le_bytes()))
+            .collect();
+        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mondrian.key-cleaner.source"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 16),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        texture
+    }
+
+    fn key_cleaner_scratch(
+        context: &crate::GpuContext,
+        width: u32,
+        height: u32,
+        count: usize,
+    ) -> Vec<wgpu::Texture> {
+        (0..count)
+            .map(|_| {
+                context.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("mondrian.key-cleaner.scratch"),
+                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            })
+            .collect()
+    }
+
+    fn key_cleaner_readback(
+        context: &crate::GpuContext,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Vec<[f32; 4]> {
+        let unpadded = width * 16;
+        let padded = unpadded.div_ceil(256) * 256;
+        let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mondrian.key-cleaner.readback"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.key-cleaner.readback-encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = context
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let data = slice.get_mapped_range().expect("mapped readback range");
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for row in 0..height as usize {
+            let start = row * padded as usize;
+            for column in 0..width as usize {
+                let base = start + column * 16;
+                let mut pixel = [0.0_f32; 4];
+                for (component, value) in pixel.iter_mut().enumerate() {
+                    let offset = base + component * 4;
+                    *value = f32::from_le_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]);
+                }
+                pixels.push(pixel);
+            }
+        }
+        drop(data);
+        buffer.unmap();
+        pixels
+    }
+
+    /// A straight-alpha fixture with a soft key edge, a stepped matte and one
+    /// isolated hole, so the erosion, the chatter box and the curve all have
+    /// something to act on.
+    fn key_cleaner_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let alpha = if u < 0.35 {
+                    0.0
+                } else if u < 0.5 {
+                    0.4
+                } else if u < 0.75 {
+                    0.85
+                } else {
+                    1.0
+                };
+                let alpha = if x == width / 2 && y == height / 2 {
+                    0.0
+                } else {
+                    alpha
+                };
+                pixels.push([0.1 + 0.8 * u, 0.2 + 0.6 * v, 0.3 + 0.5 * u * v, alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_key_cleaner_matches_the_cpu_kernel() {
+        use mondrian_effects::{key_cleaner_frame_f32, EffectGpuSpatialPass, KeyCleanerGrade};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping key cleaner parity test: no GPU adapter available");
+            return;
+        };
+        let width = 11;
+        let height = 9;
+        let pixels = key_cleaner_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+
+        let cases: [(&str, [f32; 4]); 7] = [
+            ("default", [10.0, 0.0, 0.0, 100.0]),
+            ("erode", [3.0, 0.0, 0.0, 100.0]),
+            ("soften", [4.0, 0.5, 0.0, 100.0]),
+            ("contrast", [3.0, 0.0, 80.0, 100.0]),
+            ("half", [3.0, 0.5, 40.0, 50.0]),
+            ("strength_zero", [10.0, 0.5, 80.0, 0.0]),
+            ("radius_zero", [0.0, 0.0, 0.0, 100.0]),
+        ];
+        for (index, (label, values)) in cases.iter().enumerate() {
+            let grade = KeyCleanerGrade::new(values[0], values[1], values[2], values[3])
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let mut cpu = pixels.clone();
+            assert!(
+                key_cleaner_frame_f32(&mut cpu, width as usize, height as usize, &grade),
+                "{label}: the CPU kernel must accept the frame"
+            );
+
+            let pass = EffectGpuSpatialPass::KeyCleaner { grade };
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 3, "{label}: two matte planes and the composite");
+            let source = key_cleaner_upload(&context, &pixels, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, passes as usize);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.key-cleaner.encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label} record: {error}"));
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+
+            assert_eq!(gpu.len(), cpu.len(), "{label}: pixel count");
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "key cleaner case {index} ({label}) pixel {pixel_index} channel \
+                         {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+                // The effect never reads the colour channels, so they have to
+                // survive the whole chain bit for bit.
+                for channel in 0..3 {
+                    assert_eq!(
+                        cpu_pixel[channel].to_bits(),
+                        gpu_pixel[channel].to_bits(),
+                        "key cleaner case {index} ({label}) pixel {pixel_index} colour channel \
+                         {channel} must be bit-identical"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn key_cleaner_refuses_a_two_scratch_pool() {
+        use crate::spatial_pass_gpu::EffectSpatialGpuError;
+        use mondrian_effects::{EffectGpuSpatialPass, KeyCleanerGrade};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping key cleaner geometry test: no GPU adapter available");
+            return;
+        };
+        let width = 5;
+        let height = 4;
+        let pixels = key_cleaner_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let grade = KeyCleanerGrade::new(3.0, 0.5, 40.0, 100.0).expect("valid grade");
+        let pass = EffectGpuSpatialPass::KeyCleaner { grade };
+        let source = key_cleaner_upload(&context, &pixels, width, height);
+        let scratch = key_cleaner_scratch(&context, width, height, 2);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian.key-cleaner.geometry"),
+        });
+        let error = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &source,
+                &scratch,
+                width,
+                height,
+            )
+            .expect_err("two scratch textures cannot hold the softening plane");
+        assert!(
+            matches!(
+                error,
+                EffectSpatialGpuError::UnsupportedPass("key_cleaner_scratch_geometry")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn key_cleaner_passes_over_budget_only_above_uhd() {
+        use mondrian_effects::{EffectRenderOp, KeyCleanerGrade};
+
+        let grade = KeyCleanerGrade::new(10.0, 0.5, 40.0, 100.0).expect("valid grade");
+        let pipeline = spatial_test_pipeline(EffectRenderOp::KeyCleaner { grade });
+        // UHD fits: 3840 * 2160 * 16 bytes * 4 textures = 530,841,600 bytes.
+        crate::spatial_driver::gpu_spatial_chain_plan(&pipeline, 3840, 2160)
+            .expect("UHD fits the 512 MiB spatial scratch budget");
+        // DCI 4K does not: 4096 * 2160 * 16 * 4 = 566,231,040 bytes, which is
+        // over the same budget. That is the documented consequence of declaring
+        // three scratch textures; the same limit already applies to Deband.
+        let error = crate::spatial_driver::gpu_spatial_chain_plan(&pipeline, 4096, 2160)
+            .expect_err("DCI 4K exceeds the 512 MiB spatial scratch budget");
+        let crate::spatial_driver::GpuSpatialChainBlocker::ScratchBudgetExceeded {
+            required_bytes,
+            budget_bytes,
+        } = error
+        else {
+            panic!("unexpected blocker: {error:?}");
+        };
+        assert_eq!(required_bytes, 566_231_040);
+        assert_eq!(budget_bytes, 512 * 1024 * 1024);
+    }
+
     #[tokio::test]
     async fn spatial_chain_runs_on_a_single_layer_before_compositing() {
         use mondrian_effects::{EffectRenderOp, TwirlGrade};
