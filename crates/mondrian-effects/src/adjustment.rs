@@ -494,6 +494,9 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::DisplacementMap { .. } => {
+            return Err(EffectExecutionError::AuxiliaryRequiresFloat32);
+        }
         EffectRenderOp::SmartBlur { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "smart_blur",
@@ -1181,6 +1184,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The premultiplied source snapshot is the gate reference for both
         // passes, and the horizontal pass writes a second full-frame plane.
         EffectRenderOp::SmartBlur { .. } => 2,
+        EffectRenderOp::DisplacementMap { .. } => 1,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
         EffectRenderOp::Minimax { .. } => 4,
@@ -1753,6 +1757,7 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             )?;
             Ok(true)
         }
+        EffectRenderOp::DisplacementMap { .. } => Ok(false),
         EffectRenderOp::SmartBlur { grade } => {
             crate::smart_blur::apply_smart_blur_f32_controlled(
                 working,

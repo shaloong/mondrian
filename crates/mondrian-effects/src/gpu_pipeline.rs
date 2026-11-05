@@ -848,6 +848,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::SmartBlur { grade } => {
             Some(EffectGpuSpatialPass::SmartBlur { grade: *grade })
         }
+        EffectRenderOp::DisplacementMap { .. } => None,
         _ => None,
     }
 }

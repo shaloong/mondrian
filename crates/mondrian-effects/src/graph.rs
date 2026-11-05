@@ -2486,6 +2486,11 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        EffectRenderOp::DisplacementMap { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::SelectiveColor { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The kernel reads the whole sample to resolve its ink, so the
@@ -3096,6 +3101,20 @@ fn compile_node_alpha_contracts(
                         image_scale_requirement = crate::EffectImageScaleRequirement::Unit;
                     }
                     return Some((*id, binding.alpha_contract()));
+                }
+                EffectGraphNodeKind::CustomSource {
+                    op: EffectRenderOp::FractalNoise { .. },
+                    ..
+                } => {
+                    return Some((
+                        *id,
+                        crate::EffectAlphaContract::new(
+                            mondrian_core::ColorFrameAlphaFormats::NONE,
+                            crate::EffectAlphaOutputContract::Fixed(
+                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                            ),
+                        ),
+                    ));
                 }
                 EffectGraphNodeKind::CustomSource { .. } => return None,
                 EffectGraphNodeKind::UnaryEffect {

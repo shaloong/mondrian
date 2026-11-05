@@ -1261,6 +1261,10 @@ pub enum EffectRenderOp {
         /// Authored radius, luminance threshold and output mode.
         grade: crate::SmartBlurGrade,
     },
+    /// Resample the primary image using a separate graph-local or host map.
+    DisplacementMap {
+        grade: crate::DisplacementMapGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1618,6 +1622,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::SmartBlur { grade } => {
                 formatter.debug_struct("SmartBlur").field("grade", grade).finish()
+            }
+            Self::DisplacementMap { grade } => {
+                formatter.debug_struct("DisplacementMap").field("grade", grade).finish()
             }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
@@ -2675,6 +2682,12 @@ impl EffectRenderOp {
                 // they are hashed as raw bits rather than as a rounded packing.
                 grade.hash_state(state);
             }
+            EffectRenderOp::DisplacementMap { grade } => {
+                113u8.hash(state);
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2824,6 +2837,7 @@ impl EffectRenderOp {
             EffectRenderOp::CircleEllipse { .. } => 1,
             EffectRenderOp::Stroke { .. } => 5,
             EffectRenderOp::Fill { .. } => 1,
+            EffectRenderOp::DisplacementMap { .. } => 5,
             EffectRenderOp::DustScratches { .. } => 4,
             // Three passes, four when the chatter softening is enabled.
             EffectRenderOp::KeyCleaner { grade } => grade.cost(),

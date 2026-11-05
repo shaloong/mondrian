@@ -129,19 +129,75 @@ pub fn sample_auxiliary_f32(
     uv: [f32; 2],
     sampling: AuxiliarySampling,
 ) -> [f32; 4] {
+    sample_auxiliary_float_impl(frame, uv, sampling, false, false)
+}
+
+/// Filter picture channels with their coverage before interpreting a color map.
+pub(crate) fn sample_auxiliary_color_f32(
+    frame: AuxiliaryFloatFrame<'_>,
+    uv: [f32; 2],
+    sampling: AuxiliarySampling,
+    wrap: bool,
+) -> [f32; 4] {
+    sample_auxiliary_float_impl(frame, uv, sampling, true, wrap)
+}
+
+fn sample_auxiliary_float_impl(
+    frame: AuxiliaryFloatFrame<'_>,
+    mut uv: [f32; 2],
+    mut sampling: AuxiliarySampling,
+    associated: bool,
+    wrap: bool,
+) -> [f32; 4] {
     let extent = frame.frame.extent();
     if extent.is_empty()
+        || extent.width() > i32::MAX as u32
+        || extent.height() > i32::MAX as u32
         || (extent.width() as usize).checked_mul(extent.height() as usize)
             != Some(frame.frame.pixels().len())
     {
         return [0.0; 4];
     }
-    sample_raster(extent, frame.transform, uv, sampling, |x, y, policy| {
-        let Some((x, y)) = texel_position(extent, x, y, policy) else {
+    if wrap {
+        if sampling.mapping == AuxiliaryCoordinateMapping::FrameTransform {
+            uv = transform_uv(frame.transform, uv);
+            sampling.mapping = AuxiliaryCoordinateMapping::PrimaryGrid;
+        }
+        uv = uv.map(|value| value.rem_euclid(1.0));
+    }
+    let result = sample_raster(extent, frame.transform, uv, sampling, |x, y, policy| {
+        let position = if wrap {
+            Some((
+                x.rem_euclid(extent.width() as i32),
+                y.rem_euclid(extent.height() as i32),
+            ))
+        } else {
+            texel_position(extent, x, y, policy)
+        };
+        let Some((x, y)) = position else {
             return [0.0; 4];
         };
-        frame.frame.pixels()[y as usize * extent.width() as usize + x as usize]
-    })
+        let mut pixel = frame.frame.pixels()[y as usize * extent.width() as usize + x as usize];
+        if associated {
+            let alpha = pixel[3].clamp(0.0, 1.0);
+            let scale = if frame.frame.format().alpha().is_premultiplied() {
+                if pixel[3] > 0.0 {
+                    alpha / pixel[3]
+                } else {
+                    0.0
+                }
+            } else {
+                alpha
+            };
+            pixel = [pixel[0] * scale, pixel[1] * scale, pixel[2] * scale, alpha];
+        }
+        pixel
+    });
+    if associated {
+        crate::coverage::straight_rgba_from_premultiplied(result)
+    } else {
+        result
+    }
 }
 
 impl<'a> AuxiliaryFrame<'a> {
@@ -319,6 +375,9 @@ fn texel_position(
 /// charged one auxiliary scratch frame; the exact per-operation budget is
 /// refined together with the M4 spatial pass.
 pub const fn render_op_auxiliary_scratch_frames(op: &EffectRenderOp) -> usize {
+    if matches!(op, EffectRenderOp::DisplacementMap { .. }) {
+        return 0;
+    }
     if crate::adjustment::render_op_f32_scratch_frames(op) == 0 {
         0
     } else {
@@ -328,7 +387,10 @@ pub const fn render_op_auxiliary_scratch_frames(op: &EffectRenderOp) -> usize {
 
 /// Whether an operation has an explicit Float32 auxiliary kernel.
 pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
-    matches!(op, EffectRenderOp::Fill { .. })
+    matches!(
+        op,
+        EffectRenderOp::Fill { .. } | EffectRenderOp::DisplacementMap { .. }
+    )
 }
 
 /// Apply the operation's own auxiliary formula; never infer it from the role.
@@ -341,6 +403,11 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
     sampling: AuxiliarySampling,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<bool, E> {
+    if let EffectRenderOp::DisplacementMap { grade } = op {
+        return crate::apply_displacement_map_controlled(
+            primary, width, height, frame, sampling, grade, checkpoint,
+        );
+    }
     let EffectRenderOp::Fill { grade } = op else {
         return Ok(false);
     };

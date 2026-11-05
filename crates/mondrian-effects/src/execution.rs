@@ -1644,18 +1644,43 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                             frame.capacity().saturating_mul(std::mem::size_of::<[f32; 4]>()),
                         )
                     }));
-                control
-                    .with_input_stage(None, |control| {
-                        crate::adjustment::apply_custom_source_op_f32(
-                            &mut output,
-                            op,
-                            frame_seed,
-                            session,
-                            caller_owned_bytes,
-                            control,
-                        )
-                    })
-                    .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                if matches!(op, EffectRenderOp::FractalNoise { .. }) {
+                    // The unary noise kernel preserves incoming coverage.
+                    // A zero-input noise producer supplies its own opaque
+                    // black canvas, independently of the primary raster.
+                    for chunk in output.pixels_mut().chunks_mut(4096) {
+                        scalar_checkpoint(control)?;
+                        chunk.fill([0.0, 0.0, 0.0, 1.0]);
+                    }
+                    let supported = crate::adjustment::apply_render_op_f32_controlled(
+                        output.allocation_mut(),
+                        width,
+                        height,
+                        op,
+                        frame_seed,
+                        &mut || scalar_checkpoint(control),
+                    )?;
+                    if !supported {
+                        return Err(unsupported_float_graph_node(
+                            node.id,
+                            "builtin_source_kernel_unavailable",
+                        ));
+                    }
+                    output.validate()?;
+                } else {
+                    control
+                        .with_input_stage(None, |control| {
+                            crate::adjustment::apply_custom_source_op_f32(
+                                &mut output,
+                                op,
+                                frame_seed,
+                                session,
+                                caller_owned_bytes,
+                                control,
+                            )
+                        })
+                        .map_err(EffectFloatExecutionError::CustomProcessor)?;
+                }
                 outputs.insert(node.id, output);
             }
             EffectGraphNodeKind::UnaryEffect { input: input_id, op }
@@ -2683,7 +2708,7 @@ fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
         EffectRenderOp::Custom { processor, .. } => {
             processor.as_ref().is_some_and(|binding| binding.supports_float32())
         }
-        EffectRenderOp::TemporalFrameBlend { .. } => false,
+        EffectRenderOp::TemporalFrameBlend { .. } | EffectRenderOp::DisplacementMap { .. } => false,
         _ => true,
     }
 }
@@ -2773,6 +2798,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::DustScratches { .. } => "dust_scratches",
         EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
         EffectRenderOp::SmartBlur { .. } => "smart_blur",
+        EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

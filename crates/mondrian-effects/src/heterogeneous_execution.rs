@@ -2785,6 +2785,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::KeyCleaner { .. } => 111,
         EffectRenderOp::ChannelCombiner { .. } => 112,
         EffectRenderOp::SmartBlur { .. } => 113,
+        EffectRenderOp::DisplacementMap { .. } => 114,
         EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::ColorBalance { .. } => 79,
@@ -4907,6 +4908,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Colorama { .. }
             | crate::EffectRenderOp::KeyCleaner { .. }
             | crate::EffectRenderOp::SmartBlur { .. }
+            | crate::EffectRenderOp::DisplacementMap { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::Grid { .. }
             | crate::EffectRenderOp::CircleEllipse { .. }
@@ -4956,7 +4958,8 @@ fn cpu_node_scratch_frames(
         | EffectGraphNodeKind::MatteMix { .. } => Ok(0),
         EffectGraphNodeKind::ExternalInput { .. } => Ok(0),
         EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
-            Ok(crate::render_op_auxiliary_scratch_frames(op))
+            Ok(crate::adjustment::render_op_f32_scratch_frames(op)
+                + crate::render_op_auxiliary_scratch_frames(op))
         }
         EffectGraphNodeKind::MultiInput { inputs, .. } if !inputs.is_empty() => Ok(0),
         EffectGraphNodeKind::Source

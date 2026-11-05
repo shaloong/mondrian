@@ -4,6 +4,12 @@
 
 pub mod adjustment;
 pub mod auxiliary;
+pub mod displacement_map;
+pub use displacement_map::{
+    apply_displacement_map_controlled, displacement_map_frame_f32, DisplacementMapBehavior,
+    DisplacementMapChannel, DisplacementMapError, DisplacementMapGrade,
+    DISPLACEMENT_MAP_MAX_PIXELS,
+};
 pub use mondrian_core::EffectPassBlendPolicy;
 pub mod alpha_contract;
 pub mod arithmetic;
