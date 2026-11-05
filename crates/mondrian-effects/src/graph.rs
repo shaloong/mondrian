@@ -190,6 +190,7 @@ pub struct AuxiliaryInputSpec {
     role: AuxiliaryRole,
     sampling: AuxiliarySampling,
     required: bool,
+    time_offset: TimelineTime,
 }
 
 impl AuxiliaryInputSpec {
@@ -211,7 +212,19 @@ impl AuxiliaryInputSpec {
             role,
             sampling,
             required,
+            time_offset: TimelineTime::ZERO,
         }
+    }
+
+    /// Constant sequence-time offset the host must resolve for this slot.
+    pub const fn time_offset(self) -> TimelineTime {
+        self.time_offset
+    }
+
+    /// Retain the external producer's authored retime in the host query.
+    pub const fn with_time_offset(mut self, time_offset: TimelineTime) -> Self {
+        self.time_offset = time_offset;
+        self
     }
 
     /// Host slot this raster is bound to.
@@ -257,6 +270,12 @@ impl AuxiliaryInputSpec {
 /// than a failed definition, and every one of them fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EffectGraphError {
+    /// An external producer's exact format contradicts its preserved domain or alpha set.
+    #[error("external auxiliary node {node:?} has inconsistent format metadata")]
+    InvalidAuxiliaryFormat {
+        /// Invalid producer node.
+        node: EffectGraphNodeId,
+    },
     /// A declared slot can never be filled by a host raster.
     #[error("auxiliary input slot {slot} is unbound")]
     MissingAuxiliaryInput {
@@ -2024,8 +2043,8 @@ impl EffectGraphBuilderState {
 
     /// Apply `op` to `input` while reading `auxiliary`.
     ///
-    /// `auxiliary` must be the value of an
-    /// [`EffectGraphNodeKind::ExternalInput`] node and must not equal `input`.
+    /// `auxiliary` may be an external producer or a graph-local value. It must
+    /// not equal the primary input or this node's own output.
     pub fn add_auxiliary_effect(
         &mut self,
         input: EffectGraphNodeId,
@@ -2705,11 +2724,8 @@ fn external_input_node_requirements(
 fn external_input_execution_modes(format: crate::EffectValueFormat) -> EffectExecutionModes {
     match format.precision() {
         crate::EffectWorkingPrecision::NormalizedU8 => EffectExecutionModes::CPU_U8,
-        // M1's host binding carries encoded bytes only. Float bindings must
-        // acquire a real executor before compilation can admit those modes.
-        crate::EffectWorkingPrecision::Float16 | crate::EffectWorkingPrecision::Float32 => {
-            EffectExecutionModes::NONE
-        }
+        crate::EffectWorkingPrecision::Float32 => EffectExecutionModes::CPU_F32,
+        crate::EffectWorkingPrecision::Float16 => EffectExecutionModes::NONE,
     }
 }
 
@@ -2723,9 +2739,13 @@ fn auxiliary_effect_node_requirements(
     role: AuxiliaryRole,
 ) -> EffectImplementationRequirements {
     EffectImplementationRequirements {
-        execution_modes: render_op_requirements(op)
-            .execution_modes
-            .intersection(EffectExecutionModes::CPU_U8),
+        execution_modes: render_op_requirements(op).execution_modes.intersection(
+            if crate::auxiliary::supports_auxiliary_f32(op) {
+                EffectExecutionModes::CPU_F32
+            } else {
+                EffectExecutionModes::NONE
+            },
+        ),
         roi_from_effect_input: merge_roi(
             render_op_requirements(op).roi_from_effect_input,
             role.roi_requirement(),
@@ -2975,17 +2995,21 @@ pub(crate) fn compile_effect_domain_plan(
                 target_domain
             }
             EffectGraphNodeKind::ExternalInput { domain, .. } => domain.output,
-            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, role, .. } => {
                 let input_domain = *plan.node_output_domains.get(input)?;
                 let auxiliary_domain = *plan.node_output_domains.get(auxiliary)?;
-                plan_domain_edge(
-                    &mut plan,
-                    Some(node.id),
-                    *auxiliary,
-                    auxiliary_domain,
-                    input_domain,
-                    EffectDomainBlockerKind::NonRgbDomainTransition,
-                );
+                if !(*role == AuxiliaryRole::Matte
+                    && auxiliary_domain == EffectColorDomain::AlphaMask)
+                {
+                    plan_domain_edge(
+                        &mut plan,
+                        Some(node.id),
+                        *auxiliary,
+                        auxiliary_domain,
+                        input_domain,
+                        EffectDomainBlockerKind::NonRgbDomainTransition,
+                    );
+                }
                 input_domain
             }
         };
@@ -3159,7 +3183,13 @@ pub fn validate_auxiliary_graph(graph: &EffectRenderGraph) -> Result<(), EffectG
 
     let mut slots = HashMap::<u32, EffectGraphNodeId>::new();
     for node in &graph.nodes {
-        if let EffectGraphNodeKind::ExternalInput { slot, .. } = &node.kind {
+        if let EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, .. } = &node.kind {
+            if domain.input != domain.output
+                || format.domain() != domain.output
+                || !alpha.contains(format.alpha())
+            {
+                return Err(EffectGraphError::InvalidAuxiliaryFormat { node: node.id });
+            }
             if *slot == UNBOUND_AUXILIARY_SLOT {
                 return Err(EffectGraphError::MissingAuxiliaryInput { slot: *slot });
             }
@@ -3184,7 +3214,10 @@ pub fn validate_auxiliary_graph(graph: &EffectRenderGraph) -> Result<(), EffectG
             return Err(EffectGraphError::NonExternalAuxiliaryInput { node: node.id });
         };
         let EffectGraphNodeKind::ExternalInput { slot, .. } = &auxiliary_node.kind else {
-            return Err(EffectGraphError::NonExternalAuxiliaryInput { node: node.id });
+            // Graph-local values have their own complete extent and metadata.
+            // Their dependencies participate through input_ids(), just as the
+            // host producer does; only host slots need binding declarations.
+            continue;
         };
         consumed.insert(*auxiliary);
         match declarations.entry(*slot) {
@@ -3214,7 +3247,8 @@ pub fn collect_auxiliary_inputs(
     validate_auxiliary_graph(graph)?;
     let mut specs = Vec::new();
     for node in &graph.nodes {
-        let EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, .. } = &node.kind
+        let EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset } =
+            &node.kind
         else {
             continue;
         };
@@ -3229,9 +3263,10 @@ pub fn collect_auxiliary_inputs(
         let Some((role, sampling)) = consumer else {
             continue;
         };
-        specs.push(AuxiliaryInputSpec::new(
-            *slot, *format, *alpha, *domain, role, sampling, true,
-        ));
+        specs.push(
+            AuxiliaryInputSpec::new(*slot, *format, *alpha, *domain, role, sampling, true)
+                .with_time_offset(*time_offset),
+        );
     }
     Ok(specs.into())
 }
@@ -3836,7 +3871,7 @@ mod tests {
         let mut builder = EffectGraphBuilderState::new();
         let checkpoint = builder.checkpoint();
         let format = crate::EffectValueFormat::new(
-            EffectWorkingPrecision::NormalizedU8,
+            EffectWorkingPrecision::Float32,
             EffectColorDomain::SceneLinearRgb,
             mondrian_core::ColorFrameAlpha::StraightCoverage,
         );
@@ -3850,7 +3885,9 @@ mod tests {
         let output = builder.add_auxiliary_effect(
             builder.source(),
             auxiliary,
-            EffectRenderOp::GaussianBlur { radius: 0.0 },
+            EffectRenderOp::Fill {
+                grade: crate::FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
+            },
             role,
             sampling,
         );
@@ -3860,7 +3897,7 @@ mod tests {
 
     fn second_input_contract() -> EffectExecutionContract {
         EffectExecutionContract {
-            execution_modes: EffectExecutionModes::CPU_U8,
+            execution_modes: EffectExecutionModes::CPU_F32,
             roi_propagation: EffectRoiPropagation::FullFrame,
             topology: EffectGraphTopology::GeneralDag,
             ..EffectExecutionContract::IDENTITY
@@ -3903,10 +3940,8 @@ mod tests {
 
     #[test]
     fn a_gpu_declared_auxiliary_effect_without_a_gpu_kernel_is_rejected() {
-        for precision in [
-            EffectWorkingPrecision::Float16,
-            EffectWorkingPrecision::Float32,
-        ] {
+        {
+            let precision = EffectWorkingPrecision::Float16;
             let format = crate::EffectValueFormat::new(
                 precision,
                 EffectColorDomain::SceneLinearRgb,

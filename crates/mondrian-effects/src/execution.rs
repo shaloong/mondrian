@@ -88,6 +88,9 @@ pub enum EffectExecutionError {
     /// The authored linear plan could not compile into a schedulable graph.
     #[error("effect render plan could not compile into a schedulable graph")]
     InvalidGraph,
+    /// Auxiliary kernels execute on the scene-linear Float32 path.
+    #[error("auxiliary effects require the Float32 executor")]
+    AuxiliaryRequiresFloat32,
     /// A render operation received a value outside its admitted author contract.
     #[error("effect operation `{op}` has an invalid `{parameter}` parameter")]
     InvalidRenderParameter {
@@ -234,6 +237,8 @@ pub enum EffectFloatExecutionError {
     ExecutionContract(EffectExecutionAdmissionError),
     /// A bound custom Float32 processor failed without publishing staged pixels.
     CustomProcessor(EffectExecutionError),
+    /// A required auxiliary raster is absent or violates its declaration.
+    AuxiliaryInput(EffectExecutionError),
     /// The graph contains a node shape or render op that cannot execute in float.
     UnsupportedNode {
         /// Unsupported node id.
@@ -1232,6 +1237,73 @@ fn scalar_processor_reservations(
     Ok(Some(reservations))
 }
 
+fn validate_float_auxiliary_inputs(
+    compiled: &CompiledEffectGraph,
+    inputs: &[crate::AuxiliaryFloatInput<'_>],
+    primary_extent: crate::EffectFrameExtent,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<Option<EffectInputContentFingerprint>, EffectFloatExecutionError> {
+    let invalid = |slot, reason| {
+        EffectFloatExecutionError::AuxiliaryInput(EffectExecutionError::InvalidAuxiliaryFrame {
+            slot,
+            reason,
+        })
+    };
+    for binding in inputs {
+        if !compiled.auxiliary_inputs().iter().any(|spec| spec.slot() == binding.slot) {
+            return Err(invalid(binding.slot, "undeclared_slot"));
+        }
+    }
+    if compiled.auxiliary_inputs().is_empty() {
+        return Ok(None);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.effect-auxiliary.f32.v1");
+    for spec in compiled.auxiliary_inputs() {
+        let mut matches = inputs.iter().filter(|binding| binding.slot == spec.slot());
+        let binding = matches.next().ok_or_else(|| {
+            EffectFloatExecutionError::AuxiliaryInput(EffectExecutionError::AuxiliaryFrameMissing {
+                slot: spec.slot(),
+            })
+        })?;
+        if matches.next().is_some() {
+            return Err(invalid(spec.slot(), "duplicate_slot"));
+        }
+        let raster = binding.raster;
+        raster.frame.validate_controlled(&mut || scalar_checkpoint(control))?;
+        if raster.frame.format() != spec.format() {
+            return Err(invalid(spec.slot(), "format_mismatch"));
+        }
+        if raster.frame.extent().is_empty() {
+            return Err(invalid(spec.slot(), "empty_extent"));
+        }
+        if raster.policy.resolution() == crate::AuxiliaryResolution::MatchPrimary
+            && raster.frame.extent() != primary_extent
+        {
+            return Err(invalid(spec.slot(), "resolution_mismatch"));
+        }
+        if raster.transform.iter().any(|value| !value.is_finite()) {
+            return Err(invalid(spec.slot(), "nonfinite_transform"));
+        }
+        hasher.update(spec.slot().to_le_bytes());
+        hasher.update(raster.frame.extent().width().to_le_bytes());
+        hasher.update(raster.frame.extent().height().to_le_bytes());
+        hasher.update([raster.policy.resolution().identity_code()]);
+        for value in raster.transform {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        for chunk in raster.frame.pixels().chunks(4096) {
+            scalar_checkpoint(control)?;
+            for pixel in chunk {
+                for value in pixel {
+                    hasher.update(value.to_bits().to_le_bytes());
+                }
+            }
+        }
+    }
+    Ok(Some(hasher.finalize().into()))
+}
+
 fn scalar_checkpoint(
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<(), EffectFloatExecutionError> {
@@ -1315,6 +1387,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     frame_seed: i64,
     domain_cache_key: Option<EffectDomainProcessorCacheKey>,
     mut processor: Option<&mut EffectDomainProcessor<'_>>,
+    auxiliary: &[crate::AuxiliaryFloatInput<'_>],
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
     let width = extent.width();
@@ -1363,6 +1436,8 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         }
     }
     validate_float_effect_graph(compiled, processor.is_some())?;
+    let auxiliary_fingerprint =
+        validate_float_auxiliary_inputs(compiled, auxiliary, extent, control)?;
     if required_len == 0 {
         // Empty unary behavior stays a copy; zero-input native extents reject.
         return input
@@ -1405,9 +1480,15 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
         scalar_checkpoint(control)?;
         return Ok(output);
     }
-    if let Some(cached) = input.filter(|_| !control.uses_input_service()).and_then(|input| {
-        get_cached_effect_output_f32(session, input, compiled, frame_seed, domain_cache_key)
-    }) {
+    let cache_key = input.filter(|_| !control.uses_input_service()).and_then(|input| {
+        let mut key = effect_output_cache_key_f32(input, compiled, frame_seed, domain_cache_key)?;
+        if let Some(auxiliary_fingerprint) = auxiliary_fingerprint {
+            key.input_fingerprint =
+                combine_input_fingerprints(key.input_fingerprint, auxiliary_fingerprint);
+        }
+        Some(key)
+    });
+    if let Some(cached) = cache_key.as_ref().and_then(|key| session.get_float_output(key)) {
         scalar_checkpoint(control)?;
         return Ok(cached);
     }
@@ -1447,12 +1528,87 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     ),
                 );
             }
-            EffectGraphNodeKind::ExternalInput { .. }
-            | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
-                return Err(unsupported_float_graph_node(
-                    node.id,
-                    "auxiliary_requires_cpu_path",
-                ));
+            EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                let raster = auxiliary
+                    .iter()
+                    .find(|binding| binding.slot == *slot)
+                    .ok_or({
+                        EffectFloatExecutionError::AuxiliaryInput(
+                            EffectExecutionError::AuxiliaryFrameMissing { slot: *slot },
+                        )
+                    })?
+                    .raster;
+                outputs.insert(node.id, raster.frame.to_owned()?);
+            }
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input: input_id,
+                auxiliary: auxiliary_id,
+                op,
+                sampling,
+                ..
+            } => {
+                let mut source = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *input_id,
+                    required_len,
+                )
+                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *input_id })?;
+                let auxiliary_len = outputs
+                    .get(auxiliary_id)
+                    .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *auxiliary_id })?
+                    .pixels()
+                    .len();
+                let auxiliary_frame = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *auxiliary_id,
+                    auxiliary_len,
+                )
+                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *auxiliary_id })?;
+                let mut raster = crate::AuxiliaryFloatFrame::new(
+                    auxiliary_frame.view(),
+                    crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
+                );
+                if let Some(EffectGraphNodeKind::ExternalInput { slot, .. }) =
+                    compiled.graph().node(*auxiliary_id).map(|node| &node.kind)
+                {
+                    let binding =
+                        auxiliary.iter().find(|binding| binding.slot == *slot).ok_or({
+                            EffectFloatExecutionError::AuxiliaryInput(
+                                EffectExecutionError::AuxiliaryFrameMissing { slot: *slot },
+                            )
+                        })?;
+                    raster.transform = binding.raster.transform;
+                    raster.policy = binding.raster.policy;
+                }
+                source = crate::materialize_straight_coverage(
+                    source,
+                    crate::EffectAlphaConsumer::StraightCoverageOperation,
+                )?;
+                source.set_format_after_write(
+                    source.format().with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                );
+                let supported = crate::auxiliary::apply_auxiliary_effect_f32(
+                    source.allocation_mut(),
+                    width,
+                    height,
+                    op,
+                    raster,
+                    *sampling,
+                    &mut || scalar_checkpoint(control),
+                )?;
+                if !supported {
+                    return Err(unsupported_float_graph_node(
+                        node.id,
+                        "auxiliary_kernel_unavailable",
+                    ));
+                }
+                source.validate()?;
+                release_float_execution_buffer(&mut buffer_pool, auxiliary_frame);
+                outputs.insert(node.id, source);
             }
             EffectGraphNodeKind::CustomSource { op, domain_contract } => {
                 // Cold sizing precedes this allocation. Reuse the scalar pool,
@@ -1845,15 +2001,8 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     output = apply_effect_domain_transition(compiled, None, output_id, output, &mut processor)?;
     output.validate().map_err(EffectFloatExecutionError::FrameContract)?;
     scalar_checkpoint(control)?;
-    if let Some(input) = input.filter(|_| !control.uses_input_service()) {
-        put_cached_effect_output_f32(
-            session,
-            input,
-            compiled,
-            frame_seed,
-            domain_cache_key,
-            &output,
-        );
+    if let Some(key) = cache_key {
+        session.put_float_output(key, output.clone());
     }
     Ok(output)
 }
@@ -1871,7 +2020,17 @@ impl EffectExecutionSession {
         control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
         let result = apply_compiled_effect_graph_rgba_f32_inner(
-            self, None, extent, format, sampling, compiled, frame_seed, None, None, control,
+            self,
+            None,
+            extent,
+            format,
+            sampling,
+            compiled,
+            frame_seed,
+            None,
+            None,
+            &[],
+            control,
         );
         finish_scalar_attempt(self, control, result)
     }
@@ -1895,6 +2054,35 @@ impl EffectExecutionSession {
             frame_seed,
             None,
             None,
+            &[],
+            control,
+        );
+        finish_scalar_attempt(self, control, result)
+    }
+
+    /// Execute a Float32 graph with validated external auxiliary slot bindings.
+    ///
+    /// Slot contents, extents, transforms and policies participate in the
+    /// output cache identity. Graph-local auxiliary branches need no bindings.
+    pub fn apply_compiled_rgba_f32_with_auxiliary(
+        &mut self,
+        input: crate::EffectFloatFrameView<'_>,
+        compiled: &CompiledEffectGraph,
+        frame_seed: i64,
+        auxiliary: &[crate::AuxiliaryFloatInput<'_>],
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+        let result = apply_compiled_effect_graph_rgba_f32_inner(
+            self,
+            Some(input),
+            input.extent(),
+            input.format(),
+            input.sampling(),
+            compiled,
+            frame_seed,
+            None,
+            None,
+            auxiliary,
             control,
         );
         finish_scalar_attempt(self, control, result)
@@ -1924,6 +2112,7 @@ impl EffectExecutionSession {
             frame_seed,
             Some(domain_cache_key),
             Some(&mut processor),
+            &[],
             control,
         );
         finish_scalar_attempt(self, control, result)
@@ -2359,6 +2548,7 @@ fn effect_output_cache_key(
     })
 }
 
+#[cfg(test)]
 fn get_cached_effect_output_f32(
     session: &mut EffectExecutionSession,
     input: crate::EffectFloatFrameView<'_>,
@@ -2368,21 +2558,6 @@ fn get_cached_effect_output_f32(
 ) -> Option<crate::EffectFloatFrame> {
     let key = effect_output_cache_key_f32(input, compiled, frame_seed, domain_cache_key)?;
     session.get_float_output(&key)
-}
-
-fn put_cached_effect_output_f32(
-    session: &mut EffectExecutionSession,
-    input: crate::EffectFloatFrameView<'_>,
-    compiled: &CompiledEffectGraph,
-    frame_seed: i64,
-    domain_cache_key: Option<EffectDomainProcessorCacheKey>,
-    output: &crate::EffectFloatFrame,
-) {
-    let Some(key) = effect_output_cache_key_f32(input, compiled, frame_seed, domain_cache_key)
-    else {
-        return;
-    };
-    session.put_float_output(key, output.clone());
 }
 
 fn effect_output_cache_key_f32(
@@ -2463,12 +2638,14 @@ fn validate_float_effect_graph_shape(
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {}
-            EffectGraphNodeKind::ExternalInput { .. }
-            | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
-                return Err(unsupported_float_graph_node(
-                    node.id,
-                    "auxiliary_requires_cpu_path",
-                ));
+            EffectGraphNodeKind::ExternalInput { .. } => {}
+            EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
+                if !crate::auxiliary::supports_auxiliary_f32(op) {
+                    return Err(unsupported_float_graph_node(
+                        node.id,
+                        "auxiliary_kernel_unavailable",
+                    ));
+                }
             }
             EffectGraphNodeKind::CustomSource { op, .. }
             | EffectGraphNodeKind::UnaryEffect { op, .. }

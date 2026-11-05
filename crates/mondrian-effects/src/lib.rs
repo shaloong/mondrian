@@ -224,8 +224,9 @@ pub use fractal::{
 };
 
 pub use auxiliary::{
-    render_op_auxiliary_scratch_frames, sample_auxiliary, AuxiliaryFrame, AuxiliaryPolicy,
-    AuxiliaryResolution, BILINEAR_TAPS, IDENTITY_AFFINE, PIXEL_CENTRE,
+    render_op_auxiliary_scratch_frames, sample_auxiliary, sample_auxiliary_f32,
+    AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryFrame, AuxiliaryPolicy, AuxiliaryResolution,
+    BILINEAR_TAPS, IDENTITY_AFFINE, PIXEL_CENTRE,
 };
 pub use bevel::{bevel_frame_f32, BevelError, BevelGrade, BEVEL_HALO_PIXELS, BEVEL_MAX_THICKNESS};
 pub use bezier_warp::{
