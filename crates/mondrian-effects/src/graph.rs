@@ -777,6 +777,7 @@ pub struct CompiledEffectStageBinding {
     origin: Option<EffectStageOrigin>,
     origin_proof: Option<Arc<()>>,
     auxiliary_sources: Arc<[AuxiliarySourceBinding]>,
+    auxiliary_preview_fallback: Option<crate::AuxiliaryPreviewFallback>,
 }
 
 /// Compiler provenance, not another instance or author identity. A shared grade
@@ -816,6 +817,7 @@ impl CompiledEffectStageBinding {
             origin: None,
             origin_proof: None,
             auxiliary_sources: Arc::from([]),
+            auxiliary_preview_fallback: None,
         }
     }
 
@@ -833,6 +835,19 @@ impl CompiledEffectStageBinding {
     /// Explicit host addresses attached to ExternalInput values emitted by this stage.
     pub fn auxiliary_sources(&self) -> &[AuxiliarySourceBinding] {
         &self.auxiliary_sources
+    }
+
+    /// Explicit advisory for an identity stage admitted only by Preview policy.
+    pub fn auxiliary_preview_fallback(&self) -> Option<&crate::AuxiliaryPreviewFallback> {
+        self.auxiliary_preview_fallback.as_ref()
+    }
+
+    pub(crate) fn with_auxiliary_preview_fallback(
+        mut self,
+        fallback: Option<crate::AuxiliaryPreviewFallback>,
+    ) -> Self {
+        self.auxiliary_preview_fallback = fallback;
+        self
     }
 
     pub(crate) fn origin(&self) -> Option<EffectStageOrigin> {
@@ -876,6 +891,11 @@ impl CompiledEffectStageBinding {
             } else {
                 0
             })
+            .saturating_add(
+                self.auxiliary_preview_fallback
+                    .as_ref()
+                    .map_or(0, |fallback| fallback.heap_bytes_estimate()),
+            )
     }
 
     /// Definition-stage index in [`EffectExecutionEnvelope::stages`].
@@ -1043,6 +1063,16 @@ impl CompiledEffectGraph {
     /// graph never reads a second input.
     pub fn auxiliary_inputs(&self) -> &[AuxiliaryInputSpec] {
         &self.auxiliary_inputs
+    }
+
+    /// Preview identity substitutions retained for host badges and cache admission.
+    /// Export callers must refuse graphs containing any such substitution.
+    pub fn auxiliary_preview_fallbacks(
+        &self,
+    ) -> impl Iterator<Item = &crate::AuxiliaryPreviewFallback> {
+        self.stage_bindings
+            .iter()
+            .filter_map(|stage| stage.auxiliary_preview_fallback())
     }
 
     /// Frozen author reference for one host slot, when prepared through a Definition.
@@ -1533,6 +1563,10 @@ pub struct EffectGraphBuilderState {
     active_domain_contract: EffectColorDomainContract,
     auxiliary_masks: Arc<[Option<crate::MaskEvaluation>]>,
     auxiliary_sources: Vec<AuxiliarySourceBinding>,
+    unavailable_auxiliary_sources: Arc<[mondrian_core::VisualSourceReference]>,
+    missing_auxiliary_preview_request:
+        Option<crate::auxiliary_preview::MissingAuxiliaryPreviewRequest>,
+    auxiliary_preview_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1831,11 +1865,37 @@ impl Default for EffectGraphBuilderState {
             active_domain_contract: EffectColorDomainContract::SCENE_LINEAR,
             auxiliary_masks: Arc::from([]),
             auxiliary_sources: Vec::new(),
+            unavailable_auxiliary_sources: Arc::from([]),
+            missing_auxiliary_preview_request: None,
+            auxiliary_preview_enabled: false,
         }
     }
 }
 
 impl EffectGraphBuilderState {
+    pub(crate) fn set_auxiliary_preview_sources(
+        &mut self,
+        enabled: bool,
+        unavailable: Arc<[mondrian_core::VisualSourceReference]>,
+    ) {
+        self.auxiliary_preview_enabled = enabled;
+        self.unavailable_auxiliary_sources = unavailable;
+        self.missing_auxiliary_preview_request = None;
+    }
+
+    pub(crate) fn auxiliary_preview_enabled(&self) -> bool {
+        self.auxiliary_preview_enabled
+    }
+
+    pub(crate) fn clear_missing_auxiliary_preview_request(&mut self) {
+        self.missing_auxiliary_preview_request = None;
+    }
+
+    pub(crate) fn missing_auxiliary_preview_request(
+        &self,
+    ) -> Option<&crate::auxiliary_preview::MissingAuxiliaryPreviewRequest> {
+        self.missing_auxiliary_preview_request.as_ref()
+    }
     pub(crate) fn set_auxiliary_masks(&mut self, masks: Arc<[Option<crate::MaskEvaluation>]>) {
         self.auxiliary_masks = masks;
     }
@@ -2227,14 +2287,6 @@ impl EffectGraphBuilderState {
                 reason: format!("visual source parameter `{parameter_id}` is absent or invalid"),
             }
         })?;
-        let mondrian_core::VisualSourceReference::Asset { retime, .. } = reference else {
-            return Err(crate::EffectGraphBuildError::MissingAuxiliaryInput {
-                effect_key: effect.effect_type.key(),
-                effect_id: effect.id,
-                parameter_id: parameter_id.clone(),
-                slot,
-            });
-        };
         if format.precision() != crate::EffectWorkingPrecision::Float32
             || format.domain() != EffectColorDomain::SceneLinearRgb
             || !format.alpha().is_straight_compatible()
@@ -2247,6 +2299,26 @@ impl EffectGraphBuilderState {
                     .into(),
             });
         }
+        if reference == mondrian_core::VisualSourceReference::Unbound
+            || self.unavailable_auxiliary_sources.contains(&reference)
+        {
+            self.missing_auxiliary_preview_request =
+                Some(crate::auxiliary_preview::MissingAuxiliaryPreviewRequest {
+                    effect_id: effect.id,
+                    parameter_id: parameter_id.clone(),
+                    reference,
+                    slot,
+                });
+            return Err(crate::EffectGraphBuildError::MissingAuxiliaryInput {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: parameter_id.clone(),
+                slot,
+            });
+        }
+        let mondrian_core::VisualSourceReference::Asset { retime, .. } = reference else {
+            return Err(crate::EffectGraphBuildError::InvalidGraph);
+        };
         let producer = self.append_external_input_with(
             slot,
             format,

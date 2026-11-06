@@ -28,6 +28,12 @@ use std::{
 
 const MAX_DEFINITION_BIND_RETRIES: usize = 32;
 
+#[derive(Clone, Default)]
+struct AuxiliaryEvaluation {
+    preview: bool,
+    unavailable: Arc<[mondrian_core::VisualSourceReference]>,
+}
+
 #[cfg(test)]
 #[path = "prepared_input_tests.rs"]
 mod input_tests;
@@ -39,6 +45,10 @@ mod fill_tests;
 #[cfg(test)]
 #[path = "prepared_auxiliary_tests.rs"]
 mod auxiliary_tests;
+
+#[cfg(test)]
+#[path = "prepared_auxiliary_preview_tests.rs"]
+mod auxiliary_preview_tests;
 
 #[derive(Clone)]
 struct PreparedEffectInstance {
@@ -59,6 +69,7 @@ pub struct PreparedEffectStack {
     definition_registry_revision: u64,
     zero_graph: Arc<EffectRenderGraph>,
     zero_stage_bindings: Arc<[CompiledEffectStageBinding]>,
+    auxiliary_preview: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +119,7 @@ impl PreparedEffectStack {
             None,
             lut_cache,
             &[],
+            false,
         )
     }
 
@@ -124,6 +136,7 @@ impl PreparedEffectStack {
             None,
             &LutPreparationCache::uncached(),
             masks,
+            false,
         )
     }
 
@@ -133,6 +146,7 @@ impl PreparedEffectStack {
         frame_context: Option<EffectFrameContext>,
         lut_cache: &LutPreparationCache,
         masks: &[MaskComponent],
+        auxiliary_preview: bool,
     ) -> Result<Self, EffectGraphBuildError> {
         let mut concurrent_change = None;
         for _ in 0..MAX_DEFINITION_BIND_RETRIES {
@@ -142,6 +156,7 @@ impl PreparedEffectStack {
                 frame_context,
                 lut_cache,
                 masks,
+                auxiliary_preview,
             ) {
                 Err(error @ EffectGraphBuildError::DefinitionRegistryChanged { .. }) => {
                     concurrent_change = Some(error);
@@ -161,6 +176,7 @@ impl PreparedEffectStack {
         frame_context: Option<EffectFrameContext>,
         lut_cache: &LutPreparationCache,
         masks: &[MaskComponent],
+        auxiliary_preview: bool,
     ) -> Result<Self, EffectGraphBuildError> {
         let definition_registry_revision = effect_registry_revision();
         let mut instances = Vec::new();
@@ -256,6 +272,7 @@ impl PreparedEffectStack {
             frame_context,
             TimelineTime::ZERO,
             masks,
+            &AuxiliaryEvaluation { preview: auxiliary_preview, ..Default::default() },
         )?;
         // Preparation proves both acyclicity and the declared topology at one
         // canonical instant. Every later evaluation repeats the per-instance
@@ -283,6 +300,7 @@ impl PreparedEffectStack {
             definition_registry_revision,
             zero_graph: Arc::new(zero_evaluation.graph),
             zero_stage_bindings: zero_evaluation.stage_bindings,
+            auxiliary_preview,
         })
     }
 
@@ -300,15 +318,20 @@ impl PreparedEffectStack {
             self.frame_context,
             time,
             &self.masks,
+            &AuxiliaryEvaluation {
+                preview: self.auxiliary_preview,
+                ..Default::default()
+            },
         )?
         .graph)
     }
 
-    fn evaluate_with_stage_bindings(
+    fn evaluate_with_stage_bindings_and_sources(
         &self,
         time: TimelineTime,
+        unavailable: &[mondrian_core::VisualSourceReference],
     ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
-        if time == TimelineTime::ZERO {
+        if time == TimelineTime::ZERO && unavailable.is_empty() {
             return Ok(EvaluatedEffectGraph {
                 graph: (*self.zero_graph).clone(),
                 stage_bindings: Arc::clone(&self.zero_stage_bindings),
@@ -320,6 +343,10 @@ impl PreparedEffectStack {
             self.frame_context,
             time,
             &self.masks,
+            &AuxiliaryEvaluation {
+                preview: self.auxiliary_preview,
+                unavailable: unavailable.into(),
+            },
         )
     }
 
@@ -536,8 +563,10 @@ fn evaluate_instances(
     frame_context: Option<EffectFrameContext>,
     time: TimelineTime,
     masks: &[MaskComponent],
+    auxiliary: &AuxiliaryEvaluation,
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     let mut builder = EffectGraphBuilderState::new();
+    builder.set_auxiliary_preview_sources(auxiliary.preview, Arc::clone(&auxiliary.unavailable));
     builder.set_auxiliary_masks(
         masks
             .iter()
@@ -576,6 +605,7 @@ fn evaluate_instance_into_builder(
     let effect_key = instance.effect.effect_type.key();
     let input_value = builder.current_output();
     let mut staged = builder.clone();
+    staged.clear_missing_auxiliary_preview_request();
     let checkpoint = staged.checkpoint();
     staged.set_active_domain_contract(instance.definition.color_domain_contract());
     let context = EffectEvalContext { time, working_color_space, frame_context };
@@ -636,7 +666,46 @@ fn evaluate_instance_into_builder(
             *builder = staged;
             Ok(binding)
         }
-        Ok(Err(error)) => Err(error),
+        Ok(Err(error)) => {
+            if staged.auxiliary_preview_enabled()
+                && let EffectGraphBuildError::MissingAuxiliaryInput {
+                    effect_key,
+                    effect_id,
+                    parameter_id,
+                    slot,
+                } = &error
+                && let Some(request) = staged.missing_auxiliary_preview_request()
+                && *effect_id == instance.effect.id
+                && *effect_key == instance.effect.effect_type.key()
+                && request.effect_id == *effect_id
+                && request.parameter_id == *parameter_id
+                && request.slot == *slot
+                && instance.effect.evaluate_visual_source_parameter(parameter_id)
+                    == Some(request.reference)
+            {
+                let cause = if request.reference == mondrian_core::VisualSourceReference::Unbound {
+                    crate::AuxiliaryPreviewFallbackCause::Unbound
+                } else {
+                    crate::AuxiliaryPreviewFallbackCause::Unavailable
+                };
+                return Ok(CompiledEffectStageBinding::new(
+                    stage_index,
+                    EffectExecutionContract::IDENTITY,
+                    input_value,
+                    input_value,
+                    Arc::<[EffectGraphNodeId]>::from([]),
+                )
+                .with_auxiliary_preview_fallback(Some(
+                    crate::AuxiliaryPreviewFallback::new(
+                        request.effect_id,
+                        request.parameter_id.clone(),
+                        request.reference,
+                        cause,
+                    ),
+                )));
+            }
+            Err(error)
+        }
         Err(_) => {
             crate::extension_contract::record_extension_runtime_failure(
                 instance.definition.key(),
@@ -686,6 +755,24 @@ impl PreparedGradeGraph {
         working_color_space: WorkingColorSpace,
         lut_cache: &LutPreparationCache,
     ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_with_auxiliary_preview_policy(graph, working_color_space, lut_cache, false)
+    }
+
+    /// Prepare a Preview-only grade whose missing typed source can be an advisory identity.
+    pub fn prepare_for_auxiliary_preview_with_lut_cache(
+        graph: &GradeGraph,
+        working_color_space: WorkingColorSpace,
+        lut_cache: &LutPreparationCache,
+    ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_with_auxiliary_preview_policy(graph, working_color_space, lut_cache, true)
+    }
+
+    fn prepare_with_auxiliary_preview_policy(
+        graph: &GradeGraph,
+        working_color_space: WorkingColorSpace,
+        lut_cache: &LutPreparationCache,
+        auxiliary_preview: bool,
+    ) -> Result<Self, EffectGraphBuildError> {
         graph.validate_author_state().map_err(|error| {
             EffectGraphBuildError::GradeGraphInvalidAuthorState {
                 output_node_id: graph.output,
@@ -700,8 +787,14 @@ impl PreparedGradeGraph {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let stack =
-            PreparedEffectStack::prepare_with_lut_cache(&effects, working_color_space, lut_cache)?;
+        let stack = PreparedEffectStack::prepare_with_optional_frame_context(
+            &effects,
+            working_color_space,
+            None,
+            lut_cache,
+            &[],
+            auxiliary_preview,
+        )?;
         let effect_instances = stack
             .instances
             .iter()
@@ -714,6 +807,7 @@ impl PreparedGradeGraph {
             &effect_instances,
             working_color_space,
             TimelineTime::ZERO,
+            &[],
         )?;
         prepare_effect_graph_topology(&zero_evaluation.graph)
             .ok_or(EffectGraphBuildError::InvalidGraph)?;
@@ -729,11 +823,12 @@ impl PreparedGradeGraph {
         })
     }
 
-    fn evaluate_with_stage_bindings(
+    fn evaluate_with_stage_bindings_and_sources(
         &self,
         time: TimelineTime,
+        unavailable: &[mondrian_core::VisualSourceReference],
     ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
-        if time == TimelineTime::ZERO {
+        if time == TimelineTime::ZERO && unavailable.is_empty() {
             return Ok(self.inner.zero_evaluation.clone());
         }
         evaluate_grade_graph(
@@ -742,6 +837,7 @@ impl PreparedGradeGraph {
             &self.inner.effect_instances,
             self.inner.stack.working_color_space,
             time,
+            unavailable,
         )
     }
 
@@ -792,6 +888,7 @@ fn evaluate_grade_graph(
     effect_instances: &HashMap<EffectId, usize>,
     working_color_space: WorkingColorSpace,
     time: TimelineTime,
+    unavailable: &[mondrian_core::VisualSourceReference],
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     evaluate_grade_graph_output(
         graph,
@@ -800,6 +897,7 @@ fn evaluate_grade_graph(
         effect_instances,
         working_color_space,
         time,
+        unavailable,
     )
 }
 
@@ -810,9 +908,11 @@ fn evaluate_grade_graph_output(
     effect_instances: &HashMap<EffectId, usize>,
     working_color_space: WorkingColorSpace,
     time: TimelineTime,
+    unavailable: &[mondrian_core::VisualSourceReference],
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     let nodes = graph.nodes.iter().map(|node| (node.id, node)).collect::<HashMap<_, _>>();
     let mut builder = EffectGraphBuilderState::new();
+    builder.set_auxiliary_preview_sources(stack.auxiliary_preview, unavailable.into());
     let mut outputs = HashMap::with_capacity(nodes.len());
     let mut bindings = Vec::with_capacity(effect_instances.len());
     let output = evaluate_grade_node(
@@ -983,7 +1083,7 @@ pub struct EffectProgramDependencyIdentity {
     pub resource_fingerprint: [u8; 32],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PreparedEffectProgramInner {
     stack: PreparedEffectStack,
     masks: Arc<[MaskComponent]>,
@@ -993,6 +1093,7 @@ struct PreparedEffectProgramInner {
     dependency_identity: EffectProgramDependencyIdentity,
     zero_topology: Arc<PreparedEffectGraphTopology>,
     zero_compiled: Arc<CompiledEffectGraph>,
+    auxiliary_unavailable: Arc<[mondrian_core::VisualSourceReference]>,
 }
 
 /// Resource-bound effect and mask program shared by Preview and Export.
@@ -1123,6 +1224,53 @@ impl PreparedEffectProgram {
         )
     }
 
+    /// Explicit Preview preparation. Missing typed inputs become diagnosed
+    /// identities; ordinary preparation and Export remain strict.
+    pub fn prepare_for_auxiliary_preview(
+        effects: &[EffectNode],
+        masks: &[MaskComponent],
+        working_color_space: WorkingColorSpace,
+    ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_hierarchical_for_auxiliary_preview(
+            effects,
+            masks,
+            &[],
+            &[],
+            working_color_space,
+            None,
+            &LutPreparationCache::uncached(),
+        )
+    }
+
+    /// Preview-only hierarchy. Every supplied grade must be prepared through
+    /// its explicit Preview constructor; policy cannot leak through a cache hit.
+    pub fn prepare_hierarchical_for_auxiliary_preview(
+        effects: &[EffectNode],
+        masks: &[MaskComponent],
+        grade_before: &[PreparedGradeGraph],
+        grade_after: &[PreparedGradeGraph],
+        working_color_space: WorkingColorSpace,
+        frame_context: Option<EffectFrameContext>,
+        lut_cache: &LutPreparationCache,
+    ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_hierarchical_with_optional_frame_context(
+            effects,
+            masks,
+            grade_before,
+            grade_after,
+            working_color_space,
+            frame_context,
+            lut_cache,
+            true,
+        )
+    }
+
+    /// Whether this immutable program admits Preview auxiliary substitutions.
+    /// Export owners must reject this policy, even if this frame has no fallback.
+    pub fn auxiliary_preview_enabled(&self) -> bool {
+        self.inner.stack.auxiliary_preview
+    }
+
     /// Prepare the canonical hierarchy around one Clip's legacy stack.
     ///
     /// `grade_before` contains group pre-Clip grades. `grade_after` contains
@@ -1144,6 +1292,7 @@ impl PreparedEffectProgram {
             working_color_space,
             None,
             lut_cache,
+            false,
         )
     }
 
@@ -1165,9 +1314,11 @@ impl PreparedEffectProgram {
             working_color_space,
             Some(frame_context),
             lut_cache,
+            false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_hierarchical_with_optional_frame_context(
         effects: &[EffectNode],
         masks: &[MaskComponent],
@@ -1176,13 +1327,22 @@ impl PreparedEffectProgram {
         working_color_space: WorkingColorSpace,
         frame_context: Option<EffectFrameContext>,
         lut_cache: &LutPreparationCache,
+        auxiliary_preview: bool,
     ) -> Result<Self, EffectGraphBuildError> {
+        if grade_before
+            .iter()
+            .chain(grade_after)
+            .any(|grade| grade.inner.stack.auxiliary_preview != auxiliary_preview)
+        {
+            return Err(EffectGraphBuildError::InvalidGraph);
+        }
         let stack = PreparedEffectStack::prepare_with_optional_frame_context(
             effects,
             working_color_space,
             frame_context,
             lut_cache,
             masks,
+            auxiliary_preview,
         )?;
         let masks = masks.iter().filter(|mask| mask.enabled).cloned().collect::<Vec<_>>();
         let grade_before: Arc<[PreparedGradeGraph]> = grade_before.to_vec().into();
@@ -1193,6 +1353,7 @@ impl PreparedEffectProgram {
             &masks,
             &grade_after,
             TimelineTime::ZERO,
+            &[],
         );
         let zero_evaluation = zero_evaluation?;
         let zero_graph = zero_evaluation.graph;
@@ -1230,6 +1391,7 @@ impl PreparedEffectProgram {
                     dependency_identity,
                     zero_topology: topology,
                     zero_compiled,
+                    auxiliary_unavailable: Arc::from([]),
                 }),
             });
         }
@@ -1257,6 +1419,7 @@ impl PreparedEffectProgram {
                 dependency_identity,
                 zero_topology: topology,
                 zero_compiled,
+                auxiliary_unavailable: Arc::from([]),
             }),
         })
     }
@@ -1279,10 +1442,12 @@ impl PreparedEffectProgram {
             &self.inner.masks,
             &self.inner.grade_after,
             time,
+            &self.inner.auxiliary_unavailable,
         )?;
         self.canonicalize_origins(&mut evaluation)?;
+        let envelope = self.evaluation_envelope(&evaluation.stage_bindings)?;
         let graph = evaluation.graph;
-        if graph.is_identity() && self.inner.execution_envelope.stages().is_empty() {
+        if graph.is_identity() && envelope.stages().is_empty() {
             return identity_compiled_effect_graph().ok_or(EffectGraphBuildError::InvalidGraph);
         }
         let topology = if self.inner.zero_topology.matches(&graph) {
@@ -1293,11 +1458,7 @@ impl PreparedEffectProgram {
             )
         };
         topology
-            .bind_with_execution_bindings(
-                graph,
-                self.inner.execution_envelope.clone(),
-                evaluation.stage_bindings,
-            )
+            .bind_with_execution_bindings(graph, envelope, evaluation.stage_bindings)
             .ok_or(EffectGraphBuildError::InvalidGraph)
     }
 
@@ -1321,10 +1482,12 @@ impl PreparedEffectProgram {
             &self.inner.masks,
             &self.inner.grade_after,
             time,
+            &self.inner.auxiliary_unavailable,
         )?;
         self.canonicalize_origins(&mut evaluation)?;
+        let envelope = self.evaluation_envelope(&evaluation.stage_bindings)?;
         let graph = evaluation.graph;
-        if graph.is_identity() && self.inner.execution_envelope.stages().is_empty() {
+        if graph.is_identity() && envelope.stages().is_empty() {
             return identity_compiled_effect_graph().ok_or(EffectGraphBuildError::InvalidGraph);
         }
         let (topology, retain_after_binding) = if self.inner.zero_topology.matches(&graph) {
@@ -1341,16 +1504,111 @@ impl PreparedEffectProgram {
             )
         };
         let compiled = topology
-            .bind_with_execution_bindings(
-                graph,
-                self.inner.execution_envelope.clone(),
-                evaluation.stage_bindings,
-            )
+            .bind_with_execution_bindings(graph, envelope, evaluation.stage_bindings)
             .ok_or(EffectGraphBuildError::InvalidGraph)?;
         if retain_after_binding {
             session.retain_effect_topology(topology);
         }
         Ok(compiled)
+    }
+
+    fn evaluation_envelope(
+        &self,
+        bindings: &[CompiledEffectStageBinding],
+    ) -> Result<EffectExecutionEnvelope, EffectGraphBuildError> {
+        if self.auxiliary_preview_enabled() {
+            execution_envelope_for_bindings(bindings)
+        } else {
+            Ok(self.inner.execution_envelope.clone())
+        }
+    }
+
+    /// Re-evaluate this exact frozen Preview program with host-proved missing
+    /// addresses. The author snapshot and all unfailed Definition stages remain
+    /// intact. Strict programs refuse this API, including an empty decision set.
+    pub fn evaluate_auxiliary_preview(
+        &self,
+        time: TimelineTime,
+        unavailable: &[mondrian_core::VisualSourceReference],
+    ) -> Result<Arc<CompiledEffectGraph>, EffectGraphBuildError> {
+        self.with_auxiliary_preview_unavailable_sources(unavailable)?.evaluate(time)
+    }
+
+    /// Freeze host-proved unavailable addresses into a read-only, attempt-local
+    /// Preview view. Retain this view for temporal samples and processor input
+    /// capabilities; the original program and its cached topology stay intact.
+    /// Source facts must authorize these decisions for every sample evaluated
+    /// through this view. A failure at only one decode time is not such proof.
+    pub fn with_auxiliary_preview_unavailable_sources(
+        &self,
+        unavailable: &[mondrian_core::VisualSourceReference],
+    ) -> Result<Self, EffectGraphBuildError> {
+        if !self.auxiliary_preview_enabled() {
+            return Err(EffectGraphBuildError::InvalidGraph);
+        }
+        let mut entries = unavailable
+            .iter()
+            .map(|reference| {
+                serde_json::to_vec(reference)
+                    .map(|bytes| (bytes, *reference))
+                    .map_err(|_| EffectGraphBuildError::InvalidGraph)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        entries.dedup_by(|a, b| a.0 == b.0);
+        let sources = entries.iter().map(|entry| entry.1).collect::<Vec<_>>();
+        if self.inner.auxiliary_unavailable.as_ref() == sources.as_slice() {
+            return Ok(self.clone());
+        }
+        let mut evaluation = evaluate_effect_pipeline(
+            &self.inner.grade_before,
+            &self.inner.stack,
+            &self.inner.masks,
+            &self.inner.grade_after,
+            TimelineTime::ZERO,
+            &sources,
+        )?;
+        // A changed source context changes Definition entering values. Seal a
+        // fresh capability owner: neither the base program nor another view
+        // can authorize an input prefix from this view's graph.
+        let proof = Arc::new(());
+        for binding in Arc::make_mut(&mut evaluation.stage_bindings) {
+            binding.seal_origin(&proof);
+        }
+        let envelope = execution_envelope_for_bindings(&evaluation.stage_bindings)?;
+        let topology = if self.inner.zero_topology.matches(&evaluation.graph) {
+            Arc::clone(&self.inner.zero_topology)
+        } else {
+            Arc::new(
+                prepare_effect_graph_topology(&evaluation.graph)
+                    .ok_or(EffectGraphBuildError::InvalidGraph)?,
+            )
+        };
+        let zero_compiled = topology
+            .bind_with_execution_bindings(
+                evaluation.graph,
+                envelope.clone(),
+                evaluation.stage_bindings,
+            )
+            .ok_or(EffectGraphBuildError::InvalidGraph)?;
+        let mut inner = (*self.inner).clone();
+        inner.dependency_identity =
+            hierarchical_dependency_identity(&inner.stack, &inner.grade_before, &inner.grade_after);
+        if !entries.is_empty() {
+            let mut hasher = Sha256::new();
+            hasher.update(b"mondrian.auxiliary-preview-source-view.v1");
+            hasher.update(inner.dependency_identity.resource_fingerprint);
+            for (bytes, _) in entries {
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            }
+            inner.dependency_identity.resource_fingerprint = hasher.finalize().into();
+        }
+        inner.execution_envelope = envelope;
+        inner.zero_topology = topology;
+        inner.zero_compiled = zero_compiled;
+        inner.auxiliary_unavailable = sources.into();
+        Ok(Self { inner: Arc::new(inner) })
     }
 
     /// Aggregated execution contract for the effect stack and masks.
@@ -1409,6 +1667,13 @@ impl PreparedEffectProgram {
         std::mem::size_of::<Self>()
             .saturating_add(std::mem::size_of::<PreparedEffectProgramInner>())
             .saturating_add(self.inner.stack.retained_bytes_estimate())
+            .saturating_add(
+                self.inner
+                    .auxiliary_unavailable
+                    .len()
+                    .saturating_mul(std::mem::size_of::<mondrian_core::VisualSourceReference>()),
+            )
+            .saturating_add(2 * std::mem::size_of::<usize>())
             .saturating_add(
                 self.inner
                     .grade_before
@@ -1499,6 +1764,9 @@ pub enum EffectDependencyCheckError {
 fn dependency_identity(stack: &PreparedEffectStack) -> EffectProgramDependencyIdentity {
     let mut hasher = Sha256::new();
     hasher.update(b"mondrian.prepared-effect-dependencies.v1");
+    if stack.auxiliary_preview {
+        hasher.update(b"auxiliary-preview-policy.v1");
+    }
     hasher.update(stack.definition_registry_revision().to_le_bytes());
     for dependency in stack.dependencies() {
         match dependency {
@@ -1546,13 +1814,14 @@ fn evaluate_effect_pipeline(
     masks: &[MaskComponent],
     after: &[PreparedGradeGraph],
     time: TimelineTime,
+    unavailable: &[mondrian_core::VisualSourceReference],
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     let mut combined = EvaluatedEffectGraph {
         graph: EffectRenderGraph::identity(),
         stage_bindings: Arc::from([]),
     };
     for (index, grade) in before.iter().enumerate() {
-        let evaluation = grade.evaluate_with_stage_bindings(time)?;
+        let evaluation = grade.evaluate_with_stage_bindings_and_sources(time, unavailable)?;
         append_evaluated_graph(
             &mut combined,
             evaluation,
@@ -1561,11 +1830,15 @@ fn evaluate_effect_pipeline(
     }
     append_evaluated_graph(
         &mut combined,
-        inject_masks(stack.evaluate_with_stage_bindings(time)?, masks, time),
+        inject_masks(
+            stack.evaluate_with_stage_bindings_and_sources(time, unavailable)?,
+            masks,
+            time,
+        ),
         None,
     )?;
     for (index, grade) in after.iter().enumerate() {
-        let evaluation = grade.evaluate_with_stage_bindings(time)?;
+        let evaluation = grade.evaluate_with_stage_bindings_and_sources(time, unavailable)?;
         append_evaluated_graph(
             &mut combined,
             evaluation,
@@ -1585,6 +1858,7 @@ fn evaluate_grade_input(
     grade: &PreparedGradeGraph,
     node: GradeGraphNodeId,
     time: TimelineTime,
+    unavailable: &[mondrian_core::VisualSourceReference],
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     let Some(mondrian_core::GradeGraphNode {
         kind: GradeGraphNodeKind::Effect { input, .. }, ..
@@ -1599,6 +1873,7 @@ fn evaluate_grade_input(
         &grade.inner.effect_instances,
         grade.inner.stack.working_color_space,
         time,
+        unavailable,
     )
 }
 
@@ -1618,7 +1893,7 @@ fn evaluate_input_pipeline(
     for (index, grade) in program.grade_before.iter().take(before_count).enumerate() {
         append_evaluated_graph(
             &mut combined,
-            grade.evaluate_with_stage_bindings(time)?,
+            grade.evaluate_with_stage_bindings_and_sources(time, &program.auxiliary_unavailable)?,
             Some(ProgramGradePlacement::Before(index)),
         )?;
     }
@@ -1629,7 +1904,7 @@ fn evaluate_input_pipeline(
             .ok_or(EffectGraphBuildError::InvalidGraph)?;
         append_evaluated_graph(
             &mut combined,
-            evaluate_grade_input(grade, node, time)?,
+            evaluate_grade_input(grade, node, time, &program.auxiliary_unavailable)?,
             Some(ProgramGradePlacement::Before(assignment)),
         )?;
         return Ok(combined);
@@ -1650,6 +1925,10 @@ fn evaluate_input_pipeline(
         program.stack.frame_context,
         time,
         &program.stack.masks,
+        &AuxiliaryEvaluation {
+            preview: program.stack.auxiliary_preview,
+            unavailable: Arc::clone(&program.auxiliary_unavailable),
+        },
     )?;
     let stack = if matches!(origin, EffectStageOrigin::AfterGrade { .. }) {
         inject_masks(stack, &program.masks, time)
@@ -1661,7 +1940,10 @@ fn evaluate_input_pipeline(
         for (index, grade) in program.grade_after.iter().take(assignment).enumerate() {
             append_evaluated_graph(
                 &mut combined,
-                grade.evaluate_with_stage_bindings(time)?,
+                grade.evaluate_with_stage_bindings_and_sources(
+                    time,
+                    &program.auxiliary_unavailable,
+                )?,
                 Some(ProgramGradePlacement::After(index)),
             )?;
         }
@@ -1669,7 +1951,7 @@ fn evaluate_input_pipeline(
             program.grade_after.get(assignment).ok_or(EffectGraphBuildError::InvalidGraph)?;
         append_evaluated_graph(
             &mut combined,
-            evaluate_grade_input(grade, node, time)?,
+            evaluate_grade_input(grade, node, time, &program.auxiliary_unavailable)?,
             Some(ProgramGradePlacement::After(assignment)),
         )?;
     }
@@ -1761,6 +2043,7 @@ fn append_evaluated_graph(
                     .collect::<Result<Vec<_>, EffectGraphBuildError>>()?
                     .into(),
             )
+            .with_auxiliary_preview_fallback(binding.auxiliary_preview_fallback().cloned())
             .with_origin(match (grade, binding.origin()) {
                 (
                     Some(ProgramGradePlacement::Before(assignment)),

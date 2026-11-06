@@ -4,6 +4,8 @@
 
 pub mod adjustment;
 pub mod auxiliary;
+mod auxiliary_preview;
+pub use auxiliary_preview::{AuxiliaryPreviewFallback, AuxiliaryPreviewFallbackCause};
 pub mod displacement_map;
 pub use displacement_map::{
     apply_displacement_map_controlled, displacement_map_frame_f32, DisplacementMapBehavior,
