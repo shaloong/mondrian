@@ -2603,6 +2603,19 @@ mod tests {
                     mondrian_core::automation::ParameterResourceReference::Unbound,
                 ),
             },
+            PropertyValue::VisualSource(reference) => {
+                PropertyValue::VisualSource(match reference {
+                    mondrian_core::VisualSourceReference::Unbound => {
+                        mondrian_core::VisualSourceReference::Asset {
+                            asset_id: AssetId::new(),
+                            retime: mondrian_core::VisualSourceRetime::default(),
+                        }
+                    }
+                    mondrian_core::VisualSourceReference::Asset { .. } => {
+                        mondrian_core::VisualSourceReference::Unbound
+                    }
+                })
+            }
             PropertyValue::Text(value) => PropertyValue::Text(format!("{value} edited")),
         }
     }

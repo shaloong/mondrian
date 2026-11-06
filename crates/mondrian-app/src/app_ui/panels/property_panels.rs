@@ -4146,6 +4146,22 @@ pub(super) fn inspector_property_value_widget(
                 .enabled(can_edit),
             )
         }
+        PropertyValue::VisualSource(reference) => {
+            let label = match reference {
+                mondrian_core::VisualSourceReference::Unbound => localizer.text("resource-unbound"),
+                mondrian_core::VisualSourceReference::Asset { .. } => {
+                    localizer.text("visual-source-selected-asset")
+                }
+            };
+            let action = selection.map(|selection| {
+                crate::app_ui::resource_dialog::ResourceEditorAction::Open {
+                    clip_id: selection.clip_id,
+                    target,
+                }
+                .action()
+            });
+            Box::new(Button::new(label).enabled(can_edit && action.is_some()).on_click(action))
+        }
         PropertyValue::Resource(reference) => {
             let label = match reference {
                 ParameterResourceReference::Unbound => localizer.text("resource-unbound"),

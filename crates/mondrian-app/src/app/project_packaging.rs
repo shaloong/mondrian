@@ -1010,6 +1010,12 @@ impl<'a> DependencyCollector<'a> {
             PropertyValue::Resource(ParameterResourceReference::ProjectAsset { asset_id }) => {
                 self.add_asset(*asset_id)?;
             }
+            PropertyValue::VisualSource(mondrian_core::VisualSourceReference::Asset {
+                asset_id,
+                ..
+            }) => {
+                self.add_asset(*asset_id)?;
+            }
             PropertyValue::Resource(ParameterResourceReference::Uri { uri }) => {
                 self.issue(
                     owner,
@@ -1149,6 +1155,36 @@ mod tests {
 0 0 1\n\
 1 1 1\n\
 0 1 1\n";
+
+    #[test]
+    fn visual_source_asset_dependencies_do_not_disappear_from_package_inventory() {
+        let root = tempfile::tempdir().expect("library directory");
+        let library = AssetLibrary::open(root.path().join("library")).expect("library");
+        let missing = AssetId::new();
+        let mut collector = DependencyCollector::new(&library);
+        collector
+            .add_value(
+                &PropertyValue::VisualSource(mondrian_core::VisualSourceReference::Unbound),
+                "unbound",
+            )
+            .unwrap();
+        assert!(collector.issues.is_empty());
+        collector
+            .add_value(
+                &PropertyValue::VisualSource(mondrian_core::VisualSourceReference::Asset {
+                    asset_id: missing,
+                    retime: mondrian_core::VisualSourceRetime::default(),
+                }),
+                "matte source",
+            )
+            .unwrap();
+        let inventory = collector.finish();
+        assert!(!inventory.is_complete());
+        assert!(inventory.files.is_empty());
+        assert_eq!(inventory.issues.len(), 1);
+        assert_eq!(inventory.issues[0].owner, format!("asset:{missing}"));
+        assert!(inventory.issues[0].reason.contains("missing from the Project Library"));
+    }
 
     fn lut_effect(path: PathBuf) -> mondrian_effects::EffectNode {
         let mut effect: mondrian_effects::EffectNode =

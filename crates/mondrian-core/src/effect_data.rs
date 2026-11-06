@@ -979,6 +979,22 @@ impl EffectNode {
         })
     }
 
+    /// Read a static visual source by stable parameter identity.
+    ///
+    /// Source selection and its offset cannot be animated. Validate the property
+    /// before reading so corrupt persisted channels cannot masquerade as Unbound.
+    pub fn evaluate_visual_source_parameter(
+        &self,
+        parameter_id: &ParameterId,
+    ) -> Option<crate::VisualSourceReference> {
+        let (_, property) = self.unique_parameter_property(parameter_id)?;
+        property.validate().ok()?;
+        match property.static_value() {
+            PropertyValue::VisualSource(reference) => Some(*reference),
+            _ => None,
+        }
+    }
+
     /// Mutate one property selected by definition-stable parameter identity.
     pub fn set_static_value_by_parameter(
         &mut self,

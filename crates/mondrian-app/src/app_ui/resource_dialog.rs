@@ -203,6 +203,9 @@ pub(crate) struct ResourceDraft {
     pub(crate) clip_id: ClipId,
     pub(crate) target: InspectorPropertyTarget,
     pub(crate) original: ParameterResourceReference,
+    /// Present only for a typed visual-source draft. The picker edits the
+    /// address while retaining the exact authored retiming unchanged.
+    visual_retime: Option<mondrian_core::VisualSourceRetime>,
     pub(crate) schema: ParameterSchema,
     kind: ResourceKind,
     file: Option<mondrian_core::NativePath>,
@@ -246,6 +249,7 @@ impl ResourceDraft {
             clip_id,
             target,
             original,
+            visual_retime: None,
             schema,
             kind,
             file,
@@ -254,8 +258,65 @@ impl ResourceDraft {
             search: String::new(),
         }
     }
+
+    /// Reuse the cancellable Project Asset picker without turning visual inputs
+    /// into file-path resources or permitting arbitrary URI addresses.
+    pub(crate) fn for_visual_source(
+        clip_id: ClipId,
+        target: InspectorPropertyTarget,
+        original: mondrian_core::VisualSourceReference,
+        schema: ParameterSchema,
+        session: Option<AuthoringSessionId>,
+        sequence: Option<SequenceId>,
+        project_file: Option<PathBuf>,
+    ) -> Self {
+        let (address, retime) = match original {
+            mondrian_core::VisualSourceReference::Unbound => (
+                ParameterResourceReference::Unbound,
+                mondrian_core::VisualSourceRetime::default(),
+            ),
+            mondrian_core::VisualSourceReference::Asset { asset_id, retime } => (
+                ParameterResourceReference::ProjectAsset { asset_id },
+                retime,
+            ),
+        };
+        let mut draft = Self::new(
+            clip_id,
+            target,
+            address,
+            schema,
+            session,
+            sequence,
+            project_file,
+        );
+        draft.visual_retime = Some(retime);
+        draft
+    }
+
+    pub(crate) fn is_visual_source(&self) -> bool {
+        self.visual_retime.is_some()
+    }
+
+    fn property_value(&self, reference: ParameterResourceReference) -> Option<PropertyValue> {
+        let Some(retime) = self.visual_retime else {
+            return Some(PropertyValue::Resource(reference));
+        };
+        let source = match reference {
+            ParameterResourceReference::Unbound => mondrian_core::VisualSourceReference::Unbound,
+            ParameterResourceReference::ProjectAsset { asset_id } => {
+                mondrian_core::VisualSourceReference::Asset { asset_id, retime }
+            }
+            ParameterResourceReference::ExternalFile { .. }
+            | ParameterResourceReference::Uri { .. } => return None,
+        };
+        Some(PropertyValue::VisualSource(source))
+    }
+
     /// Whether the provider admits this reference kind in its authoring schema.
     pub(crate) fn allows_kind(&self, kind: ResourceKind) -> bool {
+        if self.is_visual_source() {
+            return matches!(kind, ResourceKind::Unbound | ResourceKind::ProjectAsset);
+        }
         let binding = match kind {
             ResourceKind::Unbound => return true,
             ResourceKind::ExternalFile => ParameterResourceKind::ExternalFile,
@@ -416,7 +477,14 @@ impl ResourceDraft {
                 Ok(ParameterResourceReference::Uri { uri: self.uri.clone() })
             }
         }?;
-        if self.schema.resource.as_ref().is_none_or(|contract| !contract.admits(&value)) {
+        let admitted = if self.is_visual_source() {
+            self.schema.value_type == mondrian_core::PropertyValueType::VisualSource
+                && self.schema.validate().is_ok()
+                && self.property_value(value.clone()).is_some()
+        } else {
+            self.schema.resource.as_ref().is_some_and(|contract| contract.admits(&value))
+        };
+        if !admitted {
             return Err("resource-not-admitted");
         }
         Ok(value)
@@ -449,7 +517,8 @@ impl ResourceDraft {
         let matches = |bag: &mondrian_core::automation::PropertyBag, parameter| {
             bag.property_by_address(parameter).is_some_and(|(_, property)| {
                 property.descriptor.schema == self.schema
-                    && matches!(property.static_value(), PropertyValue::Resource(reference) if reference == &self.original)
+                    && self.property_value(self.original.clone()).as_ref()
+                        == Some(property.static_value())
             })
         };
         match &self.target {
@@ -470,20 +539,32 @@ impl ResourceDraft {
     pub(crate) fn matches_model(&self, model: &InspectorPanelModel) -> bool {
         self.target.property(self.clip_id, model).is_some_and(|property| {
             property.schema == self.schema
-                && matches!(&property.value, PropertyValue::Resource(reference) if reference == &self.original)
+                && self.property_value(self.original.clone()).as_ref() == Some(&property.value)
         })
     }
     pub(crate) fn author_action(&self, value: ParameterResourceReference) -> Option<Action> {
         if value == self.original {
             return None;
         }
+        let value = self.property_value(value)?;
         Some(
             self.target.write_action(self.clip_id, |parameter| ParameterValueWrite::Value {
                 parameter,
-                value: PropertyValue::Resource(value),
+                value,
             }),
         )
     }
+}
+
+/// The auxiliary color contract currently accepts file-backed, color-managed
+/// pictures. Generated, audio-only and data-texture Assets need other resolvers.
+pub(crate) fn visual_source_asset_is_admitted(asset: &mondrian_assets::AssetRecord) -> bool {
+    matches!(
+        asset.kind,
+        mondrian_assets::AssetKind::Video | mondrian_assets::AssetKind::StillImage
+    ) && !asset.interpretation.payload.is_non_color_data()
+        && !asset.membership.is_retired()
+        && asset.file_path().is_some()
 }
 
 /// Modal editing a resource reference without altering project or library state.
@@ -879,6 +960,143 @@ mod tests {
             None,
             Some(std::env::temp_dir().join("resource-unit.mdp")),
         )
+    }
+
+    fn visual_draft(reference: mondrian_core::VisualSourceReference) -> ResourceDraft {
+        let schema = ParameterSchema::v1(
+            ParameterId::new_static("test.visual_source"),
+            PropertyValue::VisualSource(reference),
+        );
+        ResourceDraft::for_visual_source(
+            ClipId::new(),
+            InspectorPropertyTarget::Clip {
+                parameter: AnimationParameterAddress {
+                    animation_track_id: AnimationTrackId::new(),
+                    parameter_id: schema.parameter_id.clone(),
+                },
+            },
+            reference,
+            schema,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn visual_source_picker_admits_only_asset_addresses_and_keeps_retime() {
+        use mondrian_core::{VisualSourceBoundary, VisualSourceReference, VisualSourceRetime};
+        let retime = VisualSourceRetime {
+            time_offset: mondrian_core::TimelineTime::new(-1001, 24000).unwrap(),
+            mode: VisualSourceBoundary::Transparent,
+        };
+        let original = AssetId::new();
+        let mut input = visual_draft(VisualSourceReference::Asset { asset_id: original, retime });
+        assert!(input.is_visual_source());
+        assert!(input.allows_kind(ResourceKind::Unbound));
+        assert!(input.allows_kind(ResourceKind::ProjectAsset));
+        assert!(!input.allows_kind(ResourceKind::ExternalFile));
+        assert!(!input.allows_kind(ResourceKind::Uri));
+        assert!(!input.allows_browse(false));
+        assert!(!input.allows_browse(true));
+        assert_eq!(input.confirmed_value(), Ok(None));
+        input.update(ResourceUpdate::Kind(ResourceKind::Uri));
+        assert_eq!(input.kind, ResourceKind::ProjectAsset);
+        let selected = AssetId::new();
+        input.update(ResourceUpdate::Asset(selected));
+        let value = input.confirmed_value().unwrap().unwrap();
+        let Action::Custom { payload, .. } =
+            input.author_action(value).expect("typed author write")
+        else {
+            panic!("canonical action");
+        };
+        let write: ClipWriteParameterValuesPayload = serde_json::from_value(payload).unwrap();
+        assert_eq!(write.clip_id, input.clip_id);
+        assert_eq!(write.writes.len(), 1);
+        let ParameterValueWrite::Value { value, .. } = &write.writes[0] else {
+            panic!("value write");
+        };
+        assert_eq!(
+            *value,
+            PropertyValue::VisualSource(VisualSourceReference::Asset {
+                asset_id: selected,
+                retime,
+            })
+        );
+        input.update(ResourceUpdate::Kind(ResourceKind::Unbound));
+        let value = input.confirmed_value().unwrap().unwrap();
+        assert_eq!(
+            input.property_value(value),
+            Some(PropertyValue::VisualSource(VisualSourceReference::Unbound))
+        );
+        input.update(ResourceUpdate::Kind(ResourceKind::ProjectAsset));
+        assert_eq!(
+            input.property_value(input.value().unwrap()),
+            Some(PropertyValue::VisualSource(VisualSourceReference::Asset {
+                asset_id: selected,
+                retime
+            }))
+        );
+    }
+
+    #[test]
+    fn visual_source_picker_defaults_new_sources_without_coercing_path_resources() {
+        use mondrian_core::{VisualSourceReference, VisualSourceRetime};
+        let mut input = visual_draft(VisualSourceReference::Unbound);
+        input.update(ResourceUpdate::Kind(ResourceKind::ProjectAsset));
+        assert_eq!(input.confirmed_value(), Err("resource-asset-required"));
+        let selected = AssetId::new();
+        input.update(ResourceUpdate::Asset(selected));
+        assert_eq!(
+            input.property_value(input.value().unwrap()),
+            Some(PropertyValue::VisualSource(VisualSourceReference::Asset {
+                asset_id: selected,
+                retime: VisualSourceRetime::default()
+            }))
+        );
+        assert!(input
+            .author_action(ParameterResourceReference::ExternalFile {
+                path: PathBuf::from("unexpected.png").into(),
+            })
+            .is_none());
+        assert!(input
+            .author_action(ParameterResourceReference::Uri {
+                uri: "https://example.test/unexpected.png".into(),
+            })
+            .is_none());
+        // Wrong schema families must not be accepted just because the selector
+        // happens to hold an Asset ID.
+        input.schema.value_type = mondrian_core::PropertyValueType::Resource;
+        assert_eq!(input.value(), Err("resource-not-admitted"));
+    }
+
+    #[test]
+    fn visual_source_picker_filters_audio_generated_and_data_assets() {
+        use mondrian_assets::{AssetKind, AssetLibrary, AssetLibraryMembership};
+        let root = tempfile::tempdir().unwrap();
+        let library = AssetLibrary::open(root.path().join("library")).unwrap();
+        let id = library.create_solid_color_asset(Some("classification fixture")).unwrap();
+        let mut asset = library.get_asset(id).unwrap().unwrap();
+        assert!(!visual_source_asset_is_admitted(&asset));
+        asset.kind = AssetKind::Video;
+        assert!(
+            !visual_source_asset_is_admitted(&asset),
+            "generated source is not file-backed"
+        );
+        asset.source = mondrian_core::AssetSource::File(root.path().join("picture.mov"));
+        assert!(visual_source_asset_is_admitted(&asset));
+        asset.kind = AssetKind::StillImage;
+        assert!(visual_source_asset_is_admitted(&asset));
+        asset.interpretation.payload =
+            mondrian_core::timeline_data::AssetColorPayload::NonColorData;
+        assert!(!visual_source_asset_is_admitted(&asset));
+        asset.interpretation.payload =
+            mondrian_core::timeline_data::AssetColorPayload::ColorManaged;
+        asset.kind = AssetKind::Audio;
+        assert!(!visual_source_asset_is_admitted(&asset));
+        asset.kind = AssetKind::Video;
+        asset.membership = AssetLibraryMembership::Retired { at: "fixture".into() };
+        assert!(!visual_source_asset_is_admitted(&asset));
     }
 
     #[test]

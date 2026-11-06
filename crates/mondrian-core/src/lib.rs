@@ -57,6 +57,7 @@ pub mod timeline_data;
 pub mod timeline_time;
 pub mod title;
 pub mod types;
+pub mod visual_source;
 
 pub use audio_layout::*;
 pub use audio_mix::*;
@@ -103,6 +104,7 @@ pub use signal_compliance::*;
 pub use timeline_time::*;
 pub use title::*;
 pub use types::*;
+pub use visual_source::*;
 
 mod native_audio_diagnostics;
 pub use native_audio_diagnostics::{

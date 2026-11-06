@@ -118,6 +118,8 @@ pub enum PropertyValue {
     QualifierSamples(QualifierSampleSet),
     Enum(String),
     Resource(ParameterResourceReference),
+    /// A picture source address with static, exact retiming; resolved by the host.
+    VisualSource(crate::VisualSourceReference),
     Text(String),
 }
 
@@ -147,6 +149,7 @@ pub enum PropertyValueType {
     QualifierSamples,
     Enum,
     Resource,
+    VisualSource,
     Text,
 }
 
@@ -700,6 +703,7 @@ impl ParameterSchema {
                 | PropertyValueType::QualifierSamples
                 | PropertyValueType::Enum
                 | PropertyValueType::Resource
+                | PropertyValueType::VisualSource
                 | PropertyValueType::Text
         ) {
             vec![ParameterInterpolation::Hold]
@@ -725,7 +729,11 @@ impl ParameterSchema {
             resource: (value_type == PropertyValueType::Resource)
                 .then(ParameterResourceContract::all_bindings),
             enum_options: Vec::new(),
-            cache_impact: ParameterCacheImpact::Value,
+            cache_impact: if value_type == PropertyValueType::VisualSource {
+                ParameterCacheImpact::Topology
+            } else {
+                ParameterCacheImpact::Value
+            },
         }
     }
 
@@ -831,6 +839,7 @@ impl ParameterSchema {
                 | PropertyValueType::QualifierSamples
                 | PropertyValueType::Enum
                 | PropertyValueType::Resource
+                | PropertyValueType::VisualSource
                 | PropertyValueType::Text
         ) && self.allowed_interpolations != [ParameterInterpolation::Hold]
         {
@@ -844,6 +853,7 @@ impl ParameterSchema {
                     | PropertyValueType::QualifierSamples
                     | PropertyValueType::Enum
                     | PropertyValueType::Resource
+                    | PropertyValueType::VisualSource
                     | PropertyValueType::Text
             ) {
                 return Err(ParameterSchemaError::NumericContractTypeMismatch);
@@ -929,6 +939,11 @@ impl ParameterSchema {
             )
         {
             return Err(ParameterSchemaError::ResourceCacheImpactRequired);
+        }
+        if self.value_type == PropertyValueType::VisualSource
+            && self.cache_impact != ParameterCacheImpact::Topology
+        {
+            return Err(ParameterSchemaError::VisualSourceCacheImpactRequired);
         }
         match &self.default_value {
             PropertyValue::Curve(curve) if curve.validate().is_err() => {
@@ -1405,6 +1420,9 @@ pub enum ParameterSchemaError {
     DefaultValueOutsideHardRange,
     #[error("resource parameters must declare resource cache impact")]
     ResourceCacheImpactRequired,
+    /// Bound/unbound source selection can change a graph's input requirements.
+    #[error("visual source parameters must declare topology cache impact")]
+    VisualSourceCacheImpactRequired,
     #[error("curve parameter default must be a valid normalized curve")]
     InvalidCurveDefaultValue,
     #[error("qualifier-samples parameter default must be a valid bounded sample set")]
@@ -1454,6 +1472,7 @@ impl PropertyValue {
             Self::QualifierSamples(_) => "qualifier_samples",
             Self::Enum(_) => "enum",
             Self::Resource(_) => "resource",
+            Self::VisualSource(_) => "visual_source",
             Self::Text(_) => "text",
         }
     }
@@ -1478,6 +1497,7 @@ impl PropertyValue {
             Self::QualifierSamples(_) => PropertyValueType::QualifierSamples,
             Self::Enum(_) => PropertyValueType::Enum,
             Self::Resource(_) => PropertyValueType::Resource,
+            Self::VisualSource(_) => PropertyValueType::VisualSource,
             Self::Text(_) => PropertyValueType::Text,
         }
     }
@@ -1560,6 +1580,7 @@ impl PropertyValue {
             | Self::QualifierSamples(_)
             | Self::Enum(_)
             | Self::Resource(_)
+            | Self::VisualSource(_)
             | Self::Text(_) => vec![],
         }
     }
@@ -1625,6 +1646,7 @@ impl PropertyValue {
             | PropertyValueType::QualifierSamples
             | PropertyValueType::Enum
             | PropertyValueType::Resource
+            | PropertyValueType::VisualSource
             | PropertyValueType::Text => fallback.clone(),
         }
     }
@@ -1645,14 +1667,18 @@ impl PropertyValueType {
             Self::Vec3 | Self::DoubleVec3 | Self::DoubleRgb | Self::IntVec3 => 3,
             Self::Color | Self::Vec4 | Self::DoubleColor => 4,
             Self::Enum => 1,
-            Self::Curve | Self::QualifierSamples | Self::Resource | Self::Text => 0,
+            Self::Curve
+            | Self::QualifierSamples
+            | Self::Resource
+            | Self::VisualSource
+            | Self::Text => 0,
         }
     }
 
     pub fn supports_animation(self) -> bool {
         !matches!(
             self,
-            Self::Curve | Self::QualifierSamples | Self::Resource | Self::Text
+            Self::Curve | Self::QualifierSamples | Self::Resource | Self::VisualSource | Self::Text
         )
     }
 
@@ -1664,6 +1690,7 @@ impl PropertyValueType {
             | Self::QualifierSamples
             | Self::Enum
             | Self::Resource
+            | Self::VisualSource
             | Self::Text => InterpolationType::Hold,
             _ => interpolation,
         }
@@ -2103,6 +2130,14 @@ impl AnimatedProperty {
             return Err(parameter_value_error(
                 &self.descriptor.path,
                 "persisted animation channel count does not match the parameter type",
+            ));
+        }
+        if self.animation_enabled
+            && (!self.descriptor.schema.is_animatable || !self.value_type().supports_animation())
+        {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "persisted animation is enabled for a static parameter",
             ));
         }
         let mut keyframe_times = HashMap::<KeyframeId, TimelineTime>::new();
@@ -2561,6 +2596,12 @@ impl AnimatedProperty {
     /// Invalid handle coordinates and normalization failures leave every channel
     /// and the animation-enabled state unchanged.
     pub fn set_exact_keyframe(&mut self, mut keyframe: Keyframe<PropertyValue>) -> Result<()> {
+        if !self.descriptor.schema.is_animatable || !self.value_type().supports_animation() {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "parameter does not support keyframes",
+            ));
+        }
         validate_visual_handle_coordinates(
             &self.descriptor.path,
             keyframe.interp_in,
@@ -5129,6 +5170,7 @@ impl crate::AuthoringFootprint for PropertyValueType {
             | Self::QualifierSamples
             | Self::Enum
             | Self::Resource
+            | Self::VisualSource
             | Self::Text => Ok(()),
         }
     }
@@ -5210,6 +5252,7 @@ impl crate::AuthoringFootprint for PropertyValue {
         match self {
             Self::Enum(value) | Self::Text(value) => collector.collect(value),
             Self::Resource(reference) => collector.collect(reference),
+            Self::VisualSource(reference) => collector.collect(reference),
             Self::Curve(curve) => collector.collect(&curve.points),
             Self::QualifierSamples(samples) => collector.collect(&samples.0),
             Self::Bool(_)

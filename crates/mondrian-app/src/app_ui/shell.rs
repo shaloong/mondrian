@@ -1175,6 +1175,7 @@ fn resource_asset_catalog_revision(
 
 fn resource_asset_choices(
     state: &AppState,
+    visual_only: bool,
 ) -> Result<Vec<crate::app_ui::resource_dialog::ResourceAssetChoice>> {
     let mut assets = state
         .asset_library()
@@ -1182,6 +1183,9 @@ fn resource_asset_choices(
         .transpose()?
         .unwrap_or_default()
         .into_iter()
+        .filter(|asset| {
+            !visual_only || crate::app_ui::resource_dialog::visual_source_asset_is_admitted(asset)
+        })
         .map(
             |asset| crate::app_ui::resource_dialog::ResourceAssetChoice {
                 id: asset.id,
@@ -1233,23 +1237,34 @@ impl AppUiAppRoot {
             let Some(property) = target.property(clip_id, model) else {
                 return Ok(ResourceActionOutcome::Handled(None));
             };
-            let mondrian_core::PropertyValue::Resource(reference) = &property.value else {
-                return Ok(ResourceActionOutcome::Handled(None));
+            let draft = match &property.value {
+                mondrian_core::PropertyValue::Resource(reference) => ResourceDraft::new(
+                    clip_id,
+                    target,
+                    reference.clone(),
+                    property.schema.clone(),
+                    state.authoring_session_id(),
+                    state.active_sequence_id(),
+                    state.current_project_path().map(Path::to_path_buf),
+                ),
+                mondrian_core::PropertyValue::VisualSource(reference) => {
+                    ResourceDraft::for_visual_source(
+                        clip_id,
+                        target,
+                        *reference,
+                        property.schema.clone(),
+                        state.authoring_session_id(),
+                        state.active_sequence_id(),
+                        state.current_project_path().map(Path::to_path_buf),
+                    )
+                }
+                _ => return Ok(ResourceActionOutcome::Handled(None)),
             };
-            let draft = ResourceDraft::new(
-                clip_id,
-                target,
-                reference.clone(),
-                property.schema.clone(),
-                state.authoring_session_id(),
-                state.active_sequence_id(),
-                state.current_project_path().map(Path::to_path_buf),
-            );
             let (catalog_revision, assets) =
                 if draft.allows_kind(crate::app_ui::resource_dialog::ResourceKind::ProjectAsset) {
                     (
                         resource_asset_catalog_revision(state)?,
-                        resource_asset_choices(state)?,
+                        resource_asset_choices(state, draft.is_visual_source())?,
                     )
                 } else {
                     (None, Vec::new())
@@ -1377,6 +1392,14 @@ impl AppUiAppRoot {
                         .flatten();
                     if current.as_ref().is_none_or(|asset| asset.membership.is_retired()) {
                         dialog.set_error("resource-asset-missing");
+                        return Ok(ResourceActionOutcome::Handled(None));
+                    }
+                    if dialog.draft.is_visual_source()
+                        && current.as_ref().is_none_or(|asset| {
+                            !crate::app_ui::resource_dialog::visual_source_asset_is_admitted(asset)
+                        })
+                    {
+                        dialog.set_error("visual-source-asset-not-picture");
                         return Ok(ResourceActionOutcome::Handled(None));
                     }
                 }
@@ -1842,7 +1865,10 @@ impl AppUiAppRoot {
         if dialog.asset_catalog_revision != revision {
             // Capture the revision before reading rows. A concurrent later commit
             // then causes another refresh, rather than marking older rows current.
-            dialog.replace_asset_catalog(revision, resource_asset_choices(state)?);
+            dialog.replace_asset_catalog(
+                revision,
+                resource_asset_choices(state, dialog.draft.is_visual_source())?,
+            );
         }
         Ok(())
     }
@@ -6501,6 +6527,131 @@ mod tests {
         state.test_set_sequence(Some(sequence));
         state.select_clip_by_id(id).expect("selection");
         (state, id, target)
+    }
+
+    #[test]
+    fn visual_source_picker_preserves_missing_addresses_and_commits_one_undoable_write() {
+        use crate::app_ui::resource_dialog::{
+            InspectorPropertyTarget, ResourceActionOutcome, ResourceEditorAction, ResourceKind,
+            ResourceUpdate,
+        };
+        use mondrian_core::{
+            PropertyDescriptor, PropertyValue, TimelineTime, VisualSourceBoundary,
+            VisualSourceReference, VisualSourceRetime,
+        };
+        use mondrian_effects::*;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let kind = EffectType::External(format!(
+            "test.visual-source.picker.{}",
+            uuid::Uuid::new_v4()
+        ));
+        let reference = VisualSourceReference::Asset {
+            asset_id: AssetId::new(),
+            retime: VisualSourceRetime {
+                time_offset: TimelineTime::new(-1001, 24000).unwrap(),
+                mode: VisualSourceBoundary::Transparent,
+            },
+        };
+        register_effect_definition(
+            EffectExtensionDefinitionBuilder::new(
+                kind.key(),
+                "Visual source picker fixture",
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract::IDENTITY)
+            .with_branching_graph(|_, _, _| {})
+            .property(
+                PropertyDescriptor::new(
+                    "source",
+                    "Picture source",
+                    PropertyValue::VisualSource(reference),
+                )
+                .with_parameter_id(kind.parameter_id("source").unwrap()),
+            )
+            .build(),
+        )
+        .unwrap();
+        let effect = instantiate_effect_node(kind).unwrap();
+        let target = InspectorPropertyTarget::Effect {
+            effect_id: effect.id,
+            parameter: effect.properties.property("source").unwrap().address(),
+        };
+        let mut clip = mondrian_timeline::Clip::new_basic_title(
+            "Title",
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .unwrap();
+        let clip_id = clip.id;
+        clip.add_effect_node(effect);
+        let mut sequence = mondrian_timeline::Sequence::new("Visual source authoring");
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.select_clip_by_id(clip_id).unwrap();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let platform = FakePlatform::default();
+        let open = ResourceEditorAction::Open { clip_id, target: target.clone() }.action();
+        root.try_handle_resource_action(&open, &state, &platform).unwrap();
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).unwrap().draft.id;
+        let outcome = root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform,
+            )
+            .unwrap();
+        assert!(matches!(outcome, ResourceActionOutcome::Handled(None)));
+        assert!(root.modal.is_none());
+        assert!(
+            !state.can_undo_action(),
+            "keeping a missing reference creates no edit"
+        );
+        root.try_handle_resource_action(&open, &state, &platform).unwrap();
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).unwrap().draft.id;
+        root.try_handle_resource_action(
+            &ResourceEditorAction::Update {
+                id,
+                update: ResourceUpdate::Kind(ResourceKind::Unbound),
+            }
+            .action(),
+            &state,
+            &platform,
+        )
+        .unwrap();
+        let outcome = root
+            .try_handle_resource_action(
+                &ResourceEditorAction::Confirm { id }.action(),
+                &state,
+                &platform,
+            )
+            .unwrap();
+        let ResourceActionOutcome::Handled(Some(action)) = outcome else {
+            panic!("one authored VisualSource write");
+        };
+        state.dispatch_action(action).unwrap();
+        let read_value = |state: &AppState| {
+            let model =
+                crate::app_ui::panels::InspectorPanelModel::from_app_state(state, &root.localizer);
+            target.property(clip_id, &model).unwrap().value.clone()
+        };
+        assert_eq!(
+            read_value(&state),
+            PropertyValue::VisualSource(VisualSourceReference::Unbound)
+        );
+        assert!(state.can_undo_action());
+        state.dispatch_action(Action::Undo).unwrap();
+        assert_eq!(read_value(&state), PropertyValue::VisualSource(reference));
+        assert!(
+            !state.can_undo_action(),
+            "one confirmation is exactly one history entry"
+        );
+        state.dispatch_action(Action::Redo).unwrap();
+        assert_eq!(
+            read_value(&state),
+            PropertyValue::VisualSource(VisualSourceReference::Unbound)
+        );
     }
 
     #[test]
