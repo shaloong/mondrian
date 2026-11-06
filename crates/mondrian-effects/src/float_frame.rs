@@ -25,6 +25,14 @@ pub enum EffectFloatFrameError {
         /// Pixel count in supplied storage.
         actual: usize,
     },
+    /// Pixelwise graph inputs address different two-dimensional grids.
+    #[error("Float image extent {actual:?} differs from required {expected:?}")]
+    GridExtentMismatch {
+        /// Destination grid required by the pixelwise operation.
+        expected: EffectFrameExtent,
+        /// Grid carried by the other complete image value.
+        actual: EffectFrameExtent,
+    },
     /// The materialization format is not Float32.
     #[error("Float frame cannot carry {precision:?} sample precision")]
     WrongPrecision {
@@ -365,14 +373,20 @@ impl EffectFloatFrame {
     ) -> Self {
         Self { extent, format, sampling, pixels }
     }
-    pub(crate) fn ensure_same_sampling(
+    pub(crate) fn ensure_same_grid(
         &self,
-        actual: ImageSampling,
+        actual: EffectFloatFrameView<'_>,
     ) -> Result<(), EffectFloatFrameError> {
-        if self.sampling != actual {
+        if self.extent != actual.extent() {
+            return Err(EffectFloatFrameError::GridExtentMismatch {
+                expected: self.extent,
+                actual: actual.extent(),
+            });
+        }
+        if self.sampling != actual.sampling() {
             return Err(EffectFloatFrameError::SamplingMismatch {
                 expected: self.sampling,
-                actual,
+                actual: actual.sampling(),
             });
         }
         Ok(())

@@ -727,11 +727,46 @@ pub(crate) struct EffectExecutionSchedule {
     pub(crate) ordered_nodes: Vec<EffectGraphNodeId>,
 }
 
-/// Exact Definition-stage ownership of values emitted into one compiled graph.
-///
-/// This is compiler evidence attached to the unique [`CompiledEffectGraph`];
-/// it is not another graph representation. Empty `emitted_nodes` preserve an
-/// enabled Definition stage that evaluated to an identity operation.
+/// Frozen author address for one host raster, kept outside the pixel graph.
+/// Prepared Definition ownership seals the Effect/parameter provenance; the
+/// host resolves this reference and supplies the raster to the matching slot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuxiliarySourceBinding {
+    producer: EffectGraphNodeId,
+    slot: u32,
+    effect_id: mondrian_core::EffectId,
+    parameter_id: mondrian_core::ParameterId,
+    reference: mondrian_core::VisualSourceReference,
+}
+
+impl AuxiliarySourceBinding {
+    /// ExternalInput producer owned by the consuming Definition stage.
+    pub const fn producer(&self) -> EffectGraphNodeId {
+        self.producer
+    }
+    /// Raster slot to populate before executing the compiled graph.
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+    /// Frozen author instance that selected this source.
+    pub const fn effect_id(&self) -> mondrian_core::EffectId {
+        self.effect_id
+    }
+    /// Definition-stable source parameter, independent of its UI path.
+    pub const fn parameter_id(&self) -> &mondrian_core::ParameterId {
+        &self.parameter_id
+    }
+    /// Authored address and exact constant retiming, without decoded resources.
+    pub const fn reference(&self) -> mondrian_core::VisualSourceReference {
+        self.reference
+    }
+
+    pub(crate) fn remapped(&self, producer: EffectGraphNodeId, slot: u32) -> Self {
+        Self { producer, slot, ..self.clone() }
+    }
+}
+
+/// Frozen Definition ownership and host-reference evidence for one graph stage.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CompiledEffectStageBinding {
     stage_index: usize,
@@ -741,6 +776,7 @@ pub struct CompiledEffectStageBinding {
     emitted_nodes: Arc<[EffectGraphNodeId]>,
     origin: Option<EffectStageOrigin>,
     origin_proof: Option<Arc<()>>,
+    auxiliary_sources: Arc<[AuxiliarySourceBinding]>,
 }
 
 /// Compiler provenance, not another instance or author identity. A shared grade
@@ -779,6 +815,7 @@ impl CompiledEffectStageBinding {
             emitted_nodes: emitted_nodes.into(),
             origin: None,
             origin_proof: None,
+            auxiliary_sources: Arc::from([]),
         }
     }
 
@@ -786,6 +823,16 @@ impl CompiledEffectStageBinding {
         self.origin = origin;
         self.origin_proof = None;
         self
+    }
+
+    pub(crate) fn with_auxiliary_sources(mut self, sources: Arc<[AuxiliarySourceBinding]>) -> Self {
+        self.auxiliary_sources = sources;
+        self
+    }
+
+    /// Explicit host addresses attached to ExternalInput values emitted by this stage.
+    pub fn auxiliary_sources(&self) -> &[AuxiliarySourceBinding] {
+        &self.auxiliary_sources
     }
 
     pub(crate) fn origin(&self) -> Option<EffectStageOrigin> {
@@ -813,6 +860,17 @@ impl CompiledEffectStageBinding {
         self.emitted_nodes
             .len()
             .saturating_mul(std::mem::size_of::<EffectGraphNodeId>())
+            .saturating_add(
+                self.auxiliary_sources
+                    .len()
+                    .saturating_mul(std::mem::size_of::<AuxiliarySourceBinding>()),
+            )
+            .saturating_add(
+                self.auxiliary_sources
+                    .iter()
+                    .map(|source| source.parameter_id.storage_owner().capacity())
+                    .fold(0usize, usize::saturating_add),
+            )
             .saturating_add(if self.origin_proof.is_some() {
                 2 * std::mem::size_of::<usize>()
             } else {
@@ -985,6 +1043,83 @@ impl CompiledEffectGraph {
     /// graph never reads a second input.
     pub fn auxiliary_inputs(&self) -> &[AuxiliaryInputSpec] {
         &self.auxiliary_inputs
+    }
+
+    /// Frozen author reference for one host slot, when prepared through a Definition.
+    /// Raw reference graphs may leave this absent and bind their rasters explicitly.
+    pub fn auxiliary_source_binding(&self, slot: u32) -> Option<&AuxiliarySourceBinding> {
+        self.stage_bindings
+            .iter()
+            .flat_map(|stage| stage.auxiliary_sources.iter())
+            .find(|source| source.slot == slot)
+    }
+
+    /// Author references remain separate from the pixel graph's semantic identity.
+    /// Preview/Export must include these and resolved raster identities in host cache keys.
+    pub fn auxiliary_source_bindings(&self) -> impl Iterator<Item = &AuxiliarySourceBinding> {
+        self.stage_bindings.iter().flat_map(|stage| stage.auxiliary_sources.iter())
+    }
+
+    /// Whether primary history/temporal execution remains necessary after the
+    /// caller resolves the external auxiliary rasters. A closed native stage
+    /// can declare an unbounded auxiliary retime without requesting primary
+    /// Echo history. Opaque processors retain their declared temporal debt.
+    pub fn requires_primary_temporal_execution(&self) -> bool {
+        self.stage_bindings.iter().any(|stage| {
+            let mut external = false;
+            let mut closed_current = true;
+            let mut temporal_kernel = false;
+            for id in stage.emitted_nodes() {
+                let Some(node) = self.graph.node(*id) else {
+                    return true;
+                };
+                match &node.kind {
+                    EffectGraphNodeKind::ExternalInput { .. } => external = true,
+                    EffectGraphNodeKind::UnaryEffect { op, .. }
+                    | EffectGraphNodeKind::DomainEffect { op, .. }
+                    | EffectGraphNodeKind::CustomSource { op, .. }
+                    | EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
+                        temporal_kernel |= matches!(op, EffectRenderOp::TemporalFrameBlend { .. });
+                        closed_current &= !matches!(
+                            op,
+                            EffectRenderOp::Custom { .. }
+                                | EffectRenderOp::TemporalFrameBlend { .. }
+                        ) && raw_render_op_execution_requirements(op)
+                            .temporal_input
+                            == EffectTemporalInputExtent::CURRENT_FRAME;
+                    }
+                    EffectGraphNodeKind::Source
+                    | EffectGraphNodeKind::Blend { .. }
+                    | EffectGraphNodeKind::Mask { .. }
+                    | EffectGraphNodeKind::MaskSource { .. }
+                    | EffectGraphNodeKind::MaskCombine { .. }
+                    | EffectGraphNodeKind::MatteMix { .. }
+                    | EffectGraphNodeKind::MultiInput { .. } => {}
+                }
+            }
+            temporal_kernel
+                || (stage.contract.temporal_input != EffectTemporalInputExtent::CURRENT_FRAME
+                    && !(external && closed_current))
+        })
+    }
+
+    /// Admit the backend after external source time has been resolved by the
+    /// host. This does not change the Definition contracts or lend any raster:
+    /// executors must still validate every required binding before provider work.
+    /// Exact mode and continuity refusals are never discharged here.
+    pub fn admit_single_frame_backend_with_resolved_auxiliary(
+        &self,
+        backend: crate::EffectProcessingBackend,
+        precision: crate::EffectWorkingPrecision,
+    ) -> Result<(), crate::EffectExecutionAdmissionError> {
+        match self.execution_envelope.admit_single_frame_backend(backend, precision) {
+            Err(crate::EffectExecutionAdmissionError::TemporalInputRequired { .. })
+                if !self.requires_primary_temporal_execution() =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     /// Explicit processing-domain transitions and blockers.
@@ -1397,12 +1532,14 @@ pub struct EffectGraphBuilderState {
     next_id: u32,
     active_domain_contract: EffectColorDomainContract,
     auxiliary_masks: Arc<[Option<crate::MaskEvaluation>]>,
+    auxiliary_sources: Vec<AuxiliarySourceBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EffectGraphBuilderCheckpoint {
     node_count: usize,
     current_output: EffectGraphNodeId,
+    auxiliary_source_count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1607,6 +1744,7 @@ fn compile_node_execution_modes(
     }
     let scheduled_nodes = schedule.ordered_nodes.iter().copied().collect::<HashSet<_>>();
     let mut owner_by_node = HashMap::<EffectGraphNodeId, usize>::new();
+    let mut source_slots = HashSet::new();
     for (expected_index, binding) in bindings.iter().enumerate() {
         if binding.stage_index != expected_index
             || binding.contract != envelope.stages()[expected_index]
@@ -1618,6 +1756,20 @@ fn compile_node_execution_modes(
                 && !binding.emitted_nodes.contains(&binding.output_value))
         {
             return None;
+        }
+        for source in binding.auxiliary_sources.iter() {
+            let mondrian_core::VisualSourceReference::Asset { retime, .. } = source.reference
+            else {
+                return None;
+            };
+            if !binding.emitted_nodes.contains(&source.producer)
+                || !source_slots.insert(source.slot)
+                || !matches!(graph.node(source.producer).map(|node| &node.kind),
+                    Some(EffectGraphNodeKind::ExternalInput { slot, time_offset, .. })
+                    if *slot == source.slot && *time_offset == retime.time_offset)
+            {
+                return None;
+            }
         }
         for node_id in binding.emitted_nodes.iter().copied() {
             if matches!(
@@ -1678,6 +1830,7 @@ impl Default for EffectGraphBuilderState {
             next_id: current_output.0 + 1,
             active_domain_contract: EffectColorDomainContract::SCENE_LINEAR,
             auxiliary_masks: Arc::from([]),
+            auxiliary_sources: Vec::new(),
         }
     }
 }
@@ -1707,7 +1860,15 @@ impl EffectGraphBuilderState {
         EffectGraphBuilderCheckpoint {
             node_count: self.graph.nodes.len(),
             current_output: self.current_output,
+            auxiliary_source_count: self.auxiliary_sources.len(),
         }
+    }
+
+    pub(crate) fn auxiliary_sources_since(
+        &self,
+        checkpoint: EffectGraphBuilderCheckpoint,
+    ) -> Arc<[AuxiliarySourceBinding]> {
+        self.auxiliary_sources[checkpoint.auxiliary_source_count..].to_vec().into()
     }
 
     pub(crate) fn node_ids_since(
@@ -2032,6 +2193,75 @@ impl EffectGraphBuilderState {
             domain,
             TimelineTime::ZERO,
         )
+    }
+
+    /// Declare a required, statically authored picture source in a prepared Definition.
+    ///
+    /// Slots are allocated across this builder, rather than being a local slot 0
+    /// for each Effect. Prepared programs retain the source separately in stage
+    /// evidence; `finish()` itself still returns only the pure pixel graph.
+    pub fn append_visual_source_input(
+        &mut self,
+        effect: &mondrian_core::effect_data::EffectNode,
+        parameter_id: &mondrian_core::ParameterId,
+        format: crate::EffectValueFormat,
+        domain: EffectColorDomainContract,
+    ) -> Result<EffectGraphNodeId, crate::EffectGraphBuildError> {
+        let used = self
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                EffectGraphNodeKind::ExternalInput { slot, .. } => Some(slot),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let slot = (0..=used.len())
+            .filter_map(|slot| u32::try_from(slot).ok())
+            .find(|slot| *slot != UNBOUND_AUXILIARY_SLOT && !used.contains(slot))
+            .ok_or(crate::EffectGraphBuildError::InvalidGraph)?;
+        let reference = effect.evaluate_visual_source_parameter(parameter_id).ok_or_else(|| {
+            crate::EffectGraphBuildError::InvalidAuthorState {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                reason: format!("visual source parameter `{parameter_id}` is absent or invalid"),
+            }
+        })?;
+        let mondrian_core::VisualSourceReference::Asset { retime, .. } = reference else {
+            return Err(crate::EffectGraphBuildError::MissingAuxiliaryInput {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                parameter_id: parameter_id.clone(),
+                slot,
+            });
+        };
+        if format.precision() != crate::EffectWorkingPrecision::Float32
+            || format.domain() != EffectColorDomain::SceneLinearRgb
+            || !format.alpha().is_straight_compatible()
+            || domain != EffectColorDomainContract::SCENE_LINEAR
+        {
+            return Err(crate::EffectGraphBuildError::InvalidAuthorState {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                reason: "authored auxiliary sources require scene-linear Float32 independent RGB"
+                    .into(),
+            });
+        }
+        let producer = self.append_external_input_with(
+            slot,
+            format,
+            mondrian_core::ColorFrameAlphaFormats::only(format.alpha()),
+            domain,
+            retime.time_offset,
+        );
+        self.auxiliary_sources.push(AuxiliarySourceBinding {
+            producer,
+            slot,
+            effect_id: effect.id,
+            parameter_id: parameter_id.clone(),
+            reference,
+        });
+        Ok(producer)
     }
 
     /// Declare a host auxiliary raster with an explicit alpha set and retime.
@@ -3013,6 +3243,17 @@ pub(crate) fn compile_effect_domain_plan(
             EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, role, .. } => {
                 let input_domain = *plan.node_output_domains.get(input)?;
                 let auxiliary_domain = *plan.node_output_domains.get(auxiliary)?;
+                // Native auxiliary kernels have the same scene-linear contract
+                // as UnaryEffect; they must not inherit a preceding display/log domain.
+                let target_domain = EffectColorDomain::SceneLinearRgb;
+                plan_domain_edge(
+                    &mut plan,
+                    Some(node.id),
+                    *input,
+                    input_domain,
+                    target_domain,
+                    EffectDomainBlockerKind::NonRgbDomainTransition,
+                );
                 if !(*role == AuxiliaryRole::Matte
                     && auxiliary_domain == EffectColorDomain::AlphaMask)
                 {
@@ -3021,11 +3262,11 @@ pub(crate) fn compile_effect_domain_plan(
                         Some(node.id),
                         *auxiliary,
                         auxiliary_domain,
-                        input_domain,
+                        target_domain,
                         EffectDomainBlockerKind::NonRgbDomainTransition,
                     );
                 }
-                input_domain
+                target_domain
             }
         };
         plan.node_output_domains.insert(node.id, output_domain);

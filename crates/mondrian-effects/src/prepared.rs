@@ -36,6 +36,10 @@ mod input_tests;
 #[path = "prepared_fill_tests.rs"]
 mod fill_tests;
 
+#[cfg(test)]
+#[path = "prepared_auxiliary_tests.rs"]
+mod auxiliary_tests;
+
 #[derive(Clone)]
 struct PreparedEffectInstance {
     effect: EffectNode,
@@ -579,6 +583,19 @@ fn evaluate_instance_into_builder(
         (instance.evaluator.evaluator())(&instance.effect, context, &mut staged)
     })) {
         Ok(Ok(())) => {
+            let auxiliary_sources = staged.auxiliary_sources_since(checkpoint);
+            if auxiliary_sources.iter().any(|source| {
+                source.effect_id() != instance.effect.id
+                    || instance.effect.evaluate_visual_source_parameter(source.parameter_id())
+                        != Some(source.reference())
+            }) {
+                return Err(EffectGraphBuildError::InvalidAuthorState {
+                    effect_key,
+                    effect_id: instance.effect.id,
+                    reason: "auxiliary source does not belong to the frozen Effect parameter"
+                        .into(),
+                });
+            }
             staged.bind_custom_runtime_owner_since(
                 checkpoint,
                 instance.definition.key(),
@@ -614,7 +631,8 @@ fn evaluate_instance_into_builder(
                 input_value,
                 staged.current_output(),
                 staged.node_ids_since(checkpoint),
-            );
+            )
+            .with_auxiliary_sources(auxiliary_sources);
             *builder = staged;
             Ok(binding)
         }
@@ -1666,16 +1684,50 @@ fn append_evaluated_graph(
     let current = combined.graph.output.unwrap_or(EffectGraphNodeId(0));
     let mut ids = HashMap::with_capacity(evaluation.graph.nodes.len());
     ids.insert(EffectGraphNodeId(0), current);
+    // Independent stacks/grades can both start at slot zero. Preserve explicit
+    // slots when free; remap collisions and their source evidence together.
+    let mut used_slots = combined
+        .graph
+        .nodes
+        .iter()
+        .filter_map(|node| match node.kind {
+            EffectGraphNodeKind::ExternalInput { slot, .. } => Some(slot),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut slots = HashMap::new();
+    let mut next_slot = 0u32;
+    for node in &evaluation.graph.nodes {
+        if let EffectGraphNodeKind::ExternalInput { slot, .. } = node.kind {
+            if slot == crate::UNBOUND_AUXILIARY_SLOT || slots.contains_key(&slot) {
+                return Err(EffectGraphBuildError::InvalidGraph);
+            }
+            let assigned = if !used_slots.contains(&slot) {
+                slot
+            } else {
+                while used_slots.contains(&next_slot) {
+                    next_slot =
+                        next_slot.checked_add(1).ok_or(EffectGraphBuildError::InvalidGraph)?;
+                }
+                if next_slot == crate::UNBOUND_AUXILIARY_SLOT {
+                    return Err(EffectGraphBuildError::InvalidGraph);
+                }
+                next_slot
+            };
+            slots.insert(slot, assigned);
+            used_slots.insert(assigned);
+        }
+    }
     let mut next_id = u32::try_from(combined.graph.nodes.len())
         .map_err(|_| EffectGraphBuildError::InvalidGraph)?;
     for node in evaluation.graph.nodes.iter().skip(1) {
         let id = EffectGraphNodeId(next_id);
         next_id = next_id.checked_add(1).ok_or(EffectGraphBuildError::InvalidGraph)?;
         ids.insert(node.id, id);
-        combined
-            .graph
-            .nodes
-            .push(EffectGraphNode { id, kind: remap_graph_node_kind(&node.kind, &ids)? });
+        combined.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: remap_graph_node_kind(&node.kind, &ids, &slots)?,
+        });
     }
     combined.graph.output = Some(remap_graph_id(
         evaluation.graph.output.unwrap_or(EffectGraphNodeId(0)),
@@ -1694,6 +1746,20 @@ fn append_evaluated_graph(
                     .iter()
                     .map(|id| remap_graph_id(*id, &ids))
                     .collect::<Result<Vec<_>, _>>()?,
+            )
+            .with_auxiliary_sources(
+                binding
+                    .auxiliary_sources()
+                    .iter()
+                    .map(|source| {
+                        let slot = slots
+                            .get(&source.slot())
+                            .copied()
+                            .ok_or(EffectGraphBuildError::InvalidGraph)?;
+                        Ok(source.remapped(remap_graph_id(source.producer(), &ids)?, slot))
+                    })
+                    .collect::<Result<Vec<_>, EffectGraphBuildError>>()?
+                    .into(),
             )
             .with_origin(match (grade, binding.origin()) {
                 (
@@ -1716,6 +1782,7 @@ fn append_evaluated_graph(
 fn remap_graph_node_kind(
     kind: &EffectGraphNodeKind,
     ids: &HashMap<EffectGraphNodeId, EffectGraphNodeId>,
+    slots: &HashMap<u32, u32>,
 ) -> Result<EffectGraphNodeKind, EffectGraphBuildError> {
     let remap = |id| remap_graph_id(id, ids);
     Ok(match kind {
@@ -1770,7 +1837,7 @@ fn remap_graph_node_kind(
         },
         EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset } => {
             EffectGraphNodeKind::ExternalInput {
-                slot: *slot,
+                slot: slots.get(slot).copied().ok_or(EffectGraphBuildError::InvalidGraph)?,
                 format: *format,
                 alpha: *alpha,
                 domain: *domain,

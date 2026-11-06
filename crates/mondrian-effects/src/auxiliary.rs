@@ -537,6 +537,268 @@ mod tests {
     }
 
     #[test]
+    fn auxiliary_consumers_convert_a_display_domain_primary_before_the_kernel() {
+        let display = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let mut builder = crate::EffectGraphBuilderState::new();
+        builder.append_unary_in_domain(
+            EffectRenderOp::ColorAdjust {
+                exposure: 1.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+            },
+            crate::EffectColorDomainContract::preserving(display),
+        );
+        let input = builder.current_output();
+        let aux = builder.append_external_input(
+            0,
+            float_view(&[], 0, 0).format(),
+            crate::EffectColorDomainContract::SCENE_LINEAR,
+        );
+        let output = builder.add_auxiliary_effect_with_role(
+            input,
+            aux,
+            EffectRenderOp::Fill {
+                grade: crate::FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
+            },
+            crate::AuxiliaryRole::Matte,
+        );
+        builder.set_current_output(output);
+        let graph = crate::compile_reference_render_graph(builder.finish()).unwrap();
+        assert_eq!(graph.domain_plan().transitions.len(), 2);
+        assert!(graph
+            .domain_plan()
+            .transitions
+            .iter()
+            .any(|edge| edge.consumer == Some(output) && edge.input == input));
+        let matte = [[0.0, 0.0, 0.0, 0.25]];
+        let binding = AuxiliaryFloatInput {
+            slot: 0,
+            raster: AuxiliaryFloatFrame::new(
+                float_view(&matte, 1, 1),
+                AuxiliaryPolicy::MATCH_PRIMARY,
+            ),
+        };
+        let result = crate::EffectExecutionSession::default()
+            .apply_compiled_rgba_f32_with_auxiliary_and_domain_processor(
+                float_view(&[[0.0, 0.0, 2.0, 1.0]], 1, 1),
+                &graph,
+                0,
+                &[binding],
+                crate::EffectDomainProcessorCacheKey::from_complete_semantic_fingerprint([71; 32]),
+                |pixels, edge| {
+                    let scale = if edge.to == display { 0.5 } else { 3.0 };
+                    for pixel in pixels {
+                        for channel in &mut pixel[..3] {
+                            *channel *= scale;
+                        }
+                    }
+                    Ok(())
+                },
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.format().domain(),
+            crate::EffectColorDomain::SceneLinearRgb
+        );
+        for (actual, expected) in result.pixels()[0].iter().zip([0.25, 0.0, 4.5, 1.0]) {
+            assert!((actual - expected).abs() < 1e-5, "{:?}", result.pixels());
+        }
+    }
+
+    #[test]
+    fn explicit_rgb_auxiliary_domain_edges_are_executed_before_sampling() {
+        let display = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let mut builder = crate::EffectGraphBuilderState::new();
+        let input = builder.current_output();
+        // This is the low-level explicit-input API, not an authored host source.
+        let aux = builder.append_external_input(
+            0,
+            float_view(&[], 0, 0).format().with_domain(display),
+            crate::EffectColorDomainContract::preserving(display),
+        );
+        let output = builder.add_auxiliary_effect_with_role(
+            input,
+            aux,
+            EffectRenderOp::Fill {
+                grade: crate::FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
+            },
+            crate::AuxiliaryRole::Matte,
+        );
+        builder.set_current_output(output);
+        let graph = crate::compile_reference_render_graph(builder.finish()).unwrap();
+        assert_eq!(graph.domain_plan().transitions.len(), 1);
+        let matte = [[1.0, 0.0, 0.0, 0.25]];
+        let view = crate::EffectFloatFrameView::new(
+            EffectFrameExtent::new(1, 1),
+            float_view(&[], 0, 0).format().with_domain(display),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &matte,
+        );
+        let binding = AuxiliaryFloatInput {
+            slot: 0,
+            raster: AuxiliaryFloatFrame::new(view, AuxiliaryPolicy::MATCH_PRIMARY),
+        };
+        let mut calls = 0;
+        let result = crate::EffectExecutionSession::default()
+            .apply_compiled_rgba_f32_with_auxiliary_and_domain_processor(
+                float_view(&[[0.0, 0.0, 2.0, 1.0]], 1, 1),
+                &graph,
+                0,
+                &[binding],
+                crate::EffectDomainProcessorCacheKey::from_complete_semantic_fingerprint([72; 32]),
+                |pixels, edge| {
+                    calls += 1;
+                    assert_eq!(edge.consumer, Some(output));
+                    assert_eq!(edge.input, aux);
+                    assert_eq!(edge.from, display);
+                    assert_eq!(edge.to, crate::EffectColorDomain::SceneLinearRgb);
+                    assert_eq!(pixels, &matte);
+                    for pixel in pixels {
+                        for channel in &mut pixel[..3] {
+                            *channel *= 0.5;
+                        }
+                    }
+                    Ok(())
+                },
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert_eq!(calls, 1);
+        for (actual, expected) in result.pixels()[0].iter().zip([0.25, 0.0, 1.5, 1.0]) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn auxiliary_and_color_domain_execution_share_one_complete_cache_identity() {
+        let display = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let mut builder = crate::EffectGraphBuilderState::new();
+        builder.append_unary_in_domain(
+            EffectRenderOp::ColorAdjust {
+                exposure: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+            },
+            crate::EffectColorDomainContract::preserving(display),
+        );
+        for _ in 0..4 {
+            builder.append_unary(EffectRenderOp::GaussianBlur { radius: 1.0 });
+        }
+        let input = builder.current_output();
+        let auxiliary = builder.append_external_input(
+            0,
+            float_view(&[], 0, 0).format(),
+            crate::EffectColorDomainContract::SCENE_LINEAR,
+        );
+        let output = builder.add_auxiliary_effect_with_role(
+            input,
+            auxiliary,
+            EffectRenderOp::Fill {
+                grade: crate::FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
+            },
+            crate::AuxiliaryRole::Matte,
+        );
+        builder.set_current_output(output);
+        let graph = crate::compile_reference_render_graph(builder.finish()).unwrap();
+        assert_eq!(graph.domain_plan().transitions.len(), 2);
+        assert!(graph.output_cache_enabled());
+        let primary = [[0.0, 0.0, 2.0, 1.0]];
+        let mut session = crate::EffectExecutionSession::default();
+        let mut calls = 0;
+        let mut first_calls = 0;
+        for (index, (context, coverage, blue)) in [
+            (1u8, 0.25, 1.5),
+            (1, 0.25, 1.5),
+            (2, 0.25, 2.25),
+            (2, 0.5, 1.5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let matte = [[4.0, -2.0, 1.0, coverage]];
+            let binding = AuxiliaryFloatInput {
+                slot: 0,
+                raster: AuxiliaryFloatFrame::new(
+                    float_view(&matte, 1, 1),
+                    AuxiliaryPolicy::MATCH_PRIMARY,
+                ),
+            };
+            let output = session
+                .apply_compiled_rgba_f32_with_auxiliary_and_domain_processor(
+                    float_view(&primary, 1, 1),
+                    &graph,
+                    0,
+                    &[binding],
+                    crate::EffectDomainProcessorCacheKey::from_complete_semantic_fingerprint(
+                        [context; 32],
+                    ),
+                    |pixels, transition| {
+                        calls += 1;
+                        let scale = if transition.to == display {
+                            0.5
+                        } else if context == 1 {
+                            2.0
+                        } else {
+                            3.0
+                        };
+                        for pixel in pixels {
+                            for channel in &mut pixel[..3] {
+                                *channel *= scale;
+                            }
+                        }
+                        Ok(())
+                    },
+                    &mut crate::EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            let expected = [coverage, 0.0, blue, 1.0];
+            for (actual, expected) in output.pixels()[0].iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 1e-5,
+                    "context {context}, alpha {coverage}: {:?}",
+                    output.pixels()
+                );
+            }
+            if index == 0 {
+                first_calls = calls;
+                assert!(calls > 0);
+            }
+            if index == 1 {
+                assert_eq!(calls, first_calls, "same domain and auxiliary hit cache");
+            }
+            if index == 2 {
+                assert!(calls > first_calls, "new color context must execute");
+            }
+        }
+        let error = session
+            .apply_compiled_rgba_f32_with_auxiliary_and_domain_processor(
+                float_view(&primary, 1, 1),
+                &graph,
+                0,
+                &[],
+                crate::EffectDomainProcessorCacheKey::from_complete_semantic_fingerprint([2; 32]),
+                |_, _| panic!("missing auxiliary must refuse before any color processor"),
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::EffectFloatExecutionError::AuxiliaryInput(
+                EffectExecutionError::AuxiliaryFrameMissing { slot: 0 }
+            )
+        ));
+    }
+
+    #[test]
     fn auxiliary_float_cache_identity_includes_the_second_raster() {
         let graph = auxiliary_fill_graph();
         assert!(graph.output_cache_enabled());

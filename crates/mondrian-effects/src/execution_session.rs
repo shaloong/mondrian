@@ -33,9 +33,11 @@ pub struct EffectExecutionSessionConfig {
     pub max_cache_entries: usize,
     /// Maximum aggregate pixel/topology logical bytes retained by the Session.
     pub max_cache_bytes: usize,
-    /// Maximum active bytes admitted by temporal/ROI or reusable-processor
-    /// execution, including source coverage, owned rasters, atomic staging and
-    /// every resident/active processor during that invocation.
+    /// Maximum active bytes admitted by temporal/ROI, auxiliary scalar, or
+    /// reusable-processor execution, including owned rasters, atomic staging
+    /// and every resident/active processor during that invocation. Temporal
+    /// source coverage is included; scalar borrowed host inputs have separate
+    /// residency owners and are excluded from the scalar raster charge.
     pub max_working_bytes: usize,
     /// Maximum GPU lowering plans or deterministic blockers retained by the
     /// Session.
@@ -379,6 +381,12 @@ impl EffectExecutionSession {
         output: crate::EffectFloatFrame,
     ) {
         self.float_outputs.insert(key, output);
+    }
+
+    pub(crate) fn admits_float_output_cache_copy(&self, output: &crate::EffectFloatFrame) -> bool {
+        self.float_outputs.max_entries != 0
+            && output.pixels().len().saturating_mul(std::mem::size_of::<[f32; 4]>())
+                <= self.float_outputs.max_bytes
     }
 
     pub(crate) fn get_temporal_output(

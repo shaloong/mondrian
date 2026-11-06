@@ -3753,7 +3753,7 @@ fn execute_cpu_dag_prefix(
                     crate::EffectAlphaConsumer::AlphaMask,
                     &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
-                output.ensure_same_sampling(mask.sampling())?;
+                output.ensure_same_grid(mask.view())?;
                 apply_alpha_mask_f32_region_controlled(
                     &mut output,
                     &mask,
@@ -3792,7 +3792,7 @@ fn execute_cpu_dag_prefix(
                     crate::EffectAlphaConsumer::AlphaMask,
                     &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
-                left.ensure_same_sampling(right.sampling())?;
+                left.ensure_same_grid(right.view())?;
                 combine_alpha_masks_f32_controlled(&mut left, &right, mask_op, &mut || {
                     heterogeneous_processor_checkpoint(control, generation)
                 })?;
@@ -3836,8 +3836,8 @@ fn execute_cpu_dag_prefix(
                     crate::EffectAlphaConsumer::AlphaMask,
                     &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
-                base.ensure_same_sampling(graded.sampling())?;
-                base.ensure_same_sampling(matte.sampling())?;
+                base.ensure_same_grid(graded.view())?;
+                base.ensure_same_grid(matte.view())?;
                 matte_mix_f32_controlled(&mut base, &graded, &matte, &mut || {
                     heterogeneous_processor_checkpoint(control, generation)
                 })?;

@@ -14,6 +14,7 @@ pub use mondrian_core::EffectPassBlendPolicy;
 pub mod alpha_contract;
 pub mod arithmetic;
 mod float_frame;
+mod float_working_set;
 pub use alpha_contract::{
     ColorFrameAlphaFormats, EffectAlphaConsumer, EffectAlphaContract, EffectAlphaOutputContract,
 };
@@ -24,6 +25,7 @@ pub use float_frame::{
     validate_float32_frame_storage, EffectAlphaConversionFailure, EffectFloatFrame,
     EffectFloatFrameError, EffectFloatFrameView,
 };
+pub use float_working_set::estimate_compiled_float_raster_working_bytes;
 pub mod black_white;
 pub mod box_blur;
 pub mod brightness_contrast;
@@ -374,8 +376,8 @@ pub use graph::{
     compile_reference_effect_graph_in_domain, compile_reference_render_graph,
     identity_compiled_effect_graph, prepare_effect_graph_topology, validate_auxiliary_graph,
     AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryInputSpec, AuxiliaryOutOfBounds,
-    AuxiliaryRole, AuxiliarySampling, CompiledEffectDomainPlan, CompiledEffectGraph,
-    CompiledEffectStageBinding, EffectDomainBlocker, EffectDomainBlockerKind,
+    AuxiliaryRole, AuxiliarySampling, AuxiliarySourceBinding, CompiledEffectDomainPlan,
+    CompiledEffectGraph, CompiledEffectStageBinding, EffectDomainBlocker, EffectDomainBlockerKind,
     EffectDomainTransition, EffectGraphBuilderState, EffectGraphError, EffectGraphNode,
     EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
     PreparedEffectGraphTopology, UNBOUND_AUXILIARY_SLOT,

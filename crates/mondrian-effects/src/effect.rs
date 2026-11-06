@@ -277,6 +277,14 @@ pub enum EffectGraphBuildError {
         effect_key: String,
         effect_id: EffectId,
     },
+    /// A required typed visual source has no authored address.
+    #[error("effect `{effect_key}` ({effect_id}) has no visual source `{parameter_id}` for auxiliary slot {slot}")]
+    MissingAuxiliaryInput {
+        effect_key: String,
+        effect_id: EffectId,
+        parameter_id: ParameterId,
+        slot: u32,
+    },
     /// Authored parameter schemas do not exactly match the bound definition.
     #[error("effect `{effect_key}` ({effect_id}) has invalid author state: {reason}")]
     InvalidAuthorState {
