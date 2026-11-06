@@ -33,6 +33,12 @@ use super::preview_media_frame::MediaPreviewFrame;
 use super::preview_media_residency::PreviewMediaResidencyGuard;
 
 pub(crate) enum ResolvedPreviewElement {
+    /// Invocation-scoped sources for this element, including both endpoints
+    /// of a transition. This context does not add a compositing layer.
+    WithAuxiliary {
+        element: Box<ResolvedPreviewElement>,
+        inputs: Box<[super::preview_auxiliary::ResolvedPreviewAuxiliaryInputs]>,
+    },
     SolidColor(TimelineSolidColorLayer),
     HeterogeneousSolidColor {
         layer: TimelineSolidColorLayer,
@@ -53,6 +59,15 @@ pub(crate) enum ResolvedPreviewElement {
         right: Box<ResolvedPreviewTransitionInput>,
         progress: f32,
     },
+}
+
+impl ResolvedPreviewElement {
+    pub(crate) fn without_auxiliary(&self) -> &Self {
+        match self {
+            Self::WithAuxiliary { element, .. } => element.without_auxiliary(),
+            element => element,
+        }
+    }
 }
 
 pub(crate) enum ResolvedPreviewTransitionInput {
@@ -80,6 +95,18 @@ pub(crate) fn resolved_preview_media_residency(
     let mut protections = Vec::new();
     for element in elements {
         match element {
+            ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
+                protections.extend(resolved_preview_media_residency(std::slice::from_ref(
+                    element,
+                )));
+                for input in inputs {
+                    for source in &input.sources {
+                        protections.extend(
+                            source.frame.as_ref().and_then(MediaPreviewFrame::residency_guard),
+                        );
+                    }
+                }
+            }
             ResolvedPreviewElement::Media { frame, .. } => {
                 protections.extend(frame.residency_guard());
             }
@@ -187,8 +214,8 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     color_context: &ProgramColorContext,
     sampling: mondrian_core::ImageSampling,
 ) -> PreviewOutputKey {
-    // v5 invalidates GPU image coverage computed with a half-pixel-shifted support.
-    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v5");
+    // v6 binds authored auxiliary sources, exact media revisions and grids.
+    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v6");
     sampling.hash(&mut builder);
     color_context.working_color_space().hash(&mut builder);
     color_context.output_color_space().hash(&mut builder);
@@ -197,60 +224,72 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     color_context.output_transform().hash(&mut builder);
     elements.len().hash(&mut builder);
     for element in elements {
-        match element {
-            ResolvedPreviewElement::SolidColor(solid) => {
-                0u8.hash(&mut builder);
-                hash_color(solid.color, &mut builder);
-                solid.opacity.to_bits().hash(&mut builder);
-                solid.blend_mode.hash(&mut builder);
-                hash_transform(solid.transform, &mut builder);
-                hash_effect_graph_identity(&solid.effect_graph, solid.frame_seed, &mut builder);
-            }
-            ResolvedPreviewElement::HeterogeneousSolidColor { layer: solid, .. } => {
-                0u8.hash(&mut builder);
-                hash_color(solid.color, &mut builder);
-                solid.opacity.to_bits().hash(&mut builder);
-                solid.blend_mode.hash(&mut builder);
-                hash_transform(solid.transform, &mut builder);
-                hash_effect_graph_identity(&solid.effect_graph, solid.frame_seed, &mut builder);
-            }
-            ResolvedPreviewElement::Adjustment(adjustment) => {
-                1u8.hash(&mut builder);
-                adjustment.opacity.to_bits().hash(&mut builder);
-                adjustment.blend_policy.hash(&mut builder);
-                hash_effect_graph_identity(
-                    &adjustment.effect_graph,
-                    adjustment.frame_seed,
-                    &mut builder,
-                );
-            }
-            ResolvedPreviewElement::Media {
-                frame,
-                opacity,
-                blend_mode,
-                transform,
-                effect_graph,
-                frame_seed,
-                ..
-            } => {
-                2u8.hash(&mut builder);
-                frame.identity().hash(&mut builder);
-                frame.width().hash(&mut builder);
-                frame.height().hash(&mut builder);
-                opacity.to_bits().hash(&mut builder);
-                blend_mode.hash(&mut builder);
-                hash_transform(*transform, &mut builder);
-                hash_effect_graph_identity(effect_graph, *frame_seed, &mut builder);
-            }
-            ResolvedPreviewElement::CrossDissolve { left, right, progress } => {
-                3u8.hash(&mut builder);
-                hash_transition_input(left, &mut builder);
-                hash_transition_input(right, &mut builder);
-                progress.to_bits().hash(&mut builder);
-            }
-        }
+        hash_resolved_element(element, &mut builder);
     }
     PreviewOutputKey::new(sequence_id, width, height, builder.finish_identity())
+}
+
+fn hash_resolved_element(element: &ResolvedPreviewElement, mut builder: &mut impl Hasher) {
+    match element {
+        ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
+            4u8.hash(builder);
+            inputs.len().hash(builder);
+            for input in inputs {
+                input.hash_identity(builder);
+            }
+            hash_resolved_element(element, builder);
+        }
+        ResolvedPreviewElement::SolidColor(solid) => {
+            0u8.hash(&mut builder);
+            hash_color(solid.color, &mut builder);
+            solid.opacity.to_bits().hash(&mut builder);
+            solid.blend_mode.hash(&mut builder);
+            hash_transform(solid.transform, &mut builder);
+            hash_effect_graph_identity(&solid.effect_graph, solid.frame_seed, &mut builder);
+        }
+        ResolvedPreviewElement::HeterogeneousSolidColor { layer: solid, .. } => {
+            0u8.hash(&mut builder);
+            hash_color(solid.color, &mut builder);
+            solid.opacity.to_bits().hash(&mut builder);
+            solid.blend_mode.hash(&mut builder);
+            hash_transform(solid.transform, &mut builder);
+            hash_effect_graph_identity(&solid.effect_graph, solid.frame_seed, &mut builder);
+        }
+        ResolvedPreviewElement::Adjustment(adjustment) => {
+            1u8.hash(&mut builder);
+            adjustment.opacity.to_bits().hash(&mut builder);
+            adjustment.blend_policy.hash(&mut builder);
+            hash_effect_graph_identity(
+                &adjustment.effect_graph,
+                adjustment.frame_seed,
+                &mut builder,
+            );
+        }
+        ResolvedPreviewElement::Media {
+            frame,
+            opacity,
+            blend_mode,
+            transform,
+            effect_graph,
+            frame_seed,
+            ..
+        } => {
+            2u8.hash(&mut builder);
+            frame.identity().hash(&mut builder);
+            frame.width().hash(&mut builder);
+            frame.height().hash(&mut builder);
+            opacity.to_bits().hash(&mut builder);
+            blend_mode.hash(&mut builder);
+            hash_transform(*transform, &mut builder);
+            hash_effect_graph_identity(effect_graph, *frame_seed, &mut builder);
+        }
+        ResolvedPreviewElement::CrossDissolve { left, right, progress } => {
+            3u8.hash(&mut builder);
+            hash_transition_input(left, &mut builder);
+            hash_transition_input(right, &mut builder);
+            progress.to_bits().hash(&mut builder);
+        }
+    }
 }
 
 fn hash_transition_input(input: &ResolvedPreviewTransitionInput, hasher: &mut impl Hasher) {
@@ -346,6 +385,10 @@ pub(crate) fn viewer_preview_plan_allows_cross_call_reuse(
     }
 
     elements.iter().all(|element| match element {
+        ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
+            inputs.iter().all(|input| input.permits_cross_call_reuse())
+                && viewer_preview_plan_allows_cross_call_reuse(std::slice::from_ref(element))
+        }
         ResolvedPreviewElement::SolidColor(layer) => graph_reusable(&layer.effect_graph),
         ResolvedPreviewElement::HeterogeneousSolidColor { layer, .. } => {
             graph_reusable(&layer.effect_graph)
@@ -369,6 +412,9 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
     let mut has_composited_layer = false;
     for element in resolved {
         match element {
+            ResolvedPreviewElement::WithAuxiliary { .. } => {
+                return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+            }
             ResolvedPreviewElement::Media {
                 frame,
                 opacity,
@@ -497,6 +543,11 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
     let mut has_composited_layer = false;
     for element in resolved {
         match element {
+            ResolvedPreviewElement::WithAuxiliary { .. } => {
+                return Err(PreviewViewerGpuLayerPreparationError::Compositing {
+                    reason: GpuCompositingBlockerReason::EffectRequiresCpu,
+                });
+            }
             ResolvedPreviewElement::Media {
                 frame,
                 opacity,
@@ -1045,6 +1096,16 @@ pub(crate) fn resolved_preview_presentation_quality(
 
 fn resolved_element_is_degraded(element: &ResolvedPreviewElement) -> bool {
     match element {
+        ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
+            resolved_element_is_degraded(element)
+                || inputs.iter().any(|input| {
+                    input.sources.iter().any(|source| {
+                        source.frame.as_ref().is_some_and(|frame| {
+                            frame.presentation_quality() == FramePresentationQuality::Degraded
+                        })
+                    })
+                })
+        }
         ResolvedPreviewElement::Media { frame, .. } => {
             frame.presentation_quality() == FramePresentationQuality::Degraded
         }
@@ -1071,6 +1132,18 @@ pub(crate) fn resolved_preview_decode_execution(
     let mut summary = PreviewDecodeExecutionSummary::default();
     for element in resolved {
         match element {
+            ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
+                summary.accumulate(resolved_preview_decode_execution(std::slice::from_ref(
+                    element,
+                )));
+                for input in inputs {
+                    for source in &input.sources {
+                        if let Some(frame) = &source.frame {
+                            summary.accumulate(frame.decode_execution());
+                        }
+                    }
+                }
+            }
             ResolvedPreviewElement::Media { frame, .. } => {
                 summary.accumulate(frame.decode_execution());
             }

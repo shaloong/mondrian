@@ -1,5 +1,7 @@
 use super::request_scheduler::{FutureMediaWindowCache, MediaPreviewRequestAdmission};
 use super::*;
+#[path = "auxiliary_tests.rs"]
+mod auxiliary_tests;
 #[path = "temporal_plugin_tests.rs"]
 mod temporal_plugin_tests;
 use crate::app::preview_access_mode::{

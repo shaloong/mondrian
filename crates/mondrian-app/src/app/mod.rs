@@ -227,6 +227,7 @@ pub(crate) mod owned_worker_lifecycle;
 mod playback_acceptance;
 pub(crate) mod playback_preview;
 pub(crate) mod preview_access_mode;
+pub(crate) mod preview_auxiliary;
 pub(crate) mod preview_cpu_execution;
 pub(crate) mod preview_cpu_fallback_task;
 pub(crate) mod preview_decode_residency;

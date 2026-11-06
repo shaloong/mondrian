@@ -281,6 +281,7 @@ pub(crate) enum VisualExecutionTaskFailure {
     PreparedTimeline {
         reason: String,
         blocked: Option<Arc<mondrian_effects::EffectProcessorFeedbackReceipt>>,
+        terminal: Option<super::preview_unavailability::PreviewUnavailability>,
     },
     /// Broker lifecycle, preemption, or deadline evidence stopped execution.
     #[error("visual execution stopped by Broker lifecycle: {evidence:?}")]
@@ -303,6 +304,24 @@ pub(crate) enum VisualExecutionTaskFailure {
 }
 
 impl VisualExecutionTaskFailure {
+    pub(crate) fn unavailability(
+        &self,
+    ) -> Option<super::preview_unavailability::PreviewUnavailability> {
+        match self {
+            Self::PreparedTimeline { terminal, blocked, reason } => {
+                if blocked.is_some() {
+                    Some(super::preview_unavailability::PreviewUnavailability::blocked(
+                        terminal.as_ref().map_or(super::preview_unavailability::PreviewOutputStage::TimelineComposite,
+                            super::preview_unavailability::PreviewUnavailability::stage),
+                        terminal.as_ref().map_or(reason.as_str(), |reason| reason.detail()),
+                    ))
+                } else {
+                    terminal.clone()
+                }
+            }
+            _ => None,
+        }
+    }
     /// Canonical user-blocked receipt from the renderer's actual failed work.
     pub(crate) fn processor_blocked(
         &self,
@@ -1204,6 +1223,13 @@ fn execute_visual_payload(
 ) -> Result<VisualExecutionTaskOutput, VisualExecutionTaskFailure> {
     match payload.work {
         VisualExecutionWork::PreparedTimeline { work, effect_session, cpu_grant } => {
+            work.validate_auxiliary_working_set().map_err(|error| {
+                VisualExecutionTaskFailure::PreparedTimeline {
+                    blocked: None,
+                    reason: error.to_string(),
+                    terminal: Some(error.unavailability()),
+                }
+            })?;
             let cancellation = work.request().cancellation().clone();
             let mut observed_cancellation = None;
             let mut checkpoint = || {
@@ -1275,6 +1301,7 @@ fn execute_visual_payload(
                 return Err(VisualExecutionTaskFailure::PreparedTimeline {
                     blocked: None,
                     reason: "prepared Timeline changed its original generation".into(),
+                    terminal: None,
                 });
             }
             let mut blocked = None;
@@ -1294,6 +1321,7 @@ fn execute_visual_payload(
                     VisualExecutionTaskFailure::PreparedTimeline {
                         blocked: None,
                         reason: format!("prepared Timeline stopped: {reason:?}"),
+                        terminal: None,
                     },
                     |evidence| VisualExecutionTaskFailure::BrokerCanceled { evidence },
                 ));
@@ -1305,6 +1333,7 @@ fn execute_visual_payload(
                         VisualExecutionTaskFailure::PreparedTimeline {
                             blocked: None,
                             reason: error.to_string(),
+                            terminal: None,
                         }
                     })?;
                     Ok(VisualExecutionTaskOutput::PreparedTimeline {
@@ -1318,12 +1347,14 @@ fn execute_visual_payload(
                 } => Err(VisualExecutionTaskFailure::PreparedTimeline {
                     blocked,
                     reason: reason.detail().to_owned(),
+                    terminal: Some(reason),
                 }),
                 super::preview_timeline_execution::PreviewTimelineResolution::Pending {
                     ..
                 } => Err(VisualExecutionTaskFailure::PreparedTimeline {
                     blocked: None,
                     reason: "source-ready worker returned to pre-DSP preparation".into(),
+                    terminal: None,
                 }),
             }
         }

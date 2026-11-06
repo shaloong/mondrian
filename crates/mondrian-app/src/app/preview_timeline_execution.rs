@@ -47,6 +47,10 @@ use mondrian_renderer::{
 };
 use mondrian_timeline::sequence::{MediaInputColorContext, ProgramColorContext, Sequence};
 
+use super::preview_auxiliary::{
+    PreviewAuxiliaryAssetPlan, PreviewAuxiliaryAssetRequest, PreviewAuxiliaryAssetResolver,
+};
+mod auxiliary_budget;
 use super::preview_cpu_execution::{PreviewCpuExecutionDurations, PreviewCpuExecutionError};
 use super::preview_execution::{
     PreviewDecodeExecutionSummary, PreviewOutputKey, PreviewSemanticIdentity,
@@ -253,17 +257,32 @@ impl<'a> PreviewTimelineFrameRequest<'a> {
 pub(crate) struct PreviewTimelineSourceAdapters<'a, MediaFrame, TitleFrame> {
     media_frame: &'a mut MediaFrame,
     title_frame: &'a mut TitleFrame,
+    auxiliary_asset: Option<&'a mut PreviewAuxiliaryAssetResolver<'a>>,
     execute: Option<&'a mut dyn FnMut(Arc<PreparedPreviewTimelineWork>) -> PreviewTimelineWorkPoll>,
 }
 
 impl<'a, MediaFrame, TitleFrame> PreviewTimelineSourceAdapters<'a, MediaFrame, TitleFrame> {
     /// Bind media and generated-title resolution for one evaluation call.
     pub(crate) fn new(media_frame: &'a mut MediaFrame, title_frame: &'a mut TitleFrame) -> Self {
-        Self { media_frame, title_frame, execute: None }
+        Self {
+            media_frame,
+            title_frame,
+            auxiliary_asset: None,
+            execute: None,
+        }
     }
 }
 
 impl<'a, MediaFrame, TitleFrame> PreviewTimelineSourceAdapters<'a, MediaFrame, TitleFrame> {
+    /// Resolve auxiliary Asset facts without opening a separate decoder.
+    pub(crate) fn with_auxiliary_assets(
+        mut self,
+        resolver: &'a mut PreviewAuxiliaryAssetResolver<'a>,
+    ) -> Self {
+        self.auxiliary_asset = Some(resolver);
+        self
+    }
+
     pub(crate) fn with_execution(
         mut self,
         execute: &'a mut dyn FnMut(Arc<PreparedPreviewTimelineWork>) -> PreviewTimelineWorkPoll,
@@ -312,17 +331,17 @@ impl<'a> PreviewTimelineExecutionBinding<'a> {
 ///
 /// Prefetch and preroll iterate the same renderer-owned closure as real
 /// execution, so neither Adapter can reinterpret nesting, quality, or color.
-pub(crate) fn collect_preview_timeline_media_demands(
+pub(crate) fn collect_preview_timeline_picture_demands(
     sequence: &Sequence,
     sequences: &[Sequence],
     frame: i64,
     target_resolution: Resolution,
     runtime_scale: PreviewResolutionScale,
     color_context: ProgramColorContext,
-) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
+) -> Result<Vec<PreviewTimelinePictureDemand>, PreviewUnavailability> {
     let programs = RefCell::new(PreparedVisualProgramCache::default());
     let scratch = RefCell::new(TimelineCompositeScratch::default());
-    collect_preview_timeline_media_demands_with_programs(
+    collect_preview_timeline_picture_demands_with_programs(
         sequence,
         sequences,
         frame,
@@ -337,7 +356,70 @@ pub(crate) fn collect_preview_timeline_media_demands(
     )
 }
 
-pub(crate) fn collect_preview_timeline_media_demands_with_programs(
+/// Picture intent is retained until an Adapter with Asset facts can lower it.
+/// A transparent auxiliary boundary still needs that validation, even though
+/// it produces no decoder request.
+pub(crate) enum PreviewTimelinePictureDemand {
+    Media(PreviewTimelineMediaRequest),
+    Auxiliary(PreviewAuxiliaryAssetRequest),
+}
+
+pub(crate) fn resolve_preview_picture_media_demands(
+    demands: Vec<PreviewTimelinePictureDemand>,
+    resolver: &mut PreviewAuxiliaryAssetResolver<'_>,
+) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
+    let mut media = Vec::new();
+    let mut seen_media = HashSet::new();
+    let mut seen_auxiliary = HashSet::new();
+    for demand in demands {
+        let request = match demand {
+            PreviewTimelinePictureDemand::Media(request) => Some(request),
+            PreviewTimelinePictureDemand::Auxiliary(request) => {
+                if !seen_auxiliary.insert(request.clone()) {
+                    continue;
+                }
+                resolver(&request)?.media_request
+            }
+        };
+        if let Some(request) = request {
+            if seen_media.insert(request.clone()) {
+                media.push(request);
+            }
+        }
+    }
+    Ok(media)
+}
+
+/// Legacy media-only test Adapter must fail rather than omit an unbound source.
+#[cfg(test)]
+pub(crate) fn collect_preview_timeline_media_demands(
+    sequence: &Sequence,
+    sequences: &[Sequence],
+    frame: i64,
+    target_resolution: Resolution,
+    runtime_scale: PreviewResolutionScale,
+    color_context: ProgramColorContext,
+) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
+    resolve_preview_picture_media_demands(
+        collect_preview_timeline_picture_demands(
+            sequence,
+            sequences,
+            frame,
+            target_resolution,
+            runtime_scale,
+            color_context,
+        )?,
+        &mut |_| {
+            Err(PreviewUnavailability::blocked(
+                PreviewOutputStage::MediaResolution,
+                "media-only collector requires an auxiliary Asset resolver",
+            )
+            .into())
+        },
+    )
+}
+
+pub(crate) fn collect_preview_timeline_picture_demands_with_programs(
     sequence: &Sequence,
     sequences: &[Sequence],
     frame: i64,
@@ -349,7 +431,7 @@ pub(crate) fn collect_preview_timeline_media_demands_with_programs(
     scratch: &RefCell<TimelineCompositeScratch>,
     author_snapshot: Option<PreparedVisualAuthorSnapshotIdentity>,
     heterogeneous_graph_budget: EffectGraphExecutionBudget,
-) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
+) -> Result<Vec<PreviewTimelinePictureDemand>, PreviewUnavailability> {
     let cancellation = ExecutionCancellationToken::new();
     let graph = PreviewTimelineGraph {
         programs,
@@ -374,7 +456,12 @@ pub(crate) fn collect_preview_timeline_media_demands_with_programs(
         demands
             .into_iter()
             .filter_map(|demand| match demand {
-                PreparedPreviewSourceDemand::Media { request, .. } => Some(request),
+                PreparedPreviewSourceDemand::Media { request, .. } => {
+                    Some(PreviewTimelinePictureDemand::Media(request))
+                }
+                PreparedPreviewSourceDemand::Auxiliary(request) => {
+                    Some(PreviewTimelinePictureDemand::Auxiliary(request))
+                }
                 PreparedPreviewSourceDemand::BasicTitle(_) => None,
             })
             .collect()
@@ -505,7 +592,8 @@ where
         raster_requirement,
         color_context,
     } = request;
-    let PreviewTimelineSourceAdapters { media_frame, title_frame, execute } = adapters;
+    let PreviewTimelineSourceAdapters { media_frame, title_frame, auxiliary_asset, execute } =
+        adapters;
     let scratch = graph.scratch;
     let mut preparation = match preparation {
         Some(prepared) => prepared,
@@ -601,6 +689,7 @@ where
         &preparation.demands,
         media_frame,
         title_frame,
+        auxiliary_asset,
     );
     if graph.cancellation.is_canceled() || preparation.request().cancellation().is_canceled() {
         return PreviewTimelineResolution::Unavailable {
@@ -715,6 +804,55 @@ where
         PreviewPreparationState::Sources(sources) => std::mem::take(sources),
         PreviewPreparationState::Executing(_) => unreachable!("handled dispatched work"),
     };
+    let auxiliary_preparation_bytes =
+        match auxiliary_budget::prepared_auxiliary_working_bytes(&preparation.closure, &sources) {
+            Ok(bytes) => bytes,
+            Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
+        };
+    let auxiliary_bytes = match u64::try_from(auxiliary_preparation_bytes) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::blocked(
+                    PreviewOutputStage::InputAdaptation,
+                    "auxiliary working pixel size overflowed",
+                ),
+            }
+        }
+    };
+    materialization_bytes = match materialization_bytes.checked_add(auxiliary_bytes) {
+        Some(bytes) => bytes,
+        None => {
+            return PreviewTimelineResolution::Unavailable {
+                reason: PreviewUnavailability::blocked(
+                    PreviewOutputStage::InputAdaptation,
+                    "Preview auxiliary materialization size overflowed",
+                ),
+            }
+        }
+    };
+    if let Err(error) = nested_materialization_bytes
+        .checked_add(auxiliary_bytes)
+        .ok_or_else(|| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::InputAdaptation,
+                "nested auxiliary working size overflowed",
+            )
+        })
+        .and_then(|bytes| {
+            scratch
+                .borrow()
+                .admit_cpu_active_working_set(bytes, TimelineCpuCompositePrecision::Float32)
+                .map_err(|error| {
+                    PreviewUnavailability::blocked(
+                        PreviewOutputStage::InputAdaptation,
+                        error.to_string(),
+                    )
+                })
+        })
+    {
+        return PreviewTimelineResolution::Unavailable { reason: error };
+    }
     let mut identity =
         PreviewSemanticIdentityBuilder::new(b"mondrian.preview.prepared-execution.v1");
     uuid::Uuid::new_v4().hash(&mut identity);
@@ -726,6 +864,8 @@ where
         closure: Arc::clone(&preparation.closure),
         sources,
         materialization_bytes,
+        auxiliary_preparation_bytes,
+        auxiliary_work_reservation: std::sync::OnceLock::new(),
         sampling,
         cache_enabled: sequence.settings.preview.cache_enabled,
         interest: Arc::downgrade(&interest),
@@ -790,6 +930,9 @@ pub(crate) struct PreparedPreviewTimelineWork {
     closure: Arc<PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>>,
     sources: PreviewSourcePreparation,
     materialization_bytes: u64,
+    auxiliary_preparation_bytes: usize,
+    auxiliary_work_reservation:
+        std::sync::OnceLock<super::preview_auxiliary::PreviewAuxiliaryWorkReservation>,
     sampling: mondrian_core::ImageSampling,
     cache_enabled: bool,
     interest: std::sync::Weak<PreviewTimelineWorkInterest>,
@@ -807,6 +950,32 @@ impl std::fmt::Debug for PreparedPreviewTimelineWork {
 }
 
 impl PreparedPreviewTimelineWork {
+    pub(crate) fn admit_auxiliary_working_set(
+        &self,
+        store: &mut super::preview_frame_store::PreviewFrameStoreAdapter,
+    ) -> Result<(), PreviewUnavailability> {
+        if self.auxiliary_work_reservation.get().is_some() || self.auxiliary_preparation_bytes == 0
+        {
+            return Ok(());
+        }
+        if let Some(reservation) = super::preview_auxiliary::reserve_auxiliary_working_set(
+            store,
+            self.auxiliary_preparation_bytes,
+        )? {
+            let _ = self.auxiliary_work_reservation.set(reservation);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_auxiliary_working_set(
+        &self,
+    ) -> Result<(), super::preview_cpu_execution::PreviewCpuExecutionError> {
+        super::preview_auxiliary::validate_auxiliary_working_reservation(
+            self.auxiliary_preparation_bytes,
+            self.auxiliary_work_reservation.get(),
+        )
+    }
+
     pub(crate) fn processor_sources(
         &self,
         policy: super::preview_access_mode::PreviewMediaWorkPolicy,
@@ -988,6 +1157,7 @@ impl PreparedPreviewTimelineWork {
             };
         let mut adapter = PreviewTimelineExecutionAdapter {
             closure,
+            sources,
             media_frame: &mut admitted_media,
             title_frame: &mut admitted_title,
             scratch,
@@ -1197,6 +1367,7 @@ enum PreparedPreviewVisualOutput {
 
 struct PreviewTimelineExecutionAdapter<'a, 'control, 'input, MediaFrame, TitleFrame> {
     closure: &'a PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
+    sources: &'a PreviewSourcePreparation,
     media_frame: &'a mut MediaFrame,
     title_frame: &'a mut TitleFrame,
     scratch: &'a RefCell<TimelineCompositeScratch>,
@@ -2050,12 +2221,14 @@ enum PreparedPreviewSourceDemand {
         role: PreviewMediaSourceRole,
     },
     BasicTitle(PreviewTimelineTitleRequest),
+    Auxiliary(PreviewAuxiliaryAssetRequest),
 }
 
 #[derive(Clone, Copy)]
 enum PreviewMediaSourceRole {
     Current,
     Transition,
+    Auxiliary,
     Temporal {
         clip_id: mondrian_core::ClipId,
         time: mondrian_core::TimelineTime,
@@ -2067,6 +2240,7 @@ impl PreviewMediaSourceRole {
         match self {
             Self::Current => reason.with_context(format_args!("media {asset_id}")),
             Self::Transition => reason.with_context(format_args!("Transition media {asset_id}")),
+            Self::Auxiliary => reason.with_context(format_args!("auxiliary media {asset_id}")),
             Self::Temporal { clip_id, time } => reason.with_context(format_args!(
                 "temporal media source for Clip {clip_id} at {time}"
             )),
@@ -2186,6 +2360,7 @@ impl PreviewTimelinePreparation {
 struct PreviewSourcePreparation {
     media: HashMap<PreviewTimelineMediaRequest, PreviewTimelineMediaFrame>,
     titles: HashMap<BasicTitleRasterRequestIdentity, PreviewTimelineTitleFrame>,
+    auxiliary: HashMap<PreviewAuxiliaryAssetRequest, PreviewAuxiliaryAssetPlan>,
 }
 
 impl PreviewSourcePreparation {
@@ -2204,17 +2379,62 @@ fn admit_prepared_preview_sources(
     demands: &[PreparedPreviewSourceDemand],
     media_frame: &mut impl FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
     title_frame: &mut impl FnMut(PreviewTimelineTitleRequest) -> PreviewTimelineTitleFrame,
+    mut auxiliary_asset: Option<&mut PreviewAuxiliaryAssetResolver<'_>>,
 ) -> Result<(), PreviewTimelineAbort> {
-    let PreviewSourcePreparation { media, titles } = sources;
+    let PreviewSourcePreparation { media, titles, auxiliary } = sources;
     let mut pending = None;
     let mut retry_admission = None;
     let mut unavailable = None;
+    let mut auxiliary_demands = Vec::new();
+    let mut queried_auxiliary = HashSet::new();
+    // Refresh facts on every pre-DSP retry. A Ready raster may be retained only
+    // while its ordinary source key still matches the current Asset authority.
+    for demand in demands {
+        let PreparedPreviewSourceDemand::Auxiliary(request) = demand else {
+            continue;
+        };
+        if !queried_auxiliary.insert(request) {
+            continue;
+        }
+        let planned = match auxiliary_asset.as_deref_mut() {
+            Some(resolve) => resolve(request),
+            None => Err(PreviewUnavailability::blocked(
+                PreviewOutputStage::MediaResolution,
+                "auxiliary Asset facts resolver is unavailable",
+            )
+            .into()),
+        };
+        match planned {
+            Ok(plan) => {
+                if let Some(previous) = auxiliary.insert(request.clone(), plan.clone())
+                    && previous != plan
+                    && let Some(old_media) = previous.media_request
+                {
+                    media.remove(&old_media);
+                }
+                if let Some(request) = plan.media_request {
+                    auxiliary_demands.push(PreparedPreviewSourceDemand::Media {
+                        request,
+                        role: PreviewMediaSourceRole::Auxiliary,
+                    });
+                }
+            }
+            Err(reason) => {
+                if let Some(previous) = auxiliary.remove(request)
+                    && let Some(old_media) = previous.media_request
+                {
+                    media.remove(&old_media);
+                }
+                unavailable.get_or_insert(reason.into());
+            }
+        }
+    }
     let mut temporal_pending = 0usize;
     let mut queried_media = HashSet::new();
     let mut queried_titles = HashSet::new();
     // Admit the whole source batch even if an earlier result waits or fails.
     // This lets the original media/raster producers make progress together.
-    for demand in demands {
+    for demand in demands.iter().chain(&auxiliary_demands) {
         match demand {
             PreparedPreviewSourceDemand::Media { request, role } => {
                 let role = *role;
@@ -2244,7 +2464,8 @@ fn admit_prepared_preview_sources(
                                 }
                             }
                             PreviewMediaSourceRole::Current
-                            | PreviewMediaSourceRole::Transition => {
+                            | PreviewMediaSourceRole::Transition
+                            | PreviewMediaSourceRole::Auxiliary => {
                                 PreviewTimelinePendingDependency::Media { asset_id, wait: *wait }
                             }
                         };
@@ -2291,6 +2512,37 @@ fn admit_prepared_preview_sources(
                     }
                 }
             }
+            PreparedPreviewSourceDemand::Auxiliary(_) => {}
+        }
+    }
+    for plan in auxiliary.values() {
+        let Some(request) = &plan.media_request else {
+            continue;
+        };
+        let Some(PreviewTimelineMediaFrame::Ready(frame)) = media.get(request) else {
+            continue;
+        };
+        if frame.presentation_quality() != FramePresentationQuality::Ready {
+            pending.get_or_insert(PreviewTimelinePendingDependency::Media {
+                asset_id: request.asset_id,
+                wait: PreviewTimelineMediaWait::Producer,
+            });
+        } else if frame.source_key().is_none() {
+            unavailable.get_or_insert_with(|| {
+                PreviewUnavailability::failed(
+                    PreviewOutputStage::InputAdaptation,
+                    "auxiliary Ready media has no original source key",
+                )
+            });
+        } else if frame.source_key() != Some(&plan.validated_key) {
+            // Revision/device/color facts changed between planning and source
+            // acquisition. Refresh this same pre-DSP attempt, never use the
+            // new pixels with the old boundary/identity proof.
+            media.remove(request);
+            retry_admission.get_or_insert(PreviewTimelinePendingDependency::Media {
+                asset_id: request.asset_id,
+                wait: PreviewTimelineMediaWait::RetryAdmission,
+            });
         }
     }
     if let Some(reason) = unavailable {
@@ -2412,7 +2664,80 @@ fn collect_prepared_visual_source_demands(
             }
         }
     }
+    collect_prepared_auxiliary_source_demands(closure, &mut demands)?;
     Ok(demands)
+}
+
+fn collect_prepared_auxiliary_source_demands(
+    closure: &PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
+    demands: &mut Vec<PreparedPreviewSourceDemand>,
+) -> Result<(), PreviewUnavailability> {
+    let mut seen = HashSet::new();
+    for node in closure.nodes() {
+        if node
+            .evaluation()
+            .temporal_batches()
+            .iter()
+            .any(|batch| !batch.graph().auxiliary_inputs().is_empty())
+        {
+            return Err(PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                "primary temporal auxiliary inputs require time-expanded source bindings",
+            ));
+        }
+        let mut graphs = Vec::new();
+        for element in &node.evaluation().plan().elements {
+            match element {
+                TimelineRenderPlanElement::Media(value) => graphs.push(&value.effect_graph),
+                TimelineRenderPlanElement::NestedSequence(value) => {
+                    graphs.push(&value.effect_graph)
+                }
+                TimelineRenderPlanElement::BasicTitle(value) => graphs.push(&value.effect_graph),
+                TimelineRenderPlanElement::SolidColor(value) => graphs.push(&value.effect_graph),
+                TimelineRenderPlanElement::Adjustment(value) => graphs.push(&value.effect_graph),
+                TimelineRenderPlanElement::TimelineGrade(value) => graphs.push(&value.effect_graph),
+                TimelineRenderPlanElement::CrossDissolve(value) => {
+                    for input in [&value.left, &value.right] {
+                        match input {
+                            TimelineTransitionInputPlan::Media(value) => {
+                                graphs.push(&value.effect_graph)
+                            }
+                            TimelineTransitionInputPlan::NestedSequence(value) => {
+                                graphs.push(&value.effect_graph)
+                            }
+                            TimelineTransitionInputPlan::BasicTitle(value) => {
+                                graphs.push(&value.effect_graph)
+                            }
+                            TimelineTransitionInputPlan::SolidColor(value) => {
+                                graphs.push(&value.effect_graph)
+                            }
+                            TimelineTransitionInputPlan::Transparent => {}
+                        }
+                    }
+                }
+            }
+        }
+        for graph in graphs {
+            for spec in graph.auxiliary_inputs() {
+                let source = graph.auxiliary_source_binding(spec.slot()).ok_or_else(|| {
+                    PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineEvaluation,
+                        format!("auxiliary slot {} has no frozen author source", spec.slot()),
+                    )
+                })?;
+                let request = PreviewAuxiliaryAssetRequest {
+                    reference: source.reference(),
+                    sequence_time: node.time(),
+                    target_resolution: node.execution_resolution(),
+                    input_color: node.color_context().media_input(false),
+                };
+                if seen.insert(request.clone()) {
+                    demands.push(PreparedPreviewSourceDemand::Auxiliary(request));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn standalone_preview_heterogeneous_graph_budget() -> EffectGraphExecutionBudget {
@@ -2676,7 +3001,130 @@ where
             }
         }
     }
+    let node = prepared_visual_node(execution.closure, node_id)?;
+    let resolved = resolved
+        .into_iter()
+        .map(|element| bind_resolved_preview_auxiliary(element, node, execution.sources))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(resolved))
+}
+
+fn bind_resolved_preview_auxiliary(
+    element: ResolvedPreviewElement,
+    node: &PreparedVisualFrameNode<PreparedTimelinePreviewEffectRoutes>,
+    sources: &PreviewSourcePreparation,
+) -> Result<ResolvedPreviewElement, PreviewTimelineAbort> {
+    use super::preview_auxiliary::{
+        ResolvedPreviewAuxiliaryInputs, ResolvedPreviewAuxiliarySource,
+    };
+    let refused = |detail: &str| {
+        PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+            PreviewOutputStage::TimelineEvaluation,
+            detail,
+        ))
+    };
+    let resolution = node.execution_resolution();
+    let canvas = (
+        EffectFrameExtent::new(resolution.width, resolution.height),
+        node.materialization_contract()
+            .image_sampling(resolution)
+            .map_err(|_| refused("auxiliary primary canvas sampling is invalid"))?,
+    );
+    let mut graphs = Vec::new();
+    match &element {
+        ResolvedPreviewElement::WithAuxiliary { .. } => return Ok(element),
+        ResolvedPreviewElement::SolidColor(layer)
+        | ResolvedPreviewElement::HeterogeneousSolidColor { layer, .. } => {
+            graphs.push((&layer.effect_graph, Some(canvas)));
+        }
+        ResolvedPreviewElement::Adjustment(layer) => {
+            graphs.push((&layer.effect_graph, Some(canvas)))
+        }
+        ResolvedPreviewElement::Media { frame, effect_graph, .. } => {
+            graphs.push((effect_graph, frame.cpu_image_domain()));
+        }
+        ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
+            for input in [left, right] {
+                match input.as_ref() {
+                    ResolvedPreviewTransitionInput::Transparent => {}
+                    ResolvedPreviewTransitionInput::SolidColor(layer)
+                    | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, .. } => {
+                        graphs.push((&layer.effect_graph, Some(canvas)));
+                    }
+                    ResolvedPreviewTransitionInput::Media { frame, effect_graph, .. } => {
+                        graphs.push((effect_graph, frame.cpu_image_domain()));
+                    }
+                }
+            }
+        }
+    }
+    let mut inputs = Vec::new();
+    for (graph, domain) in graphs {
+        if graph.auxiliary_inputs().is_empty() {
+            continue;
+        }
+        let (primary_extent, primary_sampling) = domain.ok_or_else(|| {
+            refused("auxiliary consumer requires an actual CPU working primary image domain")
+        })?;
+        if inputs.iter().any(|input: &ResolvedPreviewAuxiliaryInputs| {
+            Arc::ptr_eq(&input.graph, graph) && input.primary_extent == primary_extent
+        }) {
+            continue;
+        }
+        let mut bound = Vec::new();
+        for spec in graph.auxiliary_inputs() {
+            let source = graph
+                .auxiliary_source_binding(spec.slot())
+                .ok_or_else(|| refused("auxiliary slot lost its frozen author binding"))?;
+            let request = PreviewAuxiliaryAssetRequest {
+                reference: source.reference(),
+                sequence_time: node.time(),
+                target_resolution: resolution,
+                input_color: node.color_context().media_input(false),
+            };
+            let plan = sources
+                .auxiliary
+                .get(&request)
+                .ok_or_else(|| refused("auxiliary execution lost its original source plan"))?;
+            let frame = match &plan.media_request {
+                Some(media) => match sources.media.get(media) {
+                    Some(PreviewTimelineMediaFrame::Ready(frame))
+                        if frame.presentation_quality() == FramePresentationQuality::Ready
+                            && frame.source_key() == Some(&plan.validated_key) =>
+                    {
+                        Some(frame.clone())
+                    }
+                    _ => {
+                        return Err(refused(
+                            "auxiliary execution lost its original exact Ready source",
+                        ))
+                    }
+                },
+                None if plan.time.source_sample.is_none() => None,
+                None => return Err(refused("auxiliary source plan omitted a required decode")),
+            };
+            bound.push(ResolvedPreviewAuxiliarySource {
+                slot: spec.slot(),
+                request,
+                plan: plan.clone(),
+                frame,
+            });
+        }
+        inputs.push(ResolvedPreviewAuxiliaryInputs {
+            graph: Arc::clone(graph),
+            primary_extent,
+            primary_sampling,
+            sources: bound.into_boxed_slice(),
+        });
+    }
+    if inputs.is_empty() {
+        Ok(element)
+    } else {
+        Ok(ResolvedPreviewElement::WithAuxiliary {
+            element: Box::new(element),
+            inputs: inputs.into_boxed_slice(),
+        })
+    }
 }
 
 fn collect_prepared_transition_input_source_demand(
@@ -3297,3 +3745,7 @@ pub(crate) use tests::unit_scale_test_effect;
 #[cfg(test)]
 #[path = "preview_timeline_execution/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "preview_timeline_execution/auxiliary_tests.rs"]
+pub(crate) mod auxiliary_tests;

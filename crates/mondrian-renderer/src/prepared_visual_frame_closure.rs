@@ -77,13 +77,22 @@ pub struct PreparedVisualNestedInstanceStep {
 pub struct PreparedVisualFrameEvaluation<T> {
     frame: crate::PreparedTimelineFrameExecution,
     payload: T,
+    auxiliary_preview_program: Option<Arc<PreparedVisualProgram>>,
 }
 
 impl<T> PreparedVisualFrameEvaluation<T> {
     /// Bind one evaluated per-Sequence plan to its temporal demands and
     /// consumer-owned execution evidence.
     pub fn new(frame: crate::PreparedTimelineFrameExecution, payload: T) -> Self {
-        Self { frame, payload }
+        Self { frame, payload, auxiliary_preview_program: None }
+    }
+
+    /// Keep the exact source-fact view that prepared this frame. The closure
+    /// verifies its original frozen author/schedule authority before installing
+    /// it on the node for later temporal and processor-input execution.
+    pub fn with_auxiliary_preview_program(mut self, program: Arc<PreparedVisualProgram>) -> Self {
+        self.auxiliary_preview_program = Some(program);
+        self
     }
 
     /// Evaluated per-Sequence Render Plan.
@@ -117,7 +126,11 @@ impl<T> PreparedVisualFrameEvaluation<T> {
     }
 
     fn with_payload<U>(self, payload: U) -> PreparedVisualFrameEvaluation<U> {
-        PreparedVisualFrameEvaluation { frame: self.frame, payload }
+        PreparedVisualFrameEvaluation {
+            frame: self.frame,
+            payload,
+            auxiliary_preview_program: self.auxiliary_preview_program,
+        }
     }
 }
 
@@ -735,6 +748,30 @@ where
                 reason,
             })?;
             validate_evaluation(sequence, position, evaluation.plan())?;
+            let program = if let Some(view) = &evaluation.auxiliary_preview_program {
+                if !view.is_auxiliary_preview_view_of(&program) {
+                    return Err(PreparedVisualFrameClosureError::Evaluation {
+                        sequence_id: sequence.id,
+                        frame: position.frame,
+                        reason: "auxiliary Preview view does not share the original frozen program authority".to_owned(),
+                    });
+                }
+                if matches!(
+                    evaluation.plan().intent,
+                    crate::TimelineRenderIntent::Export
+                        | crate::TimelineRenderIntent::ReferenceOutput
+                ) {
+                    return Err(PreparedVisualFrameClosureError::Evaluation {
+                        sequence_id: sequence.id,
+                        frame: position.frame,
+                        reason: "Export cannot install an auxiliary Preview program view"
+                            .to_owned(),
+                    });
+                }
+                Arc::clone(view)
+            } else {
+                program
+            };
             let demands = collect_nested_demands(evaluation.plan(), evaluation.temporal_batches());
             let node_index = u32::try_from(self.nodes.len())
                 .map_err(|_| PreparedVisualFrameClosureError::NodeCapacityExceeded)?;
@@ -1413,6 +1450,133 @@ mod tests {
             .settings
             .root_program_color_context(&ProjectColorEnvironment::default())
             .expect("valid test color context")
+    }
+
+    fn closure_with_auxiliary_program_view(
+        sequence: &Sequence,
+        base: Arc<PreparedVisualProgram>,
+        view: Arc<PreparedVisualProgram>,
+        intent: crate::TimelineRenderIntent,
+    ) -> Result<PreparedVisualFrameClosure<()>, PreparedVisualFrameClosureError> {
+        prepare_bound_visual_frame_closure(
+            PreparedVisualFrameClosureRequest {
+                root_sequence: sequence,
+                sequences: &[],
+                root_position: FramePosition::new(0, sequence.time_base()),
+                root_resolution: Resolution { width: 1, height: 1 },
+                root_color_context: root_color_context(sequence),
+                child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
+            },
+            |sequence| {
+                PreparedVisualProgramBinding::checked(sequence, Arc::clone(&base))
+                    .map_err(|error| error.to_string())
+            },
+            |_, position, resolution, _, _| {
+                let mut plan = evaluate_prepared_visual_program(
+                    &view,
+                    crate::TimelineEvaluationRequest::preview(position, 1.0),
+                )
+                .map_err(|error| error.to_string())?;
+                // Deliberately permit a forged Export frame in the negative
+                // test, bypassing the ordinary public evaluation guard.
+                plan.intent = intent;
+                let extent =
+                    mondrian_effects::EffectFrameExtent::new(resolution.width, resolution.height);
+                let frame = crate::timeline_temporal::prepare_timeline_temporal_execution(
+                    &view,
+                    &plan,
+                    7,
+                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
+                    extent,
+                    extent.full_frame_roi(),
+                    mondrian_core::ExecutionCancellationToken::new(),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(PreparedVisualFrameEvaluation::new(frame, ())
+                    .with_auxiliary_preview_program(Arc::clone(&view)))
+            },
+        )
+    }
+
+    fn source_view(program: &PreparedVisualProgram) -> Arc<PreparedVisualProgram> {
+        Arc::new(
+            program
+                .with_auxiliary_preview_unavailable_sources(&[
+                    mondrian_core::VisualSourceReference::Asset {
+                        asset_id: mondrian_core::AssetId::new(),
+                        retime: mondrian_core::VisualSourceRetime::default(),
+                    },
+                ])
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn auxiliary_preview_closure_keeps_the_exact_view_for_later_execution() {
+        let sequence = Sequence::new("selected source view");
+        let base =
+            Arc::new(PreparedVisualProgram::prepare_for_auxiliary_preview(&sequence).unwrap());
+        let view = source_view(&base);
+        let closure = closure_with_auxiliary_program_view(
+            &sequence,
+            Arc::clone(&base),
+            Arc::clone(&view),
+            crate::TimelineRenderIntent::Preview,
+        )
+        .unwrap();
+        let node = closure.node(closure.root()).unwrap();
+        assert!(Arc::ptr_eq(node.program(), &view));
+        assert!(!Arc::ptr_eq(node.program(), &base));
+        let mapped = closure.try_map_payload(|_, _| Ok::<_, String>(9_u8)).unwrap();
+        assert!(Arc::ptr_eq(
+            mapped.node(mapped.root()).unwrap().program(),
+            &view
+        ));
+        assert_eq!(
+            *mapped.node(mapped.root()).unwrap().evaluation().payload(),
+            9
+        );
+    }
+
+    #[test]
+    fn auxiliary_preview_closure_refuses_an_independently_prepared_program_view() {
+        let sequence = Sequence::new("foreign source view");
+        let base =
+            Arc::new(PreparedVisualProgram::prepare_for_auxiliary_preview(&sequence).unwrap());
+        let foreign = PreparedVisualProgram::prepare_for_auxiliary_preview(&sequence).unwrap();
+        let error = closure_with_auxiliary_program_view(
+            &sequence,
+            base,
+            source_view(&foreign),
+            crate::TimelineRenderIntent::Preview,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PreparedVisualFrameClosureError::Evaluation { .. }
+        ));
+        assert!(error.to_string().contains("original frozen program authority"));
+    }
+
+    #[test]
+    fn auxiliary_preview_closure_refuses_program_views_in_forged_export_frames() {
+        let sequence = Sequence::new("source view export guard");
+        let base =
+            Arc::new(PreparedVisualProgram::prepare_for_auxiliary_preview(&sequence).unwrap());
+        let view = source_view(&base);
+        for intent in [
+            crate::TimelineRenderIntent::Export,
+            crate::TimelineRenderIntent::ReferenceOutput,
+        ] {
+            let error = closure_with_auxiliary_program_view(
+                &sequence,
+                Arc::clone(&base),
+                Arc::clone(&view),
+                intent,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("cannot install an auxiliary Preview program view"));
+        }
     }
 
     fn prepare_direct_closure(

@@ -664,17 +664,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .filter(|(key, _)| key == semantic_key)
         {
             return self.unavailable_gpu_candidate_with_retention(
-                if reason.blocked.is_some() {
-                    PreviewUnavailability::blocked(
-                        PreviewOutputStage::TimelineComposite,
-                        reason.detail.clone(),
-                    )
-                } else {
-                    PreviewUnavailability::failed(
-                        PreviewOutputStage::GpuComposite,
-                        reason.detail.clone(),
-                    )
-                },
+                reason.unavailability(PreviewOutputStage::GpuComposite),
                 preserve_current_output,
             );
         }
@@ -748,6 +738,31 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 (key, Some(id))
             }
         };
+        let auxiliary_work_reservation = if cached_working.is_none() {
+            let required = match super::preview_auxiliary::resolved_auxiliary_working_bytes(
+                &resolved.elements,
+            ) {
+                Ok(required) => required,
+                Err(error) => {
+                    return self.unavailable_gpu_candidate_with_retention(
+                        error.unavailability(),
+                        preserve_current_output,
+                    )
+                }
+            };
+            match super::preview_auxiliary::reserve_auxiliary_working_set(
+                &mut self.frame_store.borrow_mut(),
+                required,
+            ) {
+                Ok(reservation) => reservation,
+                Err(reason) => {
+                    return self
+                        .unavailable_gpu_candidate_with_retention(reason, preserve_current_output)
+                }
+            }
+        } else {
+            None
+        };
         let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope::scalar(
             &output_key,
             generation,
@@ -772,6 +787,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             ),
             attempt: Some(attempt.clone()),
             working_reservation,
+            auxiliary_work_reservation,
             output_target: target,
             native_gui_work: self.native_visual_gui_work(
                 snapshot,
@@ -1790,7 +1806,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ));
                 }
                 if let Some(failure) = self.visual_failures.borrow().get(&visual_key).cloned() {
-                    let is_user_blocked = failure.blocked.is_some();
+                    let reason = failure.unavailability(PreviewOutputStage::GpuComposite);
                     if !transport.is_speculative_preparation()
                         && let Some(receipt) = failure.blocked
                     {
@@ -1813,17 +1829,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         height,
                     );
                     self.scheduler.prune_obsolete();
-                    return unavailable_gpu_candidate(if is_user_blocked {
-                        PreviewUnavailability::blocked(
-                            PreviewOutputStage::GpuComposite,
-                            failure.detail,
-                        )
-                    } else {
-                        PreviewUnavailability::failed(
-                            PreviewOutputStage::GpuComposite,
-                            failure.detail,
-                        )
-                    });
+                    return unavailable_gpu_candidate(reason);
                 }
 
                 let ready = self.visual_ready.borrow_mut().remove(&visual_key);
@@ -2960,6 +2966,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                     detail: "Viewer CPU result exceeds its residency grant"
                                         .to_owned(),
                                     blocked: None,
+                                    terminal: Some(PreviewUnavailability::blocked(
+                                        PreviewOutputStage::FramePackaging,
+                                        "Viewer CPU result exceeds its residency grant",
+                                    )),
                                     preparation_interest: None,
                                 },
                             ));
@@ -3007,6 +3017,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             VisualExecutionFailureView {
                                 detail: failed.reason,
                                 blocked: failed.blocked.clone(),
+                                terminal: Some(failed.unavailability),
                                 preparation_interest: None,
                             },
                         ));
@@ -3117,6 +3128,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 VisualExecutionFailureView {
                     detail: failed.failure().to_string(),
                     blocked: failed.failure().processor_blocked().map(std::sync::Arc::clone),
+                    terminal: failed.failure().unavailability(),
                     preparation_interest: failed.preparation_interest().cloned(),
                 },
             );
@@ -3124,7 +3136,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let Some(identity) = failed.demand_identity() else {
             return;
         };
-        let kind = if failed.failure().processor_blocked().is_some() {
+        let kind = if failed.failure().processor_blocked().is_some()
+            || failed.failure().unavailability().is_some_and(|reason| {
+                reason.disposition()
+                    == super::preview_unavailability::PreviewUnavailabilityDisposition::Blocked
+            }) {
             Some(mondrian_playback::FrameDeliveryKind::Blocked)
         } else {
             match failed.failure() {
@@ -3814,7 +3830,7 @@ pub fn preview_input_color_resolution_counts_for_frame(
         sequence.settings.preview.resolution_scale,
         mondrian_playback::PreviewResolutionScale::Full,
     );
-    let demands = crate::app::preview_timeline_execution::collect_preview_timeline_media_demands(
+    let demands = crate::app::preview_timeline_execution::collect_preview_timeline_picture_demands(
         sequence,
         sequences,
         frame,
@@ -3824,14 +3840,33 @@ pub fn preview_input_color_resolution_counts_for_frame(
     )?;
     let mut counts = InputColorResolutionSourceCounts::default();
     for demand in demands {
-        let executable_color_space = asset_executable_color_spaces.get(&demand.asset_id).copied();
+        use crate::app::preview_timeline_execution::PreviewTimelinePictureDemand;
+        let (asset_id, color_space_override, input_color) = match demand {
+            PreviewTimelinePictureDemand::Media(request) => (
+                request.asset_id,
+                request.color_space_override,
+                request.input_color,
+            ),
+            PreviewTimelinePictureDemand::Auxiliary(request) => {
+                let mondrian_core::VisualSourceReference::Asset { asset_id, .. } =
+                    request.reference
+                else {
+                    return Err(PreviewUnavailability::blocked(
+                        PreviewOutputStage::MediaResolution,
+                        "auxiliary picture source is unbound",
+                    ));
+                };
+                (asset_id, None, request.input_color)
+            }
+        };
+        let executable_color_space = asset_executable_color_spaces.get(&asset_id).copied();
         let asset_interpretation =
-            asset_interpretations.get(&demand.asset_id).copied().unwrap_or_default();
+            asset_interpretations.get(&asset_id).copied().unwrap_or_default();
         let resolution = resolve_preview_input_color_space(
-            demand.color_space_override,
+            color_space_override,
             asset_interpretation,
             executable_color_space,
-            &demand.input_color,
+            &input_color,
         );
         counts.record(resolution.source);
     }
@@ -4233,11 +4268,24 @@ mod tests;
 struct VisualExecutionFailureView {
     detail: String,
     blocked: Option<std::sync::Arc<mondrian_effects::EffectProcessorFeedbackReceipt>>,
+    terminal: Option<PreviewUnavailability>,
     preparation_interest:
         Option<std::sync::Weak<super::preview_timeline_execution::PreviewTimelineWorkInterest>>,
 }
 
 impl VisualExecutionFailureView {
+    fn unavailability(&self, stage: PreviewOutputStage) -> PreviewUnavailability {
+        // The actual processor bank receipt is authoritative user-blocked
+        // evidence, including when a nested adapter reports a generic failure.
+        if self.blocked.is_some() {
+            let stage = self.terminal.as_ref().map_or(stage, PreviewUnavailability::stage);
+            PreviewUnavailability::blocked(stage, self.detail.clone())
+        } else {
+            self.terminal
+                .clone()
+                .unwrap_or_else(|| PreviewUnavailability::failed(stage, self.detail.clone()))
+        }
+    }
     fn preparation_owner_is_active(&self) -> bool {
         self.preparation_interest
             .as_ref()

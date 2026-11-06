@@ -280,6 +280,34 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         ));
                     }
                     let render_cache_hit = cached_working.is_some();
+                    let _auxiliary_work_reservation = if cached_working.is_none() {
+                        let required =
+                            match crate::app::preview_auxiliary::resolved_auxiliary_working_bytes(
+                                &evaluation.elements,
+                            ) {
+                                Ok(required) => required,
+                                Err(error) => {
+                                    return self.observe_preview_state(
+                                        PreviewPresentationState::Unavailable(
+                                            error.unavailability(),
+                                        ),
+                                    )
+                                }
+                            };
+                        match crate::app::preview_auxiliary::reserve_auxiliary_working_set(
+                            &mut self.frame_store.borrow_mut(),
+                            required,
+                        ) {
+                            Ok(reservation) => reservation,
+                            Err(reason) => {
+                                return self.observe_preview_state(
+                                    PreviewPresentationState::Unavailable(reason),
+                                )
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let cancellation = self.execution.borrow().generation_cancellation();
                     let mut checkpoint = || {
                         cancellation

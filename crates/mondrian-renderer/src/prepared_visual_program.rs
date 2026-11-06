@@ -127,6 +127,8 @@ struct PreparedVisualProgramKey {
     sequence_revision: SequenceRevision,
     effect_registry_revision: u64,
     visual_author_fingerprint: [u8; 32],
+    auxiliary_preview: bool,
+    auxiliary_source_view: [u8; 32],
 }
 
 /// Process-local identity of one validated, immutable Project author snapshot.
@@ -157,12 +159,15 @@ impl PreparedVisualProgramKey {
     fn for_sequence_with_author_fingerprint(
         sequence: &Sequence,
         visual_author_fingerprint: [u8; 32],
+        auxiliary_preview: bool,
     ) -> Self {
         Self {
             sequence_id: sequence.id,
             sequence_revision: sequence.revision,
             effect_registry_revision: effect_registry_revision(),
             visual_author_fingerprint,
+            auxiliary_preview,
+            auxiliary_source_view: [0; 32],
         }
     }
 }
@@ -428,6 +433,7 @@ impl PreparedVisualMaterializationContract {
 /// Preview therefore remains usable on unrelated timeline regions, while
 /// Export composes [`Self::preflight_frame`] across its selected root range and
 /// nested reachability closure before admitting encoder execution.
+#[derive(Clone)]
 pub struct PreparedVisualProgram {
     key: PreparedVisualProgramKey,
     materialization: PreparedVisualMaterializationContract,
@@ -437,6 +443,7 @@ pub struct PreparedVisualProgram {
     transitions: HashMap<VideoTransitionId, PreparedVisualTransition>,
     diagnostics: PreparedVisualProgramDiagnostics,
     retained_bytes_estimate: usize,
+    auxiliary_source_view_retained_bytes: usize,
 }
 
 impl std::fmt::Debug for PreparedVisualProgram {
@@ -459,6 +466,22 @@ impl PreparedVisualProgram {
     /// preparation retries against the next exact registry revision before a
     /// persistent mutation storm is reported fail-closed.
     pub fn prepare(sequence: &Sequence) -> std::result::Result<Self, PreparedVisualProgramError> {
+        Self::prepare_with_auxiliary_policy(sequence, false)
+    }
+
+    /// Prepare a Preview-only program that diagnoses missing auxiliary inputs
+    /// while preserving the other consuming definitions. Export must use
+    /// [`Self::prepare`]; this policy is part of the immutable program key.
+    pub fn prepare_for_auxiliary_preview(
+        sequence: &Sequence,
+    ) -> std::result::Result<Self, PreparedVisualProgramError> {
+        Self::prepare_with_auxiliary_policy(sequence, true)
+    }
+
+    fn prepare_with_auxiliary_policy(
+        sequence: &Sequence,
+        auxiliary_preview: bool,
+    ) -> std::result::Result<Self, PreparedVisualProgramError> {
         let lut_cache = LutPreparationCache::uncached();
         let visual_author_fingerprint = prepared_visual_author_fingerprint(sequence)?;
         let mut retries = 0;
@@ -466,6 +489,7 @@ impl PreparedVisualProgram {
             let key = PreparedVisualProgramKey::for_sequence_with_author_fingerprint(
                 sequence,
                 visual_author_fingerprint,
+                auxiliary_preview,
             );
             match Self::prepare_reusing_with_key(sequence, None, &lut_cache, key) {
                 Err(PreparedVisualProgramError::EffectRegistryChanged { .. })
@@ -513,12 +537,13 @@ impl PreparedVisualProgram {
                     .active()
                     .ok_or_else(|| "active grade version does not exist".to_owned())
                     .and_then(|version| {
-                        PreparedGradeGraph::prepare_with_lut_cache(
-                            &version.graph,
-                            working_color_space,
-                            lut_cache,
-                        )
-                        .map_err(|error| error.to_string())
+                        let prepare = if key.auxiliary_preview {
+                            PreparedGradeGraph::prepare_for_auxiliary_preview_with_lut_cache
+                        } else {
+                            PreparedGradeGraph::prepare_with_lut_cache
+                        };
+                        prepare(&version.graph, working_color_space, lut_cache)
+                            .map_err(|error| error.to_string())
                     });
                 let prepared = match prepared {
                     Ok(grade) => PreparedSharedGrade::Ready(grade),
@@ -534,25 +559,55 @@ impl PreparedVisualProgram {
             clip_effect_author_fingerprint(&[], &[], working_color_space).map_err(|reason| {
                 PreparedVisualProgramError::IdentityProgram { sequence_id: sequence.id, reason }
             })?;
-        let shared_identity =
-            PreparedEffectProgram::prepare_with_lut_cache(&[], &[], working_color_space, lut_cache)
-                .map_err(|error| PreparedVisualProgramError::IdentityProgram {
-                    sequence_id: sequence.id,
-                    reason: error.to_string(),
-                })?;
+        let prepare_program =
+            |effects: &[mondrian_effects::EffectNode],
+             masks: &[mondrian_effects::MaskComponent],
+             before: &[PreparedGradeGraph],
+             after: &[PreparedGradeGraph],
+             frame_context: Option<EffectFrameContext>| {
+                if key.auxiliary_preview {
+                    PreparedEffectProgram::prepare_hierarchical_for_auxiliary_preview(
+                        effects,
+                        masks,
+                        before,
+                        after,
+                        working_color_space,
+                        frame_context,
+                        lut_cache,
+                    )
+                } else if let Some(context) = frame_context {
+                    PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                        effects,
+                        masks,
+                        before,
+                        after,
+                        working_color_space,
+                        context,
+                        lut_cache,
+                    )
+                } else {
+                    PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
+                        effects,
+                        masks,
+                        before,
+                        after,
+                        working_color_space,
+                        lut_cache,
+                    )
+                }
+            };
+        let shared_identity = prepare_program(&[], &[], &[], &[], None).map_err(|error| {
+            PreparedVisualProgramError::IdentityProgram {
+                sequence_id: sequence.id,
+                reason: error.to_string(),
+            }
+        })?;
 
         let timeline_grade = match sequence.timeline_grade {
             None => PreparedTimelineGrade::None,
             Some(definition_id) => match prepared_grades.get(&definition_id) {
                 Some(PreparedSharedGrade::Ready(grade)) => {
-                    match PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
-                        &[],
-                        &[],
-                        &[],
-                        std::slice::from_ref(grade),
-                        working_color_space,
-                        lut_cache,
-                    ) {
+                    match prepare_program(&[], &[], &[], std::slice::from_ref(grade), None) {
                         Ok(program) => PreparedTimelineGrade::Ready(program),
                         Err(error) => PreparedTimelineGrade::Blocked {
                             reason: Arc::from(error.to_string()),
@@ -635,6 +690,10 @@ impl PreparedVisualProgram {
                     identity_author_fingerprint
                 };
                 let reusable = previous
+                    .filter(|program| {
+                        program.key.auxiliary_preview == key.auxiliary_preview
+                            && program.key.auxiliary_source_view == key.auxiliary_source_view
+                    })
                     .and_then(|program| program.clip_effects.get(&clip.id))
                     .and_then(|effects| match effects {
                         PreparedClipEffects::Ready {
@@ -654,14 +713,12 @@ impl PreparedVisualProgram {
                     reused_clips += 1;
                     Ok(program)
                 } else if let Some(frame_context) = frame_context {
-                    PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                    prepare_program(
                         &clip.effects,
                         &clip.masks,
                         &grade_before,
                         &grade_after,
-                        working_color_space,
-                        frame_context,
-                        lut_cache,
+                        Some(frame_context),
                     )
                 } else {
                     Ok(shared_identity.clone())
@@ -768,12 +825,117 @@ impl PreparedVisualProgram {
                 blocked_transitions,
             },
             retained_bytes_estimate,
+            auxiliary_source_view_retained_bytes: 0,
         })
     }
 
     /// Placement schedule owned by this exact execution program.
     pub fn schedule(&self) -> &PreparedVisualSchedule {
         &self.schedule
+    }
+
+    /// Whether missing auxiliary inputs may be substituted during Preview.
+    pub const fn auxiliary_preview_enabled(&self) -> bool {
+        self.key.auxiliary_preview
+    }
+
+    pub(crate) fn is_auxiliary_preview_view_of(&self, original: &Self) -> bool {
+        let mut selected_key = self.key;
+        let mut original_key = original.key;
+        selected_key.auxiliary_source_view = [0; 32];
+        original_key.auxiliary_source_view = [0; 32];
+        self.auxiliary_preview_enabled()
+            && original.auxiliary_preview_enabled()
+            && selected_key == original_key
+            && self.materialization == original.materialization
+            && Arc::ptr_eq(&self.schedule, &original.schedule)
+    }
+
+    /// Derive one immutable Preview source-fact view from this exact author and
+    /// evaluator snapshot. Keep it with the node through ordinary evaluation,
+    /// temporal expansion, and processor-input binding. Source decisions must
+    /// hold across every sample prepared through this view, not just one failed
+    /// decode time. The resident base cache is never changed.
+    pub fn with_auxiliary_preview_unavailable_sources(
+        &self,
+        unavailable: &[mondrian_core::VisualSourceReference],
+    ) -> Result<Self> {
+        if !self.auxiliary_preview_enabled() {
+            return Err(MondrianError::EffectGraphEvaluationFailed {
+                reason: "auxiliary Preview source views require a Preview program".to_owned(),
+            });
+        }
+        let mut canonical = unavailable
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                reason: error.to_string(),
+            })?;
+        canonical.sort_unstable();
+        canonical.dedup();
+        let fingerprint = if canonical.is_empty() {
+            [0; 32]
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(b"mondrian.visual-auxiliary-source-view.v1");
+            for bytes in canonical {
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            }
+            hasher.finalize().into()
+        };
+        if self.key.auxiliary_source_view == fingerprint {
+            return Ok(self.clone());
+        }
+        let mut view = self.clone();
+        view.key.auxiliary_source_view = fingerprint;
+        for (clip_id, effects) in &mut view.clip_effects {
+            if let PreparedClipEffects::Ready { program, .. } = effects {
+                *program = program
+                    .with_auxiliary_preview_unavailable_sources(unavailable)
+                    .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                        reason: format!("Clip {clip_id} auxiliary source view failed: {error}"),
+                    })?;
+            }
+        }
+        if let PreparedTimelineGrade::Ready(program) = &mut view.timeline_grade {
+            *program = program.with_auxiliary_preview_unavailable_sources(unavailable).map_err(
+                |error| MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!("Timeline Grade auxiliary source view failed: {error}"),
+                },
+            )?;
+        }
+        // Charge the retained base snapshot plus all derived program payloads.
+        // Shared author/resource Arcs are deliberately charged conservatively;
+        // this attempt cannot borrow another cache owner's metadata grant.
+        view.auxiliary_source_view_retained_bytes =
+            PreparedEffectProgram::retained_bytes_estimate_for_owner(
+                view.clip_effects
+                    .values()
+                    .filter_map(|effects| match effects {
+                        PreparedClipEffects::Ready { program, .. } => Some(program),
+                        PreparedClipEffects::Blocked { .. } => None,
+                    })
+                    .chain(match &view.timeline_grade {
+                        PreparedTimelineGrade::Ready(program) => Some(program),
+                        PreparedTimelineGrade::None | PreparedTimelineGrade::Blocked { .. } => None,
+                    }),
+            );
+        view.retained_bytes_estimate = self
+            .retained_bytes_estimate
+            .saturating_sub(self.auxiliary_source_view_retained_bytes)
+            .saturating_add(view.auxiliary_source_view_retained_bytes);
+        Ok(view)
+    }
+
+    pub(crate) fn ensure_strict_auxiliary_policy(&self) -> Result<()> {
+        if self.auxiliary_preview_enabled() {
+            return Err(MondrianError::EffectGraphEvaluationFailed {
+                reason: "Export cannot use an auxiliary Preview program".to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Exact Sequence identity.
@@ -1059,6 +1221,7 @@ impl PreparedVisualProgram {
     /// instead. This whole-Sequence diagnostic is retained for callers that
     /// deliberately need a conservative readiness summary.
     pub fn preflight(&self) -> Result<()> {
+        self.ensure_strict_auxiliary_policy()?;
         self.ensure_timeline_grade_ready()?;
         if let Some(blocker) = self.blockers().into_iter().next() {
             return Err(MondrianError::EffectGraphEvaluationFailed {
@@ -1093,6 +1256,7 @@ impl PreparedVisualProgram {
 
     /// Preflight only visual work reachable at one exact Sequence-local time.
     pub fn preflight_time(&self, time: TimelineTime) -> Result<PreparedVisualFrameReachability> {
+        self.ensure_strict_auxiliary_policy()?;
         self.ensure_timeline_grade_ready()?;
         let items = self.schedule.flat_visual_items_at(time)?;
         let mut reachability = PreparedVisualFrameReachability::default();
@@ -1250,6 +1414,24 @@ impl PreparedVisualProgram {
         }
     }
 
+    pub(crate) fn evaluate_clip_effects_for_auxiliary_preview(
+        &self,
+        clip_id: ClipId,
+        clip_time: TimelineTime,
+        unavailable: &[mondrian_core::VisualSourceReference],
+    ) -> Result<Arc<CompiledEffectGraph>> {
+        match self.clip_effects.get(&clip_id) {
+            Some(PreparedClipEffects::Ready { program, .. }) => program
+                .evaluate_auxiliary_preview(clip_time, unavailable)
+                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!("Clip {clip_id} auxiliary Preview evaluation failed: {error}"),
+                }),
+            Some(PreparedClipEffects::Blocked { .. }) | None => {
+                self.evaluate_clip_effects(clip_id, clip_time)
+            }
+        }
+    }
+
     pub(crate) fn evaluate_timeline_grade(
         &self,
         sequence_time: TimelineTime,
@@ -1287,6 +1469,24 @@ impl PreparedVisualProgram {
                 Err(MondrianError::EffectGraphEvaluationFailed {
                     reason: format!("Timeline Grade preparation failed: {reason}"),
                 })
+            }
+        }
+    }
+
+    pub(crate) fn evaluate_timeline_grade_for_auxiliary_preview(
+        &self,
+        sequence_time: TimelineTime,
+        unavailable: &[mondrian_core::VisualSourceReference],
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        match &self.timeline_grade {
+            PreparedTimelineGrade::Ready(program) => program
+                .evaluate_auxiliary_preview(sequence_time, unavailable)
+                .map(Some)
+                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!("Timeline Grade auxiliary Preview evaluation failed: {error}"),
+                }),
+            PreparedTimelineGrade::None | PreparedTimelineGrade::Blocked { .. } => {
+                self.evaluate_timeline_grade(sequence_time)
             }
         }
     }
@@ -1812,6 +2012,7 @@ struct AuthorSnapshotBindingFailure {
 /// file-watch/manual-refresh Seam and must not run once per frame.
 pub struct PreparedVisualProgramCache {
     config: PreparedVisualProgramCacheConfig,
+    auxiliary_preview: bool,
     lut_cache: LutPreparationCache,
     retained_bytes: usize,
     scope_generation: u64,
@@ -1843,8 +2044,27 @@ impl PreparedVisualProgramCache {
 
     /// Construct a cache from an explicit entry-and-byte grant.
     pub fn with_config(config: PreparedVisualProgramCacheConfig) -> Self {
+        Self::with_auxiliary_policy(config, false)
+    }
+
+    /// Construct an isolated Preview cache. Its policy cannot be changed by
+    /// reconfiguration, author-snapshot binding, or dependency refresh.
+    pub fn for_auxiliary_preview() -> Self {
+        Self::with_auxiliary_preview_config(PreparedVisualProgramCacheConfig::default())
+    }
+
+    /// Preview cache with an explicit entry-and-byte grant.
+    pub fn with_auxiliary_preview_config(config: PreparedVisualProgramCacheConfig) -> Self {
+        Self::with_auxiliary_policy(config, true)
+    }
+
+    fn with_auxiliary_policy(
+        config: PreparedVisualProgramCacheConfig,
+        auxiliary_preview: bool,
+    ) -> Self {
         Self {
             config,
+            auxiliary_preview,
             lut_cache: LutPreparationCache::new(config.lut_cache),
             retained_bytes: 0,
             scope_generation: 0,
@@ -2012,6 +2232,7 @@ impl PreparedVisualProgramCache {
         let program_key = PreparedVisualProgramKey::for_sequence_with_author_fingerprint(
             sequence,
             visual_author_fingerprint,
+            self.auxiliary_preview,
         );
         let key = ScopedPreparedVisualProgramKey::new(self.scope_generation, program_key);
         if let Some(program) = self.entries.get(&key).cloned() {
@@ -2027,6 +2248,8 @@ impl PreparedVisualProgramCache {
                 candidate_key.scope_generation == self.scope_generation
                     && candidate.sequence_id() == sequence.id
                     && candidate.effect_registry_revision() == program_key.effect_registry_revision
+                    && candidate.key.auxiliary_preview == program_key.auxiliary_preview
+                    && candidate.key.auxiliary_source_view == program_key.auxiliary_source_view
             })
             .map(|(_, candidate)| candidate)
             .cloned();
@@ -2268,6 +2491,272 @@ mod tests {
             }
         }
         panic!("Effect registry did not stabilize during cache test")
+    }
+
+    #[test]
+    fn auxiliary_preview_policy_stays_isolated_across_cache_binding_and_reconfiguration() {
+        let sequence = single_solid_sequence(None);
+        let mut strict = PreparedVisualProgramCache::default();
+        let mut preview = PreparedVisualProgramCache::for_auxiliary_preview();
+        let snapshot = PreparedVisualAuthorSnapshotIdentity::new(31);
+        let strict_binding =
+            with_stable_effect_registry(|| strict.bind_author_snapshot(snapshot, &sequence).ok());
+        let preview_binding =
+            with_stable_effect_registry(|| preview.bind_author_snapshot(snapshot, &sequence).ok());
+        assert!(!strict_binding.program().auxiliary_preview_enabled());
+        assert!(preview_binding.program().auxiliary_preview_enabled());
+        assert_ne!(strict_binding.program().key, preview_binding.program().key);
+        preview.reconfigure(PreparedVisualProgramCacheConfig::new(8, 128 * 1024 * 1024));
+        preview.rotate_scope();
+        let rebound =
+            with_stable_effect_registry(|| preview.bind_author_snapshot(snapshot, &sequence).ok());
+        assert!(rebound.program().auxiliary_preview_enabled());
+        assert!(!Arc::ptr_eq(preview_binding.program(), rebound.program()));
+        strict_binding.program().preflight_frame(0).unwrap();
+        assert!(rebound.program().preflight_frame(0).is_err());
+    }
+
+    #[test]
+    fn auxiliary_preview_program_is_refused_by_export_even_without_missing_inputs() {
+        let sequence = single_solid_sequence(None);
+        let program = with_stable_effect_registry(|| {
+            PreparedVisualProgram::prepare_for_auxiliary_preview(&sequence).ok()
+        });
+        let position = fp(&sequence, 0);
+        evaluate_prepared_visual_program(
+            &program,
+            TimelineEvaluationRequest::preview(position, 1.0),
+        )
+        .expect("Preview can execute its isolated policy");
+        for request in [
+            TimelineEvaluationRequest::export(position),
+            TimelineEvaluationRequest::reference_output(position),
+        ] {
+            let error = evaluate_prepared_visual_program(&program, request).unwrap_err();
+            assert!(error.to_string().contains("auxiliary Preview program"));
+            let mut scratch = crate::TimelineCompositeScratch::default();
+            assert!(scratch.evaluate_prepared_visual_program(&program, request).is_err());
+        }
+        assert!(program.preflight().is_err());
+    }
+
+    fn auxiliary_preview_matte(reference: mondrian_core::VisualSourceReference) -> EffectNode {
+        use mondrian_core::{ColorFrameAlpha, PropertyBag, PropertyDescriptor};
+        use mondrian_effects::*;
+        let kind = EffectType::External(format!(
+            "test.visual.auxiliary.{}",
+            mondrian_core::EffectId::new()
+        ));
+        let parameter = kind.parameter_id("source").unwrap();
+        let mut properties = PropertyBag::default();
+        properties.define(
+            PropertyDescriptor::new(
+                "source",
+                "Picture source",
+                PropertyValue::VisualSource(reference),
+            )
+            .with_parameter_id(parameter.clone()),
+        );
+        register_effect_definition(
+            EffectDefinition::new(
+                kind.key(),
+                "Preview matte",
+                properties,
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(cpu_float_contract())
+            .with_branching_graph_builder(Arc::new(move |effect, _, builder| {
+                let input = builder.current_output();
+                let auxiliary = builder.append_visual_source_input(
+                    effect,
+                    &parameter,
+                    EffectValueFormat::new(
+                        EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        ColorFrameAlpha::StraightCoverage,
+                    ),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                )?;
+                let output = builder.add_auxiliary_effect_with_role(
+                    input,
+                    auxiliary,
+                    EffectRenderOp::Fill {
+                        grade: FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
+                    },
+                    AuxiliaryRole::Matte,
+                );
+                builder.set_current_output(output);
+                Ok(())
+            })),
+        )
+        .unwrap();
+        instantiate_effect_node(kind).unwrap()
+    }
+
+    #[test]
+    fn auxiliary_preview_re_evaluates_frozen_consumers_and_restores_the_original_graph() {
+        use mondrian_core::{VisualSourceReference, VisualSourceRetime};
+        use mondrian_effects::AuxiliaryPreviewFallbackCause;
+        let missing = VisualSourceReference::Asset {
+            asset_id: AssetId::new(),
+            retime: VisualSourceRetime::default(),
+        };
+        let available = VisualSourceReference::Asset {
+            asset_id: AssetId::new(),
+            retime: VisualSourceRetime::default(),
+        };
+        let first = auxiliary_preview_matte(missing);
+        let second = auxiliary_preview_matte(available);
+        let mut sequence = single_solid_sequence(Some(first.clone()));
+        sequence.video_tracks[0].clips[0].add_effect_node(second);
+        let author = serde_json::to_value(&sequence).unwrap();
+        let preview = with_stable_effect_registry(|| {
+            PreparedVisualProgram::prepare_for_auxiliary_preview(&sequence).ok()
+        });
+        let strict = prepare_stable(&sequence);
+        let request = TimelineEvaluationRequest::preview(fp(&sequence, 1), 1.0);
+        let evaluate = |refs: &[VisualSourceReference]| {
+            crate::evaluate_prepared_visual_program_for_auxiliary_preview(&preview, request, refs)
+                .unwrap()
+        };
+        let original = evaluate(&[]);
+        let degraded = evaluate(&[missing]);
+        let restored = evaluate(&[]);
+        let graph = |plan: &TimelineRenderPlan| match &plan.elements[0] {
+            TimelineRenderPlanElement::SolidColor(solid) => Arc::clone(&solid.effect_graph),
+            other => panic!("expected solid, got {other:?}"),
+        };
+        assert_eq!(graph(&original).auxiliary_inputs().len(), 2);
+        assert_eq!(graph(&degraded).auxiliary_inputs().len(), 1);
+        assert_eq!(
+            graph(&degraded).auxiliary_source_bindings().next().unwrap().reference(),
+            available
+        );
+        let degraded_graph = graph(&degraded);
+        let notices = degraded_graph.auxiliary_preview_fallbacks().collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].effect_id(), first.id);
+        assert_eq!(
+            notices[0].cause(),
+            AuxiliaryPreviewFallbackCause::Unavailable
+        );
+        assert_eq!(
+            graph(&original).semantic_fingerprint(),
+            graph(&restored).semantic_fingerprint()
+        );
+        assert!(graph(&restored).auxiliary_preview_fallbacks().next().is_none());
+        assert!(
+            crate::evaluate_prepared_visual_program_for_auxiliary_preview(
+                &strict,
+                request,
+                &[missing]
+            )
+            .is_err()
+        );
+        assert_eq!(serde_json::to_value(&sequence).unwrap(), author);
+    }
+
+    #[test]
+    fn auxiliary_preview_unbound_source_is_diagnosed_before_frame_preparation() {
+        let effect = auxiliary_preview_matte(mondrian_core::VisualSourceReference::Unbound);
+        let sequence = single_solid_sequence(Some(effect.clone()));
+        let strict = prepare_stable(&sequence);
+        assert_eq!(strict.blockers().len(), 1);
+        let preview = with_stable_effect_registry(|| {
+            PreparedVisualProgram::prepare_for_auxiliary_preview(&sequence).ok()
+        });
+        assert!(preview.blockers().is_empty());
+        let mut scratch = crate::TimelineCompositeScratch::default();
+        let plan = scratch
+            .evaluate_prepared_visual_program(
+                &preview,
+                TimelineEvaluationRequest::preview(fp(&sequence, 0), 1.0),
+            )
+            .unwrap();
+        let TimelineRenderPlanElement::SolidColor(solid) = &plan.elements[0] else {
+            panic!("solid");
+        };
+        assert!(solid.effect_graph.graph().is_identity());
+        assert_eq!(
+            solid.effect_graph.auxiliary_preview_fallbacks().next().unwrap().effect_id(),
+            effect.id
+        );
+    }
+
+    #[test]
+    fn auxiliary_preview_source_views_keep_matching_prefix_owners_and_leave_the_cache_intact() {
+        use mondrian_core::{VisualSourceReference, VisualSourceRetime};
+        let missing = VisualSourceReference::Asset {
+            asset_id: AssetId::new(),
+            retime: VisualSourceRetime::default(),
+        };
+        let available = VisualSourceReference::Asset {
+            asset_id: AssetId::new(),
+            retime: VisualSourceRetime::default(),
+        };
+        let mut sequence = single_solid_sequence(Some(auxiliary_preview_matte(missing)));
+        sequence.video_tracks[0].clips[0].add_effect_node(auxiliary_preview_matte(available));
+        let mut cache = PreparedVisualProgramCache::for_auxiliary_preview();
+        let base = with_stable_effect_registry(|| cache.prepare(&sequence).ok());
+        let view = base.with_auxiliary_preview_unavailable_sources(&[missing]).unwrap();
+        let repeated =
+            view.with_auxiliary_preview_unavailable_sources(&[missing, missing]).unwrap();
+        assert_eq!(repeated.key, view.key);
+        assert_eq!(
+            repeated.retained_bytes_estimate(),
+            view.retained_bytes_estimate()
+        );
+        assert_ne!(view.key, base.key);
+        assert!(view.retained_bytes_estimate() > base.retained_bytes_estimate());
+        let changed = view.with_auxiliary_preview_unavailable_sources(&[available]).unwrap();
+        let roundtrip = changed.with_auxiliary_preview_unavailable_sources(&[missing]).unwrap();
+        assert_eq!(roundtrip.key, view.key);
+        assert_eq!(
+            roundtrip.retained_bytes_estimate(),
+            view.retained_bytes_estimate()
+        );
+        let request = TimelineEvaluationRequest::preview(fp(&sequence, 1), 1.0);
+        let mut scratch = crate::TimelineCompositeScratch::default();
+        let plan = scratch.evaluate_prepared_visual_program(&view, request).unwrap();
+        let TimelineRenderPlanElement::SolidColor(solid) = &plan.elements[0] else {
+            panic!("solid");
+        };
+        assert_eq!(solid.effect_graph.auxiliary_inputs().len(), 1);
+        assert_eq!(solid.effect_graph.auxiliary_preview_fallbacks().count(), 1);
+        let clip_id = solid.placement.clip_id;
+        let PreparedClipEffects::Ready { program: selected, .. } = &view.clip_effects[&clip_id]
+        else {
+            panic!("selected program");
+        };
+        let PreparedClipEffects::Ready { program: original, .. } = &base.clip_effects[&clip_id]
+        else {
+            panic!("base program");
+        };
+        let stage = &solid.effect_graph.stage_bindings()[1];
+        assert!(original.input_for_stage(stage).is_none());
+        let prefix = selected.input_for_stage(stage).unwrap().evaluate(TimelineTime::ONE).unwrap();
+        assert!(prefix.graph().is_identity());
+        assert!(prefix.auxiliary_inputs().is_empty());
+        assert_eq!(prefix.auxiliary_preview_fallbacks().count(), 1);
+        let restored = view.with_auxiliary_preview_unavailable_sources(&[]).unwrap();
+        let restored_again = repeated.with_auxiliary_preview_unavailable_sources(&[]).unwrap();
+        assert_eq!(restored.key, base.key);
+        assert_eq!(
+            restored.retained_bytes_estimate(),
+            restored_again.retained_bytes_estimate()
+        );
+        let plan = evaluate_prepared_visual_program(&restored, request).unwrap();
+        let TimelineRenderPlanElement::SolidColor(solid) = &plan.elements[0] else {
+            panic!("restored solid");
+        };
+        assert_eq!(solid.effect_graph.auxiliary_inputs().len(), 2);
+        assert!(solid.effect_graph.auxiliary_preview_fallbacks().next().is_none());
+        let resident = with_stable_effect_registry(|| cache.prepare(&sequence).ok());
+        assert!(Arc::ptr_eq(&base, &resident));
+        assert!(view.preflight_frame(1).is_err());
+        assert!(prepare_stable(&sequence)
+            .with_auxiliary_preview_unavailable_sources(&[])
+            .is_err());
     }
 
     #[test]

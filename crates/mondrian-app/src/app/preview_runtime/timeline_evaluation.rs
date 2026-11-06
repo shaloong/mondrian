@@ -25,6 +25,52 @@ fn media_pending_dependency_from_wait(
 }
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// Shared Asset authority for current evaluation, prefetch, and preroll.
+    pub(super) fn resolve_auxiliary_asset(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        request: &crate::app::preview_auxiliary::PreviewAuxiliaryAssetRequest,
+    ) -> Result<
+        crate::app::preview_auxiliary::PreviewAuxiliaryAssetPlan,
+        crate::app::preview_auxiliary::PreviewAuxiliaryAssetError,
+    > {
+        let mondrian_core::VisualSourceReference::Asset { asset_id, .. } = request.reference else {
+            return Err(PreviewUnavailability::blocked(
+                PreviewOutputStage::MediaResolution,
+                "auxiliary picture source is unbound",
+            )
+            .into());
+        };
+        let authoring = snapshot.authoring().ok_or_else(|| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::MediaResolution,
+                "auxiliary source requires the project Asset Library",
+            )
+        })?;
+        let asset = authoring
+            .asset_library()
+            .get_asset(asset_id)
+            .map_err(|error| {
+                PreviewUnavailability::failed(
+                    PreviewOutputStage::MediaResolution,
+                    error.to_string(),
+                )
+            })?
+            .ok_or_else(|| {
+                crate::app::preview_auxiliary::PreviewAuxiliaryAssetError::SourceUnavailable(
+                    PreviewUnavailability::blocked(
+                        PreviewOutputStage::MediaResolution,
+                        format!("auxiliary Asset {asset_id} does not exist in the project library"),
+                    ),
+                )
+            })?;
+        crate::app::preview_auxiliary::resolve_preview_auxiliary_asset(
+            request,
+            &asset,
+            self.hardware_decode_admission.get(),
+        )
+    }
+
     /// Acquire one frame evaluation through the single authoritative entry.
     ///
     /// This is the only path that may call [`Self::resolve_timeline`]; every
@@ -46,12 +92,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ) -> FrameResolutionOutcome {
         self.synchronize_visual_program_authoring_session(snapshot);
         let clock = self.evaluation_working_set_clock.get();
-        if let Some(evaluation) =
-            self.evaluation_working_set.borrow_mut().get(evaluation_key, clock)
-        {
-            bump(&self.metrics.timeline_evaluation_hits);
-            self.request_timeline_render_cache_lookup(&evaluation);
-            return FrameResolutionOutcome::Ready(evaluation);
+        let cached = self.evaluation_working_set.borrow_mut().get(evaluation_key, clock);
+        if let Some(evaluation) = cached {
+            if self.auxiliary_evaluation_sources_are_current(snapshot, &evaluation) {
+                bump(&self.metrics.timeline_evaluation_hits);
+                self.request_timeline_render_cache_lookup(&evaluation);
+                return FrameResolutionOutcome::Ready(evaluation);
+            }
+            self.evaluation_working_set.borrow_mut().invalidate_key(evaluation_key);
         }
         let request_priority = if snapshot.transport().is_speculative_preparation() {
             MediaPreviewRequestPriority::Prefetch
@@ -193,6 +241,29 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
     }
 
+    fn auxiliary_evaluation_sources_are_current(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        evaluation: &ResolvedFrameEvaluation,
+    ) -> bool {
+        let mut bindings = Vec::new();
+        for element in evaluation.elements.iter() {
+            crate::app::preview_auxiliary::collect_auxiliary_bindings(element, &mut bindings);
+        }
+        let mut observed = std::collections::HashMap::new();
+        for binding in bindings {
+            for source in &binding.sources {
+                let current = observed.entry(&source.request).or_insert_with(|| {
+                    self.resolve_auxiliary_asset(snapshot, &source.request).ok()
+                });
+                if current.as_ref() != Some(&source.plan) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub(super) fn bump_timeline_resolve_count(&self) {
         bump(&self.metrics.timeline_resolve_count);
     }
@@ -292,6 +363,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let mut title_frame =
             |request: PreviewTimelineTitleRequest| self.title_frame_for_plan(request);
+        let mut auxiliary_asset =
+            |request: &crate::app::preview_auxiliary::PreviewAuxiliaryAssetRequest| {
+                self.resolve_auxiliary_asset(snapshot, request)
+            };
         let Some(author_snapshot) = snapshot
             .authoring()
             .map(PreviewAuthoringSnapshot::visual_author_snapshot_identity)
@@ -317,6 +392,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let resolution = resolve_preview_timeline_with_programs_and_observer(
             request,
             PreviewTimelineSourceAdapters::new(&mut media_frame, &mut title_frame)
+                .with_auxiliary_assets(&mut auxiliary_asset)
                 .with_execution(&mut execute),
             PreviewTimelineExecutionBinding::new(
                 &self.visual_programs,
@@ -405,7 +481,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         // This attempt ends on failure; its per-attempt key is never reused.
         if let Some(failure) = self.visual_failures.borrow_mut().remove(&key) {
-            let is_user_blocked = failure.blocked.is_some();
+            let reason = failure.unavailability(PreviewOutputStage::TimelineComposite);
             if !snapshot.transport().is_speculative_preparation()
                 && let Some(receipt) = failure.blocked
             {
@@ -419,14 +495,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     );
                 }
             }
-            return unavailable(if is_user_blocked {
-                PreviewUnavailability::blocked(
-                    PreviewOutputStage::TimelineComposite,
-                    failure.detail,
-                )
-            } else {
-                PreviewUnavailability::failed(PreviewOutputStage::TimelineComposite, failure.detail)
-            });
+            return unavailable(reason);
         }
         let ready = self.visual_ready.borrow_mut().remove(&key);
         if let Some(mut ready) = ready {
@@ -499,6 +568,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         .map(|deadline| task.project_adapter_deadline(deadline, sampled_at));
         let grant = self.heterogeneous_effect_decision.get().cpu_prefix_grant();
+        if let Err(reason) = work.admit_auxiliary_working_set(&mut self.frame_store.borrow_mut()) {
+            return unavailable(reason);
+        }
         let sequence_id = work.sequence_id();
         let payload = VisualExecutionTaskPayload::prepared_timeline(
             epoch,

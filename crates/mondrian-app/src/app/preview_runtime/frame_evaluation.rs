@@ -440,6 +440,17 @@ impl EvaluationWorkingSet {
         Some(Arc::clone(&entry.evaluation))
     }
 
+    /// Retire one picture whose external source facts no longer authorize its
+    /// retained value. Drop completion evidence and original producer interest
+    /// together so neither can suppress a fresh source wave for the same key.
+    pub(crate) fn invalidate_key(&mut self, key: FrameEvaluationKey) {
+        self.entries.retain(|entry| entry.key != key);
+        self.waiting.retain(|entry| entry.key != key);
+        if self.completed.as_ref().is_some_and(|proof| proof.key == key) {
+            self.completed = None;
+        }
+    }
+
     /// Return the retained wait dependencies for an exact key, if resident.
     ///
     /// Ready evaluations are scheduling-independent, but a wait is authority
@@ -666,6 +677,11 @@ impl EvaluationWorkingSet {
 
 fn element_retains_media_residency(element: &ResolvedPreviewElement) -> bool {
     match element {
+        ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
+            element_retains_media_residency(element) || inputs.iter().any(|input| {
+                input.sources.iter().any(|source| source.frame.as_ref().is_some_and(|frame| frame.retains_media_residency()))
+            })
+        }
         ResolvedPreviewElement::Media { frame, .. } => frame.retains_media_residency(),
         ResolvedPreviewElement::CrossDissolve { left, right, .. } => [left, right]
             .into_iter()
@@ -678,6 +694,17 @@ fn element_retains_media_residency(element: &ResolvedPreviewElement) -> bool {
 
 fn element_pins_decoder_resource(element: &ResolvedPreviewElement) -> bool {
     match element {
+        ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
+            element_pins_decoder_resource(element)
+                || inputs.iter().any(|input| {
+                    input.sources.iter().any(|source| {
+                        source
+                            .frame
+                            .as_ref()
+                            .is_some_and(|frame| frame.decoder_resource_units() != 0)
+                    })
+                })
+        }
         ResolvedPreviewElement::Media { frame, .. } => frame.decoder_resource_units() != 0,
         ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
             transition_input_pins_decoder_resource(left)

@@ -470,6 +470,7 @@ pub fn evaluate_prepared_visual_program(
     request: TimelineEvaluationRequest,
 ) -> Result<TimelineRenderPlan> {
     let mut effects = PreparedClipEffectResolver { program };
+    validate_prepared_auxiliary_policy(program, request)?;
     evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
 }
 
@@ -484,8 +485,42 @@ pub fn evaluate_prepared_visual_program_with_session(
     request: TimelineEvaluationRequest,
     session: &mut EffectExecutionSession,
 ) -> Result<TimelineRenderPlan> {
+    validate_prepared_auxiliary_policy(program, request)?;
     let mut effects = SessionPreparedClipEffectResolver { program, session };
     evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
+}
+
+/// Re-evaluate the original frozen program after this Sequence sample's host
+/// source wave has proved addressed auxiliary inputs unavailable. Decisions are
+/// local to this evaluation and never update author data or the program cache.
+/// Pending, cancellation, and invalid pixel/format results are not unavailable
+/// source decisions and must retain their original host behavior.
+pub fn evaluate_prepared_visual_program_for_auxiliary_preview(
+    program: &PreparedVisualProgram,
+    request: TimelineEvaluationRequest,
+    unavailable: &[mondrian_core::VisualSourceReference],
+) -> Result<TimelineRenderPlan> {
+    validate_prepared_auxiliary_policy(program, request)?;
+    if !program.auxiliary_preview_enabled() {
+        return Err(MondrianError::EffectGraphEvaluationFailed {
+            reason: "auxiliary Preview source decisions require a Preview program".to_owned(),
+        });
+    }
+    let mut effects = AuxiliaryPreviewClipEffectResolver { program, unavailable };
+    evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
+}
+
+fn validate_prepared_auxiliary_policy(
+    program: &PreparedVisualProgram,
+    request: TimelineEvaluationRequest,
+) -> Result<()> {
+    if matches!(
+        request.intent,
+        TimelineRenderIntent::Export | TimelineRenderIntent::ReferenceOutput
+    ) {
+        program.ensure_strict_auxiliary_policy()?;
+    }
+    Ok(())
 }
 
 trait ClipEffectResolver {
@@ -497,6 +532,33 @@ trait ClipEffectResolver {
     ) -> Result<Option<Arc<CompiledEffectGraph>>>;
 
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()>;
+}
+
+struct AuxiliaryPreviewClipEffectResolver<'a> {
+    program: &'a PreparedVisualProgram,
+    unavailable: &'a [mondrian_core::VisualSourceReference],
+}
+
+impl ClipEffectResolver for AuxiliaryPreviewClipEffectResolver<'_> {
+    fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
+        self.program.evaluate_clip_effects_for_auxiliary_preview(
+            clip.clip_id,
+            clip.clip_time,
+            self.unavailable,
+        )
+    }
+
+    fn evaluate_timeline_grade(
+        &mut self,
+        sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        self.program
+            .evaluate_timeline_grade_for_auxiliary_preview(sequence_time, self.unavailable)
+    }
+
+    fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
+        self.program.ensure_transition_ready(transition.transition_id)
+    }
 }
 
 #[cfg(test)]

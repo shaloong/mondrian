@@ -83,6 +83,8 @@ pub(crate) struct PreviewCpuFallbackRequest {
     pub(crate) monitoring_settings: mondrian_core::SignalMonitoringSettings,
     // Pixel/source fields retire before this work charge.
     pub(crate) working_reservation: Option<mondrian_playback::ViewerFrameWorkLease>,
+    pub(crate) auxiliary_work_reservation:
+        Option<super::preview_auxiliary::PreviewAuxiliaryWorkReservation>,
 }
 
 impl PreviewCpuFallbackRequest {
@@ -121,6 +123,7 @@ pub(crate) struct PreviewCpuFallbackExecutionEvidence {
 }
 
 pub(crate) struct PreviewCpuFallbackFailed {
+    pub(crate) unavailability: super::preview_unavailability::PreviewUnavailability,
     pub(crate) attempt: Option<PreviewCpuFallbackAttempt>,
     pub(crate) generation: u64,
     pub(crate) epoch: PlaybackEpoch,
@@ -149,6 +152,24 @@ enum PreviewCpuFallbackFailure {
     Stopped(mondrian_effects::EffectProcessorStopReason),
 }
 impl PreviewCpuFallbackFailure {
+    fn unavailability(&self) -> super::preview_unavailability::PreviewUnavailability {
+        use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
+        let reason = match self {
+            Self::Execution(error) => error.unavailability(),
+            Self::Adapter(detail) => {
+                PreviewUnavailability::failed(PreviewOutputStage::TimelineComposite, detail.clone())
+            }
+            Self::Stopped(reason) => PreviewUnavailability::stopped(
+                PreviewOutputStage::TimelineComposite,
+                format!("Viewer CPU invocation stopped: {reason:?}"),
+            ),
+        };
+        if self.processor_blocked().is_some() {
+            PreviewUnavailability::blocked(reason.stage(), reason.detail())
+        } else {
+            reason
+        }
+    }
     fn processor_blocked(&self) -> Option<&Arc<mondrian_effects::EffectProcessorFeedbackReceipt>> {
         match self {
             Self::Execution(error) => error.processor_blocked(),
@@ -411,6 +432,10 @@ fn cpu_fallback_worker(
                         if results.send(PreviewCpuFallbackResult::Failed(Box::new(PreviewCpuFallbackFailed {
                             attempt: request.attempt, generation: request.generation, epoch: request.epoch,
                             output_key: request.output_key, blocked: None,
+                            unavailability: super::preview_unavailability::PreviewUnavailability::blocked(
+                                super::preview_unavailability::PreviewOutputStage::FramePackaging,
+                                "Viewer working capacity exceeds its pre-allocation reservation",
+                            ),
                             reason: "Viewer working capacity exceeds its pre-allocation reservation".to_owned(),
                         }))).is_err() { break; }
                         work_notifier.result_became_pollable();
@@ -434,6 +459,7 @@ fn cpu_fallback_worker(
                 epoch: request.epoch,
                 output_key: request.output_key,
                 blocked: reason.processor_blocked().map(Arc::clone),
+                unavailability: reason.unavailability(),
                 reason: reason.to_string(),
             })),
         };
@@ -515,7 +541,11 @@ fn execute_cpu_fallback_observed(
                 request.cpu_materialization_active_bytes,
                 mondrian_renderer::TimelineCpuCompositePrecision::Float32,
             )
-            .map_err(|error| PreviewCpuFallbackFailure::Adapter(error.to_string()))?;
+            .map_err(|error| {
+                PreviewCpuFallbackFailure::Execution(
+                    mondrian_renderer::TimelineCompositeError::CpuWorkingSet(error).into(),
+                )
+            })?;
         let authority = mondrian_renderer::TimelineFrameExecutionAuthority::new(
             request.generation,
             mondrian_effects::EffectExecutionContinuity::Discontinuous,
@@ -551,16 +581,24 @@ fn execute_cpu_fallback_observed(
                 input_color_stage_diagnostics: RenderColorStageDiagnostics::default(),
                 execution_durations: PreviewCpuExecutionDurations::default(),
             },
-            None => super::preview_cpu_execution::composite_resolved_preview_working_with_inputs(
-                request.width,
-                request.height,
-                &request.elements,
-                &request.color_context,
-                request.sampling,
-                scratch,
-                &mut control,
-                Some(&mut inputs),
-            )?,
+            None => {
+                let required =
+                    super::preview_auxiliary::resolved_auxiliary_working_bytes(&request.elements)?;
+                super::preview_auxiliary::validate_auxiliary_working_reservation(
+                    required,
+                    request.auxiliary_work_reservation.as_ref(),
+                )?;
+                super::preview_cpu_execution::composite_resolved_preview_working_with_inputs(
+                    request.width,
+                    request.height,
+                    &request.elements,
+                    &request.color_context,
+                    request.sampling,
+                    scratch,
+                    &mut control,
+                    Some(&mut inputs),
+                )?
+            }
         };
         control
             .check()
@@ -1202,6 +1240,7 @@ mod tests {
             sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             attempt: None,
             working_reservation: None,
+            auxiliary_work_reservation: None,
             output_target: PreviewCpuOutputTarget::WorkingGpu,
             native_gui_work: None,
             cancellation: mondrian_core::ExecutionCancellationToken::new(),
@@ -1239,6 +1278,105 @@ mod tests {
             monitoring_tap: Default::default(),
             monitoring_settings: Default::default(),
         }
+    }
+
+    #[test]
+    fn auxiliary_cpu_worker_preserves_typed_blockers_and_releases_temporary_charges() {
+        use crate::app::preview_auxiliary::tests::asset_fixture;
+        use crate::app::preview_auxiliary::{
+            reserve_auxiliary_working_set, resolved_auxiliary_working_bytes,
+        };
+        use crate::app::preview_frame_store::{
+            PreviewFrameStoreAdapter, PreviewFrameStoreAdapterConfig,
+        };
+        use crate::app::preview_timeline_execution::auxiliary_tests::{
+            auxiliary_matte_sequence, resolve_auxiliary_fixture,
+        };
+        use crate::app::preview_unavailability::{
+            PreviewOutputStage, PreviewUnavailabilityDisposition,
+        };
+        let (_root, asset) = asset_fixture(Some(std::time::Duration::from_secs(2)));
+        let sequence = auxiliary_matte_sequence(asset.id);
+        let resolved = resolve_auxiliary_fixture(&sequence, &asset);
+        let required = resolved_auxiliary_working_bytes(&resolved.plan.elements).unwrap();
+        let elements: Arc<[ResolvedPreviewElement]> = resolved.plan.elements.into();
+        let make_request = || {
+            let mut request = working_request();
+            request.width = 3;
+            request.height = 1;
+            request.output_key = resolved.plan.cache_key.clone();
+            request.elements = Arc::clone(&elements);
+            request.color_context = resolved.plan.color_context.clone();
+            request.sampling = resolved.plan.sampling;
+            request.cpu_materialization_active_bytes =
+                resolved.plan.cpu_materialization_active_bytes;
+            request
+        };
+        let worker = PreviewCpuFallbackTask::new(PreviewWorkNotifier::default()).unwrap();
+        assert!(matches!(
+            worker.submit(make_request()),
+            PreviewCpuFallbackSubmission::Scheduled
+        ));
+        let refusal = worker
+            .results
+            .as_ref()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let PreviewCpuFallbackResult::Failed(refusal) = refusal else {
+            panic!("unfunded auxiliary pixels must fail before execution");
+        };
+        assert_eq!(
+            refusal.unavailability.disposition(),
+            PreviewUnavailabilityDisposition::Blocked
+        );
+        assert_eq!(
+            refusal.unavailability.stage(),
+            PreviewOutputStage::InputAdaptation
+        );
+        assert!(
+            refusal.blocked.is_none(),
+            "resource admission never forges a processor receipt"
+        );
+        drop(refusal);
+        let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
+            viewer_byte_budget: required + 48,
+            ..Default::default()
+        });
+        let mut funded = make_request();
+        funded.auxiliary_work_reservation =
+            reserve_auxiliary_working_set(&mut store, required).unwrap();
+        funded.working_reservation = store.reserve_working_result(48);
+        assert!(matches!(
+            worker.submit(funded),
+            PreviewCpuFallbackSubmission::Scheduled
+        ));
+        let ready = worker
+            .results
+            .as_ref()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let PreviewCpuFallbackResult::Ready(ready) = ready else {
+            panic!("funded auxiliary pixels must reach a working result");
+        };
+        assert!(matches!(
+            worker.shutdown_and_wait(),
+            PreviewOwnedWorkerShutdown::Terminated
+        ));
+        assert_eq!(
+            store.diagnostics().viewer_aggregate_reserved_bytes,
+            48,
+            "temporary preparation charges retire separately from the published output"
+        );
+        let crate::app::preview_frame_store::PreviewViewerCpuFrame::Working(frame) = &ready.frame
+        else {
+            panic!("working output");
+        };
+        assert_eq!(frame.rgba_f32().data.len(), 3);
+        assert!((frame.rgba_f32().data[0][0] - 0.25).abs() < 1e-6);
+        drop(ready);
+        assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 0);
     }
 
     #[test]
@@ -1346,6 +1484,7 @@ mod tests {
             sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
             attempt: None,
             working_reservation: None,
+            auxiliary_work_reservation: None,
             output_target: PreviewCpuOutputTarget::Raster,
             native_gui_work: None,
             cancellation: mondrian_core::ExecutionCancellationToken::new(),

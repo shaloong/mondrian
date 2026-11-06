@@ -129,6 +129,45 @@ pub(crate) fn canonical_resolved_node_materialization(
     bytes.u64(elements.len() as u64);
     for element in elements {
         match element {
+            ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
+                bytes.u8(5);
+                bytes.u64(inputs.len() as u64);
+                for input in inputs {
+                    bytes.fixed(&input.graph.semantic_fingerprint());
+                    bytes.u32(input.primary_extent.width());
+                    bytes.u32(input.primary_extent.height());
+                    bytes.json(&input.primary_sampling)?;
+                    bytes.u64(input.sources.len() as u64);
+                    for source in &input.sources {
+                        bytes.u32(source.slot);
+                        bytes.json(&source.request.reference)?;
+                        bytes.json(&source.request.sequence_time)?;
+                        bytes.json(&source.request.target_resolution)?;
+                        bytes.fixed(&canonical_media_source_fingerprint(
+                            &source.plan.validated_key,
+                        )?);
+                        bytes.json(&source.plan.time.requested_time)?;
+                        bytes.json(&source.plan.time.source_sample)?;
+                        bytes.u8(u8::from(source.plan.time.out_of_range));
+                        if let Some(frame) = &source.frame {
+                            bytes.u8(1);
+                            bytes.fixed(
+                                &frame
+                                    .render_cache_source_fingerprint()
+                                    .ok_or(PreviewRenderCacheIdentityError::MissingMediaSource)?,
+                            );
+                            bytes.u32(frame.width());
+                            bytes.u32(frame.height());
+                        } else {
+                            bytes.u8(0);
+                        }
+                    }
+                }
+                bytes.fixed(
+                    &canonical_resolved_node_materialization(std::slice::from_ref(element))?
+                        .digest(),
+                );
+            }
             ResolvedPreviewElement::SolidColor(layer) => {
                 bytes.u8(0);
                 encode_solid(layer, &mut bytes)?;

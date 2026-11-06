@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::app::preview_access_mode::MediaPreviewRequestIntent;
-use crate::app::preview_timeline_execution::collect_preview_timeline_media_demands_with_programs;
+use crate::app::preview_timeline_execution::{
+    collect_preview_timeline_picture_demands_with_programs, resolve_preview_picture_media_demands,
+};
 use mondrian_media::PreviewPlaybackDirection;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -852,7 +854,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .map(PreviewAuthoringSnapshot::visual_author_snapshot_identity);
         let heterogeneous_graph_budget =
             self.heterogeneous_effect_decision.get().cpu_prefix_grant().graph_execution();
-        let demands = match collect_preview_timeline_media_demands_with_programs(
+        let demands = match collect_preview_timeline_picture_demands_with_programs(
             sequence,
             sequences,
             frame,
@@ -864,7 +866,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             &self.scratch,
             author_snapshot,
             heterogeneous_graph_budget,
-        ) {
+        )
+        .and_then(|demands| {
+            resolve_preview_picture_media_demands(demands, &mut |request| {
+                self.resolve_auxiliary_asset(snapshot, request)
+            })
+        }) {
             Ok(demands) => demands,
             Err(_) => {
                 self.future_media_window.borrow_mut().record_evaluation(0);

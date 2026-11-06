@@ -95,6 +95,7 @@ impl PreviewProcessorSourceWork {
                 }
             };
             for element in elements {
+                let element = element.without_auxiliary();
                 if let ResolvedPreviewElement::CrossDissolve { left, right, .. } = element {
                     transition(left);
                     transition(right);
@@ -102,6 +103,7 @@ impl PreviewProcessorSourceWork {
             }
         }
         for element in elements {
+            let element = element.without_auxiliary();
             if let ResolvedPreviewElement::Media { frame, prepared_effect_route, .. } = element {
                 media(frame, prepared_effect_route.as_deref());
             }

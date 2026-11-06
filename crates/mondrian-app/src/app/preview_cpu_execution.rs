@@ -34,6 +34,8 @@ use super::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransiti
 /// Typed failure from the shared CPU Preview execution path.
 #[derive(Debug, Clone, thiserror::Error)]
 pub(crate) enum PreviewCpuExecutionError {
+    #[error("auxiliary source registration is blocked: {detail}")]
+    AuxiliaryRegistration { detail: String },
     #[error(transparent)]
     WorkingFrame(#[from] MediaPreviewWorkingFrameError),
     #[error("Timeline composition failed: {0}")]
@@ -56,6 +58,14 @@ pub(crate) enum PreviewCpuExecutionError {
     },
 }
 
+impl From<mondrian_effects::EffectFloatFrameError> for PreviewCpuExecutionError {
+    fn from(error: mondrian_effects::EffectFloatFrameError) -> Self {
+        Self::TimelineComposite(TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::FrameContract(error),
+        })
+    }
+}
+
 impl PreviewCpuExecutionError {
     /// Borrow the actual canonical bank disposition without parsing text.
     pub(crate) fn processor_blocked(
@@ -74,7 +84,17 @@ impl PreviewCpuExecutionError {
 
     /// Project this execution error into the shared terminal Preview contract.
     pub(crate) fn unavailability(&self) -> PreviewUnavailability {
+        if self.processor_blocked().is_some() {
+            return PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineComposite,
+                self.to_string(),
+            );
+        }
         match self {
+            Self::AuxiliaryRegistration { .. } => PreviewUnavailability::blocked(
+                PreviewOutputStage::InputAdaptation,
+                self.to_string(),
+            ),
             Self::WorkingFrame(MediaPreviewWorkingFrameError::NativeSurfaceRequiresGpu {
                 ..
             })
@@ -173,7 +193,7 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
         } => false,
         TimelineCompositeError::MediaFrameContractMismatch { .. }
         | TimelineCompositeError::MediaFrameStorageLengthMismatch { .. } => false,
-        TimelineCompositeError::CpuWorkingSet(_) => false,
+        TimelineCompositeError::CpuWorkingSet(_) => true,
     }
 }
 
@@ -288,9 +308,42 @@ pub(crate) fn composite_resolved_preview_working_with_inputs(
     let mut input_color_diagnostics = Vec::new();
     let mut input_color_stage_diagnostics = RenderColorStageDiagnostics::default();
 
+    let mut auxiliary_bindings = Vec::new();
+    for element in resolved {
+        super::preview_auxiliary::collect_auxiliary_bindings(element, &mut auxiliary_bindings);
+    }
+    super::preview_auxiliary::preflight_auxiliary_composite(
+        width,
+        height,
+        resolved,
+        &auxiliary_bindings,
+        scratch,
+    )?;
+    let auxiliary_rasters = super::preview_auxiliary::prepare_auxiliary_rasters(
+        &auxiliary_bindings,
+        scratch,
+        control,
+        &mut input_color_diagnostics,
+        &mut input_color_stage_diagnostics,
+    )?;
+    let auxiliary_inputs = auxiliary_rasters.iter().map(|set| set.inputs()).collect::<Vec<_>>();
+    let auxiliary_sets = auxiliary_rasters
+        .iter()
+        .zip(&auxiliary_inputs)
+        .map(|(set, inputs)| {
+            mondrian_renderer::TimelineAuxiliaryInputs::new(
+                &set.binding.graph,
+                set.binding.primary_extent,
+                inputs,
+            )
+        })
+        .collect::<Vec<_>>();
+
     for element in resolved {
         preview_processor_checkpoint(control)?;
+        let element = element.without_auxiliary();
         match element {
+            ResolvedPreviewElement::WithAuxiliary { .. } => unreachable!("context was peeled"),
             ResolvedPreviewElement::SolidColor(layer) => {
                 working_elements.push(PreviewWorkingElement::SolidColor(layer.clone()));
             }
@@ -401,7 +454,8 @@ pub(crate) fn composite_resolved_preview_working_with_inputs(
             color_context.engine(),
             color_context.working_color_space(),
             sampling,
-        ),
+        )
+        .with_auxiliary_inputs(&auxiliary_sets),
         scratch,
         control,
         inputs,
