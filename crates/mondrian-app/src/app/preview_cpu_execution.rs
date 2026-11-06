@@ -132,6 +132,7 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
                 | EffectExecutionError::InputUnavailable { .. }
                 | EffectExecutionError::AuxiliaryFrameMissing { .. }
                 | EffectExecutionError::InvalidAuxiliaryFrame { .. }
+                | EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded { .. }
                 | EffectExecutionError::AuxiliaryRequiresFloat32
         ),
         TimelineCompositeError::FloatEffect {
@@ -662,6 +663,10 @@ mod tests {
         for error in [
             EffectExecutionError::AuxiliaryFrameMissing { slot: 2 },
             EffectExecutionError::InvalidAuxiliaryFrame { slot: 2, reason: "format_mismatch" },
+            EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded {
+                required_bytes: 80,
+                budget_bytes: 79,
+            },
         ] {
             for error in [
                 TimelineCompositeError::EncodedEffect(error.clone()),

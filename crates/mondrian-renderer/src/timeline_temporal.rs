@@ -22,8 +22,7 @@ use mondrian_effects::{
     identity_compiled_effect_graph, CompiledEffectGraph, EffectExecutionContinuity,
     EffectExecutionSession, EffectFrameExtent, EffectPixelRoi, EffectTemporalExecutionError,
     EffectTemporalExecutionOutput, EffectTemporalExecutionRequest, EffectTemporalFrameDemandBatch,
-    EffectTemporalFrameRequest, EffectTemporalSpan, PreparedEffectTemporalExecution,
-    PreparedTemporalFrameSet,
+    EffectTemporalFrameRequest, PreparedEffectTemporalExecution, PreparedTemporalFrameSet,
 };
 use std::sync::Arc;
 
@@ -1660,9 +1659,7 @@ fn reject_temporal_title(
 }
 
 fn graph_requires_temporal(graph: &CompiledEffectGraph) -> bool {
-    let temporal = graph.execution_envelope().aggregate().temporal_input;
-    !matches!(temporal.past, EffectTemporalSpan::None)
-        || !matches!(temporal.future, EffectTemporalSpan::None)
+    graph.requires_primary_temporal_execution()
 }
 
 fn replace_effect_graph(
@@ -1764,7 +1761,7 @@ mod tests {
         EffectExecutionContract, EffectExecutionModes, EffectExecutionSessionConfig,
         EffectFrameTileF32, EffectGraphTopology, EffectNode, EffectNodeExt, EffectRenderOp,
         EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
-        EffectTemporalSourceIdentity, EffectType,
+        EffectTemporalSourceIdentity, EffectTemporalSpan, EffectType,
     };
     use mondrian_timeline::{Clip, Sequence, Track};
     use std::sync::atomic::{AtomicU64, Ordering};
