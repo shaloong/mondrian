@@ -1704,10 +1704,10 @@ fn derive_implementation_requirements<'a>(
             EffectGraphNodeKind::ExternalInput { format, time_offset, .. } => {
                 external_input_node_requirements(*format, *time_offset)
             }
-            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, .. } => {
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
                 requirement_for(*input, &requirements)
                     .merge_branches(requirement_for(*auxiliary, &requirements))
-                    .compose_node(auxiliary_effect_node_requirements(op, *role))
+                    .compose_node(auxiliary_effect_node_requirements(op, *role, *sampling))
             }
         };
         requirements.insert(node.id, derived);
@@ -1790,8 +1790,8 @@ fn raw_node_implementation_requirements(
         EffectGraphNodeKind::ExternalInput { format, time_offset, .. } => {
             Some(external_input_node_requirements(*format, *time_offset))
         }
-        EffectGraphNodeKind::AuxiliaryEffect { op, role, .. } => {
-            Some(auxiliary_effect_node_requirements(op, *role))
+        EffectGraphNodeKind::AuxiliaryEffect { op, role, sampling, .. } => {
+            Some(auxiliary_effect_node_requirements(op, *role, *sampling))
         }
     }
 }
@@ -3070,28 +3070,31 @@ fn external_input_node_requirements(
 fn external_input_execution_modes(format: crate::EffectValueFormat) -> EffectExecutionModes {
     match format.precision() {
         crate::EffectWorkingPrecision::NormalizedU8 => EffectExecutionModes::CPU_U8,
-        crate::EffectWorkingPrecision::Float32 => EffectExecutionModes::CPU_F32,
+        crate::EffectWorkingPrecision::Float32 => {
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        }
         crate::EffectWorkingPrecision::Float16 => EffectExecutionModes::NONE,
     }
 }
 
 /// Requirements of one operation that reads a second input.
 ///
-/// The auxiliary kernel exists only on the CPU in M1, so the node never
-/// inherits an operation's GPU modes; the role raises the ROI tier to
-/// full-frame for maps even when the operation itself is pixel-local.
+/// Each backend needs a dedicated auxiliary kernel. A Map still raises the ROI
+/// tier to FullFrame when the operation itself is pixel-local.
 fn auxiliary_effect_node_requirements(
     op: &EffectRenderOp,
     role: AuxiliaryRole,
+    sampling: AuxiliarySampling,
 ) -> EffectImplementationRequirements {
+    let mut modes = EffectExecutionModes::NONE;
+    if crate::auxiliary::supports_auxiliary_f32(op) {
+        modes = modes.union(EffectExecutionModes::CPU_F32);
+    }
+    if crate::gpu_pipeline::lower_auxiliary_spatial_pass(op, role, sampling, None).is_some() {
+        modes = modes.union(EffectExecutionModes::GPU_F32);
+    }
     EffectImplementationRequirements {
-        execution_modes: render_op_requirements(op).execution_modes.intersection(
-            if crate::auxiliary::supports_auxiliary_f32(op) {
-                EffectExecutionModes::CPU_F32
-            } else {
-                EffectExecutionModes::NONE
-            },
-        ),
+        execution_modes: render_op_requirements(op).execution_modes.intersection(modes),
         roi_from_effect_input: merge_roi(
             render_op_requirements(op).roi_from_effect_input,
             role.roi_requirement(),
@@ -4325,8 +4328,8 @@ mod tests {
         }
         let (builder, checkpoint) = second_input_builder(
             0,
-            AuxiliaryRole::Matte,
-            AuxiliaryRole::Matte.default_sampling(),
+            AuxiliaryRole::Map,
+            AuxiliaryRole::Map.default_sampling(),
             TimelineTime::ZERO,
         );
         let declared = EffectExecutionContract {

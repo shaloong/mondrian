@@ -257,6 +257,15 @@ pub enum EffectGpuSpatialPass {
         /// Authored radius, threshold and the output mode.
         grade: crate::SmartBlurGrade,
     },
+    /// Fill composited through an independently sampled alpha matte.
+    FillMatte {
+        /// Authored feather, inversion, RGB and opacity.
+        grade: crate::FillGrade,
+        /// Exact reconstruction and boundary behavior of the second edge.
+        sampling: crate::AuxiliarySampling,
+        /// Host slot for a linear chain. A graph dispatcher supplies its own value.
+        external_slot: Option<u32>,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -311,6 +320,7 @@ impl EffectGpuSpatialPass {
             Self::DustScratches { .. } => "dust_scratches",
             Self::KeyCleaner { .. } => "key_cleaner",
             Self::SmartBlur { .. } => "smart_blur",
+            Self::FillMatte { .. } => "fill_matte",
         }
     }
 
@@ -397,6 +407,7 @@ impl EffectGpuSpatialPass {
             // The blur window is the authored radius plus the one fractional
             // tap, so it is bounded by the authoring ceiling of 100.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            Self::FillMatte { .. } => 0,
         }
     }
 
@@ -469,8 +480,21 @@ impl EffectGpuSpatialPass {
             Self::KeyCleaner { .. } => u32::MAX,
             // Same reach as the horizontal halo.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            Self::FillMatte { .. } => 0,
         }
     }
+}
+
+pub(crate) fn lower_auxiliary_spatial_pass(
+    op: &EffectRenderOp,
+    role: crate::AuxiliaryRole,
+    sampling: crate::AuxiliarySampling,
+    external_slot: Option<u32>,
+) -> Option<EffectGpuSpatialPass> {
+    let (EffectRenderOp::Fill { grade }, crate::AuxiliaryRole::Matte) = (op, role) else {
+        return None;
+    };
+    Some(EffectGpuSpatialPass::FillMatte { grade: *grade, sampling, external_slot })
 }
 
 /// Reach of the stroke kernel in source pixels.
@@ -595,9 +619,8 @@ impl CompiledEffectGpuPipeline {
 /// Lower one compiled graph into ordered GPU stages.
 ///
 /// Fails closed with the same blockers as the fused point path: a graph that
-/// cannot be represented as one linear GPU chain (branching, masks, external
-/// processors, non-preserving domains) is rejected instead of being
-/// approximated.
+/// cannot be represented as one linear primary chain with direct auxiliary
+/// bindings is rejected. Graph-local masks use the heterogeneous dispatcher.
 pub fn lower_effect_graph_to_gpu_pipeline(
     compiled: &CompiledEffectGraph,
 ) -> Result<CompiledEffectGpuPipeline, EffectGpuPlanBlocker> {
@@ -619,10 +642,10 @@ pub fn lower_effect_graph_to_gpu_pipeline(
         .iter()
         .copied()
         .filter(|node_id| {
-            !matches!(
-                compiled.graph().node(*node_id).map(|node| &node.kind),
-                Some(EffectGraphNodeKind::Source)
-            )
+            let kind = compiled.graph().node(*node_id).map(|node| &node.kind);
+            !matches!(kind, Some(EffectGraphNodeKind::Source))
+                && !(matches!(kind, Some(EffectGraphNodeKind::ExternalInput { .. }))
+                    && compiled.external_auxiliary_is_read_only(*node_id))
         })
         .collect::<Vec<_>>();
 
@@ -637,9 +660,9 @@ pub fn lower_effect_graph_to_gpu_pipeline(
         let Some(node) = compiled.graph().node(node_id) else {
             return Err(EffectGpuPlanBlocker::DisconnectedChain { node_id });
         };
-        let (input, op, domain) = match &node.kind {
+        let (input, op, domain, auxiliary_pass) = match &node.kind {
             EffectGraphNodeKind::UnaryEffect { input, op } => {
-                (*input, op, EffectColorDomain::SceneLinearRgb)
+                (*input, op, EffectColorDomain::SceneLinearRgb, None)
             }
             EffectGraphNodeKind::DomainEffect { input, op, domain_contract } => {
                 if domain_contract.input != domain_contract.output {
@@ -649,7 +672,32 @@ pub fn lower_effect_graph_to_gpu_pipeline(
                         output: domain_contract.output,
                     });
                 }
-                (*input, op, domain_contract.input)
+                (*input, op, domain_contract.input, None)
+            }
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
+                let Some(EffectGraphNodeKind::ExternalInput { slot, .. }) =
+                    compiled.graph().node(*auxiliary).map(|node| &node.kind)
+                else {
+                    return Err(EffectGpuPlanBlocker::UnsupportedTopology {
+                        node_id,
+                        kind: "graph_local_auxiliary",
+                    });
+                };
+                let admitted =
+                    compiled.node_execution_modes(node_id).unwrap_or(EffectExecutionModes::NONE);
+                if !admitted.contains(
+                    EffectProcessingBackend::Gpu,
+                    EffectWorkingPrecision::Float32,
+                ) {
+                    return Err(EffectGpuPlanBlocker::NodeExecutionModeNotAdmitted {
+                        node_id,
+                        admitted,
+                    });
+                }
+                let pass = lower_auxiliary_spatial_pass(op, *role, *sampling, Some(*slot)).ok_or(
+                    EffectGpuPlanBlocker::UnsupportedTopology { node_id, kind: "auxiliary_kernel" },
+                )?;
+                (*input, op, EffectColorDomain::SceneLinearRgb, Some(pass))
             }
             kind => {
                 return Err(EffectGpuPlanBlocker::UnsupportedTopology {
@@ -667,7 +715,7 @@ pub fn lower_effect_graph_to_gpu_pipeline(
         }
         merge_processing_domain(&mut processing_domain, domain)?;
 
-        match spatial_pass_for(op) {
+        match auxiliary_pass.or_else(|| spatial_pass_for(op)) {
             Some(pass) => {
                 flush_point_stage(&mut stages, &mut pending_operations, &mut pending_ids);
                 stages.push(EffectGpuStage::Spatial { pass, node_id });
