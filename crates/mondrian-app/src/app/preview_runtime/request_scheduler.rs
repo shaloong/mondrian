@@ -866,6 +866,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             &self.scratch,
             author_snapshot,
             heterogeneous_graph_budget,
+            Some(&mut |request| self.resolve_auxiliary_asset(snapshot, request)),
         )
         .and_then(|demands| {
             resolve_preview_picture_media_demands(demands, &mut |request| {

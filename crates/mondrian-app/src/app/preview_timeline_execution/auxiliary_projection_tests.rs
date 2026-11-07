@@ -399,7 +399,7 @@ fn a_restored_source_rejoins_the_same_frozen_pending_attempt_before_dsp() {
         6,
         "both original queries are revalidated once per wave"
     );
-    assert!(contexts(&result).is_empty());
+    assert!(contexts(&result).iter().all(|context| context.notices.is_empty()));
 }
 
 #[test]
@@ -455,6 +455,108 @@ fn skipping_a_definition_removes_its_other_pending_auxiliary_demand() {
     assert_eq!(queried, 2, "original definition facts are retained");
     assert_eq!(contexts(&result)[0].notices.len(), 1);
     assert_eq!(pixels(&result), vec![[0.0, 0.0, 0.0, 1.0]; 3]);
+
+    let demands = collect_preview_timeline_picture_demands_with_programs(
+        &sequence,
+        &[],
+        0,
+        sequence.settings.resolution,
+        PreviewResolutionScale::Full,
+        PreviewRasterRequirement::Viewer,
+        sequence.settings.root_program_color_context(&Default::default()).unwrap(),
+        &programs,
+        &scratch,
+        None,
+        standalone_preview_heterogeneous_graph_budget(),
+        Some(&mut |request| match request.reference {
+            VisualSourceReference::Asset { asset_id, .. } if asset_id == asset.id => {
+                Ok(planned(&asset, request))
+            }
+            _ => Err(missing()),
+        }),
+    )
+    .expect("prefetch shares the live demand projection");
+    assert!(
+        demands.is_empty(),
+        "a skipped Definition cannot prefetch its other input"
+    );
+}
+
+#[test]
+fn missing_auxiliary_notices_identify_each_transition_endpoint() {
+    use mondrian_core::{
+        timeline_data::TimelineClipEndpointContext, TimelineTime, TimelineTimeRange,
+    };
+    let mut sequence = auxiliary_matte_sequence(AssetId::new());
+    let mut incoming = auxiliary_matte_sequence(AssetId::new());
+    let mut left = sequence.video_tracks[0].clips.pop().unwrap();
+    let mut right = incoming.video_tracks[0].clips.pop().unwrap();
+    let time_base = sequence.time_base();
+    let time = |frame| TimelineTime::new(frame * time_base.num, time_base.den).unwrap();
+    let (start, cut, end, length) = (time(0), time(2), time(3), time(2));
+    left.position = start;
+    left.duration = length;
+    right.position = cut;
+    right.duration = length;
+    let (left_id, right_id) = (left.id, right.id);
+    let (left_effect, right_effect) = (left.effects[0].id, right.effects[0].id);
+    sequence.video_tracks[0].add_clip(left).unwrap();
+    sequence.video_tracks[0].add_clip(right).unwrap();
+    let transition = mondrian_timeline::VideoTransition::cross_dissolve(
+        left_id,
+        right_id,
+        TimelineTimeRange::new(time(1), end).unwrap(),
+    );
+    let transition_id = transition.id;
+    sequence.video_transitions.push(transition);
+    sequence.validate_author_identities().unwrap();
+    let programs = RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    let cancellation = ExecutionCancellationToken::new();
+    let result = output(resolve_preview_timeline_with_graph(
+        PreviewTimelineFrameRequest::new(
+            &sequence,
+            &[],
+            2,
+            sequence.settings.resolution,
+            PreviewResolutionScale::Full,
+            sequence.settings.root_program_color_context(&Default::default()).unwrap(),
+        ),
+        PreviewTimelineSourceAdapters::new(
+            &mut |_| panic!("missing auxiliary endpoints have no pixel demand"),
+            &mut |_| panic!("no title"),
+        )
+        .with_auxiliary_assets(&mut |_| Err(missing())),
+        PreviewTimelineGraph {
+            programs: &programs,
+            scratch: &scratch,
+            dependency_observer: None,
+            generation: 0,
+            cancellation: &cancellation,
+            author_snapshot: None,
+            heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
+        },
+        None,
+    ));
+    let notices = &contexts(&result)[0].notices;
+    assert_eq!(notices.len(), 2);
+    for (clip, effect, endpoint) in [
+        (
+            left_id,
+            left_effect,
+            TimelineClipEndpointContext::TransitionLeft { transition_id },
+        ),
+        (
+            right_id,
+            right_effect,
+            TimelineClipEndpointContext::TransitionRight { transition_id },
+        ),
+    ] {
+        let notice = notices.iter().find(|notice| notice.fallback.effect_id() == effect).unwrap();
+        let placement = notice.placement.unwrap();
+        assert_eq!(placement.clip_id, clip);
+        assert_eq!(placement.endpoint, endpoint);
+    }
 }
 
 #[test]
@@ -544,4 +646,73 @@ fn projection_metadata_uses_the_existing_viewer_lease_until_the_cached_owner_ret
     );
     drop(result);
     assert_eq!(store.diagnostics().viewer_aggregate_reserved_bytes, 0);
+}
+
+#[test]
+fn auxiliary_advisories_locate_each_shared_grade_assignment() {
+    use mondrian_core::{GradeDefinition, GradeGraphNode, GradeGraphNodeId, GradeGraphNodeKind};
+    use mondrian_renderer::{PreparedAuxiliaryConsumerLocation, PreparedGradeAssignmentScope};
+    let mut sequence = auxiliary_matte_sequence(AssetId::new());
+    let mut grade = GradeDefinition::new("Shared");
+    let node = GradeGraphNodeId::new();
+    let graph = &mut grade.versions[0].graph;
+    let effect = sequence.video_tracks[0].clips[0].effects.remove(0);
+    let effect_id = effect.id;
+    graph.nodes.push(GradeGraphNode {
+        id: node,
+        kind: GradeGraphNodeKind::Effect { input: graph.output, effect },
+    });
+    graph.output = node;
+    let definition = grade.id;
+    sequence.grade_definitions.push(grade);
+    let mut group = mondrian_timeline::grade::GradeGroup::new("Shared group");
+    group.pre_clip_grade = Some(definition);
+    group.post_clip_grade = Some(definition);
+    let clip = &mut sequence.video_tracks[0].clips[0];
+    clip.grade = Some(definition);
+    clip.grade_group = Some(group.id);
+    sequence.grade_groups.push(group);
+    sequence.timeline_grade = Some(definition);
+
+    let resolved = output(resolve(
+        &sequence,
+        &[],
+        &RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview()),
+        &RefCell::new(TimelineCompositeScratch::default()),
+        &mut |_| Err(missing()),
+        &mut |_| panic!("a missing source cannot start decode"),
+        None,
+    ));
+    let contexts = contexts(&resolved);
+    let scopes: HashSet<_> = contexts[0]
+        .notices
+        .iter()
+        .map(|notice| {
+            assert_eq!(notice.fallback.effect_id(), effect_id);
+            let PreparedAuxiliaryConsumerLocation::Grade {
+                scope,
+                definition: owner,
+                node: owner_node,
+            } = notice.location
+            else {
+                panic!("grade consumer resolved as a clip effect")
+            };
+            assert_eq!((owner, owner_node), (definition, node));
+            assert_eq!(
+                notice.placement.is_none(),
+                scope == PreparedGradeAssignmentScope::Timeline
+            );
+            scope
+        })
+        .collect();
+    assert_eq!(
+        scopes,
+        HashSet::from([
+            PreparedGradeAssignmentScope::GroupPreClip,
+            PreparedGradeAssignmentScope::Clip,
+            PreparedGradeAssignmentScope::GroupPostClip,
+            PreparedGradeAssignmentScope::Timeline,
+        ])
+    );
+    assert_eq!(contexts[0].notices.len(), scopes.len());
 }

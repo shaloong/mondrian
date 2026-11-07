@@ -336,7 +336,8 @@ pub use prepared_visual_frame_closure::{
     PreparedVisualNestedSample,
 };
 pub use prepared_visual_program::{
-    prepared_visual_author_fingerprint, PreparedVisualAuthorFingerprintError,
+    prepared_visual_author_fingerprint, PreparedAuxiliaryConsumerLocation,
+    PreparedGradeAssignmentScope, PreparedVisualAuthorFingerprintError,
     PreparedVisualAuthorSnapshotIdentity, PreparedVisualEffectBlocker,
     PreparedVisualFrameReachability, PreparedVisualMaterializationContract,
     PreparedVisualNestedDemand, PreparedVisualNestedRange, PreparedVisualNestedRangeDemand,

@@ -193,6 +193,18 @@ viewer-blocked = Preview blocked
 viewer-failed = Preview failed
 viewer-playing = Playing
 viewer-ready = Ready
+viewer-auxiliary-effects-skipped =
+    { $count ->
+        [one] One effect skipped
+       *[other] { $count } effects skipped
+    }
+viewer-auxiliary-detail = { $location } · { $effect } · { $parameter } — { $reason }
+viewer-auxiliary-unbound = Choose an input source.
+viewer-auxiliary-unavailable = The input source is unavailable.
+viewer-auxiliary-grade-before = Group pre-clip grade
+viewer-auxiliary-grade-after = Group post-clip grade
+viewer-auxiliary-transition-outgoing = Outgoing transition clip
+viewer-auxiliary-transition-incoming = Incoming transition clip
 viewer-color-rejection-detail =
     Color interpretation rejected
     Asset: { $asset }

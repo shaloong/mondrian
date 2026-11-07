@@ -3,16 +3,19 @@
 use super::*;
 use mondrian_core::VisualSourceReference;
 use mondrian_effects::AuxiliaryPreviewFallback;
-use mondrian_renderer::{PreparedVisualNestedInstanceStep, PreparedVisualProgram};
+use mondrian_renderer::{
+    PreparedAuxiliaryConsumerLocation, PreparedVisualNestedInstanceStep, PreparedVisualProgram,
+};
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct PreviewAuxiliaryNotice {
+pub struct PreviewAuxiliaryNotice {
     pub(crate) sequence_id: SequenceId,
     pub(crate) time: mondrian_core::TimelineTime,
     pub(crate) path: Arc<[PreparedVisualNestedInstanceStep]>,
     pub(crate) placement: Option<TimelineClipExecutionRef>,
     pub(crate) stage_index: usize,
+    pub(crate) location: PreparedAuxiliaryConsumerLocation,
     pub(crate) fallback: AuxiliaryPreviewFallback,
 }
 
@@ -21,14 +24,15 @@ pub(crate) struct PreviewAuxiliaryNotice {
 pub(crate) struct PreviewAuxiliaryProjectionContext {
     pub(crate) notices: Box<[PreviewAuxiliaryNotice]>,
     pub(crate) unavailable_queries: Box<[PreviewAuxiliaryAssetRequest]>,
+    pub(crate) available_queries: Box<[(PreviewAuxiliaryAssetRequest, PreviewAuxiliaryAssetPlan)]>,
     _programs: Box<[Arc<PreparedVisualProgram>]>,
-    pub(super) bytes: usize,
+    pub(crate) bytes: usize,
     reservation: OnceLock<super::super::preview_auxiliary::PreviewAuxiliaryWorkReservation>,
 }
 
 impl PreviewAuxiliaryProjectionContext {
     pub(crate) fn hash_identity(&self, hasher: &mut impl std::hash::Hasher) {
-        b"mondrian.preview.auxiliary-projection.v1".hash(hasher);
+        b"mondrian.preview.auxiliary-projection.v2".hash(hasher);
         self.notices.hash(hasher);
         self.unavailable_queries.hash(hasher);
     }
@@ -130,34 +134,37 @@ impl SourceProjection {
     }
 }
 
-pub(super) fn visit_graphs(
+fn visit_graphs(
     plan: &mondrian_renderer::TimelineRenderPlan,
-    mut visit: impl FnMut(Option<TimelineClipExecutionRef>, &Arc<CompiledEffectGraph>),
-) {
+    mut visit: impl FnMut(
+        Option<TimelineClipExecutionRef>,
+        &Arc<CompiledEffectGraph>,
+    ) -> Result<(), PreviewTimelineAbort>,
+) -> Result<(), PreviewTimelineAbort> {
     for element in &plan.elements {
         match element {
-            TimelineRenderPlanElement::Media(v) => visit(Some(v.placement), &v.effect_graph),
+            TimelineRenderPlanElement::Media(v) => visit(Some(v.placement), &v.effect_graph)?,
             TimelineRenderPlanElement::NestedSequence(v) => {
-                visit(Some(v.placement), &v.effect_graph)
+                visit(Some(v.placement), &v.effect_graph)?
             }
-            TimelineRenderPlanElement::BasicTitle(v) => visit(Some(v.placement), &v.effect_graph),
-            TimelineRenderPlanElement::SolidColor(v) => visit(Some(v.placement), &v.effect_graph),
-            TimelineRenderPlanElement::Adjustment(v) => visit(Some(v.placement), &v.effect_graph),
-            TimelineRenderPlanElement::TimelineGrade(v) => visit(None, &v.effect_graph),
+            TimelineRenderPlanElement::BasicTitle(v) => visit(Some(v.placement), &v.effect_graph)?,
+            TimelineRenderPlanElement::SolidColor(v) => visit(Some(v.placement), &v.effect_graph)?,
+            TimelineRenderPlanElement::Adjustment(v) => visit(Some(v.placement), &v.effect_graph)?,
+            TimelineRenderPlanElement::TimelineGrade(v) => visit(None, &v.effect_graph)?,
             TimelineRenderPlanElement::CrossDissolve(v) => {
                 for input in [&v.left, &v.right] {
                     match input {
                         TimelineTransitionInputPlan::Media(v) => {
-                            visit(Some(v.placement), &v.effect_graph)
+                            visit(Some(v.placement), &v.effect_graph)?
                         }
                         TimelineTransitionInputPlan::NestedSequence(v) => {
-                            visit(Some(v.placement), &v.effect_graph)
+                            visit(Some(v.placement), &v.effect_graph)?
                         }
                         TimelineTransitionInputPlan::BasicTitle(v) => {
-                            visit(Some(v.placement), &v.effect_graph)
+                            visit(Some(v.placement), &v.effect_graph)?
                         }
                         TimelineTransitionInputPlan::SolidColor(v) => {
-                            visit(Some(v.placement), &v.effect_graph)
+                            visit(Some(v.placement), &v.effect_graph)?
                         }
                         TimelineTransitionInputPlan::Transparent => {}
                     }
@@ -165,6 +172,7 @@ pub(super) fn visit_graphs(
             }
         }
     }
+    Ok(())
 }
 
 fn original_queries(
@@ -194,7 +202,8 @@ fn original_queries(
                     requests.push(PreparedPreviewSourceDemand::Auxiliary(request));
                 }
             }
-        });
+            Ok(())
+        })?;
     }
     Ok(requests)
 }
@@ -266,7 +275,7 @@ pub(super) fn prepare_sources(
                 ),
             ));
         }
-        let queries = if preview {
+        let queries = if preview && !prepared.unavailable_auxiliary.is_empty() {
             original_queries(prepared)?
         } else {
             prepared.demands.clone()
@@ -295,8 +304,12 @@ pub(super) fn prepare_sources(
             prepared.unavailable_auxiliary = missing;
             continue;
         }
-        let active = collect_prepared_visual_source_demands(&prepared.closure)
-            .map_err(PreviewTimelineAbort::Unavailable)?;
+        let active = if prepared.unavailable_auxiliary.is_empty() {
+            prepared.demands.clone()
+        } else {
+            collect_prepared_visual_source_demands(&prepared.closure)
+                .map_err(PreviewTimelineAbort::Unavailable)?
+        };
         let current: HashSet<_> = queries
             .iter()
             .filter_map(|demand| match demand {
@@ -308,7 +321,7 @@ pub(super) fn prepare_sources(
             sources.auxiliary.retain(|request, _| current.contains(request));
             sources.unavailable_auxiliary.retain(|request| current.contains(request));
         }
-        prepared.projection_context = context(prepared, &queries);
+        prepared.projection_context = context(prepared, &queries, &active, preview)?;
         return Ok(active);
     }
     Err(invalid(
@@ -319,7 +332,9 @@ pub(super) fn prepare_sources(
 fn context(
     prepared: &PreviewTimelinePreparation,
     queries: &[PreparedPreviewSourceDemand],
-) -> Option<Arc<PreviewAuxiliaryProjectionContext>> {
+    active: &[PreparedPreviewSourceDemand],
+    preview: bool,
+) -> Result<Option<Arc<PreviewAuxiliaryProjectionContext>>, PreviewTimelineAbort> {
     let PreviewPreparationState::Sources(sources) = &prepared.state else {
         unreachable!()
     };
@@ -345,6 +360,14 @@ fn context(
                         path: node.instance_path().into(),
                         placement,
                         stage_index: stage.stage_index(),
+                        location: node
+                            .program()
+                            .auxiliary_consumer_location(placement, stage)
+                            .ok_or_else(|| {
+                                invalid(
+                                    "auxiliary advisory is missing its authored consumer location",
+                                )
+                            })?,
                         fallback: fallback.clone(),
                     };
                     if seen_notices.insert(notice.clone()) {
@@ -352,13 +375,14 @@ fn context(
                     }
                 }
             }
+            Ok(())
         };
-        visit_graphs(node.evaluation().plan(), &mut add);
+        visit_graphs(node.evaluation().plan(), &mut add)?;
         for batch in node.evaluation().temporal_batches() {
-            add(Some(batch.placement()), batch.graph());
+            add(Some(batch.placement()), batch.graph())?;
         }
         for input in node.evaluation().temporal_media_inputs() {
-            add(Some(input.media().placement), &input.media().effect_graph);
+            add(Some(input.media().placement), &input.media().effect_graph)?;
         }
     }
     let unavailable_queries = queries
@@ -372,8 +396,28 @@ fn context(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if notices.is_empty() && unavailable_queries.is_empty() && programs.is_empty() {
-        return None;
+    // Nested nodes become single working frames before root cache insertion.
+    // Preserve their source facts after the child's pixel bindings are gone.
+    let mut available_queries = Vec::new();
+    if preview || prepared.closure.nodes().len() > 1 {
+        let mut seen = HashSet::new();
+        for demand in active {
+            if let PreparedPreviewSourceDemand::Auxiliary(request) = demand
+                && seen.insert(request)
+            {
+                let plan = sources.auxiliary.get(request).ok_or_else(|| {
+                    invalid("active auxiliary source is missing its resolved plan")
+                })?;
+                available_queries.push((request.clone(), plan.clone()));
+            }
+        }
+    }
+    if notices.is_empty()
+        && unavailable_queries.is_empty()
+        && available_queries.is_empty()
+        && programs.is_empty()
+    {
+        return Ok(None);
     }
     let bytes = programs
         .iter()
@@ -404,12 +448,22 @@ fn context(
                         .saturating_add(format!("{query:?}").len().saturating_mul(4))
                 })
                 .fold(0usize, usize::saturating_add),
+        )
+        .saturating_add(
+            available_queries
+                .iter()
+                .map(|entry| {
+                    std::mem::size_of::<(PreviewAuxiliaryAssetRequest, PreviewAuxiliaryAssetPlan)>()
+                        .saturating_add(format!("{entry:?}").len().saturating_mul(4))
+                })
+                .fold(0usize, usize::saturating_add),
         );
-    Some(Arc::new(PreviewAuxiliaryProjectionContext {
+    Ok(Some(Arc::new(PreviewAuxiliaryProjectionContext {
         notices: notices.into(),
         unavailable_queries: unavailable_queries.into(),
+        available_queries: available_queries.into(),
         _programs: programs.into(),
         bytes,
         reservation: OnceLock::new(),
-    }))
+    })))
 }

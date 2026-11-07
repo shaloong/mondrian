@@ -920,6 +920,14 @@ mod tests {
             "viewer-failed",
             "viewer-playing",
             "viewer-ready",
+            "viewer-auxiliary-effects-skipped",
+            "viewer-auxiliary-detail",
+            "viewer-auxiliary-unbound",
+            "viewer-auxiliary-unavailable",
+            "viewer-auxiliary-grade-before",
+            "viewer-auxiliary-grade-after",
+            "viewer-auxiliary-transition-outgoing",
+            "viewer-auxiliary-transition-incoming",
             "viewer-color-rejection-detail",
         ] {
             assert!(

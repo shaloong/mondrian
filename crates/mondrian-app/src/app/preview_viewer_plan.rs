@@ -62,6 +62,17 @@ pub(crate) enum ResolvedPreviewElement {
 }
 
 impl ResolvedPreviewElement {
+    fn without_auxiliary_metadata(&self) -> &Self {
+        match self {
+            Self::WithAuxiliary { element, inputs }
+                if inputs.iter().all(|input| input.sources.is_empty()) =>
+            {
+                element.without_auxiliary_metadata()
+            }
+            element => element,
+        }
+    }
+
     pub(crate) fn without_auxiliary(&self) -> &Self {
         match self {
             Self::WithAuxiliary { element, .. } => element.without_auxiliary(),
@@ -226,7 +237,11 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     for element in elements {
         hash_resolved_element(element, &mut builder);
     }
-    PreviewOutputKey::new(sequence_id, width, height, builder.finish_identity())
+    let mut key = PreviewOutputKey::new(sequence_id, width, height, builder.finish_identity());
+    key.requires_auxiliary_revalidation = elements
+        .iter()
+        .any(|element| matches!(element, ResolvedPreviewElement::WithAuxiliary { .. }));
+    key
 }
 
 fn hash_resolved_element(element: &ResolvedPreviewElement, mut builder: &mut impl Hasher) {
@@ -411,7 +426,7 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
     for element in resolved {
-        match element {
+        match element.without_auxiliary_metadata() {
             ResolvedPreviewElement::WithAuxiliary { .. } => {
                 return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
             }
@@ -542,7 +557,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
     for element in resolved {
-        match element {
+        match element.without_auxiliary_metadata() {
             ResolvedPreviewElement::WithAuxiliary { .. } => {
                 return Err(PreviewViewerGpuLayerPreparationError::Compositing {
                     reason: GpuCompositingBlockerReason::EffectRequiresCpu,

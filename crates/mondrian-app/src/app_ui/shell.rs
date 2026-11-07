@@ -2886,6 +2886,7 @@ fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> b
             model.empty_message.clone(),
         );
         viewer.set_canvas_background(model.canvas_background);
+        viewer.set_status_detail(model.status_detail.clone());
         return true;
     }
 

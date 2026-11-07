@@ -232,6 +232,9 @@ pub trait AssetThumbnailSource {
     fn thumbnail_for_asset(&self, asset: &AssetRecord) -> AssetThumbnailState;
 }
 
+/// Read-only auxiliary-input advisory returned by a Viewer preview source.
+pub use crate::app::preview_timeline_execution::auxiliary_projection::PreviewAuxiliaryNotice as ViewerAuxiliaryNotice;
+
 /// Supplies render-ready viewer preview frames for the active application state.
 ///
 /// Implementations own preview caching, media decode, and render-plan execution.
@@ -248,6 +251,11 @@ pub trait ViewerPreviewSource {
     /// Return the current color pipeline health status for the viewer.
     fn viewer_color_pipeline_status(&self) -> Option<ViewerColorPipelineStatus> {
         None
+    }
+
+    /// Optional advisories for the exact current frame.
+    fn viewer_auxiliary_notices(&self, _state: &AppState) -> Vec<ViewerAuxiliaryNotice> {
+        Vec::new()
     }
 }
 
@@ -998,6 +1006,7 @@ pub struct ViewerPanelModel {
     pub title: String,
     pub status: String,
     pub status_tone: ViewerStatusTone,
+    pub(crate) status_detail: Option<String>,
     pub resolution_label: String,
     pub position_label: String,
     pub duration_label: String,
@@ -1119,6 +1128,7 @@ impl ViewerPanelModel {
         state: &AppState,
         localizer: Option<&Localizer>,
     ) {
+        self.status_detail = None;
         if self.frame_content.is_none() && !self.transparent_canvas {
             return;
         }
@@ -1271,10 +1281,21 @@ impl ViewerPanelModel {
 
         let (status, status_tone) =
             viewer_processor_progress_status(state, status, status_tone, localizer);
+        let (status, status_tone, status_detail) =
+            if matches!(preview_state, Some(ViewerPreviewState::Ready(_)))
+                && state.processor_feedback.active_progress().is_none()
+                && let Some(preview) = preview
+                && let Some((summary, detail)) = viewer_auxiliary_status(state, preview, localizer)
+            {
+                (summary, ViewerStatusTone::Warning, Some(detail))
+            } else {
+                (status, status_tone, None)
+            };
         Self {
             title: sequence.name.clone(),
             status,
             status_tone,
+            status_detail,
             resolution_label: format!(
                 "{}x{} @ {:.2} fps",
                 resolution.width, resolution.height, fps
@@ -1333,6 +1354,7 @@ impl ViewerPanelModel {
             title: viewer_text(localizer, "panel-viewer", "预览"),
             status: viewer_text(localizer, "viewer-no-sequence", "没有序列"),
             status_tone: ViewerStatusTone::Neutral,
+            status_detail: None,
             resolution_label: viewer_text(localizer, "viewer-no-signal", "无信号"),
             position_label: "00:00:00:00".into(),
             duration_label: String::new(),
@@ -1363,6 +1385,125 @@ impl ViewerPanelModel {
             clip_transform: None,
         }
     }
+}
+
+fn viewer_auxiliary_status(
+    state: &AppState,
+    preview: &dyn ViewerPreviewSource,
+    localizer: Option<&Localizer>,
+) -> Option<(String, String)> {
+    let notices = preview.viewer_auxiliary_notices(state);
+    if notices.is_empty() {
+        return None;
+    }
+    let fallback;
+    let localizer = match localizer {
+        Some(localizer) => localizer,
+        None => {
+            fallback = Localizer::new(AppUiLocale::ZhCn).ok()?;
+            &fallback
+        }
+    };
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("count", notices.len() as i64);
+    let summary = localizer.format("viewer-auxiliary-effects-skipped", Some(&args));
+    let detail = notices
+        .iter()
+        .filter_map(|notice| viewer_auxiliary_detail(state, notice, localizer))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((summary, detail))
+}
+
+fn viewer_auxiliary_detail(
+    state: &AppState,
+    notice: &ViewerAuxiliaryNotice,
+    localizer: &Localizer,
+) -> Option<String> {
+    use mondrian_core::{
+        timeline_data::{TimelineClipEndpointContext, TimelineClipExecutionRef},
+        GradeGraphNodeKind,
+    };
+    use mondrian_effects::AuxiliaryPreviewFallbackCause;
+    use mondrian_renderer::{PreparedAuxiliaryConsumerLocation, PreparedGradeAssignmentScope};
+    let find_sequence = |id| state.sequences().iter().find(|sequence| sequence.id == id);
+    let sequence = find_sequence(notice.sequence_id)?;
+    let mut location = Vec::new();
+    let mut push_placement = |placement: TimelineClipExecutionRef| -> Option<()> {
+        let owner = find_sequence(placement.sequence_id)?;
+        let clip = owner.find_clip(placement.clip_id)?;
+        location.push(owner.name.clone());
+        location.push(clip.label.clone().unwrap_or_else(|| default_clip_label(clip)));
+        match placement.endpoint {
+            TimelineClipEndpointContext::Ordinary => {}
+            TimelineClipEndpointContext::TransitionLeft { .. } => {
+                location.push(localizer.text("viewer-auxiliary-transition-outgoing"));
+            }
+            TimelineClipEndpointContext::TransitionRight { .. } => {
+                location.push(localizer.text("viewer-auxiliary-transition-incoming"));
+            }
+        }
+        Some(())
+    };
+    for step in notice.path.iter() {
+        push_placement(step.placement)?;
+    }
+    if let Some(placement) = notice.placement {
+        push_placement(placement)?;
+    } else {
+        location.push(sequence.name.clone());
+    }
+    let effect_id = notice.fallback.effect_id();
+    let effect = match notice.location {
+        PreparedAuxiliaryConsumerLocation::ClipEffect => sequence
+            .find_clip(notice.placement?.clip_id)?
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)?,
+        PreparedAuxiliaryConsumerLocation::Grade { scope, definition, node } => {
+            let grade = sequence.grade_definition(definition)?;
+            location.push(localizer.text(match scope {
+                PreparedGradeAssignmentScope::GroupPreClip => "viewer-auxiliary-grade-before",
+                PreparedGradeAssignmentScope::Clip => "inspector-grade-clip",
+                PreparedGradeAssignmentScope::GroupPostClip => "viewer-auxiliary-grade-after",
+                PreparedGradeAssignmentScope::Timeline => "inspector-grade-timeline",
+            }));
+            location.push(grade.name.clone());
+            let version = grade.active()?;
+            let node = version.graph.nodes.iter().find(|candidate| candidate.id == node)?;
+            let GradeGraphNodeKind::Effect { effect, .. } = &node.kind else {
+                return None;
+            };
+            if effect.id != effect_id {
+                return None;
+            }
+            effect
+        }
+    };
+    let (_, property) = effect.properties.iter().find(|(_, property)| {
+        property.descriptor.parameter_id() == notice.fallback.parameter_id()
+    })?;
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("location", location.join(" › "));
+    args.set(
+        "effect",
+        localized_effect_name(&effect.effect_type, Some(localizer)),
+    );
+    args.set(
+        "parameter",
+        localizer.parameter_text(
+            &property.descriptor.schema.message_id,
+            &property.descriptor.display_name,
+        ),
+    );
+    args.set(
+        "reason",
+        localizer.text(match notice.fallback.cause() {
+            AuxiliaryPreviewFallbackCause::Unbound => "viewer-auxiliary-unbound",
+            AuxiliaryPreviewFallbackCause::Unavailable => "viewer-auxiliary-unavailable",
+        }),
+    );
+    Some(localizer.format("viewer-auxiliary-detail", Some(&args)))
 }
 
 fn viewer_clip_transform_model(
@@ -3791,7 +3932,7 @@ fn scopes_panel(model: &ScopesPanelModel) -> VideoScopesSurface {
 }
 
 fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
-    let surface = ViewerSurface::new(model.title.clone(), model.width, model.height)
+    let mut surface = ViewerSurface::new(model.title.clone(), model.width, model.height)
         .with_status(model.status.clone())
         .with_status_tone(model.status_tone)
         .with_resolution_label(model.resolution_label.clone())
@@ -3812,6 +3953,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
                 scale,
             })
         });
+    surface.set_status_detail(model.status_detail.clone());
     let surface = with_viewer_transport_icons(surface);
     let surface = if let Some(message) = model.empty_message.clone() {
         surface.with_empty_message(message)

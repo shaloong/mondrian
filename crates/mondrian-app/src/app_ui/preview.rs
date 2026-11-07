@@ -12,8 +12,8 @@ use crate::app::preview_runtime::{PreviewPresentationContent, PreviewPresentatio
 use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use crate::app::AppState;
 use crate::app_ui::panels::{
-    ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
-    ViewerPreviewState,
+    ViewerAuxiliaryNotice, ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel,
+    ViewerPreviewSource, ViewerPreviewState,
 };
 
 /// Window specialization of the production Preview Runtime.
@@ -51,9 +51,20 @@ impl ViewerPreviewSource for WindowPreviewSnapshot<'_> {
     fn viewer_color_pipeline_status(&self) -> Option<ViewerColorPipelineStatus> {
         <WindowPreviewAdapter as ViewerPreviewSource>::viewer_color_pipeline_status(self.adapter)
     }
+
+    fn viewer_auxiliary_notices(&self, state: &AppState) -> Vec<ViewerAuxiliaryNotice> {
+        self.adapter.viewer_auxiliary_notices(state)
+    }
 }
 
 impl ViewerPreviewSource for WindowPreviewAdapter {
+    fn viewer_auxiliary_notices(&self, state: &AppState) -> Vec<ViewerAuxiliaryNotice> {
+        self.current_auxiliary_advisory(
+            &state.preview_execution_snapshot(std::time::Instant::now()),
+        )
+        .map_or_else(Vec::new, |context| context.notices.to_vec())
+    }
+
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
         match self.presentation(
             state.preview_frame_execution_request(std::time::Instant::now()),

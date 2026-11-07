@@ -187,6 +187,14 @@ viewer-blocked = 预览被阻止
 viewer-failed = 预览失败
 viewer-playing = 播放中
 viewer-ready = 就绪
+viewer-auxiliary-effects-skipped = 已跳过 { $count } 个效果
+viewer-auxiliary-detail = { $location } · { $effect } · { $parameter } — { $reason }
+viewer-auxiliary-unbound = 请选择输入源。
+viewer-auxiliary-unavailable = 输入源不可用。
+viewer-auxiliary-grade-before = 组前调色
+viewer-auxiliary-grade-after = 组后调色
+viewer-auxiliary-transition-outgoing = 转出片段
+viewer-auxiliary-transition-incoming = 转入片段
 viewer-color-rejection-detail =
     色彩解释被拒绝
     素材：{ $asset }

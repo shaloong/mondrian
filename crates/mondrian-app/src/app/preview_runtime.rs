@@ -405,6 +405,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     scratch: RefCell<TimelineCompositeScratch>,
     evaluation_working_set: RefCell<EvaluationWorkingSet>,
     evaluation_working_set_clock: Cell<u64>,
+    current_auxiliary_advisory: RefCell<Option<timeline_evaluation::CurrentAuxiliaryAdvisory>>,
     last_color_rejection: RefCell<Option<PreviewColorRejection>>,
     unavailability_evidence: RefCell<PreviewUnavailabilityEvidence>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
@@ -1181,7 +1182,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.scheduler.prune_obsolete();
             return PreviewGpuFrameState::Prepared;
         }
-        let prepared_promotion = if transport.is_speculative_preparation() {
+        let prepared_promotion = if transport.is_speculative_preparation()
+            || self
+                .execution
+                .borrow()
+                .exact_prepared_successor_gpu_output_key_for_intent(playback_intent)
+                .is_some_and(|key| key.requires_auxiliary_revalidation)
+        {
             None
         } else {
             self.execution
@@ -1308,7 +1315,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         if !transport.is_playing()
             && matches!(generation_binding, PreviewGenerationBinding::Current(_))
-            && self.execution.borrow().has_exact_current_output()
+            && self.execution.borrow().exact_current_output().is_some_and(|(key, _)| {
+                !key.requires_auxiliary_revalidation
+                    || self.can_reuse_auxiliary_gpu_output(snapshot, key, &monitor_adaptation)
+            })
         {
             self.scheduler.prune_obsolete();
             self.try_release_settled_transport_media_residency();
@@ -1335,6 +1345,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         if !transport.is_playing()
             && let Some(proof) = self.evaluation_working_set.borrow().completed_for(evaluation_key)
+            && !proof.output_key.requires_auxiliary_revalidation
         {
             let (tap, settings) = self.viewer_signal_monitoring.get();
             let key = proof
@@ -2235,6 +2246,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             || previous.width != next.width
             || previous.height != next.height
             || previous.display_color_space != next.display_color_space
+        {
+            return None;
+        }
+        if execution
+            .exact_prepared_successor_gpu_output_key_for_intent(transport.playback_intent())
+            .is_some_and(|key| key.requires_auxiliary_revalidation)
         {
             return None;
         }
@@ -3326,6 +3343,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             | PreviewGenerationBinding::Rotated(generation) => generation,
         };
         if matches!(binding, PreviewGenerationBinding::Rotated(_)) {
+            self.current_auxiliary_advisory.borrow_mut().take();
             self.retire_cpu_fallback_pending();
             self.cpu_fallback_failure.borrow_mut().take();
             self.evaluation_working_set.borrow_mut().retire_generation_work();
@@ -3349,6 +3367,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn invalidate_preview_generation(&self) {
+        self.current_auxiliary_advisory.borrow_mut().take();
         self.retire_cpu_fallback_pending();
         self.cpu_fallback_failure.borrow_mut().take();
         self.evaluation_working_set.borrow_mut().retire_generation_work();
@@ -3786,6 +3805,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Terminal absence is a content discontinuity. Only pending work may
     /// retain a same-scope stale output for later presentation.
     fn clear_terminal_viewer_state(&self) {
+        self.current_auxiliary_advisory.borrow_mut().take();
         self.execution.borrow_mut().clear_output();
         self.frame_store.borrow_mut().clear_pinned_viewer_frame();
     }

@@ -99,7 +99,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if carrier == PreviewPresentationCarrier::ExternalGpu
             && !transport.is_playing()
             && matches!(generation_binding, PreviewGenerationBinding::Current(_))
-            && let Some((_, output)) = self.registered_exact_current_gpu_output_artifact()
+            && let Some((key, output)) = self.registered_exact_current_gpu_output_artifact()
+            && (!key.requires_auxiliary_revalidation
+                || color_context
+                    .output_color_space()
+                    .color()
+                    .and_then(|program_output| {
+                        RenderMonitorAdaptation::new(
+                            program_output,
+                            display_color_space,
+                            color_context.engine().clone(),
+                        )
+                        .ok()
+                    })
+                    .is_some_and(|adaptation| {
+                        self.can_reuse_auxiliary_gpu_output(snapshot, &key, &adaptation)
+                    }))
         {
             // The Window already owns the final output for this exact still
             // generation. Resolving its retired decoder inputs again would

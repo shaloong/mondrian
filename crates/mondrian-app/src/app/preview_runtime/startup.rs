@@ -278,7 +278,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             last_gpu_loading_reason: Cell::new(None),
             visual_terminal_candidates: RefCell::new(Vec::new()),
             visual_program_authoring_session: Cell::new(None),
-            visual_programs: RefCell::new(mondrian_renderer::PreparedVisualProgramCache::default()),
+            visual_programs: RefCell::new(
+                mondrian_renderer::PreparedVisualProgramCache::for_auxiliary_preview(),
+            ),
             future_media_window: RefCell::new(request_scheduler::FutureMediaWindowCache::default()),
             visual_dependencies: PreviewVisualDependencyObserver::prepare(
                 work_notifier.clone(),
@@ -287,6 +289,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             evaluation_working_set: RefCell::new(EvaluationWorkingSet::new()),
             evaluation_working_set_clock: Cell::new(0),
+            current_auxiliary_advisory: RefCell::new(None),
             last_color_rejection: RefCell::new(None),
             unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),
             display_snapshot: RefCell::new(None),

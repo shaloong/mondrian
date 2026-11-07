@@ -19,8 +19,8 @@ use mondrian_core::{Color, SampleAspectRatio};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
-    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
-    PaintContext,
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue,
+    AccessibilityVirtualNode, EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_theme::{current_theme, Theme};
@@ -33,7 +33,7 @@ use crate::paint::{
     centered_text_origin_y, color_with_alpha, horizontal_stroke_rect, mix_color, paint_focus_ring,
     soft_border, vertical_stroke_rect,
 };
-use crate::text_metrics::measure_single_line;
+use crate::text_metrics::{measure_single_line, measure_text_box};
 use crate::{RasterImage, VectorIcon};
 
 use self::model as viewer_model;
@@ -346,6 +346,9 @@ pub struct ViewerSurface {
     title: String,
     status: String,
     status_tone: ViewerStatusTone,
+    status_detail: Option<String>,
+    status_detail_open: bool,
+    status_detail_scroll: f32,
     resolution_label: String,
     position_label: String,
     duration_label: String,
@@ -395,6 +398,9 @@ impl ViewerSurface {
             title: title.into(),
             status: "无信号".into(),
             status_tone: ViewerStatusTone::Neutral,
+            status_detail: None,
+            status_detail_open: false,
+            status_detail_scroll: 0.0,
             resolution_label: String::new(),
             position_label: "00:00:00:00".into(),
             duration_label: String::new(),
@@ -733,6 +739,50 @@ impl ViewerSurface {
         ) && !self.status.is_empty()
     }
 
+    /// Replace the optional detail displayed when the status badge is opened.
+    pub fn set_status_detail(&mut self, detail: Option<String>) {
+        let detail = detail.filter(|text| !text.is_empty());
+        if self.status_detail != detail {
+            self.status_detail = detail;
+            self.status_detail_open &= self.status_detail.is_some();
+            self.status_detail_scroll = 0.0;
+        }
+    }
+
+    fn status_badge_rect(&self, theme: &Theme) -> Rect {
+        let width = (measure_single_line(&self.status, theme.typography.small.font_size).0 + 24.0)
+            .clamp(64.0, (self.bounds.width - 32.0).max(64.0));
+        Rect::new(
+            self.bounds.x + self.bounds.width - width - 16.0,
+            self.bounds.y + 9.0,
+            width,
+            24.0,
+        )
+    }
+
+    fn status_detail_layout(&self, theme: &Theme) -> Option<(Rect, f32)> {
+        let detail = self.status_detail.as_ref()?;
+        if !self.status_detail_open || !self.should_paint_status_badge() {
+            return None;
+        }
+        let badge = self.status_badge_rect(theme);
+        let width = theme.spacing.tooltip_max_width.min(self.bounds.width - 32.0);
+        let available_height = self.bounds.y + self.bounds.height - badge.y - badge.height - 20.0;
+        if width <= 24.0 || available_height <= 24.0 {
+            return None;
+        }
+        let height =
+            measure_text_box(detail, theme.typography.small.font_size, width - 24.0).1 + 24.0;
+        let visible_height = height.min(available_height);
+        let rect = Rect::new(
+            badge.x + badge.width - width,
+            badge.y + badge.height + 4.0,
+            width,
+            visible_height,
+        );
+        Some((rect, height - visible_height))
+    }
+
     fn control_strip_rect(&self) -> Rect {
         viewer_model::control_strip_rect(self.bounds)
     }
@@ -840,6 +890,7 @@ impl ViewerSurface {
 
     fn clear_interaction_state(&mut self) -> bool {
         let changed = self.hovered_control.is_some()
+            || self.status_detail_open
             || self.pressed_control.is_some()
             || self.hovered_zoom
             || self.pressed_zoom
@@ -859,6 +910,7 @@ impl ViewerSurface {
         self.hovered_preview_quality = false;
         self.pressed_preview_quality = false;
         self.open_dropdown = None;
+        self.status_detail_open = false;
         self.hovered_dropdown_index = None;
         self.pressed_dropdown_index = None;
         self.focused = false;
@@ -938,6 +990,25 @@ impl Widget for ViewerSurface {
                 }
             }
             UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
+                if self.status_detail.is_some()
+                    && self.should_paint_status_badge()
+                    && self.status_badge_rect(&current_theme()).contains(*position)
+                {
+                    self.focus_from_pointer(ctx);
+                    self.open_dropdown = None;
+                    self.status_detail_open = !self.status_detail_open;
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if self
+                    .status_detail_layout(&current_theme())
+                    .is_some_and(|(rect, _)| rect.contains(*position))
+                {
+                    return EventResult::Handled;
+                }
+                if std::mem::take(&mut self.status_detail_open) {
+                    ctx.request_repaint();
+                }
                 if let Some((dropdown, index)) = self.dropdown_item_at(*position) {
                     self.open_dropdown = Some(dropdown);
                     self.hovered_dropdown_index = Some(index);
@@ -1132,7 +1203,20 @@ impl Widget for ViewerSurface {
                 }
                 EventResult::Handled
             }
+            UiEvent::MouseWheel { delta, position, .. }
+                if let Some((rect, maximum)) = self.status_detail_layout(&current_theme())
+                    && rect.contains(*position) =>
+            {
+                self.status_detail_scroll =
+                    (self.status_detail_scroll - *delta * 24.0).clamp(0.0, maximum);
+                ctx.request_repaint();
+                EventResult::Handled
+            }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
+                if *key == KeyCode::Escape && std::mem::take(&mut self.status_detail_open) {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if *key == KeyCode::Escape
                     && (self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel)
                         || self
@@ -1167,15 +1251,7 @@ impl Widget for ViewerSurface {
             paint_focus_ring(ctx, self.bounds.inset(2.0, 2.0), spacing.radius_lg);
         }
         if self.should_paint_status_badge() {
-            let status_width = (measure_single_line(&self.status, typography.small.font_size).0
-                + 24.0)
-                .clamp(64.0, (self.bounds.width - 32.0).max(64.0));
-            let badge = Rect::new(
-                self.bounds.x + self.bounds.width - status_width - 16.0,
-                self.bounds.y + 9.0,
-                status_width,
-                24.0,
-            );
+            let badge = self.status_badge_rect(ctx.theme);
             let (badge_fill, badge_text) = status_badge_colors(self, ctx);
             ctx.encoder.draw_rect(badge, soft_border(colors.border), spacing.radius_sm);
             ctx.encoder
@@ -1361,6 +1437,26 @@ impl Widget for ViewerSurface {
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if let Some((rect, max_scroll)) = self.status_detail_layout(ctx.theme)
+            && let Some(detail) = &self.status_detail
+        {
+            let colors = &ctx.theme.colors;
+            let radius = ctx.theme.spacing.radius_md;
+            ctx.encoder.draw_rect(rect, colors.border, radius);
+            ctx.encoder.draw_rect(rect.inset(1.0, 1.0), colors.popover, radius);
+            ctx.push_clip(rect.inset(8.0, 8.0));
+            ctx.encoder.draw_text_box(
+                detail,
+                ctx.theme.typography.small.font_size,
+                Point::new(
+                    rect.x + 12.0,
+                    rect.y + 12.0 - self.status_detail_scroll.min(max_scroll),
+                ),
+                rect.width - 24.0,
+                colors.popover_foreground,
+            );
+            ctx.pop_clip();
+        }
         if self.open_dropdown.is_none() {
             self.overlay_viewport.set(None);
             return;
@@ -1417,6 +1513,21 @@ impl Widget for ViewerSurface {
 
     fn accessibility_bounds(&self) -> Option<Rect> {
         Some(self.bounds)
+    }
+
+    fn accessibility_virtual_children(&self) -> Vec<AccessibilityVirtualNode> {
+        if let Some(detail) = &self.status_detail
+            && self.should_paint_status_badge()
+        {
+            return vec![AccessibilityVirtualNode {
+                key: 1,
+                role: AccessibilityRole::Button,
+                name: format!("{}. {}", self.status, detail),
+                bounds: self.status_badge_rect(&current_theme()),
+                enabled: self.enabled,
+            }];
+        }
+        Vec::new()
     }
 }
 

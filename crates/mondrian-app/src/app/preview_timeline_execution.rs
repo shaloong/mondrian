@@ -355,6 +355,7 @@ pub(crate) fn collect_preview_timeline_picture_demands(
         &scratch,
         None,
         standalone_preview_heterogeneous_graph_budget(),
+        None,
     )
 }
 
@@ -433,6 +434,7 @@ pub(crate) fn collect_preview_timeline_picture_demands_with_programs(
     scratch: &RefCell<TimelineCompositeScratch>,
     author_snapshot: Option<PreparedVisualAuthorSnapshotIdentity>,
     heterogeneous_graph_budget: EffectGraphExecutionBudget,
+    mut auxiliary_asset: Option<&mut PreviewAuxiliaryAssetResolver<'_>>,
 ) -> Result<Vec<PreviewTimelinePictureDemand>, PreviewUnavailability> {
     let cancellation = ExecutionCancellationToken::new();
     let graph = PreviewTimelineGraph {
@@ -444,29 +446,95 @@ pub(crate) fn collect_preview_timeline_picture_demands_with_programs(
         author_snapshot,
         heterogeneous_graph_budget,
     };
-    let closure = prepare_preview_frame_closure(
-        graph,
+    let request = PreviewTimelineFrameRequest::new(
         sequence,
         sequences,
-        frame.max(0),
+        frame,
         target_resolution,
-        color_context,
         runtime_scale,
-        raster_requirement,
+        color_context,
+    )
+    .with_raster_requirement(raster_requirement);
+    let mut prepared = prepare_preview_timeline_sources(graph, &request)?;
+    let resolve_sources = auxiliary_asset.is_some()
+        && prepared
+            .demands
+            .iter()
+            .any(|demand| matches!(demand, PreparedPreviewSourceDemand::Auxiliary(_)));
+    let demands = if resolve_sources {
+        auxiliary_projection::prepare_sources(&mut prepared, graph, &request, &mut auxiliary_asset)
+            .map_err(|abort| match abort {
+                PreviewTimelineAbort::Unavailable(reason) => reason,
+                PreviewTimelineAbort::Pending { .. } => PreviewUnavailability::blocked(
+                    PreviewOutputStage::MediaResolution,
+                    "auxiliary source changed during prefetch planning",
+                ),
+            })?
+    } else {
+        std::mem::take(&mut prepared.demands)
+    };
+    let PreviewPreparationState::Sources(sources) = &prepared.state else {
+        unreachable!("prefetch resolves source metadata only");
+    };
+    let mut picture = Vec::new();
+    for demand in demands {
+        match demand {
+            PreparedPreviewSourceDemand::Media { request, .. } => {
+                picture.push(PreviewTimelinePictureDemand::Media(request))
+            }
+            PreparedPreviewSourceDemand::Auxiliary(request) if resolve_sources => {
+                let plan = sources.auxiliary.get(&request).ok_or_else(|| {
+                    PreviewUnavailability::blocked(
+                        PreviewOutputStage::MediaResolution,
+                        "active auxiliary source has no prefetched plan",
+                    )
+                })?;
+                if let Some(media) = &plan.media_request {
+                    picture.push(PreviewTimelinePictureDemand::Media(media.clone()));
+                }
+            }
+            PreparedPreviewSourceDemand::Auxiliary(request) => {
+                picture.push(PreviewTimelinePictureDemand::Auxiliary(request))
+            }
+            PreparedPreviewSourceDemand::BasicTitle(_) => {}
+        }
+    }
+    Ok(picture)
+}
+
+fn prepare_preview_timeline_sources(
+    graph: PreviewTimelineGraph<'_>,
+    request: &PreviewTimelineFrameRequest<'_>,
+) -> Result<PreviewTimelinePreparation, PreviewUnavailability> {
+    let closure = prepare_preview_frame_closure(
+        graph,
+        request.root_sequence,
+        request.sequences,
+        request.frame.max(0),
+        request.target_resolution,
+        request.color_context.clone(),
+        request.runtime_scale,
+        request.raster_requirement,
     )?;
-    collect_prepared_visual_source_demands(&closure).map(|demands| {
-        demands
-            .into_iter()
-            .filter_map(|demand| match demand {
-                PreparedPreviewSourceDemand::Media { request, .. } => {
-                    Some(PreviewTimelinePictureDemand::Media(request))
-                }
-                PreparedPreviewSourceDemand::Auxiliary(request) => {
-                    Some(PreviewTimelinePictureDemand::Auxiliary(request))
-                }
-                PreparedPreviewSourceDemand::BasicTitle(_) => None,
-            })
-            .collect()
+    let demands = collect_prepared_visual_source_demands(&closure)?;
+    let frozen_programs = closure
+        .nodes()
+        .iter()
+        .map(|node| (node.sequence_id(), Arc::clone(node.program())))
+        .collect();
+    let closure = Arc::new(closure);
+    Ok(PreviewTimelinePreparation {
+        original_closure: Arc::clone(&closure),
+        closure,
+        frozen_programs,
+        unavailable_auxiliary: Vec::new(),
+        projection_context: None,
+        demands,
+        state: PreviewPreparationState::Sources(PreviewSourcePreparation::default()),
+        author_snapshot: graph.author_snapshot,
+        graph_budget: graph.heterogeneous_graph_budget,
+        runtime_scale: request.runtime_scale,
+        raster_requirement: request.raster_requirement,
     })
 }
 
@@ -585,16 +653,8 @@ where
         };
     }
     let preparation = preparation.filter(|prepared| prepared.matches(&request, graph));
-    let projection_request = request.clone();
-    let PreviewTimelineFrameRequest {
-        root_sequence: sequence,
-        sequences,
-        frame,
-        target_resolution,
-        runtime_scale,
-        raster_requirement,
-        color_context,
-    } = request;
+    let sequence = request.root_sequence;
+    let target_resolution = request.target_resolution;
     let PreviewTimelineSourceAdapters {
         media_frame,
         title_frame,
@@ -604,44 +664,10 @@ where
     let scratch = graph.scratch;
     let mut preparation = match preparation {
         Some(prepared) => prepared,
-        None => {
-            let closure = match prepare_preview_frame_closure(
-                graph,
-                sequence,
-                sequences,
-                frame.max(0),
-                target_resolution,
-                color_context.clone(),
-                runtime_scale,
-                raster_requirement,
-            ) {
-                Ok(closure) => closure,
-                Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
-            };
-            let demands = match collect_prepared_visual_source_demands(&closure) {
-                Ok(demands) => demands,
-                Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
-            };
-            let frozen_programs = closure
-                .nodes()
-                .iter()
-                .map(|node| (node.sequence_id(), Arc::clone(node.program())))
-                .collect();
-            let closure = Arc::new(closure);
-            Box::new(PreviewTimelinePreparation {
-                original_closure: Arc::clone(&closure),
-                closure,
-                frozen_programs,
-                unavailable_auxiliary: Vec::new(),
-                projection_context: None,
-                demands,
-                state: PreviewPreparationState::Sources(PreviewSourcePreparation::default()),
-                author_snapshot: graph.author_snapshot,
-                graph_budget: graph.heterogeneous_graph_budget,
-                runtime_scale,
-                raster_requirement,
-            })
-        }
+        None => match prepare_preview_timeline_sources(graph, &request) {
+            Ok(prepared) => Box::new(prepared),
+            Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
+        },
     };
     if let PreviewPreparationState::Executing(owner) = &preparation.state {
         let work = Arc::clone(&owner.work);
@@ -650,7 +676,7 @@ where
     let active_demands = match auxiliary_projection::prepare_sources(
         &mut preparation,
         graph,
-        &projection_request,
+        &request,
         &mut auxiliary_asset,
     ) {
         Ok(demands) => demands,
@@ -1254,28 +1280,34 @@ impl PreparedPreviewTimelineWork {
         let Some(mut elements) = elements else {
             return PreviewTimelineResolution::Empty;
         };
-        if let Some(context) = &work.projection_context
-            && !elements.is_empty()
-        {
-            let first = elements.remove(0);
-            elements.insert(
-                0,
-                ResolvedPreviewElement::WithAuxiliary {
-                    element: Box::new(first),
-                    inputs: vec![super::preview_auxiliary::ResolvedPreviewAuxiliaryInputs {
-                        graph: mondrian_effects::identity_compiled_effect_graph()
-                            .expect("built-in identity compiles"),
-                        primary_extent: EffectFrameExtent::new(
-                            target_resolution.width,
-                            target_resolution.height,
-                        ),
-                        primary_sampling: sampling,
-                        sources: Box::new([]),
-                        projection_context: Some(Arc::clone(context)),
-                    }]
-                    .into_boxed_slice(),
-                },
-            );
+        if let Some(context) = &work.projection_context {
+            let binding = elements.iter_mut().find_map(|element| match element {
+                ResolvedPreviewElement::WithAuxiliary { inputs, .. } => inputs.first_mut(),
+                _ => None,
+            });
+            if let Some(binding) = binding {
+                binding.projection_context = Some(Arc::clone(context));
+            } else if !elements.is_empty() {
+                let first = elements.remove(0);
+                elements.insert(
+                    0,
+                    ResolvedPreviewElement::WithAuxiliary {
+                        element: Box::new(first),
+                        inputs: vec![super::preview_auxiliary::ResolvedPreviewAuxiliaryInputs {
+                            graph: mondrian_effects::identity_compiled_effect_graph()
+                                .expect("built-in identity compiles"),
+                            primary_extent: EffectFrameExtent::new(
+                                target_resolution.width,
+                                target_resolution.height,
+                            ),
+                            primary_sampling: sampling,
+                            sources: Box::new([]),
+                            projection_context: Some(Arc::clone(context)),
+                        }]
+                        .into_boxed_slice(),
+                    },
+                );
+            }
         }
         let resolved_visual_identity = if work.projection_context.is_some() {
             super::preview_render_cache_identity::canonical_resolved_node_materialization(&elements)

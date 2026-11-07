@@ -81,6 +81,15 @@ fn an_asset_backed_image_matte_renders_in_preview() {
         "original source charge includes its lazy working cache"
     );
     let required = resolved_auxiliary_working_bytes(&resolved.plan.elements).unwrap();
+    let metadata_bytes =
+        crate::app::preview_auxiliary::resolved_auxiliary_projection(&resolved.plan.elements)
+            .expect("production Preview retains source facts")
+            .bytes;
+    crate::app::preview_auxiliary::admit_resolved_auxiliary_projection(
+        &resolved.plan.elements,
+        &mut runtime.frame_store.borrow_mut(),
+    )
+    .unwrap();
     let temporary =
         reserve_auxiliary_working_set(&mut runtime.frame_store.borrow_mut(), required).unwrap();
     let result_reservation = runtime.frame_store.borrow_mut().reserve_working_result(48).unwrap();
@@ -116,7 +125,7 @@ fn an_asset_backed_image_matte_renders_in_preview() {
     drop(temporary);
     assert_eq!(
         runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
-        48
+        48 + metadata_bytes
     );
     drop(output);
     drop(result_resource);
@@ -157,9 +166,9 @@ fn auxiliary_cache_recovery(preview_fallback: bool) {
     state.test_set_sequence(Some(auxiliary_matte_sequence(asset)));
     state.seek(0).unwrap();
     let runtime = PreviewProductionRuntime::<()>::try_new_boxed().unwrap();
-    if preview_fallback {
+    if !preview_fallback {
         *runtime.visual_programs.borrow_mut() =
-            mondrian_renderer::PreparedVisualProgramCache::for_auxiliary_preview();
+            mondrian_renderer::PreparedVisualProgramCache::default();
     }
     runtime.synchronize_transport_intent(state.preview_transport_intent());
     let snapshot = state.preview_execution_snapshot(Instant::now());
@@ -169,20 +178,33 @@ fn auxiliary_cache_recovery(preview_fallback: bool) {
         .settings
         .root_program_color_context(state.project_color_environment())
         .unwrap();
+    let (generation_key, width, height, display_color_space) = runtime
+        .resolve_preview_generation_contract(&snapshot, snapshot.authoring().unwrap(), sequence)
+        .unwrap();
+    runtime.activate_preview_generation(generation_key);
     let key = FrameEvaluationKey {
         sequence_id: sequence.id,
         sequence_revision: sequence.revision,
         author_generation: snapshot.authoring().unwrap().author_generation(),
         frame: 0,
-        width: 3,
-        height: 1,
+        width,
+        height,
         runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
         raster_requirement: PreviewRasterRequirement::Viewer,
-        display_color_space: ColorSpace::Srgb,
+        display_color_space,
         display_contract_identity: None,
     };
     let acquire = || {
-        runtime.acquire_frame_evaluation(&snapshot, &state, sequence, 0, 3, 1, color.clone(), key)
+        runtime.acquire_frame_evaluation(
+            &snapshot,
+            &state,
+            sequence,
+            0,
+            width,
+            height,
+            color.clone(),
+            key,
+        )
     };
     let deadline = Instant::now() + Duration::from_secs(20);
     let ready = || loop {
@@ -258,6 +280,24 @@ fn auxiliary_cache_recovery(preview_fallback: bool) {
             panic!("unchanged missing fact remains reusable");
         };
         assert!(Arc::ptr_eq(&missing, &hit));
+        let advisory =
+            runtime.current_auxiliary_advisory(&snapshot).expect("current missing source");
+        assert_eq!(advisory.notices.len(), 1);
+        assert_eq!(advisory.notices[0].sequence_id, sequence.id);
+        let adaptation = RenderMonitorAdaptation::new(
+            color.output_color_space().color().unwrap(),
+            display_color_space,
+            color.engine().clone(),
+        )
+        .unwrap();
+        runtime.register_gpu_output(missing.output_key.with_monitor_adaptation(&adaptation), ());
+        assert!(matches!(
+            runtime.presentation(
+                state.preview_frame_execution_request(Instant::now()),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            PreviewPresentationState::Ready(_)
+        ));
         Some(missing)
     } else {
         let FrameResolutionOutcome::Unavailable(reason) = acquire() else {
@@ -282,7 +322,20 @@ fn auxiliary_cache_recovery(preview_fallback: bool) {
         restored_info,
     );
     assert_eq!(restored_asset, asset);
+    if preview_fallback {
+        assert!(
+            !matches!(
+                runtime.presentation(
+                    state.preview_frame_execution_request(Instant::now()),
+                    PreviewPresentationCarrier::ExternalGpu,
+                ),
+                PreviewPresentationState::Ready(_)
+            ),
+            "restored source must retire the visible fallback artifact"
+        );
+    }
     let restored = ready();
+    assert!(runtime.current_auxiliary_advisory(&snapshot).is_none());
     assert!(!Arc::ptr_eq(&first, &restored));
     assert_ne!(first.output_key, restored.output_key);
     if let Some(missing) = missing_identity {
@@ -291,4 +344,111 @@ fn auxiliary_cache_recovery(preview_fallback: bool) {
     }
     assert_eq!(serde_json::to_value(sequence).unwrap(), author);
     runtime.shutdown_and_wait();
+}
+
+#[test]
+fn auxiliary_current_advisory_survives_ticketless_work_and_retires_with_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = AssetLibrary::open(directory.path().join("library")).unwrap();
+    let mut state = AppState::new();
+    pin_standard_execution_resources(&mut state);
+    state.test_set_asset_library(Some(library));
+    state.test_set_sequence(Some(auxiliary_matte_sequence(AssetId::new())));
+    state.play().unwrap();
+    let runtime = crate::app_ui::preview::WindowPreviewAdapter::new_without_workers_for_test();
+    let now = Instant::now();
+    let current = state.preview_execution_snapshot(now);
+    runtime.synchronize_transport_intent(current.transport().intent());
+    let successor = state.preview_successor_execution_request(now).unwrap();
+    let sequence = state.active_sequence().unwrap();
+    let acquire = |snapshot: &PreviewExecutionSnapshot<'_>| {
+        let authoring = snapshot.authoring().unwrap();
+        let (_, width, height, display_color_space) = runtime
+            .resolve_preview_generation_contract(snapshot, authoring, sequence)
+            .unwrap();
+        let frame = snapshot.transport().current_frame();
+        runtime.acquire_frame_evaluation(
+            snapshot,
+            &state,
+            sequence,
+            frame,
+            width,
+            height,
+            sequence
+                .settings
+                .root_program_color_context(state.project_color_environment())
+                .unwrap(),
+            FrameEvaluationKey {
+                sequence_id: sequence.id,
+                sequence_revision: sequence.revision,
+                author_generation: authoring.author_generation(),
+                frame,
+                width,
+                height,
+                display_color_space,
+                runtime_scale: runtime.execution_scale(snapshot),
+                raster_requirement: runtime.raster_requirement.get(),
+                display_contract_identity: runtime.display_snapshot_identity.get(),
+            },
+        )
+    };
+    assert!(matches!(
+        acquire(successor.snapshot()),
+        FrameResolutionOutcome::Ready(_)
+    ));
+    assert!(runtime.current_auxiliary_advisory(&current).is_none());
+    assert!(matches!(
+        acquire(&current),
+        FrameResolutionOutcome::Ready(_)
+    ));
+    let owner = runtime.current_auxiliary_advisory(&current).unwrap();
+    let frame = mondrian_ui_widgets::ViewerFrameImage::new(
+        "auxiliary-advisory-test",
+        3,
+        1,
+        mondrian_ui_core::RasterImageColorSpace::Srgb,
+        vec![0u8; 12],
+    )
+    .unwrap();
+    let ready = crate::app_ui::panels::ViewerPreviewState::Ready(
+        mondrian_ui_widgets::ViewerFrameContent::Raster(frame),
+    );
+    let window = crate::app_ui::preview::WindowPreviewSnapshot::new(&ready, &runtime);
+    for (locale, summary, reason) in [
+        (
+            crate::app_ui::localization::AppUiLocale::EnUs,
+            "One effect skipped",
+            "The input source is unavailable.",
+        ),
+        (
+            crate::app_ui::localization::AppUiLocale::ZhCn,
+            "已跳过",
+            "输入源不可用。",
+        ),
+    ] {
+        let localizer = crate::app_ui::localization::Localizer::new(locale).unwrap();
+        let model = crate::app_ui::panels::ViewerPanelModel::from_app_state_with_preview_and_locale(
+            &state,
+            Some(&window),
+            Some(&localizer),
+        );
+        assert!(model.status.contains(summary), "{}", model.status);
+        let detail = model.status_detail.unwrap();
+        assert!(
+            detail.contains(reason) && detail.contains("Picture source"),
+            "{detail}"
+        );
+    }
+    assert!(matches!(
+        acquire(successor.snapshot()),
+        FrameResolutionOutcome::Ready(_)
+    ));
+    assert!(runtime.current_auxiliary_advisory(successor.snapshot()).is_none());
+    runtime.evaluation_working_set.borrow_mut().clear();
+    assert!(Arc::ptr_eq(
+        &owner,
+        &runtime.current_auxiliary_advisory(&current).unwrap()
+    ));
+    runtime.invalidate_preview_generation();
+    assert!(runtime.current_auxiliary_advisory(&current).is_none());
 }

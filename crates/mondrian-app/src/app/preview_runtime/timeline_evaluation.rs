@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::app::preview_timeline_execution::auxiliary_projection::PreviewAuxiliaryProjectionContext;
 use crate::app::preview_timeline_execution::{
     resolve_preview_timeline_with_programs_and_observer, PreparedPreviewTimelineWork,
     PreviewTimelineExecutionBinding, PreviewTimelineExecutionFact, PreviewTimelineFrameRequest,
@@ -10,6 +11,20 @@ use crate::app::preview_timeline_execution::{
     PreviewTimelineResolution, PreviewTimelineSourceAdapters, PreviewTimelineTitleRequest,
     PreviewTimelineWorkPoll,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct AuxiliaryAdvisoryScope {
+    key: FrameEvaluationKey,
+    session: AuthoringSessionId,
+    intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    generation: u64,
+}
+
+pub(super) struct CurrentAuxiliaryAdvisory {
+    scope: AuxiliaryAdvisoryScope,
+    output_key: PreviewOutputKey,
+    context: Arc<PreviewAuxiliaryProjectionContext>,
+}
 
 /// Reconstruct the media timeline dependency for consumers that keep
 /// branch-local pending handling.
@@ -91,12 +106,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         evaluation_key: FrameEvaluationKey,
     ) -> FrameResolutionOutcome {
         self.synchronize_visual_program_authoring_session(snapshot);
+        let advisory_scope = self.auxiliary_advisory_scope(snapshot, evaluation_key);
+        if advisory_scope.is_some() {
+            self.current_auxiliary_advisory.borrow_mut().take();
+        }
         let clock = self.evaluation_working_set_clock.get();
         let cached = self.evaluation_working_set.borrow_mut().get(evaluation_key, clock);
         if let Some(evaluation) = cached {
             if self.auxiliary_evaluation_sources_are_current(snapshot, &evaluation) {
                 bump(&self.metrics.timeline_evaluation_hits);
                 self.request_timeline_render_cache_lookup(&evaluation);
+                self.publish_auxiliary_advisory(advisory_scope, &evaluation);
                 return FrameResolutionOutcome::Ready(evaluation);
             }
             self.evaluation_working_set.borrow_mut().invalidate_key(evaluation_key);
@@ -206,6 +226,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     self.evaluation_working_set_clock.set(clock.saturating_add(1));
                 }
                 self.request_timeline_render_cache_lookup(&evaluation);
+                self.publish_auxiliary_advisory(advisory_scope, &evaluation);
                 FrameResolutionOutcome::Ready(evaluation)
             }
             PreviewTimelineResolution::Empty => FrameResolutionOutcome::Empty,
@@ -240,6 +261,111 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
     }
 
+    fn auxiliary_advisory_scope(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        key: FrameEvaluationKey,
+    ) -> Option<AuxiliaryAdvisoryScope> {
+        let transport = snapshot.transport();
+        if transport.is_speculative_preparation()
+            || self.transport_epoch.get() != Some(transport.epoch())
+            || key.frame != transport.current_frame().max(0)
+        {
+            return None;
+        }
+        let authoring = snapshot.authoring()?;
+        let sequence = authoring.active_sequence()?;
+        if key.sequence_id != sequence.id
+            || key.sequence_revision != sequence.revision
+            || key.author_generation != authoring.author_generation()
+        {
+            return None;
+        }
+        Some(AuxiliaryAdvisoryScope {
+            key,
+            session: authoring.session_id(),
+            intent: transport.playback_intent(),
+            generation: self.execution.borrow().generation(),
+        })
+    }
+
+    fn publish_auxiliary_advisory(
+        &self,
+        scope: Option<AuxiliaryAdvisoryScope>,
+        evaluation: &ResolvedFrameEvaluation,
+    ) {
+        let Some(scope) = scope.filter(|_| evaluation.output_key.requires_auxiliary_revalidation)
+        else {
+            return;
+        };
+        if let Some(context) =
+            crate::app::preview_auxiliary::resolved_auxiliary_projection(&evaluation.elements)
+        {
+            self.current_auxiliary_advisory.replace(Some(CurrentAuxiliaryAdvisory {
+                scope,
+                output_key: evaluation.output_key.clone(),
+                context: Arc::clone(context),
+            }));
+        }
+    }
+
+    pub(crate) fn current_auxiliary_advisory(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+    ) -> Option<Arc<PreviewAuxiliaryProjectionContext>> {
+        let current = self.current_auxiliary_advisory.borrow();
+        let advisory = current.as_ref().filter(|advisory| !advisory.context.notices.is_empty())?;
+        let key = advisory.scope.key;
+        if self.auxiliary_advisory_scope(snapshot, key)? != advisory.scope {
+            return None;
+        }
+        let authoring = snapshot.authoring()?;
+        let (_, width, height, color_space) = self
+            .resolve_preview_generation_contract(snapshot, authoring, authoring.active_sequence()?)
+            .ok()?;
+        (key.width == width
+            && key.height == height
+            && key.display_color_space == color_space
+            && key.display_contract_identity == self.display_snapshot_identity.get()
+            && key.raster_requirement == self.raster_requirement.get()
+            && key.runtime_scale == self.execution_scale(snapshot))
+        .then(|| Arc::clone(&advisory.context))
+    }
+
+    /// Check source facts for a retained static GPU artifact using its admitted
+    /// metadata. This can reuse the artifact after decoded inputs have retired.
+    pub(super) fn can_reuse_auxiliary_gpu_output(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        output_key: &PreviewOutputKey,
+        adaptation: &RenderMonitorAdaptation,
+    ) -> bool {
+        let current = self.current_auxiliary_advisory.borrow();
+        let Some(advisory) = current.as_ref() else {
+            return false;
+        };
+        let (tap, settings) = self.viewer_signal_monitoring.get();
+        self.auxiliary_advisory_scope(snapshot, advisory.scope.key) == Some(advisory.scope)
+            && advisory
+                .output_key
+                .with_monitor_adaptation(adaptation)
+                .with_signal_monitoring(tap, settings)
+                == *output_key
+            && self.auxiliary_projection_sources_are_current(snapshot, &advisory.context)
+    }
+
+    fn auxiliary_projection_sources_are_current(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        context: &PreviewAuxiliaryProjectionContext,
+    ) -> bool {
+        context.available_queries.iter().all(|(request, expected)| {
+            matches!(self.resolve_auxiliary_asset(snapshot, request), Ok(current) if &current == expected)
+        }) && context.unavailable_queries.iter().all(|request| {
+            matches!(self.resolve_auxiliary_asset(snapshot, request), Err(reason) if reason.permits_missing_source_fallback())
+        })
+    }
+
     fn request_timeline_render_cache_lookup(&self, evaluation: &ResolvedFrameEvaluation) {
         if let Some(identity) = evaluation.render_cache_identity {
             let _ = self
@@ -254,6 +380,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         snapshot: &PreviewExecutionSnapshot<'_>,
         evaluation: &ResolvedFrameEvaluation,
     ) -> bool {
+        if let Some(context) =
+            crate::app::preview_auxiliary::resolved_auxiliary_projection(&evaluation.elements)
+        {
+            return self.auxiliary_projection_sources_are_current(snapshot, context);
+        }
         let mut bindings = Vec::new();
         for element in evaluation.elements.iter() {
             crate::app::preview_auxiliary::collect_auxiliary_bindings(element, &mut bindings);
@@ -266,16 +397,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     .or_insert_with(|| self.resolve_auxiliary_asset(snapshot, &source.request));
                 if !matches!(current, Ok(plan) if plan == &source.plan) {
                     return false;
-                }
-            }
-            if let Some(context) = &binding.projection_context {
-                for request in &context.unavailable_queries {
-                    let current = observed
-                        .entry(request)
-                        .or_insert_with(|| self.resolve_auxiliary_asset(snapshot, request));
-                    if !matches!(current, Err(reason) if reason.permits_missing_source_fallback()) {
-                        return false;
-                    }
                 }
             }
         }

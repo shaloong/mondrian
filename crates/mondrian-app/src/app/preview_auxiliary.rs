@@ -100,6 +100,21 @@ pub(crate) fn collect_auxiliary_bindings<'a>(
     }
 }
 
+pub(crate) fn resolved_auxiliary_projection(
+    elements: &[super::preview_viewer_plan::ResolvedPreviewElement],
+) -> Option<
+    &Arc<
+        super::preview_timeline_execution::auxiliary_projection::PreviewAuxiliaryProjectionContext,
+    >,
+> {
+    elements.iter().find_map(|element| match element {
+        super::preview_viewer_plan::ResolvedPreviewElement::WithAuxiliary { inputs, .. } => {
+            inputs.iter().find_map(|input| input.projection_context.as_ref())
+        }
+        _ => None,
+    })
+}
+
 pub(crate) fn resolved_auxiliary_working_bytes(
     elements: &[super::preview_viewer_plan::ResolvedPreviewElement],
 ) -> Result<usize, super::preview_cpu_execution::PreviewCpuExecutionError> {

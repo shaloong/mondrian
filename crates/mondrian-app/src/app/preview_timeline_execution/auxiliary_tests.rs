@@ -383,9 +383,12 @@ fn auxiliary_nested_work_reuses_its_reservation_and_keeps_it_until_execution_ret
     );
     let required = 2 * 4 * 2 * 16 + 2 * 16;
     assert_eq!(work.auxiliary_preparation_bytes, required);
+    let metadata = work.projection_context.as_ref().expect("nested source facts");
+    assert_eq!(metadata.available_queries.len(), 1);
+    let total_required = required + metadata.bytes;
     assert!(work.validate_auxiliary_working_set().is_err());
     let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
-        viewer_byte_budget: required,
+        viewer_byte_budget: total_required,
         ..Default::default()
     });
     work.admit_auxiliary_working_set(&mut store).unwrap();
@@ -393,7 +396,7 @@ fn auxiliary_nested_work_reuses_its_reservation_and_keeps_it_until_execution_ret
     work.validate_auxiliary_working_set().unwrap();
     assert_eq!(
         store.diagnostics().viewer_aggregate_reserved_bytes,
-        required,
+        total_required,
         "polling never reserves twice"
     );
     let output = work.execute(
@@ -416,7 +419,7 @@ fn auxiliary_nested_work_reuses_its_reservation_and_keeps_it_until_execution_ret
     assert!(!work.is_active());
     assert_eq!(
         store.diagnostics().viewer_aggregate_reserved_bytes,
-        required,
+        total_required,
         "retiring interest cannot free a still-owned worker charge"
     );
     drop(work);

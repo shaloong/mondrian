@@ -192,6 +192,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn retire_all_preview_work(&self, preserve_output: bool) -> (u64, u64) {
+        self.current_auxiliary_advisory.borrow_mut().take();
         // Resolved CPU evaluations also carry old Current protection leases.
         // Retire this reuse owner with the transport/device work, otherwise
         // the next Priming window can wait for capacity held only by an

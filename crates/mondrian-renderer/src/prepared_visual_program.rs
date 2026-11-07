@@ -12,14 +12,14 @@ use mondrian_core::timeline_data::{
     TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    AssetId, ClipId, FramePosition, FrameRounding, GradeDefinitionId, MondrianError, Rational,
-    Resolution, Result, SequenceId, SequenceRevision, TimelineTime, TimelineTimeRange,
-    VideoTransitionId,
+    AssetId, ClipId, FramePosition, FrameRounding, GradeDefinitionId, GradeGraphNodeId,
+    MondrianError, Rational, Resolution, Result, SequenceId, SequenceRevision, TimelineTime,
+    TimelineTimeRange, VideoTransitionId,
 };
 use mondrian_effects::{
     effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
     EffectExecutionEnvelope, EffectExecutionSession, EffectFrameContext, EffectProjectGeometry,
-    EffectTemporalExecutionRequest, EffectTemporalSpan, LutPreparationCache,
+    EffectStageOrigin, EffectTemporalExecutionRequest, EffectTemporalSpan, LutPreparationCache,
     LutPreparationCacheConfig, PreparedEffectProgram, PreparedEffectTemporalExecution,
     PreparedGradeGraph,
 };
@@ -35,7 +35,60 @@ pub const DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_CAPACITY: usize = 64;
 pub const DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VISUAL_DEFINITION_BIND_RETRIES: usize = 32;
 
-type PreparedClipGradeSegments = (Vec<PreparedGradeGraph>, Vec<PreparedGradeGraph>);
+/// Scope of one authored grade assignment in the visual program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparedGradeAssignmentScope {
+    /// Grade applied before a group's clips.
+    GroupPreClip,
+    /// Grade assigned directly to a clip.
+    Clip,
+    /// Grade applied after a group's clips.
+    GroupPostClip,
+    /// Grade assigned to the timeline output.
+    Timeline,
+}
+
+/// Authored consumer location validated against a compiled stage's owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PreparedAuxiliaryConsumerLocation {
+    /// Effect in the owning clip's effect stack.
+    ClipEffect,
+    /// Node in one specific grade assignment.
+    Grade {
+        /// Assignment in this placement's processing order.
+        scope: PreparedGradeAssignmentScope,
+        /// Sequence-owned shared definition.
+        definition: GradeDefinitionId,
+        /// Node that owns the effect in the active grade graph.
+        node: GradeGraphNodeId,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClipGradeAssignments {
+    pre: Option<GradeDefinitionId>,
+    clip: Option<GradeDefinitionId>,
+    post: Option<GradeDefinitionId>,
+}
+
+impl ClipGradeAssignments {
+    fn after(self) -> impl Iterator<Item = (PreparedGradeAssignmentScope, GradeDefinitionId)> {
+        [
+            (PreparedGradeAssignmentScope::Clip, self.clip),
+            (PreparedGradeAssignmentScope::GroupPostClip, self.post),
+        ]
+        .into_iter()
+        .filter_map(|(scope, id)| Some((scope, id?)))
+    }
+}
+
+type PreparedClipGradeSegments = (
+    Vec<PreparedGradeGraph>,
+    Vec<PreparedGradeGraph>,
+    ClipGradeAssignments,
+);
 type PreparedGradeBlocker = (Arc<str>, PreparedVisualBlockerRetry);
 
 fn prepared_clip_grade_segments(
@@ -46,11 +99,11 @@ fn prepared_clip_grade_segments(
     let group = clip
         .grade_group
         .and_then(|id| sequence.grade_groups.iter().find(|group| group.id == id));
-    let before_ids = group.into_iter().filter_map(|group| group.pre_clip_grade);
-    let after_ids = clip
-        .grade
-        .into_iter()
-        .chain(group.into_iter().filter_map(|group| group.post_clip_grade));
+    let assignments = ClipGradeAssignments {
+        pre: group.and_then(|group| group.pre_clip_grade),
+        clip: clip.grade,
+        post: group.and_then(|group| group.post_clip_grade),
+    };
     let resolve = |id| match grades.get(&id) {
         Some(PreparedSharedGrade::Ready(grade)) => Ok(grade.clone()),
         Some(PreparedSharedGrade::Blocked { reason, retry }) => Err((Arc::clone(reason), *retry)),
@@ -60,8 +113,16 @@ fn prepared_clip_grade_segments(
         )),
     };
     Ok((
-        before_ids.map(resolve).collect::<std::result::Result<Vec<_>, _>>()?,
-        after_ids.map(resolve).collect::<std::result::Result<Vec<_>, _>>()?,
+        assignments
+            .pre
+            .into_iter()
+            .map(resolve)
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        assignments
+            .after()
+            .map(|(_, id)| resolve(id))
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        assignments,
     ))
 }
 
@@ -237,6 +298,7 @@ enum PreparedClipEffects {
     Ready {
         program: PreparedEffectProgram,
         author_fingerprint: [u8; 32],
+        grade_assignments: ClipGradeAssignments,
     },
     Blocked {
         reason: Arc<str>,
@@ -440,6 +502,7 @@ pub struct PreparedVisualProgram {
     schedule: Arc<PreparedVisualSchedule>,
     clip_effects: HashMap<ClipId, PreparedClipEffects>,
     timeline_grade: PreparedTimelineGrade,
+    timeline_grade_definition: Option<GradeDefinitionId>,
     transitions: HashMap<VideoTransitionId, PreparedVisualTransition>,
     diagnostics: PreparedVisualProgramDiagnostics,
     retained_bytes_estimate: usize,
@@ -635,7 +698,7 @@ impl PreparedVisualProgram {
             sequence.video_tracks.iter().filter(|track| track.is_visible && !track.is_muted)
         {
             for clip in track.clips.iter().filter(|clip| !clip.is_disabled) {
-                let (grade_before, grade_after) =
+                let (grade_before, grade_after, grade_assignments) =
                     match prepared_clip_grade_segments(sequence, clip, &prepared_grades) {
                         Ok(segments) => segments,
                         Err((reason, retry)) => {
@@ -699,6 +762,7 @@ impl PreparedVisualProgram {
                         PreparedClipEffects::Ready {
                             program,
                             author_fingerprint: previous_fingerprint,
+                            ..
                         } if *previous_fingerprint == author_fingerprint
                             && program.frame_context() == frame_context
                             && !program.has_external_dependencies() =>
@@ -726,7 +790,11 @@ impl PreparedVisualProgram {
                 let prepared = match result {
                     Ok(program) => {
                         prepared_clips += 1;
-                        PreparedClipEffects::Ready { program, author_fingerprint }
+                        PreparedClipEffects::Ready {
+                            program,
+                            author_fingerprint,
+                            grade_assignments,
+                        }
                     }
                     Err(error) => {
                         blocked_clips += 1;
@@ -813,6 +881,7 @@ impl PreparedVisualProgram {
             schedule,
             clip_effects,
             timeline_grade,
+            timeline_grade_definition: sequence.timeline_grade,
             transitions,
             diagnostics: PreparedVisualProgramDiagnostics {
                 sequence_id: sequence.id,
@@ -1115,6 +1184,56 @@ impl PreparedVisualProgram {
             }
         };
         Ok(effect_program)
+    }
+
+    /// Find the authored target of a Preview advisory for this exact placement
+    /// or for the Timeline Grade when the placement is absent.
+    pub fn auxiliary_consumer_location(
+        &self,
+        placement: Option<TimelineClipExecutionRef>,
+        stage: &mondrian_effects::CompiledEffectStageBinding,
+    ) -> Option<PreparedAuxiliaryConsumerLocation> {
+        stage.auxiliary_preview_fallback()?;
+        let (scope, definition, node) = if let Some(placement) = placement {
+            self.schedule.clip_content(placement).ok()?;
+            let PreparedClipEffects::Ready { program, grade_assignments, .. } =
+                self.clip_effects.get(&placement.clip_id)?
+            else {
+                return None;
+            };
+            match program.stage_origin(stage)? {
+                EffectStageOrigin::Stack { .. } => {
+                    return Some(PreparedAuxiliaryConsumerLocation::ClipEffect)
+                }
+                EffectStageOrigin::BeforeGrade { assignment: 0, node } => (
+                    PreparedGradeAssignmentScope::GroupPreClip,
+                    grade_assignments.pre?,
+                    node,
+                ),
+                EffectStageOrigin::AfterGrade { assignment, node } => {
+                    let (scope, definition) = grade_assignments.after().nth(assignment)?;
+                    (scope, definition, node)
+                }
+                EffectStageOrigin::GradeLocal { .. } | EffectStageOrigin::BeforeGrade { .. } => {
+                    return None
+                }
+            }
+        } else {
+            let PreparedTimelineGrade::Ready(program) = &self.timeline_grade else {
+                return None;
+            };
+            let EffectStageOrigin::AfterGrade { assignment: 0, node } =
+                program.stage_origin(stage)?
+            else {
+                return None;
+            };
+            (
+                PreparedGradeAssignmentScope::Timeline,
+                self.timeline_grade_definition?,
+                node,
+            )
+        };
+        Some(PreparedAuxiliaryConsumerLocation::Grade { scope, definition, node })
     }
 
     pub(crate) fn temporal_frame_seed_on_grid(

@@ -123,6 +123,8 @@ pub(crate) struct PreviewOutputKey {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) plan_identity: PreviewSemanticIdentity,
+    /// The picture's auxiliary source facts must be checked before reuse.
+    pub(crate) requires_auxiliary_revalidation: bool,
 }
 
 /// Exact running-transport coordinate proved by one Viewer execution turn.
@@ -186,7 +188,13 @@ impl PreviewOutputKey {
         height: u32,
         plan_identity: PreviewSemanticIdentity,
     ) -> Self {
-        Self { sequence_id, width, height, plan_identity }
+        Self {
+            sequence_id,
+            width,
+            height,
+            plan_identity,
+            requires_auxiliary_revalidation: false,
+        }
     }
 
     /// Derive the monitor-adapted identity used by final Viewer presentation.
@@ -209,12 +217,10 @@ impl PreviewOutputKey {
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.monitor-output.v1");
         self.plan_identity.hash(&mut builder);
         adaptation.hash(&mut builder);
-        Self::new(
-            self.sequence_id,
-            self.width,
-            self.height,
-            builder.finish_identity(),
-        )
+        Self {
+            plan_identity: builder.finish_identity(),
+            ..self.clone()
+        }
     }
 
     /// Derive the final Viewer presentation identity for active signal warnings.
@@ -234,12 +240,10 @@ impl PreviewOutputKey {
         self.plan_identity.hash(&mut builder);
         tap.hash(&mut builder);
         settings.hash(&mut builder);
-        Self::new(
-            self.sequence_id,
-            self.width,
-            self.height,
-            builder.finish_identity(),
-        )
+        Self {
+            plan_identity: builder.finish_identity(),
+            ..self.clone()
+        }
     }
 
     /// Bind a semantic plan identity to one concrete non-reusable execution.
@@ -248,12 +252,10 @@ impl PreviewOutputKey {
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.execution-output.v1");
         self.plan_identity.hash(&mut builder);
         candidate_id.hash(&mut builder);
-        Self::new(
-            self.sequence_id,
-            self.width,
-            self.height,
-            builder.finish_identity(),
-        )
+        Self {
+            plan_identity: builder.finish_identity(),
+            ..self.clone()
+        }
     }
 }
 

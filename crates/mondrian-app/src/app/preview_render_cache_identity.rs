@@ -131,7 +131,7 @@ pub(crate) fn canonical_resolved_node_materialization(
         match element {
             ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
                 let projected = inputs.iter().any(|input| input.projection_context.is_some());
-                bytes.u8(if projected { 6 } else { 5 });
+                bytes.u8(if projected { 7 } else { 5 });
                 bytes.u64(inputs.len() as u64);
                 for input in inputs {
                     if projected {
@@ -166,6 +166,7 @@ pub(crate) fn canonical_resolved_node_materialization(
                                     bytes.u8(0);
                                 }
                                 bytes.u64(notice.stage_index as u64);
+                                bytes.json(&notice.location)?;
                                 bytes.json(&notice.fallback.effect_id())?;
                                 bytes.json(notice.fallback.parameter_id())?;
                                 bytes.json(&notice.fallback.reference())?;
