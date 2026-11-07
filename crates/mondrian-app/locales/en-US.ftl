@@ -3099,8 +3099,8 @@ parameter-mondrian-effect-stroke-paint-style-reveal-original = Reveal Original I
 
 effect-fill = Fill
 parameter-group-fill = Fill
-parameter-mondrian-effect-builtin-fill-fill-mask-label = Fill Mask (0 = None)
-parameter-mondrian-effect-builtin-fill-all-masks-label = Use All Masks
+parameter-mondrian-effect-builtin-fill-fill-mask-label = Clip Mask Index (0 = None)
+parameter-mondrian-effect-builtin-fill-all-masks-label = Use All Clip Masks
 parameter-mondrian-effect-builtin-fill-color-label = Color
 parameter-mondrian-effect-builtin-fill-invert-label = Invert
 parameter-mondrian-effect-builtin-fill-feather-x-label = Horizontal Feather

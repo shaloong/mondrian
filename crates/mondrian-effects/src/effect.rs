@@ -3280,6 +3280,10 @@ impl EffectDefinition {
         self.definition_registry_revision
     }
 
+    pub(crate) const fn is_registered_builtin(&self) -> bool {
+        self.definition_registry_revision == BUILTIN_EFFECT_DEFINITION_REVISION
+    }
+
     pub(crate) fn retained_bytes_estimate(&self) -> usize {
         let category_bytes = self
             .category_path
@@ -3514,6 +3518,8 @@ fn builtin_effect_types() -> [EffectType; 112] {
     ]
 }
 
+const BUILTIN_EFFECT_DEFINITION_REVISION: u64 = 1;
+
 /// Global effect definition registry. Entries are retained until process exit;
 /// replacing a definition advances its registry revision. This registry does
 /// not implement the future Extension installation or unload lifecycle.
@@ -3523,7 +3529,7 @@ fn effect_registry() -> &'static RwLock<HashMap<String, Arc<EffectDefinition>>> 
         let mut definitions = HashMap::new();
         for effect_type in builtin_effect_types() {
             let mut definition = builtin_effect_definition(effect_type);
-            definition.definition_registry_revision = 1;
+            definition.definition_registry_revision = BUILTIN_EFFECT_DEFINITION_REVISION;
             definition
                 .validate()
                 .unwrap_or_else(|error| panic!("invalid built-in effect definition: {error}"));
@@ -3534,7 +3540,7 @@ fn effect_registry() -> &'static RwLock<HashMap<String, Arc<EffectDefinition>>> 
 }
 
 fn effect_registry_revision_counter() -> &'static AtomicU64 {
-    static REVISION: AtomicU64 = AtomicU64::new(1);
+    static REVISION: AtomicU64 = AtomicU64::new(BUILTIN_EFFECT_DEFINITION_REVISION);
     &REVISION
 }
 

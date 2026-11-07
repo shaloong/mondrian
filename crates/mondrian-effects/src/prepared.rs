@@ -520,12 +520,19 @@ fn fill_may_use_masks(effect: &EffectNode) -> bool {
     if effect.effect_type != crate::EffectType::Fill {
         return false;
     }
-    let paths = [
-        effect.effect_type.property_path("fill_mask"),
-        effect.effect_type.property_path("all_masks"),
+    let parameters = [
+        effect
+            .effect_type
+            .parameter_id("fill_mask")
+            .expect("builtin Fill mask parameter"),
+        effect
+            .effect_type
+            .parameter_id("all_masks")
+            .expect("builtin Fill all masks parameter"),
     ];
-    effect.properties.iter().any(|(path, property)| {
-        let Some(index) = paths.iter().position(|candidate| candidate == path) else {
+    effect.properties.iter().any(|(_, property)| {
+        let id = property.descriptor.parameter_id();
+        let Some(index) = parameters.iter().position(|candidate| candidate == id) else {
             return false;
         };
         (property.is_enabled() && property.is_animated())
@@ -662,7 +669,10 @@ fn evaluate_instance_into_builder(
                 staged.current_output(),
                 staged.node_ids_since(checkpoint),
             )
-            .with_auxiliary_sources(auxiliary_sources);
+            .with_auxiliary_sources(auxiliary_sources)
+            .with_native_fill_matte(
+                instance.definition.is_registered_builtin() && fill_may_use_masks(&instance.effect),
+            );
             *builder = staged;
             Ok(binding)
         }
@@ -2054,6 +2064,7 @@ fn append_evaluated_graph(
                     .into(),
             )
             .with_auxiliary_preview_fallback(binding.auxiliary_preview_fallback().cloned())
+            .with_native_fill_matte(binding.native_fill_matte())
             .with_origin(match (grade, binding.origin()) {
                 (
                     Some(ProgramGradePlacement::Before(assignment)),

@@ -138,6 +138,39 @@ fn fill_all_masks_honours_authored_algebra_and_overrides_the_index() {
 }
 
 #[test]
+fn authored_fill_matte_admits_gpu_nodes_within_a_cpu_raster_stage() {
+    let masks = [
+        rectangle(0.0, 1.0, crate::MaskOp::Add),
+        rectangle(0.75, 0.25, crate::MaskOp::Subtract),
+    ];
+    let mut effect = fill(0.0, 1.0, false);
+    effect.instantiate_for_clip("Fill".to_owned());
+    let graph = PreparedEffectProgram::prepare(&[effect], &masks, WorkingColorSpace::LinearRec709)
+        .unwrap()
+        .evaluate(TimelineTime::ZERO)
+        .unwrap();
+    let stage = graph.stage_bindings().iter().find(|stage| stage.native_fill_matte()).unwrap();
+    assert_eq!(
+        stage.contract().execution_modes,
+        EffectExecutionModes::CPU_F32
+    );
+    assert_eq!(stage.emitted_nodes().len(), 4);
+    for id in stage.emitted_nodes() {
+        let kind = &graph.graph().node(*id).unwrap().kind;
+        let expected = match kind {
+            EffectGraphNodeKind::MaskSource { .. } => EffectExecutionModes::CPU_F32,
+            EffectGraphNodeKind::MaskCombine { .. }
+            | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+                EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+            }
+            other => panic!("unexpected masked Fill node {other:?}"),
+        };
+        assert_eq!(graph.node_execution_modes(*id), Some(expected));
+    }
+    assert_eq!(graph.auxiliary_inputs(), &[]);
+}
+
+#[test]
 fn disabled_masks_do_not_renumber_authored_fill_references() {
     let mut disabled = rectangle(0.0, 0.5, crate::MaskOp::Add);
     disabled.enabled = false;

@@ -778,6 +778,7 @@ pub struct CompiledEffectStageBinding {
     origin_proof: Option<Arc<()>>,
     auxiliary_sources: Arc<[AuxiliarySourceBinding]>,
     auxiliary_preview_fallback: Option<crate::AuxiliaryPreviewFallback>,
+    native_fill_matte: bool,
 }
 
 /// Authored position of a stage in the program that compiled it. A shared grade
@@ -828,6 +829,7 @@ impl CompiledEffectStageBinding {
             origin_proof: None,
             auxiliary_sources: Arc::from([]),
             auxiliary_preview_fallback: None,
+            native_fill_matte: false,
         }
     }
 
@@ -840,6 +842,15 @@ impl CompiledEffectStageBinding {
     pub(crate) fn with_auxiliary_sources(mut self, sources: Arc<[AuxiliarySourceBinding]>) -> Self {
         self.auxiliary_sources = sources;
         self
+    }
+
+    pub(crate) fn with_native_fill_matte(mut self, native: bool) -> Self {
+        self.native_fill_matte = native;
+        self
+    }
+
+    pub(crate) fn native_fill_matte(&self) -> bool {
+        self.native_fill_matte
     }
 
     /// Explicit host addresses attached to ExternalInput values emitted by this stage.
@@ -1196,8 +1207,8 @@ impl CompiledEffectGraph {
         &self.stage_bindings
     }
 
-    /// Exact modes that both the node implementation and its owning
-    /// Definition stage admit.
+    /// Exact modes admitted for a node, including native heterogeneous work
+    /// proved by its owning Definition stage.
     pub fn node_execution_modes(&self, node_id: EffectGraphNodeId) -> Option<EffectExecutionModes> {
         self.node_execution_modes.get(&node_id).copied()
     }
@@ -1855,7 +1866,24 @@ fn compile_node_execution_modes(
         }
         let stage_index = owner_by_node.get(&node_id).copied()?;
         let implemented = raw_node_implementation_requirements(node)?.execution_modes;
-        let admitted = implemented.intersection(bindings[stage_index].contract.execution_modes);
+        let binding = &bindings[stage_index];
+        // The complete masked Fill stage needs CPU rasterization. Its frozen
+        // MaskCombine and Fill matte kernels can run after those rasters upload.
+        let declared = if binding.native_fill_matte
+            && matches!(
+                &node.kind,
+                EffectGraphNodeKind::MaskCombine { .. }
+                    | EffectGraphNodeKind::AuxiliaryEffect {
+                        op: EffectRenderOp::Fill { .. },
+                        role: AuxiliaryRole::Matte,
+                        ..
+                    }
+            ) {
+            binding.contract.execution_modes.union(EffectExecutionModes::GPU_F32)
+        } else {
+            binding.contract.execution_modes
+        };
+        let admitted = implemented.intersection(declared);
         if admitted.is_empty() {
             return None;
         }

@@ -2071,6 +2071,23 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Canonical authored alpha combination operation.
         mask_op: crate::mask::MaskOp,
     },
+    /// Sample a graph-local AlphaMask with the native Fill spatial kernel.
+    FillMatte {
+        /// Exact semantic auxiliary node.
+        node: EffectGraphNodeId,
+        /// Scene-linear input materialization.
+        input: EffectMaterializationId,
+        /// Independent alpha-mask materialization.
+        mask: EffectMaterializationId,
+        /// New scene-linear materialization on the primary grid.
+        output: EffectMaterializationId,
+        /// Producer completion dependencies in input/mask order.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token for the spatial draw.
+        signal: EffectCompletionToken,
+        /// Native auxiliary spatial pass with a graph-local matte.
+        pass: crate::EffectGpuSpatialPass,
+    },
     /// Combine two AlphaMask-domain materializations.
     MaskCombine {
         node: EffectGraphNodeId,
@@ -2104,6 +2121,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Blend { output, .. }
             | Self::MultiInput { output, .. }
             | Self::Mask { output, .. }
+            | Self::FillMatte { output, .. }
             | Self::MaskCombine { output, .. }
             | Self::MatteMix { output, .. } => *output,
         }
@@ -2119,6 +2137,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Blend { waits, .. }
             | Self::MultiInput { waits, .. }
             | Self::Mask { waits, .. }
+            | Self::FillMatte { waits, .. }
             | Self::MaskCombine { waits, .. }
             | Self::MatteMix { waits, .. } => waits,
         }
@@ -2134,6 +2153,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Blend { signal, .. }
             | Self::MultiInput { signal, .. }
             | Self::Mask { signal, .. }
+            | Self::FillMatte { signal, .. }
             | Self::MaskCombine { signal, .. }
             | Self::MatteMix { signal, .. } => *signal,
         }
@@ -2148,6 +2168,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Blend { node, .. }
             | Self::MultiInput { node, .. }
             | Self::Mask { node, .. }
+            | Self::FillMatte { node, .. }
             | Self::MaskCombine { node, .. }
             | Self::MatteMix { node, .. } => output.push(*node),
         }
@@ -2171,7 +2192,7 @@ impl PreparedHeterogeneousGpuDispatch {
                     visit(input)?;
                 }
             }
-            Self::Mask { input, mask, .. } => {
+            Self::Mask { input, mask, .. } | Self::FillMatte { input, mask, .. } => {
                 visit(*input)?;
                 visit(*mask)?;
             }
@@ -2690,6 +2711,21 @@ fn hash_effect_operation_shape(
         EffectGraphNodeKind::MultiInput { .. } => hasher.update([6]),
         EffectGraphNodeKind::MaskCombine { .. } => hasher.update([7]),
         EffectGraphNodeKind::MatteMix { .. } => hasher.update([8]),
+        EffectGraphNodeKind::AuxiliaryEffect {
+            op: op @ EffectRenderOp::Fill { .. },
+            role: crate::AuxiliaryRole::Matte,
+            sampling,
+            ..
+        } => {
+            let (mapping, filter, out_of_bounds) = sampling.identity_codes();
+            hasher.update([
+                9,
+                effect_operation_shape_tag(op),
+                mapping,
+                filter,
+                out_of_bounds,
+            ]);
+        }
         EffectGraphNodeKind::Source | EffectGraphNodeKind::CustomSource { .. } => {
             return Err(
                 PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
@@ -3893,6 +3929,46 @@ fn execute_cpu_dag_prefix(
                     output,
                 )?
             }
+            EffectGraphNodeKind::AuxiliaryEffect {
+                op: op @ EffectRenderOp::Fill { .. },
+                role: crate::AuxiliaryRole::Matte,
+                sampling,
+                ..
+            } => {
+                let [primary, matte]: [crate::EffectFloatFrame; 2] =
+                    inputs.try_into().map_err(|_| {
+                        PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                            node: dispatch.node,
+                        }
+                    })?;
+                primary.ensure_same_grid(matte.view())?;
+                let mut primary = crate::materialize_finite_coverage_controlled(
+                    primary,
+                    crate::EffectAlphaConsumer::StraightCoverageOperation,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
+                )?;
+                let raster = crate::AuxiliaryFloatFrame::new(
+                    matte.view(),
+                    crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
+                );
+                let supported = crate::auxiliary::apply_auxiliary_effect_f32(
+                    primary.allocation_mut(),
+                    extent.width(),
+                    extent.height(),
+                    &op,
+                    raster,
+                    sampling,
+                    &mut || heterogeneous_processor_checkpoint(control, generation),
+                )?;
+                if !supported {
+                    return Err(
+                        PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
+                            node: dispatch.node,
+                        },
+                    );
+                }
+                primary
+            }
             EffectGraphNodeKind::Source
             | EffectGraphNodeKind::CustomSource { .. }
             | EffectGraphNodeKind::ExternalInput { .. }
@@ -4439,6 +4515,54 @@ fn prepare_gpu_suffix(
                                 signal: *signal,
                                 opacity: *opacity,
                                 blend_mode: *blend_mode,
+                            })
+                        }
+                        EffectGraphNodeKind::AuxiliaryEffect { op, role, sampling, .. } => {
+                            let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
+                                op, *role, *sampling, None,
+                            )
+                            .ok_or(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_auxiliary_dispatch_kernel_unavailable",
+                                },
+                            )?;
+                            let [input, mask] = inputs.as_ref() else {
+                                return Err(
+                                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                        reason: "gpu_fill_matte_dispatch_input_arity",
+                                    },
+                                );
+                            };
+                            let format = |id| {
+                                plan.materialization(id)
+                                    .and_then(|value| value.residency().format().exact_format())
+                            };
+                            let exact = |domain| {
+                                EffectValueFormat::new(
+                                    EffectWorkingPrecision::Float32,
+                                    domain,
+                                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                                )
+                            };
+                            let scene_linear = exact(EffectColorDomain::SceneLinearRgb);
+                            if format(*input) != Some(scene_linear)
+                                || format(*mask) != Some(exact(EffectColorDomain::AlphaMask))
+                                || format(*output) != Some(scene_linear)
+                            {
+                                return Err(
+                                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                        reason: "gpu_fill_matte_dispatch_domain_mismatch",
+                                    },
+                                );
+                            }
+                            Ok(PreparedHeterogeneousGpuDispatch::FillMatte {
+                                node: *node_id,
+                                input: *input,
+                                mask: *mask,
+                                output: *output,
+                                waits: Arc::clone(waits),
+                                signal: *signal,
+                                pass,
                             })
                         }
                         EffectGraphNodeKind::Mask { invert, mask_op, .. } => {
