@@ -1,9 +1,16 @@
 //! Invocation-local registration; no decoder or independent frame cache.
 
-use super::ResolvedPreviewAuxiliaryInputs;
+use std::collections::{HashMap, HashSet};
+
+use super::{
+    PreviewAuxiliaryAssetPlan, ResolvedPreviewAuxiliaryInputs, ResolvedPreviewAuxiliarySource,
+};
+use crate::app::preview_access_mode::MediaPreviewKey;
 use crate::app::preview_cpu_execution::PreviewCpuExecutionError;
+use crate::app::preview_execution::PreviewSemanticIdentity;
+use crate::app::preview_media_frame::MediaPreviewFrame;
 use crate::app::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
-use mondrian_core::{ColorFrameAlpha, WorkingRgbaF32Frame};
+use mondrian_core::{ColorFrameAlpha, ImageSampling, WorkingColorSpace, WorkingRgbaF32Frame};
 use mondrian_effects::{
     AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryPolicy, AuxiliaryResolution, AuxiliaryRole,
     EffectColorDomain, EffectFloatFrameError, EffectFloatFrameView, EffectFrameExtent,
@@ -42,9 +49,101 @@ fn bytes(extent: EffectFrameExtent) -> Result<u64, PreviewCpuExecutionError> {
         .ok_or_else(overflow)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct AuxiliaryRegistrationKey<'a> {
+    source: &'a MediaPreviewKey,
+    ready: Option<PreviewSemanticIdentity>,
+    extent: EffectFrameExtent,
+    sampling: ImageSampling,
+    working_color: WorkingColorSpace,
+}
+
+pub(crate) struct AuxiliaryRegistration<'a> {
+    pub(crate) key: AuxiliaryRegistrationKey<'a>,
+    source_extent: Option<EffectFrameExtent>,
+    policy: AuxiliaryPolicy,
+}
+
+impl AuxiliaryRegistration<'_> {
+    pub(crate) fn working_bytes(&self) -> Result<usize, PreviewCpuExecutionError> {
+        auxiliary_source_working_bytes(self.source_extent, self.key.extent)
+    }
+}
+
+pub(crate) fn plan_auxiliary_registration<'a>(
+    plan: &'a PreviewAuxiliaryAssetPlan,
+    frame: Option<&MediaPreviewFrame>,
+    role: AuxiliaryRole,
+    primary: (EffectFrameExtent, ImageSampling),
+    working_color: WorkingColorSpace,
+) -> Result<AuxiliaryRegistration<'a>, PreviewCpuExecutionError> {
+    let source_domain = frame
+        .map(|frame| {
+            frame.cpu_image_domain().ok_or_else(|| {
+                PreviewCpuExecutionError::AuxiliaryRegistration {
+                    detail: "auxiliary source has no actual CPU image domain".into(),
+                }
+            })
+        })
+        .transpose()?;
+    let ((extent, sampling), policy) = if role == AuxiliaryRole::Map {
+        let domain = if let Some(domain) = source_domain {
+            domain
+        } else {
+            let resolution = plan.validated_key.residency_resolution();
+            let sampling = plan.validated_key.picture_geometry.image_sampling(resolution).map_err(
+                |error| PreviewCpuExecutionError::AuxiliaryRegistration {
+                    detail: error.to_string(),
+                },
+            )?;
+            (
+                EffectFrameExtent::new(resolution.width, resolution.height),
+                sampling,
+            )
+        };
+        (domain, AuxiliaryPolicy::new(AuxiliaryResolution::Authored))
+    } else {
+        (primary, AuxiliaryPolicy::MATCH_PRIMARY)
+    };
+    Ok(AuxiliaryRegistration {
+        key: AuxiliaryRegistrationKey {
+            source: &plan.validated_key,
+            ready: frame.map(MediaPreviewFrame::identity),
+            extent,
+            sampling,
+            working_color,
+        },
+        source_extent: source_domain.map(|domain| domain.0),
+        policy,
+    })
+}
+
+impl ResolvedPreviewAuxiliaryInputs {
+    pub(super) fn registration<'a>(
+        &self,
+        source: &'a ResolvedPreviewAuxiliarySource,
+    ) -> Result<AuxiliaryRegistration<'a>, PreviewCpuExecutionError> {
+        let spec = self
+            .graph
+            .auxiliary_inputs()
+            .iter()
+            .find(|spec| spec.slot() == source.slot)
+            .ok_or_else(|| PreviewCpuExecutionError::AuxiliaryRegistration {
+                detail: "resolved auxiliary source has no compiled slot".into(),
+            })?;
+        plan_auxiliary_registration(
+            &source.plan,
+            source.frame.as_ref(),
+            spec.role(),
+            (self.primary_extent, self.primary_sampling),
+            source.request.input_color.working_color_space,
+        )
+    }
+}
+
 /// Cold canonical conversion workspace plus the retained registered plane.
 /// Source Store payloads keep their existing leases; no source lease is forged.
-pub(crate) fn auxiliary_source_working_bytes(
+fn auxiliary_source_working_bytes(
     source_extent: Option<EffectFrameExtent>,
     registered_extent: EffectFrameExtent,
 ) -> Result<usize, PreviewCpuExecutionError> {
@@ -90,7 +189,7 @@ fn view(frame: &CpuColorFrame) -> EffectFloatFrameView<'_> {
 
 /// Charge cold source conversion, registered planes, primary preparation and
 /// graph peaks before allocating any registration/working pixels. Store leases
-/// remain separately owned; shared frames are conservatively counted per slot.
+/// remain separately owned. Equal registration targets share their pixel charge.
 pub(crate) fn preflight_auxiliary_composite(
     width: u32,
     height: u32,
@@ -104,46 +203,18 @@ pub(crate) fn preflight_auxiliary_composite(
     let canvas = EffectFrameExtent::new(width, height);
     let mut owned = bytes(canvas)?.checked_mul(3).ok_or_else(overflow)?;
     let mut graph_peak = 0u64;
+    let mut registered = HashSet::new();
     for binding in bindings {
         let mut extents = Vec::new();
         for source in &binding.sources {
-            let spec = binding
-                .graph
-                .auxiliary_inputs()
-                .iter()
-                .find(|spec| spec.slot() == source.slot)
-                .ok_or_else(|| PreviewCpuExecutionError::AuxiliaryRegistration {
-                    detail: "resolved auxiliary source has no compiled slot".into(),
-                })?;
-            let extent = if spec.role() == AuxiliaryRole::Map {
-                source
-                    .frame
-                    .as_ref()
-                    .and_then(|frame| frame.cpu_image_domain())
-                    .map(|domain| domain.0)
-                    .unwrap_or_else(|| {
-                        let resolution = source.plan.validated_key.residency_resolution();
-                        EffectFrameExtent::new(resolution.width, resolution.height)
-                    })
-            } else {
-                binding.primary_extent
-            };
-            extents.push((source.slot, extent));
-            let source_extent = source
-                .frame
-                .as_ref()
-                .map(|frame| {
-                    frame.cpu_image_domain().map(|domain| domain.0).ok_or_else(|| {
-                        PreviewCpuExecutionError::AuxiliaryRegistration {
-                            detail: "auxiliary source has no actual CPU image domain".into(),
-                        }
-                    })
-                })
-                .transpose()?;
-            let working = auxiliary_source_working_bytes(source_extent, extent)?;
-            owned = owned
-                .checked_add(u64::try_from(working).map_err(|_| overflow())?)
-                .ok_or_else(overflow)?;
+            let registration = binding.registration(source)?;
+            extents.push((source.slot, registration.key.extent));
+            if registered.insert(registration.key) {
+                let working = registration.working_bytes()?;
+                owned = owned
+                    .checked_add(u64::try_from(working).map_err(|_| overflow())?)
+                    .ok_or_else(overflow)?;
+            }
         }
         let peak = mondrian_effects::estimate_compiled_float_raster_working_bytes(
             &binding.graph,
@@ -242,6 +313,7 @@ pub(crate) fn prepare_auxiliary_rasters<'a>(
     stage_diagnostics: &mut mondrian_renderer::color::RenderColorStageDiagnostics,
 ) -> Result<Vec<PreparedAuxiliaryRasters<'a>>, PreviewCpuExecutionError> {
     let mut prepared = Vec::new();
+    let mut registered = HashMap::<AuxiliaryRegistrationKey<'_>, CpuColorFrame>::new();
     for binding in bindings {
         if let Some(context) = &binding.projection_context {
             context.validate()?;
@@ -252,19 +324,12 @@ pub(crate) fn prepare_auxiliary_rasters<'a>(
         let mut frames = Vec::new();
         for source in &binding.sources {
             checkpoint(control)?;
-            let spec = binding
-                .graph
-                .auxiliary_inputs()
-                .iter()
-                .find(|spec| spec.slot() == source.slot)
-                .ok_or_else(|| PreviewCpuExecutionError::AuxiliaryRegistration {
-                    detail: "resolved auxiliary source has no compiled slot".into(),
-                })?;
-            let policy = AuxiliaryPolicy::new(if spec.role() == AuxiliaryRole::Map {
-                AuxiliaryResolution::Authored
-            } else {
-                AuxiliaryResolution::MatchPrimary
-            });
+            let registration = binding.registration(source)?;
+            if let Some(frame) = registered.get(&registration.key) {
+                frames.push((source.slot, frame.clone(), registration.policy));
+                continue;
+            }
+            let AuxiliaryRegistrationKey { extent, sampling, working_color, .. } = registration.key;
             let frame = if let Some(source_frame) = &source.frame {
                 let working =
                     source_frame.working_frame_with_session(scratch.color_execution_mut())?;
@@ -273,46 +338,21 @@ pub(crate) fn prepare_auxiliary_rasters<'a>(
                 }
                 stage_diagnostics.accumulate(working.stage_diagnostics);
                 let working = working.frame;
-                if working.rgba_f32().color_space != source.request.input_color.working_color_space
-                {
+                if working.rgba_f32().color_space != working_color {
                     return Err(PreviewCpuExecutionError::AuxiliaryRegistration {
                         detail: "auxiliary working payload contradicts its frozen color context"
                             .into(),
                     });
                 }
-                if spec.role() == AuxiliaryRole::Map {
-                    register(
-                        &working,
-                        view(&working).extent(),
-                        view(&working).sampling(),
-                        control,
-                    )?
-                } else {
-                    register(
-                        &working,
-                        binding.primary_extent,
-                        binding.primary_sampling,
-                        control,
-                    )?
+                let actual = view(&working);
+                if source_frame.cpu_image_domain() != Some((actual.extent(), actual.sampling())) {
+                    return Err(PreviewCpuExecutionError::AuxiliaryRegistration {
+                        detail: "auxiliary working payload contradicts its admitted image domain"
+                            .into(),
+                    });
                 }
+                register(&working, extent, sampling, control)?
             } else {
-                let (extent, sampling) = if spec.role() == AuxiliaryRole::Map {
-                    let resolution = source.plan.validated_key.residency_resolution();
-                    let sampling = source
-                        .plan
-                        .validated_key
-                        .picture_geometry
-                        .image_sampling(resolution)
-                        .map_err(|error| PreviewCpuExecutionError::AuxiliaryRegistration {
-                            detail: error.to_string(),
-                        })?;
-                    (
-                        EffectFrameExtent::new(resolution.width, resolution.height),
-                        sampling,
-                    )
-                } else {
-                    (binding.primary_extent, binding.primary_sampling)
-                };
                 let count = usize::try_from(bytes(extent)? / 16).map_err(|_| overflow())?;
                 let mut data = Vec::new();
                 data.try_reserve_exact(count).map_err(|_| {
@@ -331,11 +371,12 @@ pub(crate) fn prepare_auxiliary_rasters<'a>(
                     height: extent.height(),
                     sampling,
                     alpha: ColorFrameAlpha::StraightCoverage,
-                    color_space: source.request.input_color.working_color_space,
+                    color_space: working_color,
                     data,
                 })
             };
-            frames.push((source.slot, frame, policy));
+            registered.insert(registration.key, frame.clone());
+            frames.push((source.slot, frame, registration.policy));
         }
         prepared.push(PreparedAuxiliaryRasters { binding, frames });
     }

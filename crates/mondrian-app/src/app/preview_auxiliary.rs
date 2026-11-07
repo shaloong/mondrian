@@ -11,7 +11,7 @@ use mondrian_core::{
 };
 use mondrian_media::{PreviewRepresentationQuality, ProxyConfig};
 use mondrian_timeline::sequence::MediaInputColorContext;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use super::preview_access_mode::MediaPreviewKey;
 use super::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
@@ -25,7 +25,7 @@ use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 
 mod raster;
 pub(crate) use raster::{
-    auxiliary_source_working_bytes, preflight_auxiliary_composite, prepare_auxiliary_rasters,
+    plan_auxiliary_registration, preflight_auxiliary_composite, prepare_auxiliary_rasters,
 };
 
 /// A temporary auxiliary preparation charge in the existing Viewer ledger.
@@ -123,40 +123,17 @@ pub(crate) fn resolved_auxiliary_working_bytes(
         collect_auxiliary_bindings(element, &mut bindings);
     }
     let mut total = 0usize;
+    let mut registered = HashSet::new();
     for binding in bindings {
         for source in &binding.sources {
-            let spec = binding
-                .graph
-                .auxiliary_inputs()
-                .iter()
-                .find(|spec| spec.slot() == source.slot)
-                .ok_or_else(|| {
-                    super::preview_cpu_execution::PreviewCpuExecutionError::AuxiliaryRegistration {
-                        detail: "resolved auxiliary source has no compiled slot".into(),
-                    }
-                })?;
-            let source_extent = source.frame.as_ref().map(|frame| frame.cpu_image_domain()
-                .map(|domain| domain.0).ok_or_else(|| super::preview_cpu_execution::PreviewCpuExecutionError::AuxiliaryRegistration {
-                    detail: "auxiliary source has no actual CPU image domain".into(),
-                })).transpose()?;
-            let registered_extent = if spec.role() == mondrian_effects::AuxiliaryRole::Map {
-                source_extent.unwrap_or_else(|| {
-                    let resolution = source.plan.validated_key.residency_resolution();
-                    mondrian_effects::EffectFrameExtent::new(resolution.width, resolution.height)
-                })
-            } else {
-                binding.primary_extent
-            };
-            total = total
-                .checked_add(auxiliary_source_working_bytes(
-                    source_extent,
-                    registered_extent,
-                )?)
-                .ok_or_else(|| {
+            let registration = binding.registration(source)?;
+            if registered.insert(registration.key) {
+                total = total.checked_add(registration.working_bytes()?).ok_or_else(|| {
                     super::preview_cpu_execution::PreviewCpuExecutionError::AuxiliaryRegistration {
                         detail: "auxiliary working pixel size overflowed".into(),
                     }
                 })?;
+            }
         }
     }
     Ok(total)

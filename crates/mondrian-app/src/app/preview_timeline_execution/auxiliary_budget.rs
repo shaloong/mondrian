@@ -19,6 +19,7 @@ pub(super) fn prepared_auxiliary_working_bytes(
         );
         let mut local = 0usize;
         let mut seen: Vec<(Arc<CompiledEffectGraph>, ImageDomain)> = Vec::new();
+        let mut registered = HashSet::new();
         let mut observe = |graph: &Arc<CompiledEffectGraph>,
                            primary: ImageDomain|
          -> Result<(), PreviewUnavailability> {
@@ -45,18 +46,9 @@ pub(super) fn prepared_auxiliary_working_bytes(
                     .auxiliary
                     .get(&request)
                     .ok_or_else(|| refused("auxiliary budget lost its original source plan"))?;
-                let source_extent = match &plan.media_request {
+                let frame = match &plan.media_request {
                     Some(request) => match sources.media.get(request) {
-                        Some(PreviewTimelineMediaFrame::Ready(frame)) => Some(
-                            frame
-                                .cpu_image_domain()
-                                .ok_or_else(|| {
-                                    refused(
-                                        "auxiliary budget requires the actual CPU source domain",
-                                    )
-                                })?
-                                .0,
-                        ),
+                        Some(PreviewTimelineMediaFrame::Ready(frame)) => Some(frame),
                         _ => {
                             return Err(refused(
                                 "auxiliary budget requires the original Ready source",
@@ -65,22 +57,21 @@ pub(super) fn prepared_auxiliary_working_bytes(
                     },
                     None => None,
                 };
-                let registered_extent = if spec.role() == mondrian_effects::AuxiliaryRole::Map {
-                    source_extent.unwrap_or_else(|| {
-                        let resolution = plan.validated_key.residency_resolution();
-                        EffectFrameExtent::new(resolution.width, resolution.height)
-                    })
-                } else {
-                    primary.0
-                };
-                let bytes = super::super::preview_auxiliary::auxiliary_source_working_bytes(
-                    source_extent,
-                    registered_extent,
+                let registration = super::super::preview_auxiliary::plan_auxiliary_registration(
+                    plan,
+                    frame,
+                    spec.role(),
+                    primary,
+                    request.input_color.working_color_space,
                 )
                 .map_err(|error| error.unavailability())?;
-                local = local
-                    .checked_add(bytes)
-                    .ok_or_else(|| refused("auxiliary working pixel size overflowed"))?;
+                if registered.insert(registration.key) {
+                    let bytes =
+                        registration.working_bytes().map_err(|error| error.unavailability())?;
+                    local = local
+                        .checked_add(bytes)
+                        .ok_or_else(|| refused("auxiliary working pixel size overflowed"))?;
+                }
             }
             Ok(())
         };

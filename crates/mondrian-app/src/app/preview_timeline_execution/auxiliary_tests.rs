@@ -268,6 +268,60 @@ fn auxiliary_asset_host_binding_reaches_cpu_on_the_actual_primary_grid() {
 }
 
 #[test]
+fn two_auxiliary_slots_share_one_registered_asset_plane_and_working_charge() {
+    use crate::app::preview_auxiliary::{
+        prepare_auxiliary_rasters, resolved_auxiliary_working_bytes,
+    };
+
+    let (_root, asset) = asset_fixture(Some(Duration::from_secs(2)));
+    let sequence = auxiliary_matte_sequence_sources(&[asset.id, asset.id]);
+    let resolved = resolve_auxiliary_fixture(&sequence, &asset);
+    let ResolvedPreviewElement::WithAuxiliary { inputs, .. } = &resolved.plan.elements[0] else {
+        panic!("resolved element must retain the two author slots");
+    };
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].sources.len(), 2);
+    assert_eq!(
+        resolved_auxiliary_working_bytes(&resolved.plan.elements).unwrap(),
+        2 * 4 * 2 * 16 + 3 * 16,
+    );
+    let mut scratch = TimelineCompositeScratch::default();
+    let mut control = mondrian_effects::EffectProcessorControl::uncancelled();
+    let registered = prepare_auxiliary_rasters(
+        &[&inputs[0]],
+        &mut scratch,
+        &mut control,
+        &mut Vec::new(),
+        &mut Default::default(),
+    )
+    .unwrap();
+    let rasters = registered[0].inputs();
+    assert_ne!(rasters[0].slot, rasters[1].slot);
+    assert_eq!(
+        rasters[0].raster.frame.extent(),
+        EffectFrameExtent::new(3, 1)
+    );
+    assert!(std::ptr::eq(
+        rasters[0].raster.frame.pixels(),
+        rasters[1].raster.frame.pixels(),
+    ));
+    let output = crate::app::preview_cpu_execution::composite_resolved_preview_working(
+        3,
+        1,
+        &resolved.plan.elements,
+        &resolved.plan.color_context,
+        resolved.plan.sampling,
+        &mut scratch,
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(
+        output.frame.rgba_f32().data,
+        vec![[0.4375, 0.0, 0.0, 1.0]; 3]
+    );
+}
+
+#[test]
 fn auxiliary_host_pixels_require_a_shared_residency_charge_that_retires_with_the_owner() {
     use crate::app::preview_auxiliary::{
         reserve_auxiliary_working_set, resolved_auxiliary_working_bytes,
@@ -311,7 +365,7 @@ fn auxiliary_nested_work_reuses_its_reservation_and_keeps_it_until_execution_ret
         PreviewFrameStoreAdapter, PreviewFrameStoreAdapterConfig,
     };
     let (_root, asset) = asset_fixture(Some(Duration::from_secs(2)));
-    let child = auxiliary_matte_sequence(asset.id);
+    let child = auxiliary_matte_sequence_sources(&[asset.id, asset.id]);
     let mut parent = Sequence::new("nested auxiliary residency");
     parent.settings.resolution = child.settings.resolution;
     parent.video_tracks[0]

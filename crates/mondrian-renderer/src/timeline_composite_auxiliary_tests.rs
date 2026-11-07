@@ -400,7 +400,7 @@ fn cpu_auxiliary_resolved_retime_does_not_request_primary_history() {
 }
 
 #[test]
-fn cpu_auxiliary_working_set_uses_the_authored_extent_before_compositor_allocation() {
+fn cpu_auxiliary_working_set_excludes_the_borrowed_authored_plane() {
     let graph = graph(AssetId::new(), false);
     let pixels = [[0.0, 0.0, 0.0, 0.25]; 4];
     let rasters = [AuxiliaryFloatInput {
@@ -435,13 +435,13 @@ fn cpu_auxiliary_working_set_uses_the_authored_extent_before_compositor_allocati
         runtime,
     )
     .unwrap();
-    // The generated source/result (32 B) use retained scratch; the canvas
-    // plus the authored auxiliary's scalar copy require 80 active bytes.
-    assert_eq!(estimate.active_bytes, 80);
+    // The generated source/result (32 B) use retained scratch, and the
+    // authored plane stays with its caller. The canvas requires 16 active bytes.
+    assert_eq!(estimate.active_bytes, 16);
     assert_eq!(estimate.retained_scratch_bytes, 32);
     let mut scratch = TimelineCompositeScratch::default();
     scratch.reconfigure_cpu_working_set(TimelineCpuWorkingSetGrant {
-        max_active_bytes: 79,
+        max_active_bytes: 15,
         max_retained_scratch_bytes: 32,
     });
     assert!(matches!(
@@ -456,8 +456,8 @@ fn cpu_auxiliary_working_set_uses_the_authored_extent_before_compositor_allocati
         ),
         Err(TimelineCompositeError::CpuWorkingSet(
             TimelineCpuWorkingSetError::ActiveGrantExceeded {
-                required_bytes: 80,
-                granted_bytes: 79,
+                required_bytes: 16,
+                granted_bytes: 15,
                 ..
             }
         ))
@@ -467,7 +467,7 @@ fn cpu_auxiliary_working_set_uses_the_authored_extent_before_compositor_allocati
         0
     );
     scratch.reconfigure_cpu_working_set(TimelineCpuWorkingSetGrant {
-        max_active_bytes: 80,
+        max_active_bytes: 16,
         max_retained_scratch_bytes: 32,
     });
     assert_pixel(
@@ -483,6 +483,79 @@ fn cpu_auxiliary_working_set_uses_the_authored_extent_before_compositor_allocati
         .unwrap(),
         [0.25, 0.0, 1.5, 1.0],
     );
+}
+
+#[test]
+fn cpu_auxiliary_working_set_admits_a_graph_local_matte_without_external_slots() {
+    let mut builder = mondrian_effects::EffectGraphBuilderState::new();
+    let primary = builder.current_output();
+    builder.append_unary(EffectRenderOp::ColorAdjust {
+        exposure: 0.0,
+        contrast: 1.0,
+        saturation: 1.0,
+        working_color_space: WorkingColorSpace::LinearRec709,
+    });
+    let output = builder.add_auxiliary_effect_with_role(
+        primary,
+        builder.current_output(),
+        EffectRenderOp::Fill {
+            grade: FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
+        },
+        AuxiliaryRole::Matte,
+    );
+    builder.set_current_output(output);
+    let graph = mondrian_effects::compile_reference_render_graph(builder.finish()).unwrap();
+    assert!(graph.auxiliary_inputs().is_empty());
+    let elements = [TimelineCompositeElement::SolidColor(solid(graph))];
+    let precision = TimelineCpuCompositePrecision::Float32;
+    let runtime = TimelineEffectColorRuntime::new(
+        &ENGINE,
+        WorkingColorSpace::LinearRec709,
+        ImageSampling::UNIT_SQUARE,
+    );
+    let estimate = estimate_timeline_cpu_working_set(1, 1, &elements, precision).unwrap();
+    assert_eq!(estimate.active_bytes, 32);
+    assert_eq!(estimate.retained_scratch_bytes, 32);
+    assert_eq!(
+        estimate_timeline_cpu_working_set_with_auxiliary(1, 1, &elements, precision, runtime)
+            .unwrap(),
+        estimate
+    );
+    let mut scratch = TimelineCompositeScratch::default();
+    let compose = |scratch: &mut TimelineCompositeScratch| {
+        composite_timeline_elements_color_frame(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            runtime,
+            scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+    };
+    scratch.reconfigure_cpu_working_set(TimelineCpuWorkingSetGrant {
+        max_active_bytes: 31,
+        max_retained_scratch_bytes: 32,
+    });
+    assert!(matches!(
+        compose(&mut scratch),
+        Err(TimelineCompositeError::CpuWorkingSet(
+            TimelineCpuWorkingSetError::ActiveGrantExceeded {
+                required_bytes: 32,
+                granted_bytes: 31,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(
+        scratch.cpu_working_set_diagnostics().retained_scratch_bytes,
+        0
+    );
+    scratch.reconfigure_cpu_working_set(TimelineCpuWorkingSetGrant {
+        max_active_bytes: 32,
+        max_retained_scratch_bytes: 32,
+    });
+    assert_pixel(compose(&mut scratch).unwrap(), [1.0, 0.0, 0.0, 1.0]);
 }
 
 #[test]

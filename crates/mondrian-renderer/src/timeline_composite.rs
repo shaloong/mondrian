@@ -1058,6 +1058,9 @@ pub enum TimelineCpuWorkingSetError {
     /// Frame-size or aggregate byte arithmetic exceeded the representable range.
     #[error("CPU compositor working-set arithmetic overflowed")]
     ArithmeticOverflow,
+    /// A graph-local auxiliary raster schedule could not be sized.
+    #[error("CPU compositor could not estimate the graph-local auxiliary working set")]
+    EffectRasterEstimateFailed,
     /// Transient frame demand exceeds the owner's active-byte grant.
     #[error(
         "CPU compositor active working set requires {required_bytes} bytes but only {granted_bytes} bytes were granted for {precision:?}"
@@ -1171,7 +1174,13 @@ pub fn estimate_timeline_cpu_working_set(
     elements: &[TimelineCompositeElement<'_>],
     precision: TimelineCpuCompositePrecision,
 ) -> Result<TimelineCpuWorkingSetEstimate, TimelineCpuWorkingSetError> {
-    estimate_timeline_cpu_working_set_inner(width, height, elements, precision, |_, extent| {
+    estimate_timeline_cpu_working_set_inner(width, height, elements, precision, |graph, extent| {
+        if graph.auxiliary_inputs().is_empty() && graph.has_auxiliary_effects() {
+            let peak =
+                mondrian_effects::estimate_compiled_float_raster_working_bytes(graph, extent, &[])
+                    .map_err(|_| TimelineCpuWorkingSetError::EffectRasterEstimateFailed)?;
+            return u64::try_from(peak).map_err(|_| TimelineCpuWorkingSetError::ArithmeticOverflow);
+        }
         checked_frame_bytes(extent.width(), extent.height(), 16)
     })
 }
@@ -1187,7 +1196,7 @@ pub fn estimate_timeline_cpu_working_set_with_auxiliary(
     runtime: TimelineEffectColorRuntime<'_>,
 ) -> Result<TimelineCpuWorkingSetEstimate, TimelineCompositeError> {
     estimate_timeline_cpu_working_set_inner(width, height, elements, precision, |graph, extent| {
-        if graph.auxiliary_inputs().is_empty() {
+        if graph.auxiliary_inputs().is_empty() && !graph.has_auxiliary_effects() {
             return checked_frame_bytes(extent.width(), extent.height(), 16).map_err(Into::into);
         }
         let auxiliary = runtime.auxiliary_for(graph, extent)?;
