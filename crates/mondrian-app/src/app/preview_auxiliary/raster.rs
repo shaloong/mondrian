@@ -243,6 +243,12 @@ pub(crate) fn prepare_auxiliary_rasters<'a>(
 ) -> Result<Vec<PreparedAuxiliaryRasters<'a>>, PreviewCpuExecutionError> {
     let mut prepared = Vec::new();
     for binding in bindings {
+        if let Some(context) = &binding.projection_context {
+            context.validate()?;
+        }
+        if binding.sources.is_empty() {
+            continue;
+        }
         let mut frames = Vec::new();
         for source in &binding.sources {
             checkpoint(control)?;
@@ -537,6 +543,7 @@ mod tests {
                 primary_sampling: ImageSampling::UNIT_SQUARE,
                 sources: vec![ResolvedPreviewAuxiliarySource { slot: 0, request, plan, frame }]
                     .into_boxed_slice(),
+                projection_context: None,
             };
             let mut scratch = TimelineCompositeScratch::default();
             let prepared = prepare_auxiliary_rasters(

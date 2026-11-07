@@ -78,6 +78,11 @@ pub(crate) fn collect_auxiliary_bindings<'a>(
                 Arc::ptr_eq(&existing.graph, &input.graph)
                     && existing.primary_extent == input.primary_extent
                     && existing.primary_sampling == input.primary_sampling
+                    && match (&existing.projection_context, &input.projection_context) {
+                        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                        (None, None) => true,
+                        _ => false,
+                    }
                     && existing.sources.len() == input.sources.len()
                     && existing.sources.iter().zip(&input.sources).all(|(a, b)| {
                         a.slot == b.slot
@@ -142,6 +147,22 @@ pub(crate) fn resolved_auxiliary_working_bytes(
     Ok(total)
 }
 
+pub(crate) fn admit_resolved_auxiliary_projection(
+    elements: &[super::preview_viewer_plan::ResolvedPreviewElement],
+    store: &mut super::preview_frame_store::PreviewFrameStoreAdapter,
+) -> Result<(), PreviewUnavailability> {
+    let mut bindings = Vec::new();
+    for element in elements {
+        collect_auxiliary_bindings(element, &mut bindings);
+    }
+    for binding in bindings {
+        if let Some(context) = &binding.projection_context {
+            context.admit(store)?;
+        }
+    }
+    Ok(())
+}
+
 /// Exact Sequence-local source intent, independent from a consumer's pixel graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PreviewAuxiliaryAssetRequest {
@@ -169,6 +190,7 @@ pub(crate) struct ResolvedPreviewAuxiliaryInputs {
     pub(crate) primary_extent: mondrian_effects::EffectFrameExtent,
     pub(crate) primary_sampling: mondrian_core::ImageSampling,
     pub(crate) sources: Box<[ResolvedPreviewAuxiliarySource]>,
+    pub(crate) projection_context: Option<Arc<super::preview_timeline_execution::auxiliary_projection::PreviewAuxiliaryProjectionContext>>,
 }
 
 pub(crate) struct ResolvedPreviewAuxiliarySource {
@@ -185,6 +207,10 @@ impl ResolvedPreviewAuxiliaryInputs {
         self.graph.semantic_fingerprint().hash(hasher);
         self.primary_extent.hash(hasher);
         self.primary_sampling.hash(hasher);
+        self.projection_context.is_some().hash(hasher);
+        if let Some(context) = &self.projection_context {
+            context.hash_identity(hasher);
+        }
         self.sources.len().hash(hasher);
         for source in &self.sources {
             source.slot.hash(hasher);
@@ -210,6 +236,13 @@ impl ResolvedPreviewAuxiliaryInputs {
 pub(crate) enum PreviewAuxiliaryAssetError {
     SourceUnavailable(PreviewUnavailability),
     Invalid(PreviewUnavailability),
+}
+
+impl PreviewAuxiliaryAssetError {
+    pub(crate) fn permits_missing_source_fallback(&self) -> bool {
+        matches!(self, Self::SourceUnavailable(reason)
+            if reason.disposition() != super::preview_unavailability::PreviewUnavailabilityDisposition::Stopped)
+    }
 }
 
 impl From<PreviewAuxiliaryAssetError> for PreviewUnavailability {

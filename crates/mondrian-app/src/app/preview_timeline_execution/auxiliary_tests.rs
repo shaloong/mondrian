@@ -8,6 +8,9 @@ use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 use mondrian_core::{ColorFrameAlpha, VisualSourceBoundary};
 use std::time::Duration;
 
+#[path = "auxiliary_projection_tests.rs"]
+mod projection_tests;
+
 fn planned(
     asset: &mondrian_assets::AssetRecord,
     request: &PreviewAuxiliaryAssetRequest,
@@ -47,6 +50,10 @@ fn ready(plan: &PreviewAuxiliaryAssetPlan, salt: u8) -> PreviewTimelineMediaFram
 }
 
 pub(crate) fn auxiliary_matte_sequence(asset_id: AssetId) -> Sequence {
+    auxiliary_matte_sequence_sources(&[asset_id])
+}
+
+fn auxiliary_matte_sequence_sources(asset_ids: &[AssetId]) -> Sequence {
     use mondrian_core::{
         PropertyBag, PropertyDescriptor, PropertyValue, VisualSourceReference, VisualSourceRetime,
     };
@@ -55,19 +62,28 @@ pub(crate) fn auxiliary_matte_sequence(asset_id: AssetId) -> Sequence {
         "test.preview.asset-matte.{}",
         mondrian_core::EffectId::new()
     ));
-    let parameter = kind.parameter_id("source").unwrap();
     let mut properties = PropertyBag::default();
-    properties.define(
-        PropertyDescriptor::new(
-            "source",
-            "Picture source",
-            PropertyValue::VisualSource(VisualSourceReference::Asset {
-                asset_id,
-                retime: VisualSourceRetime::default(),
-            }),
-        )
-        .with_parameter_id(parameter.clone()),
-    );
+    let mut parameters = Vec::new();
+    for (index, &asset_id) in asset_ids.iter().enumerate() {
+        let name = if index == 0 {
+            "source".to_owned()
+        } else {
+            format!("source_{index}")
+        };
+        let parameter = kind.parameter_id(&name).unwrap();
+        properties.define(
+            PropertyDescriptor::new(
+                name,
+                "Picture source",
+                PropertyValue::VisualSource(VisualSourceReference::Asset {
+                    asset_id,
+                    retime: VisualSourceRetime::default(),
+                }),
+            )
+            .with_parameter_id(parameter.clone()),
+        );
+        parameters.push(parameter);
+    }
     register_effect_definition(
         EffectDefinition::new(
             kind.key(),
@@ -81,26 +97,28 @@ pub(crate) fn auxiliary_matte_sequence(asset_id: AssetId) -> Sequence {
             ..EffectExecutionContract::IDENTITY
         })
         .with_branching_graph_builder(Arc::new(move |effect, _, builder| {
-            let input = builder.current_output();
-            let auxiliary = builder.append_visual_source_input(
-                effect,
-                &parameter,
-                EffectValueFormat::new(
-                    EffectWorkingPrecision::Float32,
-                    EffectColorDomain::SceneLinearRgb,
-                    ColorFrameAlpha::StraightCoverage,
-                ),
-                EffectColorDomainContract::SCENE_LINEAR,
-            )?;
-            let output = builder.add_auxiliary_effect_with_role(
-                input,
-                auxiliary,
-                EffectRenderOp::Fill {
-                    grade: FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
-                },
-                AuxiliaryRole::Matte,
-            );
-            builder.set_current_output(output);
+            for parameter in &parameters {
+                let input = builder.current_output();
+                let auxiliary = builder.append_visual_source_input(
+                    effect,
+                    parameter,
+                    EffectValueFormat::new(
+                        EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        ColorFrameAlpha::StraightCoverage,
+                    ),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                )?;
+                let output = builder.add_auxiliary_effect_with_role(
+                    input,
+                    auxiliary,
+                    EffectRenderOp::Fill {
+                        grade: FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
+                    },
+                    AuxiliaryRole::Matte,
+                );
+                builder.set_current_output(output);
+            }
             Ok(())
         })),
     )

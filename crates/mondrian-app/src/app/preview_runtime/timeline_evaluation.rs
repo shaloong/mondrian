@@ -159,6 +159,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         match resolution {
             PreviewTimelineResolution::Ready(resolved) => {
                 let plan = resolved.plan;
+                if let Err(reason) =
+                    crate::app::preview_auxiliary::admit_resolved_auxiliary_projection(
+                        &plan.elements,
+                        &mut self.frame_store.borrow_mut(),
+                    )
+                {
+                    return FrameResolutionOutcome::Unavailable(reason);
+                }
                 let resolved_quality = match resolved_preview_presentation_quality(&plan.elements) {
                     mondrian_playback::FramePresentationQuality::Ready => {
                         ResolvedFrameQuality::Full
@@ -253,11 +261,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut observed = std::collections::HashMap::new();
         for binding in bindings {
             for source in &binding.sources {
-                let current = observed.entry(&source.request).or_insert_with(|| {
-                    self.resolve_auxiliary_asset(snapshot, &source.request).ok()
-                });
-                if current.as_ref() != Some(&source.plan) {
+                let current = observed
+                    .entry(&source.request)
+                    .or_insert_with(|| self.resolve_auxiliary_asset(snapshot, &source.request));
+                if !matches!(current, Ok(plan) if plan == &source.plan) {
                     return false;
+                }
+            }
+            if let Some(context) = &binding.projection_context {
+                for request in &context.unavailable_queries {
+                    let current = observed
+                        .entry(request)
+                        .or_insert_with(|| self.resolve_auxiliary_asset(snapshot, request));
+                    if !matches!(current, Err(reason) if reason.permits_missing_source_fallback()) {
+                        return false;
+                    }
                 }
             }
         }

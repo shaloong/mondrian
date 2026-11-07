@@ -130,9 +130,58 @@ pub(crate) fn canonical_resolved_node_materialization(
     for element in elements {
         match element {
             ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
-                bytes.u8(5);
+                let projected = inputs.iter().any(|input| input.projection_context.is_some());
+                bytes.u8(if projected { 6 } else { 5 });
                 bytes.u64(inputs.len() as u64);
                 for input in inputs {
+                    if projected {
+                        bytes.u8(u8::from(input.projection_context.is_some()));
+                        if let Some(context) = &input.projection_context {
+                            bytes.u64(context.notices.len() as u64);
+                            for notice in &context.notices {
+                                bytes.json(&notice.sequence_id)?;
+                                bytes.json(&notice.time)?;
+                                if let Some(placement) = notice.placement {
+                                    bytes.u8(1);
+                                    bytes.json(&placement.sequence_id)?;
+                                    bytes.json(&placement.clip_id)?;
+                                    bytes.json(&placement.clip_time)?;
+                                    use mondrian_core::timeline_data::TimelineClipEndpointContext;
+                                    match placement.endpoint {
+                                        TimelineClipEndpointContext::Ordinary => bytes.u8(0),
+                                        TimelineClipEndpointContext::TransitionLeft {
+                                            transition_id,
+                                        } => {
+                                            bytes.u8(1);
+                                            bytes.json(&transition_id)?;
+                                        }
+                                        TimelineClipEndpointContext::TransitionRight {
+                                            transition_id,
+                                        } => {
+                                            bytes.u8(2);
+                                            bytes.json(&transition_id)?;
+                                        }
+                                    }
+                                } else {
+                                    bytes.u8(0);
+                                }
+                                bytes.u64(notice.stage_index as u64);
+                                bytes.json(&notice.fallback.effect_id())?;
+                                bytes.json(notice.fallback.parameter_id())?;
+                                bytes.json(&notice.fallback.reference())?;
+                                bytes.u8(match notice.fallback.cause() {
+                                    mondrian_effects::AuxiliaryPreviewFallbackCause::Unbound => 0,
+                                    mondrian_effects::AuxiliaryPreviewFallbackCause::Unavailable => 1,
+                                });
+                            }
+                            bytes.u64(context.unavailable_queries.len() as u64);
+                            for query in &context.unavailable_queries {
+                                bytes.json(&query.reference)?;
+                                bytes.json(&query.sequence_time)?;
+                                bytes.json(&query.target_resolution)?;
+                            }
+                        }
+                    }
                     bytes.fixed(&input.graph.semantic_fingerprint());
                     bytes.u32(input.primary_extent.width());
                     bytes.u32(input.primary_extent.height());

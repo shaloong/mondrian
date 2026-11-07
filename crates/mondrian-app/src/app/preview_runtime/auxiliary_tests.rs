@@ -130,6 +130,15 @@ fn an_asset_backed_image_matte_renders_in_preview() {
 
 #[test]
 fn auxiliary_same_frame_cache_revalidates_a_missing_and_restored_physical_source() {
+    auxiliary_cache_recovery(false);
+}
+
+#[test]
+fn auxiliary_missing_identity_cache_revalidates_the_original_query_after_the_source_returns() {
+    auxiliary_cache_recovery(true);
+}
+
+fn auxiliary_cache_recovery(preview_fallback: bool) {
     ensure_test_ocio_loaded();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cached-alpha.png");
@@ -148,6 +157,10 @@ fn auxiliary_same_frame_cache_revalidates_a_missing_and_restored_physical_source
     state.test_set_sequence(Some(auxiliary_matte_sequence(asset)));
     state.seek(0).unwrap();
     let runtime = PreviewProductionRuntime::<()>::try_new_boxed().unwrap();
+    if preview_fallback {
+        *runtime.visual_programs.borrow_mut() =
+            mondrian_renderer::PreparedVisualProgramCache::for_auxiliary_preview();
+    }
     runtime.synchronize_transport_intent(state.preview_transport_intent());
     let snapshot = state.preview_execution_snapshot(Instant::now());
     let sequence = state.active_sequence().unwrap();
@@ -219,13 +232,45 @@ fn auxiliary_same_frame_cache_revalidates_a_missing_and_restored_physical_source
         "decoder retirement must not erase the cache under test"
     );
     std::fs::rename(&path, &parked).unwrap();
-    let FrameResolutionOutcome::Unavailable(reason) = acquire() else {
-        panic!("the same picture key cannot authorize pixels after its auxiliary file disappears");
+    let missing_identity = if preview_fallback {
+        let FrameResolutionOutcome::Ready(missing) = acquire() else {
+            panic!("only the missing consumer becomes identity");
+        };
+        assert!(!Arc::ptr_eq(&first, &missing));
+        assert_ne!(first.output_key, missing.output_key);
+        let mut bindings = Vec::new();
+        for element in missing.elements.iter() {
+            crate::app::preview_auxiliary::collect_auxiliary_bindings(element, &mut bindings);
+        }
+        assert_eq!(
+            bindings
+                .iter()
+                .filter_map(|binding| binding.projection_context.as_ref())
+                .map(|context| context.unavailable_queries.len())
+                .sum::<usize>(),
+            1
+        );
+        assert!(
+            bindings.iter().all(|binding| binding.sources.is_empty()),
+            "removed slot retains its original query"
+        );
+        let FrameResolutionOutcome::Ready(hit) = acquire() else {
+            panic!("unchanged missing fact remains reusable");
+        };
+        assert!(Arc::ptr_eq(&missing, &hit));
+        Some(missing)
+    } else {
+        let FrameResolutionOutcome::Unavailable(reason) = acquire() else {
+            panic!(
+                "the same picture key cannot authorize pixels after its auxiliary file disappears"
+            );
+        };
+        assert_eq!(
+            reason.disposition(),
+            crate::app::preview_unavailability::PreviewUnavailabilityDisposition::Blocked
+        );
+        None
     };
-    assert_eq!(
-        reason.disposition(),
-        crate::app::preview_unavailability::PreviewUnavailabilityDisposition::Blocked
-    );
     // Windows updates the physical revision even when the same file returns.
     // Refresh the ordinary Asset probe under the same Asset ID; keep the
     // original author generation, reference, and frame evaluation key.
@@ -240,6 +285,10 @@ fn auxiliary_same_frame_cache_revalidates_a_missing_and_restored_physical_source
     let restored = ready();
     assert!(!Arc::ptr_eq(&first, &restored));
     assert_ne!(first.output_key, restored.output_key);
+    if let Some(missing) = missing_identity {
+        assert!(!Arc::ptr_eq(&missing, &restored));
+        assert_ne!(missing.output_key, restored.output_key);
+    }
     assert_eq!(serde_json::to_value(sequence).unwrap(), author);
     runtime.shutdown_and_wait();
 }

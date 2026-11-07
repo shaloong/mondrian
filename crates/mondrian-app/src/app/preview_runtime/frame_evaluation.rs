@@ -469,7 +469,12 @@ impl EvaluationWorkingSet {
             self.waiting.remove(index);
             return None;
         }
-        if !self.waiting[index].memoized {
+        if !self.waiting[index].memoized
+            || self.waiting[index]
+                .preparation
+                .as_ref()
+                .is_some_and(|preparation| preparation.requires_auxiliary_source_revalidation())
+        {
             return None;
         }
         Some(Arc::clone(&self.waiting[index].pending_dependencies))
