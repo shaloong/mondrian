@@ -278,6 +278,15 @@ impl GpuContext {
     /// Creates a new independent GPU context (standalone device).
     /// Used when no external device is available (e.g., tests, export).
     pub async fn new() -> Result<Arc<Self>> {
+        Self::new_with_float32_filtering(true).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_without_float32_filterable_for_test() -> Result<Arc<Self>> {
+        Self::new_with_float32_filtering(false).await
+    }
+
+    async fn new_with_float32_filtering(enable: bool) -> Result<Arc<Self>> {
         #[cfg(test)]
         let test_permit = TestGpuContextPermit::acquire();
 
@@ -304,11 +313,15 @@ impl GpuContext {
             .map_err(|error| mondrian_core::MondrianError::GpuInitFailed {
                 reason: error.to_string(),
             })?;
+        let mut required_features = native_video_texture_device_features(adapter.features())
+            | ocio_lut_filtering_device_features(adapter.features())
+            | program_scopes_device_features(adapter.features())
+            | working_texture_features;
+        if !enable {
+            required_features.remove(wgpu::Features::FLOAT32_FILTERABLE);
+        }
         let device_descriptor = wgpu::DeviceDescriptor {
-            required_features: native_video_texture_device_features(adapter.features())
-                | ocio_lut_filtering_device_features(adapter.features())
-                | program_scopes_device_features(adapter.features())
-                | working_texture_features,
+            required_features,
             ..wgpu::DeviceDescriptor::default()
         };
         let (device, queue) =

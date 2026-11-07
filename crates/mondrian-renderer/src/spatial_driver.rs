@@ -112,6 +112,12 @@ pub enum GpuSpatialChainBlocker {
     /// The pipeline has no stages to execute.
     #[error("spatial effect chain has no executable stages")]
     EmptyChain,
+    /// An auxiliary stage has no admitted raster for its required slot.
+    #[error("spatial chain requires auxiliary slot {slot}")]
+    MissingAuxiliaryInput {
+        /// Graph-declared slot.
+        slot: u32,
+    },
     /// A spatial kernel has no GPU implementation, or its pass table is unknown.
     #[error("spatial pass `{pass}` cannot run on the GPU: {detail}")]
     UnsupportedPass {
@@ -151,6 +157,7 @@ impl GpuSpatialChainBlocker {
     pub fn code(&self) -> &'static str {
         match self {
             Self::EmptyChain => "spatial_chain_empty",
+            Self::MissingAuxiliaryInput { .. } => "spatial_auxiliary_missing",
             Self::UnsupportedPass { .. } => "spatial_pass_unsupported",
             Self::CropInPointStage { .. } => "spatial_crop_in_point_stage",
             Self::ExtentExceedsDeviceLimit { .. } => "spatial_extent_exceeds_device_limit",
@@ -168,6 +175,16 @@ pub fn gpu_spatial_chain_plan(
     pipeline: &CompiledEffectGpuPipeline,
     width: u32,
     height: u32,
+) -> Result<GpuSpatialChainPlan, GpuSpatialChainBlocker> {
+    gpu_spatial_chain_plan_with_auxiliary(pipeline, width, height, &[])
+}
+
+/// Plan a primary chain with the caller's admitted external texture slots.
+pub fn gpu_spatial_chain_plan_with_auxiliary(
+    pipeline: &CompiledEffectGpuPipeline,
+    width: u32,
+    height: u32,
+    auxiliary_slots: &[u32],
 ) -> Result<GpuSpatialChainPlan, GpuSpatialChainBlocker> {
     if width == 0 || height == 0 {
         // An empty raster has no chain to run; the compositor rejects zero-sized
@@ -206,6 +223,16 @@ pub fn gpu_spatial_chain_plan(
                 stages.push(GpuSpatialStagePlan::PointOps { operations: operations.clone() });
             }
             EffectGpuStage::Spatial { pass, .. } => {
+                if let EffectGpuSpatialPass::FillMatte { external_slot, .. } = pass {
+                    let slot =
+                        external_slot.ok_or_else(|| GpuSpatialChainBlocker::UnsupportedPass {
+                            pass: pass.name(),
+                            detail: "a graph-local matte requires the graph dispatcher".into(),
+                        })?;
+                    if !auxiliary_slots.contains(&slot) {
+                        return Err(GpuSpatialChainBlocker::MissingAuxiliaryInput { slot });
+                    }
+                }
                 let passes = match EffectSpatialGpu::texture_pass_count(pass) {
                     Ok(passes) => passes,
                     Err(EffectSpatialGpuError::UnsupportedPass(name)) => {

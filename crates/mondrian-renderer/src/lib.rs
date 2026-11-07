@@ -217,7 +217,7 @@ pub use gpu_compositor::{
     GpuCompositeSpatialRequest, GpuCompositingBlockerReason, GpuCompositingCapability,
     GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
     GpuCompositorUniformArenaDiagnostics, GpuFrameCompositor, GpuPointEffectRecord,
-    GpuSolidSourceRecord,
+    GpuSolidSourceRecord, GpuSpatialAuxiliaryRaster,
 };
 pub use gpu_output_working_set::{
     estimate_render_gpu_output_active_working_set, RenderGpuOutputActiveResourceDemand,

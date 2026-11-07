@@ -359,7 +359,7 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // texture reads and one write that bound every pass.
         "box_blur" | "channel_blur" => 0.5,
         // Neighbourhood kernels and whole-chain morphology jobs cost more.
-        "convolution" | "glow" | "matte_refine" | "deband" => 0.9,
+        "convolution" | "glow" | "matte_refine" | "deband" | "fill_matte" => 0.9,
         // The key cleaner is three separable morphology passes: one axis of
         // taps per pass, against the two reads and one write that bound it.
         "key_cleaner" => 0.9,
@@ -428,6 +428,7 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // Fifty-six to a hundred and twelve nearest-neighbour taps with a
         // bracket decision per tap: the most expensive CPU kernel in the family.
         "stroke" => 6.0,
+        "fill_matte" => 2.5,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
         // Same sliding histogram as the median plus the deviation gate.

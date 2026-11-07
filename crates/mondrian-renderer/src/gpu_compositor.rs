@@ -14,7 +14,8 @@ use crate::gpu_composite_execution::{
     GpuCompositeRect, GpuCompositeSourceCrop,
 };
 use crate::spatial_driver::{
-    gpu_spatial_chain_plan, GpuSpatialChainPlan, GpuSpatialScratchPool, GpuSpatialStagePlan,
+    gpu_spatial_chain_plan_with_auxiliary, GpuSpatialChainPlan, GpuSpatialScratchPool,
+    GpuSpatialStagePlan,
 };
 use crate::spatial_pass_gpu::EffectSpatialGpu;
 use crate::{
@@ -31,7 +32,8 @@ use mondrian_core::{
     types::{BlendMode, Color},
 };
 use mondrian_effects::{
-    CompiledEffectGpuPipeline, CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MaskOp,
+    AuxiliaryPolicy, AuxiliaryResolution, CompiledEffectGpuPipeline, CompiledEffectGpuPlan,
+    EffectColorDomain, EffectGpuPointOp, EffectGpuSpatialPass, EffectGpuStage, MaskOp,
     PreparedQualifier, QualifierMode, MAX_FUSED_GPU_EFFECT_OPS,
 };
 use parking_lot::Mutex;
@@ -4278,6 +4280,19 @@ pub struct GpuCompositeSpatialLayer<'a> {
     pub spatial_plan: Option<&'a CompiledEffectGpuPipeline>,
 }
 
+/// One independently admitted auxiliary raster owned by the GPU resource table.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuSpatialAuxiliaryRaster<'a> {
+    /// External slot named by the lowered chain.
+    pub slot: u32,
+    /// Retained working Float32 resource.
+    pub frame: &'a GpuColorFrameHandle,
+    /// Normalized affine mapping in `[a, b, tx, c, d, ty]` order.
+    pub transform: [f32; 6],
+    /// Host registration geometry.
+    pub policy: AuxiliaryPolicy,
+}
+
 /// Request for recording a GPU composite whose layers may carry spatial chains.
 pub struct GpuCompositeSpatialRequest<'a> {
     /// Output width.
@@ -4877,6 +4892,7 @@ impl GpuFrameCompositor {
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
         request: GpuCompositeRequest<'_>,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        validate_request(&request)?;
         self.record_layers(
             device,
             queue,
@@ -4886,6 +4902,7 @@ impl GpuFrameCompositor {
             resource_pool,
             &request,
             &|_| None,
+            &[],
         )
     }
 
@@ -4905,6 +4922,32 @@ impl GpuFrameCompositor {
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
         request: GpuCompositeSpatialRequest<'_>,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        self.record_with_auxiliary_spatial_effect_chains(
+            device,
+            queue,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            request,
+            &[],
+        )
+    }
+
+    /// Record spatial chains with auxiliary rasters indexed by layer and slot.
+    /// Every required binding is validated before recording any layer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with_auxiliary_spatial_effect_chains(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        request: GpuCompositeSpatialRequest<'_>,
+        auxiliary_rasters: &[&[GpuSpatialAuxiliaryRaster<'_>]],
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         validate_spatial_request(&request)?;
         let mut layers = Vec::with_capacity(request.layers.len());
         for entry in request.layers {
@@ -4916,6 +4959,8 @@ impl GpuFrameCompositor {
             working_color_space: request.working_color_space,
             layers: &layers,
         };
+        validate_request(&plain)?;
+        let chains = prepare_spatial_chains(&request, auxiliary_rasters, table)?;
         self.record_layers(
             device,
             queue,
@@ -4924,7 +4969,8 @@ impl GpuFrameCompositor {
             table,
             resource_pool,
             &plain,
-            &|index| request.layers[index].spatial_plan,
+            &|index| chains[index].as_ref(),
+            auxiliary_rasters,
         )
     }
 
@@ -4938,11 +4984,11 @@ impl GpuFrameCompositor {
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
         request: &GpuCompositeRequest<'a>,
-        spatial_plan_at: &dyn Fn(usize) -> Option<&'a CompiledEffectGpuPipeline>,
+        spatial_chain_at: &dyn Fn(usize) -> Option<&'a GpuSpatialChainPlan>,
+        auxiliary_rasters: &[&[GpuSpatialAuxiliaryRaster<'_>]],
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
-        validate_request(request)?;
         let has_spatial_plan =
-            (0..request.layers.len()).any(|index| spatial_plan_at(index).is_some());
+            (0..request.layers.len()).any(|index| spatial_chain_at(index).is_some());
         // A spatial chain changes coverage in ways the passthrough fast path
         // cannot prove, so it must never fire while a chain is attached.
         if !has_spatial_plan && let Some(output) = single_layer_gpu_passthrough(request) {
@@ -5125,21 +5171,12 @@ impl GpuFrameCompositor {
                     [width as f32, height as f32],
                 ),
             };
-            if let Some(spatial_plan) = spatial_plan_at(index) {
+            if let Some(chain) = spatial_chain_at(index) {
                 let source_descriptor = layer_source_descriptor(layer.source).ok_or(
                     GpuCompositeError::SpatialPlanOnUnsupportedSource {
                         source_kind: composite_layer_source_name(layer.source),
                     },
                 )?;
-                let chain = gpu_spatial_chain_plan(
-                    spatial_plan,
-                    source_descriptor.width,
-                    source_descriptor.height,
-                )
-                .map_err(|blocker| GpuCompositeError::SpatialChainFailed {
-                    pass: spatial_chain_blocker_pass(&blocker),
-                    detail: blocker.to_string(),
-                })?;
                 // Clone the sampled texture, its view, and the resource table's
                 // own handle out of the binding before the chain inserts its
                 // intermediates, so no immutable and mutable table borrow
@@ -5165,8 +5202,9 @@ impl GpuFrameCompositor {
                     &source_texture,
                     &source_view,
                     source_descriptor,
-                    &chain,
+                    chain,
                     layer.frame_seed,
+                    auxiliary_rasters.get(index).copied().unwrap_or_default(),
                 )?;
                 layer_binding = GpuCompositeTextureBinding::Resource(
                     table.get(&chain_output).map_err(GpuCompositeError::ResourceTable)?.resource(),
@@ -5347,6 +5385,7 @@ impl GpuFrameCompositor {
         descriptor: ColorFrameDescriptor,
         chain: &GpuSpatialChainPlan,
         frame_seed: i64,
+        auxiliary_rasters: &[GpuSpatialAuxiliaryRaster<'_>],
     ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
         let width = descriptor.width;
         let height = descriptor.height;
@@ -5418,20 +5457,45 @@ impl GpuFrameCompositor {
                             ),
                         });
                     }
-                    let produced = self
-                        .spatial
-                        .record(
-                            device,
-                            encoder,
-                            pass,
-                            &current_texture,
-                            &scratch,
-                            width,
-                            height,
-                        )
-                        .map_err(|error| GpuCompositeError::SpatialChainFailed {
-                            pass: spatial_failure_pass(&error),
-                            detail: error.to_string(),
+                    let produced =
+                        if let EffectGpuSpatialPass::FillMatte { external_slot, .. } = pass {
+                            let binding = auxiliary_rasters
+                                .iter()
+                                .find(|binding| Some(binding.slot) == *external_slot)
+                                .ok_or_else(|| GpuCompositeError::SpatialChainFailed {
+                                    pass: "spatial_auxiliary_missing",
+                                    detail: format!(
+                                        "auxiliary slot {external_slot:?} lost its binding"
+                                    ),
+                                })?;
+                            let resource = table
+                                .get(binding.frame)
+                                .map_err(GpuCompositeError::ResourceTable)?;
+                            self.spatial.record_auxiliary(
+                                device,
+                                encoder,
+                                pass,
+                                &current_texture,
+                                &resource.resource().texture,
+                                &scratch[0],
+                                binding.transform,
+                            )
+                        } else {
+                            self.spatial.record(
+                                device,
+                                encoder,
+                                pass,
+                                &current_texture,
+                                &scratch,
+                                width,
+                                height,
+                            )
+                        }
+                        .map_err(|error| {
+                            GpuCompositeError::SpatialChainFailed {
+                                pass: spatial_failure_pass(&error),
+                                detail: error.to_string(),
+                            }
                         })?;
                     let output = create_working_resource(
                         device,
@@ -7771,6 +7835,103 @@ fn validate_spatial_request(
     Ok(())
 }
 
+fn prepare_spatial_chains(
+    request: &GpuCompositeSpatialRequest<'_>,
+    auxiliary_rasters: &[&[GpuSpatialAuxiliaryRaster<'_>]],
+    table: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+) -> Result<Vec<Option<GpuSpatialChainPlan>>, GpuCompositeError> {
+    if !auxiliary_rasters.is_empty() && auxiliary_rasters.len() != request.layers.len() {
+        return Err(GpuCompositeError::SpatialChainFailed {
+            pass: "spatial_auxiliary_bindings",
+            detail: "auxiliary binding groups must match the composite layers".into(),
+        });
+    }
+    let mut chains = Vec::with_capacity(request.layers.len());
+    for (index, entry) in request.layers.iter().enumerate() {
+        let bindings = auxiliary_rasters.get(index).copied().unwrap_or_default();
+        let Some(pipeline) = entry.spatial_plan else {
+            if !bindings.is_empty() {
+                return Err(GpuCompositeError::SpatialChainFailed {
+                    pass: "spatial_auxiliary_bindings",
+                    detail: format!("layer {index} has auxiliary bindings without a spatial chain"),
+                });
+            }
+            chains.push(None);
+            continue;
+        };
+        let primary = layer_source_descriptor(entry.layer.source).ok_or(
+            GpuCompositeError::SpatialPlanOnUnsupportedSource {
+                source_kind: composite_layer_source_name(entry.layer.source),
+            },
+        )?;
+        let slots: Vec<_> = bindings.iter().map(|binding| binding.slot).collect();
+        let chain =
+            gpu_spatial_chain_plan_with_auxiliary(pipeline, primary.width, primary.height, &slots)
+                .map_err(|blocker| GpuCompositeError::SpatialChainFailed {
+                    pass: spatial_chain_blocker_pass(&blocker),
+                    detail: blocker.to_string(),
+                })?;
+        for (binding_index, binding) in bindings.iter().enumerate() {
+            let declared = pipeline.stages().iter().any(|stage| {
+                matches!(
+                    stage,
+                    EffectGpuStage::Spatial {
+                        pass: EffectGpuSpatialPass::FillMatte { external_slot: Some(slot), .. }, ..
+                    } if *slot == binding.slot
+                )
+            });
+            if !declared || slots[..binding_index].contains(&binding.slot) {
+                return Err(GpuCompositeError::SpatialChainFailed {
+                    pass: "spatial_auxiliary_bindings",
+                    detail: format!(
+                        "layer {index} has an undeclared or duplicate auxiliary slot {}",
+                        binding.slot
+                    ),
+                });
+            }
+            let descriptor = binding.frame.descriptor();
+            let texture = &table
+                .get(binding.frame)
+                .map_err(GpuCompositeError::ResourceTable)?
+                .resource()
+                .texture;
+            if descriptor.color_space
+                != crate::ColorFrameSpace::Working(request.working_color_space)
+                || descriptor.domain != ColorFrameDomain::Working
+                || descriptor.encoding != ColorFrameEncoding::LinearFloat
+                || descriptor.residency != ColorFrameResidency::Gpu
+                || texture.format() != wgpu::TextureFormat::Rgba32Float
+                || texture.width() != descriptor.width
+                || texture.height() != descriptor.height
+                || !texture.usage().contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            {
+                return Err(GpuCompositeError::SpatialChainFailed {
+                    pass: "spatial_auxiliary_format",
+                    detail: format!(
+                        "layer {index} auxiliary slot {} has no working Float32 texture",
+                        binding.slot
+                    ),
+                });
+            }
+            require_straight_compatible_alpha(descriptor.alpha)?;
+            if binding.transform.iter().any(|value| !value.is_finite())
+                || (binding.policy.resolution() == AuxiliaryResolution::MatchPrimary
+                    && (descriptor.width, descriptor.height) != (primary.width, primary.height))
+            {
+                return Err(GpuCompositeError::SpatialChainFailed {
+                    pass: "spatial_auxiliary_geometry",
+                    detail: format!(
+                        "layer {index} auxiliary slot {} contradicts its registration",
+                        binding.slot
+                    ),
+                });
+            }
+        }
+        chains.push(Some(chain));
+    }
+    Ok(chains)
+}
+
 fn require_straight_compatible_alpha(
     alpha: crate::ColorFrameAlpha,
 ) -> Result<(), GpuCompositeError> {
@@ -8052,6 +8213,9 @@ fn spatial_failure_pass(error: &crate::spatial_pass_gpu::EffectSpatialGpuError) 
     match error {
         crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(pass) => pass,
         crate::spatial_pass_gpu::EffectSpatialGpuError::EmptyFrame => "empty_frame",
+        crate::spatial_pass_gpu::EffectSpatialGpuError::MissingAuxiliaryInput => {
+            "spatial_auxiliary_missing"
+        }
     }
 }
 
@@ -17043,6 +17207,227 @@ mod tests {
         let graph = compile_reference_render_graph(builder.finish()).expect("valid effect graph");
         mondrian_effects::lower_effect_graph_to_gpu_pipeline(&graph)
             .expect("lowered GPU effect pipeline")
+    }
+
+    #[tokio::test]
+    async fn an_auxiliary_pass_binds_a_second_texture_and_matches_the_cpu_reference() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping Fill matte parity: no GPU adapter available");
+            return;
+        };
+        assert_fill_matte_texture_parity(&context);
+    }
+
+    #[tokio::test]
+    async fn auxiliary_sampling_is_bilinear_without_float32_filterable() {
+        let Ok(context) = crate::GpuContext::new_without_float32_filterable_for_test().await else {
+            eprintln!("skipping unfilterable Fill matte parity: no GPU adapter available");
+            return;
+        };
+        assert!(!context.device.features().contains(wgpu::Features::FLOAT32_FILTERABLE));
+        assert_fill_matte_texture_parity(&context);
+    }
+
+    fn assert_fill_matte_texture_parity(context: &crate::GpuContext) {
+        use mondrian_core::{ImageSampling, WorkingRgbaF32Frame};
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_pipeline,
+            AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryFloatFrame, AuxiliaryFloatInput,
+            AuxiliaryOutOfBounds, AuxiliaryRole, AuxiliarySampling, EffectColorDomainContract,
+            EffectExecutionSession, EffectFloatFrameView, EffectFrameExtent,
+            EffectGraphBuilderState, EffectProcessorControl, EffectRenderOp, EffectValueFormat,
+            EffectWorkingPrecision, FillGrade,
+        };
+
+        let (width, height) = (7, 5);
+        let (matte_width, matte_height) = (3, 2);
+        let working_color_space = WorkingColorSpace::LinearRec709;
+        let pixels = (0..width * height)
+            .map(|index| [index as f32 * 0.1 - 1.0, 0.4, 2.1, (index % 4) as f32 / 3.0])
+            .collect::<Vec<_>>();
+        let matte = [
+            [7.0, -1.0, 0.2, 0.0],
+            [0.0, 0.0, 0.0, 0.2],
+            [0.0, 0.0, 0.0, 0.8],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 0.6],
+            [0.0, 0.0, 0.0, 0.0],
+        ];
+        let frame = |width, height, data| {
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                width,
+                height,
+                sampling: ImageSampling::UNIT_SQUARE,
+                alpha: ColorFrameAlpha::StraightCoverage,
+                color_space: working_color_space,
+                data,
+            })
+        };
+        let primary_cpu = frame(width, height, pixels.clone());
+        let matte_cpu = frame(matte_width, matte_height, matte.to_vec());
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1).unwrap();
+        let mut table = GpuColorFrameResourceTable::new();
+        let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            ids.allocate().unwrap(),
+            &matte_cpu,
+            product_gpu_working_texture_format(),
+            "fill-matte-test",
+        )
+        .unwrap();
+        let uploaded = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
+        let matte_handle = uploaded.handle().clone();
+        table.insert(uploaded).unwrap();
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        for (sampling, transform, invert) in [
+            (
+                AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
+                identity,
+                false,
+            ),
+            (
+                AuxiliarySampling::new(
+                    AuxiliaryCoordinateMapping::FrameTransform,
+                    AuxiliaryFilter::Linear,
+                    AuxiliaryOutOfBounds::Transparent,
+                ),
+                [1.0, 0.0, -0.3, 0.0, 1.0, 0.15],
+                true,
+            ),
+            (
+                AuxiliarySampling::PRIMARY_GRID_NEAREST_CLAMP,
+                identity,
+                false,
+            ),
+        ] {
+            let grade = FillGrade::new(2.0, 1.3, invert, [0.9, 0.1, 0.6], 0.7).unwrap();
+            let mut builder = EffectGraphBuilderState::new();
+            let aux =
+                builder.append_external_input(9, format, EffectColorDomainContract::SCENE_LINEAR);
+            let output = builder.add_auxiliary_effect(
+                builder.source(),
+                aux,
+                EffectRenderOp::Fill { grade },
+                AuxiliaryRole::Matte,
+                sampling,
+            );
+            builder.set_current_output(output);
+            let graph = compile_reference_render_graph(builder.finish()).unwrap();
+            let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            assert!(matches!(
+                pipeline.stages(),
+                [EffectGpuStage::Spatial {
+                    pass: EffectGpuSpatialPass::FillMatte { external_slot: Some(9), .. },
+                    ..
+                }]
+            ));
+            let policy = AuxiliaryPolicy::new(AuxiliaryResolution::Authored);
+            let cpu_binding = AuxiliaryFloatInput {
+                slot: 9,
+                raster: AuxiliaryFloatFrame {
+                    frame: EffectFloatFrameView::new(
+                        EffectFrameExtent::new(matte_width, matte_height),
+                        format,
+                        ImageSampling::UNIT_SQUARE,
+                        &matte,
+                    ),
+                    policy,
+                    transform,
+                },
+            };
+            let cpu = EffectExecutionSession::default()
+                .apply_compiled_rgba_f32_with_auxiliary(
+                    EffectFloatFrameView::new(
+                        EffectFrameExtent::new(width, height),
+                        format,
+                        ImageSampling::UNIT_SQUARE,
+                        &pixels,
+                    ),
+                    &graph,
+                    0,
+                    &[cpu_binding],
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            assert!(cpu
+                .pixels()
+                .iter()
+                .zip(&pixels)
+                .any(|(out, input)| (out[0] - input[0]).abs() > 0.1));
+            let expected = cpu
+                .pixels()
+                .iter()
+                .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
+                .collect::<Vec<_>>();
+            let layers = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&primary_cpu),
+                spatial_plan: Some(&pipeline),
+            }];
+            let request = || GpuCompositeSpatialRequest {
+                width,
+                height,
+                working_color_space,
+                layers: &layers,
+            };
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("fill-matte-test"),
+                });
+            let error = compositor
+                .record_with_spatial_effect_chains(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    request(),
+                )
+                .err()
+                .expect("a missing auxiliary raster must reject");
+            assert!(matches!(
+                error,
+                GpuCompositeError::SpatialChainFailed { pass: "spatial_auxiliary_missing", .. }
+            ));
+            let gpu_binding =
+                GpuSpatialAuxiliaryRaster { slot: 9, frame: &matte_handle, transform, policy };
+            let record = compositor
+                .record_with_auxiliary_spatial_effect_chains(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    request(),
+                    &[&[gpu_binding]],
+                )
+                .expect("record a dual-texture spatial pass");
+            assert_eq!(record.diagnostics.spatial_effect_layers, 1);
+            assert_eq!(record.diagnostics.spatial_effect_passes, 1);
+            assert_eq!(record.diagnostics.cpu_fallback_composites, 0);
+            let actual = readback_composite_output(
+                context,
+                encoder,
+                &mut table,
+                &record.output,
+                width,
+                height,
+            );
+            assert_spatial_chain_matches(&expected, &actual);
+            let max_error = expected
+                .iter()
+                .flatten()
+                .zip(actual.iter().flatten())
+                .map(|(cpu, gpu)| (cpu - gpu).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!("Fill matte parity {sampling:?}, max absolute error = {max_error:.9e}");
+        }
     }
 
     fn assert_spatial_chain_matches(expected: &[[f32; 4]], actual: &[[f32; 4]]) {

@@ -25,7 +25,9 @@
 // parity tests only.
 #![allow(dead_code)]
 
-use mondrian_effects::EffectGpuSpatialPass;
+use mondrian_effects::{
+    AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryOutOfBounds, EffectGpuSpatialPass,
+};
 use wgpu::util::DeviceExt as _;
 
 /// One GPU spatial pass could not be executed.
@@ -37,6 +39,9 @@ pub(crate) enum EffectSpatialGpuError {
     /// The frame geometry is empty.
     #[error("spatial pass needs a non-empty frame")]
     EmptyFrame,
+    /// This kernel requires a second raster supplied by its caller.
+    #[error("spatial pass requires an auxiliary raster")]
+    MissingAuxiliaryInput,
 }
 
 /// Reusable pipelines for GPU spatial effect passes.
@@ -94,6 +99,7 @@ pub(crate) struct EffectSpatialGpu {
     selective_color: wgpu::RenderPipeline,
     stroke: wgpu::RenderPipeline,
     bezier_warp: wgpu::RenderPipeline,
+    fill_matte: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -1101,7 +1107,7 @@ impl EffectSpatialGpu {
         });
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mondrian.effect-spatial.composite-shader"),
-            source: wgpu::ShaderSource::Wgsl(SPATIAL_COMPOSITE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(spatial_composite_shader_source().into()),
         });
         let composite_bindings =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1143,6 +1149,34 @@ impl EffectSpatialGpu {
             label: Some("mondrian.effect-spatial.composite-layout"),
             bind_group_layouts: &[Some(&composite_bindings)],
             immediate_size: 0,
+        });
+        let fill_matte = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.fill-matte"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_fill_matte"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         });
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
@@ -2011,6 +2045,7 @@ impl EffectSpatialGpu {
             selective_color,
             stroke,
             bezier_warp,
+            fill_matte,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -2553,6 +2588,71 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    /// Record an independent matte texture over the primary frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_auxiliary(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        pass: &EffectGpuSpatialPass,
+        primary: &wgpu::Texture,
+        auxiliary: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        transform: [f32; 6],
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        let EffectGpuSpatialPass::FillMatte { grade, sampling, .. } = *pass else {
+            return Err(EffectSpatialGpuError::UnsupportedPass(pass.name()));
+        };
+        if primary.width() == 0
+            || primary.height() == 0
+            || auxiliary.width() == 0
+            || auxiliary.height() == 0
+        {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        if transform.iter().any(|component| !component.is_finite()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "fill_matte_transform",
+            ));
+        }
+        let [red, green, blue] = grade.color();
+        let [a, b, tx, c, d, ty] = transform;
+        let uniforms = SpatialPassUniform {
+            size: [
+                primary.width() as f32,
+                primary.height() as f32,
+                f32::from(u8::from(
+                    sampling.out_of_bounds == AuxiliaryOutOfBounds::Transparent,
+                )),
+                f32::from(u8::from(
+                    sampling.mapping == AuxiliaryCoordinateMapping::FrameTransform,
+                )),
+            ],
+            params: [
+                grade.feather_x(),
+                grade.feather_y(),
+                f32::from(u8::from(grade.invert())),
+                f32::from(u8::from(sampling.filter == AuxiliaryFilter::Linear)),
+            ],
+            extra: [red, green, blue, grade.opacity()],
+            aces: [a, b, tx, 0.0],
+            extra1: [c, d, ty, 0.0],
+        };
+        let primary = primary.create_view(&wgpu::TextureViewDescriptor::default());
+        let auxiliary = auxiliary.create_view(&wgpu::TextureViewDescriptor::default());
+        let output = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.fill_matte,
+            &primary,
+            &auxiliary,
+            &output,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
+
     /// Number of texture passes one spatial pass expands into.
     ///
     /// Box blur expands per axis and per iteration; callers use this to size a
@@ -2675,6 +2775,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Split { .. } => Ok(1),
             EffectGpuSpatialPass::LinearColorKey { .. } => Ok(1),
             EffectGpuSpatialPass::ColorOffset { .. } => Ok(1),
+            EffectGpuSpatialPass::FillMatte { .. } => Ok(1),
         }
     }
 
@@ -2699,6 +2800,9 @@ impl EffectSpatialGpu {
         }
         // Single-pass kernels write one texture and need no scratch pool.
         match pass {
+            EffectGpuSpatialPass::FillMatte { .. } => {
+                return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
+            }
             EffectGpuSpatialPass::FindEdges { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return self.record_find_edges(
@@ -8054,6 +8158,20 @@ fn fs_magnify(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> 
 }
 "#;
 
+fn spatial_composite_shader_source() -> String {
+    let taps = mondrian_effects::BILINEAR_TAPS
+        .map(|[x, y]| format!("vec2<i32>({x}, {y})"))
+        .join(", ");
+    format!(
+        "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
+         const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
+         const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
+         {SPATIAL_COMPOSITE_SHADER}",
+        mondrian_effects::PIXEL_CENTRE,
+        f32::MAX.to_bits(),
+    )
+}
+
 /// Shader for passes that need the original frame and one auxiliary texture.
 ///
 /// The primary spatial shader binds one texture plus the uniforms; this module
@@ -8094,6 +8212,93 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
 
 fn frame_dims() -> vec2<i32> {
     return vec2<i32>(uniforms.size.xy);
+}
+
+fn auxiliary_texel_alpha(p: vec2<i32>, dims: vec2<i32>, transparent: bool) -> f32 {
+    if (transparent && (any(p < vec2<i32>(0)) || any(p >= dims))) {
+        return 0.0;
+    }
+    return textureLoad(auxiliary_texture, clamp(p, vec2<i32>(0), dims - vec2<i32>(1)), 0).a;
+}
+
+fn sample_auxiliary_alpha(primary_uv: vec2<f32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(auxiliary_texture));
+    let extent = vec2<f32>(dims);
+    let transparent = uniforms.size.z != 0.0;
+    var uv = primary_uv;
+    if (uniforms.size.w != 0.0) {
+        uv = vec2<f32>(
+            uniforms.aces.x * uv.x + uniforms.aces.y * uv.y + uniforms.aces.z,
+            uniforms.extra1.x * uv.x + uniforms.extra1.y * uv.y + uniforms.extra1.z,
+        );
+    }
+    if (any(uv != uv) || any(abs(uv) > vec2<f32>(bitcast<f32>(AUX_FINITE_MAX_BITS)))) {
+        return 0.0;
+    }
+    if (transparent) {
+        let border = vec2<f32>(AUX_PIXEL_CENTRE) / extent;
+        if (any(uv < -border) || any(uv > vec2<f32>(1.0) + border)) {
+            return 0.0;
+        }
+    } else {
+        uv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    }
+    let texel = uv * extent;
+    if (uniforms.params.w == 0.0) {
+        return auxiliary_texel_alpha(vec2<i32>(floor(texel)), dims, transparent);
+    }
+    let position = texel - vec2<f32>(AUX_PIXEL_CENTRE);
+    let origin = floor(position);
+    let weight = position - origin;
+    let weights = vec4<f32>(
+        (1.0 - weight.x) * (1.0 - weight.y),
+        weight.x * (1.0 - weight.y),
+        (1.0 - weight.x) * weight.y,
+        weight.x * weight.y,
+    );
+    var result = 0.0;
+    for (var tap = 0u; tap < 4u; tap += 1u) {
+        if (weights[tap] != 0.0) {
+            result += weights[tap] * auxiliary_texel_alpha(
+                vec2<i32>(origin) + AUX_BILINEAR_TAPS[tap], dims, transparent,
+            );
+        }
+    }
+    return result;
+}
+
+fn fill_matte_axis(inset: f32, feather: f32) -> f32 {
+    if (feather <= 0.0) {
+        return 1.0;
+    }
+    return clamp(inset / feather, 0.0, 1.0);
+}
+
+@fragment
+fn fs_fill_matte(input: VsOut) -> @location(0) vec4<f32> {
+    let index = floor(input.position.xy);
+    let centre = index + vec2<f32>(AUX_PIXEL_CENTRE);
+    let extent = uniforms.size.xy;
+    let inset = min(centre, extent - centre);
+    let mask = clamp(sample_auxiliary_alpha(centre / extent), 0.0, 1.0);
+    var coverage = mask * (fill_matte_axis(inset.x, uniforms.params.x)
+        * fill_matte_axis(inset.y, uniforms.params.y));
+    if (uniforms.params.z != 0.0) {
+        coverage = 1.0 - coverage;
+    }
+    let fill_alpha = clamp(coverage * uniforms.extra.w, 0.0, 1.0);
+    let base = textureLoad(original_texture, vec2<i32>(index), 0);
+    if (fill_alpha <= 0.0) {
+        return base;
+    }
+    let base_alpha = clamp(base.a, 0.0, 1.0);
+    if (base_alpha <= 0.0) {
+        return vec4<f32>(uniforms.extra.xyz, fill_alpha);
+    }
+    let keep = 1.0 - fill_alpha;
+    let alpha = fill_alpha + base_alpha * keep;
+    let color = (uniforms.extra.xyz * fill_alpha + base.rgb * base_alpha * keep) / alpha;
+    return vec4<f32>(color, alpha);
 }
 
 // The auxiliary texture is read through its own binding, so the clamped load
