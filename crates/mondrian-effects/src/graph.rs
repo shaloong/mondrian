@@ -780,22 +780,32 @@ pub struct CompiledEffectStageBinding {
     auxiliary_preview_fallback: Option<crate::AuxiliaryPreviewFallback>,
 }
 
-/// Compiler provenance, not another instance or author identity. A shared grade
+/// Authored position of a stage in the program that compiled it. A shared grade
 /// may appear more than once in one program, so its assignment is significant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum EffectStageOrigin {
+pub enum EffectStageOrigin {
+    /// Clip stack position.
     Stack {
+        /// Index in the authored stack.
         index: usize,
     },
+    /// Stage compiled within a standalone grade graph.
     GradeLocal {
+        /// Owning node in that graph.
         node: mondrian_core::GradeGraphNodeId,
     },
+    /// Grade assignment before the Clip stack.
     BeforeGrade {
+        /// Index in the program's ordered pre-Clip assignments.
         assignment: usize,
+        /// Owning node in the assigned graph.
         node: mondrian_core::GradeGraphNodeId,
     },
+    /// Grade assignment after the Clip stack.
     AfterGrade {
+        /// Index in the program's ordered post-stack assignments.
         assignment: usize,
+        /// Owning node in the assigned graph.
         node: mondrian_core::GradeGraphNodeId,
     },
 }

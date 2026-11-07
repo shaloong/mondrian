@@ -1172,6 +1172,16 @@ impl PreparedEffectProgram {
         Some(PreparedEffectInput { program: self.clone(), origin })
     }
 
+    /// Resolve a stage's author position after verifying this program owns its binding.
+    pub fn stage_origin(&self, stage: &CompiledEffectStageBinding) -> Option<EffectStageOrigin> {
+        self.inner
+            .zero_compiled
+            .stage_bindings()
+            .iter()
+            .find(|binding| binding.shares_origin(stage))?
+            .origin()
+    }
+
     fn canonicalize_origins(
         &self,
         evaluation: &mut EvaluatedEffectGraph,

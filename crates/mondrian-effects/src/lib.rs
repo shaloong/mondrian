@@ -381,7 +381,7 @@ pub use graph::{
     AuxiliaryRole, AuxiliarySampling, AuxiliarySourceBinding, CompiledEffectDomainPlan,
     CompiledEffectGraph, CompiledEffectStageBinding, EffectDomainBlocker, EffectDomainBlockerKind,
     EffectDomainTransition, EffectGraphBuilderState, EffectGraphError, EffectGraphNode,
-    EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
+    EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph, EffectStageOrigin,
     PreparedEffectGraphTopology, UNBOUND_AUXILIARY_SLOT,
 };
 pub use grid::{
