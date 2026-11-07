@@ -646,6 +646,7 @@ mod tests {
         ));
         let (compiled, _) = procedural_graph();
         assert!(compiled.auxiliary_inputs().is_empty());
+        assert!(compiled.has_auxiliary_effects());
         let view = EffectFloatFrameView::new(
             EffectFrameExtent::new(width as u32, height as u32),
             EffectValueFormat::new(
@@ -656,7 +657,29 @@ mod tests {
             mondrian_core::ImageSampling::UNIT_SQUARE,
             &input,
         );
-        let output = crate::apply_compiled_effect_graph_rgba_f32(view, &compiled, 0).unwrap();
+        // The primary, generated map and displacement snapshot coexist.
+        let peak = 3 * input.len() * std::mem::size_of::<[f32; 4]>();
+        assert_eq!(
+            crate::estimate_compiled_float_raster_working_bytes(&compiled, view.extent(), &[])
+                .unwrap(),
+            peak
+        );
+        let mut refused = crate::EffectExecutionSession::new(
+            crate::EffectExecutionSessionConfig::uncached(peak - 1),
+        );
+        let mut control = crate::EffectProcessorControl::uncancelled();
+        assert!(matches!(
+            refused.apply_compiled_rgba_f32(view, &compiled, 0, &mut control),
+            Err(crate::EffectFloatExecutionError::AuxiliaryInput(
+                crate::EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded {
+                    required_bytes,
+                    budget_bytes,
+                }
+            )) if required_bytes == peak && budget_bytes == peak - 1
+        ));
+        let mut admitted =
+            crate::EffectExecutionSession::new(crate::EffectExecutionSessionConfig::uncached(peak));
+        let output = admitted.apply_compiled_rgba_f32(view, &compiled, 0, &mut control).unwrap();
         assert!(
             output.pixels() != input,
             "the procedural map must produce a nonidentity result"

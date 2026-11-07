@@ -11,6 +11,7 @@ use crate::{
 struct Raster {
     extent: EffectFrameExtent,
     capacity: usize,
+    borrowed: bool,
 }
 
 fn bytes(extent: EffectFrameExtent) -> Result<usize, EffectFloatExecutionError> {
@@ -41,7 +42,9 @@ impl Pool {
     }
 
     fn release(&mut self, raster: Raster) {
-        self.capacities.push(raster.capacity);
+        if !raster.borrowed {
+            self.capacities.push(raster.capacity);
+        }
     }
 }
 
@@ -80,9 +83,13 @@ pub(crate) fn reservations(
                 outputs.remove(&input).ok_or_else(|| missing(input))?
             } else {
                 let raster = outputs.get(&input).copied().ok_or_else(|| missing(input))?;
-                Raster {
-                    extent: raster.extent,
-                    capacity: pool.acquire(bytes(raster.extent)?, true),
+                if raster.borrowed {
+                    raster
+                } else {
+                    Raster {
+                        capacity: pool.acquire(bytes(raster.extent)?, true),
+                        ..raster
+                    }
                 }
             };
             if pixelwise
@@ -106,6 +113,7 @@ pub(crate) fn reservations(
                 Raster {
                     extent: primary_extent,
                     capacity: pool.acquire(bytes(primary_extent)?, true),
+                    borrowed: false,
                 },
                 0,
             ),
@@ -113,6 +121,7 @@ pub(crate) fn reservations(
                 Raster {
                     extent: primary_extent,
                     capacity: pool.acquire(bytes(primary_extent)?, true),
+                    borrowed: false,
                 },
                 crate::adjustment::render_op_f32_scratch_frames(op),
             ),
@@ -124,10 +133,16 @@ pub(crate) fn reservations(
                         crate::EffectExecutionError::AuxiliaryFrameMissing { slot: *slot },
                     ))?
                     .1;
+                let borrowed = compiled.external_auxiliary_is_read_only(*id);
                 (
                     Raster {
                         extent,
-                        capacity: pool.acquire(bytes(extent)?, false),
+                        capacity: if borrowed {
+                            0
+                        } else {
+                            pool.acquire(bytes(extent)?, false)
+                        },
+                        borrowed,
                     },
                     0,
                 )
@@ -136,6 +151,7 @@ pub(crate) fn reservations(
                 Raster {
                     extent: primary_extent,
                     capacity: pool.acquire(bytes(primary_extent)?, false),
+                    borrowed: false,
                 },
                 0,
             ),
@@ -314,40 +330,80 @@ mod tests {
     }
 
     #[test]
-    fn authored_auxiliary_storage_uses_its_actual_extent_and_exact_budget() {
+    fn borrowed_authored_auxiliary_has_only_the_primary_pixel_budget() {
         let graph = graph(1, false);
         let matte = frame(vec![[0.0, 0.0, 0.0, 0.25]; 4], 4);
-        // One primary pixel (16 B) and four authored pixels (64 B) coexist.
+        // The four authored pixels stay in the caller's plane.
         assert_eq!(
-            execute(&graph, &matte, 80).unwrap().pixels(),
+            execute(&graph, &matte, 16).unwrap().pixels(),
             &[[0.25, 0.0, 1.5, 1.0]]
         );
         assert!(matches!(
-            execute(&graph, &matte, 79),
+            execute(&graph, &matte, 15),
             Err(EffectFloatExecutionError::AuxiliaryInput(
                 EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded {
-                    required_bytes: 80,
-                    budget_bytes: 79,
+                    required_bytes: 16,
+                    budget_bytes: 15,
                 }
             ))
         ));
     }
 
     #[test]
-    fn shared_authored_rasters_reuse_clone_storage_instead_of_charging_every_consumer() {
+    fn shared_authored_rasters_are_borrowed_by_each_consumer() {
         let graph = graph(40, false);
         let matte = frame(vec![[0.0, 0.0, 0.0, 0.25]; 4], 4);
-        // Primary + original matte + one recycled matte clone, not 40 clones.
-        let output = execute(&graph, &matte, 144).unwrap();
+        let output = execute(&graph, &matte, 16).unwrap();
         let residual = 0.75f32.powi(40);
         assert!((output.pixels()[0][0] - (1.0 - residual)).abs() < 1e-6);
         assert!((output.pixels()[0][2] - 2.0 * residual).abs() < 1e-6);
         assert!(matches!(
-            execute(&graph, &matte, 143),
+            execute(&graph, &matte, 15),
             Err(EffectFloatExecutionError::AuxiliaryInput(
-                EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded { required_bytes: 144, .. }
+                EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded { required_bytes: 16, .. }
             ))
         ));
+    }
+
+    #[test]
+    fn two_external_slots_can_borrow_the_same_authored_plane() {
+        let matte = frame(vec![[0.0, 0.0, 0.0, 0.25]; 4], 4);
+        let primary = frame(vec![[0.0, 0.0, 2.0, 1.0]], 1);
+        let mut builder = EffectGraphBuilderState::new();
+        for slot in [3, 19] {
+            let input = builder.current_output();
+            let auxiliary = builder.append_external_input(
+                slot,
+                matte.format(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            );
+            let output = builder.add_auxiliary_effect_with_role(
+                input,
+                auxiliary,
+                EffectRenderOp::Fill {
+                    grade: FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap(),
+                },
+                AuxiliaryRole::Matte,
+            );
+            builder.set_current_output(output);
+        }
+        let graph = compile_reference_render_graph(builder.finish()).unwrap();
+        let raster = AuxiliaryFloatFrame::new(
+            matte.view(),
+            AuxiliaryPolicy::new(AuxiliaryResolution::Authored),
+        );
+        let inputs = [3, 19].map(|slot| AuxiliaryFloatInput { slot, raster });
+        let output = EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(16))
+            .apply_compiled_rgba_f32_with_auxiliary(
+                primary.view(),
+                &graph,
+                0,
+                &inputs,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert_eq!(output.pixels(), &[[0.4375, 0.0, 1.125, 1.0]]);
+        assert!(matte.pixels().iter().all(|pixel| *pixel == [0.0, 0.0, 0.0, 0.25]));
     }
 
     #[test]
@@ -377,7 +433,22 @@ mod tests {
         };
         let residual =
             (1.0 - alpha_at_centre(&matte)) * (1.0 - alpha_at_centre(&reference)).powi(2);
-        let actual = execute(&graph(2, true), &matte, usize::MAX).unwrap();
+        let graph = graph(2, true);
+        let extent = EffectFrameExtent::new(1, 1);
+        let peak =
+            estimate_compiled_float_raster_working_bytes(&graph, extent, &[(0, matte.extent())])
+                .unwrap();
+        assert!(
+            peak >= 16 + 2 * 64,
+            "preprocessing owns the large auxiliary raster"
+        );
+        assert!(matches!(
+            execute(&graph, &matte, peak - 1),
+            Err(EffectFloatExecutionError::AuxiliaryInput(
+                EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded { required_bytes, .. }
+            )) if required_bytes == peak
+        ));
+        let actual = execute(&graph, &matte, peak).unwrap();
         assert!((actual.pixels()[0][0] - (1.0 - residual)).abs() < 1e-6);
         assert!((actual.pixels()[0][2] - 2.0 * residual).abs() < 1e-6);
     }
@@ -386,11 +457,15 @@ mod tests {
     fn large_auxiliary_estimates_are_decode_free_and_keep_primary_and_map_scratch_separate() {
         let primary = EffectFrameExtent::new(1920, 1080);
         let authored = EffectFrameExtent::new(8192, 4320);
+        let owned = graph(40, true);
         let graph = graph(40, false);
         let peak = estimate_compiled_float_raster_working_bytes(&graph, primary, &[(0, authored)])
             .unwrap();
-        assert_eq!(peak, 1920 * 1080 * 16 + 2 * 8192 * 4320 * 16);
-        assert!(peak > 512 * 1024 * 1024);
+        assert_eq!(peak, 1920 * 1080 * 16);
+        let owned_peak =
+            estimate_compiled_float_raster_working_bytes(&owned, primary, &[(0, authored)])
+                .unwrap();
+        assert!(owned_peak > 512 * 1024 * 1024);
         for (extents, expected_reason) in [
             (vec![(0, authored), (0, authored)], "duplicate_slot"),
             (vec![(42, authored)], "undeclared_slot"),
@@ -430,8 +505,8 @@ mod tests {
         let graph = compile_reference_render_graph(builder.finish()).unwrap();
         let peak = estimate_compiled_float_raster_working_bytes(&graph, primary, &[(0, authored)])
             .unwrap();
-        // Displacement snapshots the primary, and samples the map in place.
-        assert_eq!(peak, 2 * 1920 * 1080 * 16 + 8192 * 4320 * 16);
+        // Displacement snapshots the primary and reads the host's map in place.
+        assert_eq!(peak, 2 * 1920 * 1080 * 16);
     }
 
     #[test]
@@ -453,7 +528,7 @@ mod tests {
             &[(0, matte.extent())],
         )
         .unwrap();
-        assert_eq!(peak, 160);
+        assert_eq!(peak, 128);
         assert!(primary.retained_bytes() * 2 > peak);
         // A separate compositor can grant exactly this cold peak even when
         // the Effect session has a larger local grant and a usable cache.

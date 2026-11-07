@@ -835,6 +835,7 @@ mod tests {
             }
         }
         // Missing and duplicate bindings must fail even after a cached success.
+        assert_eq!(session.diagnostics().cache_entries, 2);
         assert!(matches!(
             session.apply_compiled_rgba_f32_with_auxiliary(
                 float_view(&primary, 2, 1),
@@ -960,6 +961,7 @@ mod tests {
                 EffectExecutionError::InvalidAuxiliaryFrame { reason: "format_mismatch", .. }
             ))
         ));
+        assert_eq!(session.diagnostics().cache_entries, 1);
     }
 
     #[test]

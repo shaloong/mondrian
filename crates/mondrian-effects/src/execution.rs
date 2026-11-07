@@ -1108,19 +1108,20 @@ fn scalar_processor_reservations(
             | EffectGraphNodeKind::CustomSource { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
             if binding.float32_factory().is_some()))
     });
-    let auxiliary_reservations = if compiled.auxiliary_inputs().is_empty() {
-        None
-    } else {
-        Some(crate::float_working_set::reservations(
-            compiled,
-            crate::EffectFrameExtent::new(width, height),
-            &auxiliary
-                .iter()
-                .map(|input| (input.slot, input.raster.frame.extent()))
-                .collect::<Vec<_>>(),
-            control,
-        )?)
-    };
+    let auxiliary_reservations =
+        if compiled.auxiliary_inputs().is_empty() && !compiled.has_auxiliary_effects() {
+            None
+        } else {
+            Some(crate::float_working_set::reservations(
+                compiled,
+                crate::EffectFrameExtent::new(width, height),
+                &auxiliary
+                    .iter()
+                    .map(|input| (input.slot, input.raster.frame.extent()))
+                    .collect::<Vec<_>>(),
+                control,
+            )?)
+        };
     if !has_factory && !has_resident_processors && auxiliary_reservations.is_none() {
         return Ok(None);
     }
@@ -1574,6 +1575,9 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 );
             }
             EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                if compiled.external_auxiliary_is_read_only(node.id) {
+                    continue;
+                }
                 let raster = auxiliary
                     .iter()
                     .find(|binding| binding.slot == *slot)
@@ -1599,13 +1603,6 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     *input_id,
                 )
                 .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *input_id })?;
-                let mut auxiliary_frame = take_float_graph_input(
-                    &mut outputs,
-                    &mut remaining_uses,
-                    &mut buffer_pool,
-                    *auxiliary_id,
-                )
-                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *auxiliary_id })?;
                 source = apply_effect_domain_transition(
                     compiled,
                     Some(node.id),
@@ -1613,29 +1610,59 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     source,
                     &mut processor,
                 )?;
-                auxiliary_frame = apply_effect_domain_transition(
-                    compiled,
-                    Some(node.id),
-                    *auxiliary_id,
-                    auxiliary_frame,
-                    &mut processor,
-                )?;
-                let mut raster = crate::AuxiliaryFloatFrame::new(
-                    auxiliary_frame.view(),
-                    crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
-                );
-                if let Some(EffectGraphNodeKind::ExternalInput { slot, .. }) =
+                let bound = if let Some(EffectGraphNodeKind::ExternalInput { slot, .. }) =
                     compiled.graph().node(*auxiliary_id).map(|node| &node.kind)
                 {
-                    let binding =
-                        auxiliary.iter().find(|binding| binding.slot == *slot).ok_or({
-                            EffectFloatExecutionError::AuxiliaryInput(
-                                EffectExecutionError::AuxiliaryFrameMissing { slot: *slot },
-                            )
-                        })?;
-                    raster.transform = binding.raster.transform;
-                    raster.policy = binding.raster.policy;
-                }
+                    Some(
+                        auxiliary
+                            .iter()
+                            .find(|binding| binding.slot == *slot)
+                            .ok_or({
+                                EffectFloatExecutionError::AuxiliaryInput(
+                                    EffectExecutionError::AuxiliaryFrameMissing { slot: *slot },
+                                )
+                            })?
+                            .raster,
+                    )
+                } else {
+                    None
+                };
+                let borrowed =
+                    bound.filter(|_| compiled.external_auxiliary_is_read_only(*auxiliary_id));
+                let missing_auxiliary =
+                    EffectFloatExecutionError::MissingOutput { node_id: *auxiliary_id };
+                let owned_auxiliary = if borrowed.is_some() {
+                    decrement_float_graph_use(&mut remaining_uses, *auxiliary_id)
+                        .ok_or(missing_auxiliary)?;
+                    None
+                } else {
+                    let frame = take_float_graph_input(
+                        &mut outputs,
+                        &mut remaining_uses,
+                        &mut buffer_pool,
+                        *auxiliary_id,
+                    )
+                    .ok_or(missing_auxiliary)?;
+                    Some(apply_effect_domain_transition(
+                        compiled,
+                        Some(node.id),
+                        *auxiliary_id,
+                        frame,
+                        &mut processor,
+                    )?)
+                };
+                let raster = if let Some(frame) = &owned_auxiliary {
+                    let frame = frame.view();
+                    match bound {
+                        Some(raster) => crate::AuxiliaryFloatFrame { frame, ..raster },
+                        None => crate::AuxiliaryFloatFrame::new(
+                            frame,
+                            crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
+                        ),
+                    }
+                } else {
+                    borrowed.expect("the sampled auxiliary raster is borrowed or owned")
+                };
                 source = crate::materialize_straight_coverage(
                     source,
                     crate::EffectAlphaConsumer::StraightCoverageOperation,
@@ -1660,7 +1687,9 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     ));
                 }
                 source.validate()?;
-                release_float_execution_buffer(&mut buffer_pool, auxiliary_frame);
+                if let Some(frame) = owned_auxiliary {
+                    release_float_execution_buffer(&mut buffer_pool, frame);
+                }
                 outputs.insert(node.id, source);
             }
             EffectGraphNodeKind::CustomSource { op, domain_contract } => {
@@ -2080,7 +2109,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
     if let Some(key) = cache_key.filter(|_| {
         cache_copy_working_bytes <= session.max_working_bytes()
             && session.admits_float_output_cache_copy(&output)
-            && (compiled.auxiliary_inputs().is_empty()
+            && ((compiled.auxiliary_inputs().is_empty() && !compiled.has_auxiliary_effects())
                 || cache_copy_working_bytes
                     <= reservations
                         .as_ref()
@@ -3164,12 +3193,7 @@ fn take_float_graph_input(
     buffer_pool: &mut Vec<Vec<[f32; 4]>>,
     node_id: EffectGraphNodeId,
 ) -> Option<crate::EffectFloatFrame> {
-    let remaining = remaining_uses.get_mut(&node_id)?;
-    if *remaining == 0 {
-        return None;
-    }
-    *remaining -= 1;
-    if *remaining == 0 {
+    if decrement_float_graph_use(remaining_uses, node_id)? == 0 {
         return outputs.remove(&node_id);
     }
     let source = outputs.get(&node_id)?;
@@ -3181,6 +3205,15 @@ fn take_float_graph_input(
         source.sampling(),
         storage,
     ))
+}
+
+fn decrement_float_graph_use(
+    remaining_uses: &mut HashMap<EffectGraphNodeId, usize>,
+    node_id: EffectGraphNodeId,
+) -> Option<usize> {
+    let remaining = remaining_uses.get_mut(&node_id)?;
+    *remaining = remaining.checked_sub(1)?;
+    Some(*remaining)
 }
 
 fn take_float_execution_buffer(

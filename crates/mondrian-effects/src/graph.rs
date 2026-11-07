@@ -1065,14 +1065,33 @@ impl CompiledEffectGraph {
         self.signature_hash
     }
 
-    /// Complete set of auxiliary rasters this graph samples.
+    /// Complete set of external auxiliary slots required from the caller.
     ///
-    /// The slice is fixed at compile time and ordered by the graph's node
-    /// order. Callers must supply exactly these slots to
-    /// [`crate::EffectExecutionSession::apply_compiled_rgba8_with_auxiliary`]; an empty slice means the
-    /// graph never reads a second input.
+    /// Slots are in declaration order. Graph-local producers require no slots.
+    /// Callers must supply exactly these slots to
+    /// [`crate::EffectExecutionSession::apply_compiled_rgba_f32_with_auxiliary`].
     pub fn auxiliary_inputs(&self) -> &[AuxiliaryInputSpec] {
         &self.auxiliary_inputs
+    }
+
+    /// Whether an executed node samples a second raster, including a graph-local value.
+    pub fn has_auxiliary_effects(&self) -> bool {
+        self.graph.nodes.iter().any(|node| {
+            matches!(node.kind, EffectGraphNodeKind::AuxiliaryEffect { .. })
+                && self.schedule.ordered_nodes.contains(&node.id)
+        })
+    }
+
+    /// Prove that an external producer is only sampled, with no owning use or conversion.
+    pub(crate) fn external_auxiliary_is_read_only(&self, producer: EffectGraphNodeId) -> bool {
+        self.graph.output != Some(producer)
+            && !self.domain_plan.transitions.iter().any(|edge| edge.input == producer)
+            && self.graph.nodes.iter().all(|node| {
+                matches!(node.kind, EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. }
+                    if auxiliary == producer && input != producer)
+                    || !node.input_ids().contains(&producer)
+                    || !self.schedule.ordered_nodes.contains(&node.id)
+            })
     }
 
     /// Preview identity substitutions retained for host badges and cache admission.
