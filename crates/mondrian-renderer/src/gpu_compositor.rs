@@ -5977,6 +5977,58 @@ impl GpuFrameCompositor {
         })
     }
 
+    /// Record Fill over a graph-local matte on the same actual grid.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_fill_matte_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        mask: &GpuColorFrameHandle,
+        pass: &EffectGpuSpatialPass,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
+        if !matches!(
+            pass,
+            EffectGpuSpatialPass::FillMatte { external_slot: None, .. }
+        ) {
+            return Err(GpuCompositeError::SpatialChainFailed {
+                pass: pass.name(),
+                detail: "expected a graph-local Fill matte".to_owned(),
+            });
+        }
+        validate_alpha_mask_inputs(input, mask, working_color_space)?;
+        let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
+        let mask_resource = table.get(mask).map_err(GpuCompositeError::ResourceTable)?;
+        let output = create_working_resource(
+            device,
+            ids,
+            input.descriptor(),
+            "gpu-fill-matte-output",
+            resource_pool,
+        )?;
+        self.spatial
+            .record_auxiliary(
+                device,
+                encoder,
+                pass,
+                &input_resource.resource().texture,
+                &mask_resource.resource().texture,
+                &output.resource().texture,
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                pass: spatial_failure_pass(&error),
+                detail: error.to_string(),
+            })?;
+        let handle = output.handle().clone();
+        table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(handle)
+    }
+
     /// Combine two AlphaMask-domain textures without crossing into picture RGB.
     #[allow(clippy::too_many_arguments)]
     pub fn record_alpha_mask_combine_pass(

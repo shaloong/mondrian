@@ -1225,6 +1225,38 @@ fn record_gpu_suffix(
                     }
                 }
                 PreparedHeterogeneousGpuStep::Dispatch(
+                    PreparedHeterogeneousGpuDispatch::FillMatte {
+                        input, mask, output, pass, ..
+                    },
+                ) => {
+                    let input_handle = handles.get(input).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_fill_matte_input_not_materialized",
+                        },
+                    )?;
+                    let mask_handle = handles.get(mask).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_fill_matte_mask_not_materialized",
+                        },
+                    )?;
+                    let output_handle = resources.compositor.record_fill_matte_pass(
+                        resources.device,
+                        resources.encoder,
+                        resources.ids,
+                        resources.table,
+                        resources.resource_pool.map(Arc::as_ref),
+                        input_handle,
+                        mask_handle,
+                        pass,
+                        working_color_space,
+                    )?;
+                    if handles.insert(*output, output_handle).is_some() {
+                        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_dispatch_replaced_materialization",
+                        });
+                    }
+                }
+                PreparedHeterogeneousGpuStep::Dispatch(
                     PreparedHeterogeneousGpuDispatch::MaskCombine {
                         left,
                         right,
@@ -1963,6 +1995,7 @@ fn gpu_recording_device_demand(
             | PreparedHeterogeneousGpuDispatch::Copy { .. }
             | PreparedHeterogeneousGpuDispatch::Blend { .. }
             | PreparedHeterogeneousGpuDispatch::Mask { .. }
+            | PreparedHeterogeneousGpuDispatch::FillMatte { .. }
             | PreparedHeterogeneousGpuDispatch::MaskCombine { .. }
             | PreparedHeterogeneousGpuDispatch::MatteMix { .. } => 1,
         };
@@ -2370,7 +2403,18 @@ fn validate_gpu_suffix_schedule(
                 waits,
                 signal,
                 ..
-            }) => {
+            })
+            | PreparedHeterogeneousGpuStep::Dispatch(
+                PreparedHeterogeneousGpuDispatch::FillMatte {
+                    node,
+                    input,
+                    mask,
+                    output,
+                    waits,
+                    signal,
+                    ..
+                },
+            ) => {
                 require_plan(
                     live.contains(input) && live.contains(mask),
                     "gpu_mask_input_not_live",
@@ -3908,6 +3952,149 @@ mod tests {
         }
         assert!(!runtime.is_poisoned());
         assert!(runtime.table.is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_wgpu_authored_fill_matte_matches_cpu() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping authored Fill matte test: no GPU adapter available");
+            return;
+        };
+        let pixels = test_input();
+        let input = mondrian_effects::EffectFloatFrameView::new(
+            EXTENT,
+            EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &pixels,
+        );
+        let masks = [
+            MaskComponent::new(
+                "Outer".to_owned(),
+                MaskEvaluation {
+                    shape: MaskShape::Rectangle {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.8,
+                        height: 1.0,
+                        corner_radius: 0.0,
+                    },
+                    opacity: 0.75,
+                    ..MaskEvaluation::default()
+                },
+            ),
+            MaskComponent::new(
+                "Cutout".to_owned(),
+                MaskEvaluation {
+                    shape: MaskShape::Ellipse {
+                        center: glam::Vec2::new(0.5, 0.5),
+                        radii: glam::Vec2::new(0.25, 0.35),
+                    },
+                    feather: 0.5,
+                    mask_op: MaskOp::Subtract,
+                    ..MaskEvaluation::default()
+                },
+            ),
+        ];
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .expect("heterogeneous GPU runtime");
+        for all_masks in [false, true] {
+            let mut effect = mondrian_effects::instantiate_effect_node(EffectType::Fill).unwrap();
+            for (parameter, value) in [
+                ("fill_mask", PropertyValue::Float(1.0)),
+                (
+                    "all_masks",
+                    PropertyValue::Float(f32::from(u8::from(all_masks))),
+                ),
+                ("invert", PropertyValue::Bool(all_masks)),
+                ("feather_x", PropertyValue::Float(1.25)),
+                ("feather_y", PropertyValue::Float(0.5)),
+                ("opacity", PropertyValue::Float(0.7)),
+            ] {
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: EffectType::Fill.property_path(parameter),
+                        value,
+                    })
+                    .unwrap();
+            }
+            effect.instantiate_for_clip("Fill".to_owned());
+            let graph = PreparedEffectProgram::prepare(&[effect], &masks, WORKING_SPACE)
+                .unwrap()
+                .evaluate(TimelineTime::ZERO)
+                .unwrap();
+            let expected = apply_compiled_effect_graph_rgba_f32(input, &graph, FRAME_SEED)
+                .expect("authored Fill CPU reference");
+            assert_ne!(expected.pixels(), &pixels);
+            let route = crate::PreparedHeterogeneousEffectRoute::prepare(
+                Arc::clone(&graph),
+                EXTENT,
+                generous_graph_budget(),
+            )
+            .expect("prepare authored Fill GPU continuation");
+            let prepared = route.prepared_work();
+            assert!(!prepared.cpu_nodes().is_empty());
+            assert!(prepared.cpu_nodes().iter().all(|id| matches!(
+                graph.graph().node(*id).unwrap().kind,
+                mondrian_effects::EffectGraphNodeKind::MaskSource { .. }
+            )));
+            assert_eq!(
+                prepared
+                    .gpu_suffix()
+                    .steps()
+                    .iter()
+                    .filter(|step| matches!(
+                        step,
+                        PreparedHeterogeneousGpuStep::Dispatch(
+                            PreparedHeterogeneousGpuDispatch::FillMatte { .. }
+                        )
+                    ))
+                    .count(),
+                1
+            );
+            let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(
+                8 * 1024 * 1024,
+            ));
+            session.bind_generation(GENERATION);
+            let completion = prepared
+                .execute_cpu_prefix_uncancelled(
+                    &mut session,
+                    GENERATION,
+                    input,
+                    FRAME_SEED,
+                    WORKING_SPACE,
+                )
+                .expect("rasterize authored Fill mask frontier");
+            let completed = runtime
+                .execute_to_cpu(
+                    request(&graph, generous_gpu_grant()),
+                    completion,
+                    &ExecutionCancellationToken::new(),
+                    gpu_test_deadline(),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                )
+                .expect("execute authored Fill GPU continuation");
+            let error = completed
+                .frame()
+                .rgba_f32()
+                .data
+                .iter()
+                .flatten()
+                .zip(expected.pixels().iter().flatten())
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0_f32, f32::max);
+            eprintln!(
+                "authored Fill matte all_masks={all_masks}, max absolute error = {error:.9e}"
+            );
+            assert!(error <= 1.0e-4);
+            assert!(runtime.table.is_empty());
+        }
     }
 
     #[tokio::test]

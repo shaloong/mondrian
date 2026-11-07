@@ -487,6 +487,73 @@ fn media_demand_requests_cpu_working_pixels_only_when_exact_gpu_lowering_is_unav
 }
 
 #[test]
+fn production_preview_routes_authored_fill_matte_to_gpu() {
+    use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
+    use mondrian_effects::{
+        EffectType, MaskComponent, MaskEvaluation, MaskShape, PreparedHeterogeneousGpuDispatch,
+        PreparedHeterogeneousGpuStep,
+    };
+
+    let mut sequence = Sequence::new("Fill matte route");
+    let target = Resolution { width: 64, height: 36 };
+    sequence.settings.resolution = target;
+    sequence.settings.validate().expect("valid authored Sequence canvas");
+    let time_base = sequence.time_base();
+    let mut clip = Clip::new(AssetId::new(), tt(0, time_base), tt(24, time_base)).unwrap();
+    let mut fill = mondrian_effects::instantiate_effect_node(EffectType::Fill).unwrap();
+    fill.apply_property_mutation(PropertyMutation::SetStaticValue {
+        path: EffectType::Fill.property_path("fill_mask"),
+        value: PropertyValue::Float(1.0),
+    })
+    .unwrap();
+    clip.add_effect_node(fill);
+    clip.masks.push(MaskComponent::new(
+        "Left half".to_owned(),
+        MaskEvaluation {
+            shape: MaskShape::Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 1.0,
+                corner_radius: 0.0,
+            },
+            ..MaskEvaluation::default()
+        },
+    ));
+    sequence.video_tracks[0].add_clip(clip).unwrap();
+
+    let resolution = resolve_preview_timeline(
+        &sequence,
+        &[],
+        0,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&sequence),
+        &mut |request| {
+            assert!(request.cpu_working_required);
+            ready_temporal_media_frame(&request, 0.25, 91)
+        },
+        &mut |_| panic!("media only"),
+    );
+    let PreviewTimelineResolution::Ready(resolved) = resolution else {
+        panic!("authored Fill matte must reach media materialization: {resolution:?}");
+    };
+    let [ResolvedPreviewElement::Media { prepared_effect_route: Some(route), .. }] =
+        resolved.plan.elements.as_slice()
+    else {
+        panic!("authored Fill matte must retain a prepared route");
+    };
+    let work = route
+        .heterogeneous()
+        .expect("authored Fill matte needs GPU continuation")
+        .prepared_work();
+    assert!(work.gpu_suffix().steps().iter().any(|step| matches!(
+        step,
+        PreparedHeterogeneousGpuStep::Dispatch(PreparedHeterogeneousGpuDispatch::FillMatte { .. })
+    )));
+}
+
+#[test]
 fn production_timeline_prepares_heterogeneous_route_before_media_materialization() {
     use mondrian_core::WorkingColorSpace;
     use mondrian_effects::{
