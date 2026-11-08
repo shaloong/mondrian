@@ -389,7 +389,9 @@ pub const fn render_op_auxiliary_scratch_frames(op: &EffectRenderOp) -> usize {
 pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
     matches!(
         op,
-        EffectRenderOp::Fill { .. } | EffectRenderOp::DisplacementMap { .. }
+        EffectRenderOp::Fill { .. }
+            | EffectRenderOp::DisplacementMap { .. }
+            | EffectRenderOp::ChannelCombiner { .. }
     )
 }
 
@@ -407,6 +409,26 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
         return crate::apply_displacement_map_controlled(
             primary, width, height, frame, sampling, grade, checkpoint,
         );
+    }
+    if let EffectRenderOp::ChannelCombiner { grade } = op {
+        checkpoint()?;
+        for (index, pixel) in primary.iter_mut().enumerate() {
+            if index % 4096 == 0 {
+                checkpoint()?;
+            }
+            let x = index as u32 % width;
+            let y = index as u32 / width;
+            let uv = [
+                (x as f32 + PIXEL_CENTRE) / width as f32,
+                (y as f32 + PIXEL_CENTRE) / height as f32,
+            ];
+            *pixel = grade.apply_pixel_from(*pixel, sample_auxiliary_f32(frame, uv, sampling));
+            // The auxiliary graph publishes a coverage plane. A color channel
+            // can be HDR or negative when it is copied into alpha.
+            pixel[3] = pixel[3].clamp(0.0, 1.0);
+        }
+        checkpoint()?;
+        return Ok(true);
     }
     let EffectRenderOp::Fill { grade } = op else {
         return Ok(false);

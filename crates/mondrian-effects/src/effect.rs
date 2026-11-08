@@ -10852,7 +10852,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 &effect_type,
                 "source_layer",
                 "第二图层",
-                "源图层",
+                "旧版源图层槽位",
                 PropertyValue::Int(6),
                 Some(1.0),
                 Some(19.0),
@@ -10915,6 +10915,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
                 Some(0.01),
             );
+            properties.define(EffectNode::channel_combiner_second_layer_source_descriptor());
         }
         EffectType::Dent => {
             define_builtin_enum_property(
@@ -12823,7 +12824,11 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
     } else if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
         if matches!(
             effect_type,
-            EffectType::Qualifier | EffectType::LumaKey | EffectType::ChromaKey | EffectType::Echo
+            EffectType::Qualifier
+                | EffectType::LumaKey
+                | EffectType::ChromaKey
+                | EffectType::Echo
+                | EffectType::ChannelCombiner
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -13083,8 +13088,8 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::ChannelCombiner => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-            // One sample in, one sample out: every slot reads the current sample
-            // only, so the definition-level envelope stays pixel-local.
+            // Both inputs are sampled at the same output coordinate.
+            topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
         EffectType::Choker => EffectExecutionContract {
@@ -18805,6 +18810,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
         EffectType::ChannelCombiner => {
             let use_second_layer_id = builtin_parameter_id(effect_type, "use_second_layer");
             let source_layer_id = builtin_parameter_id(effect_type, "source_layer");
+            let second_layer_source_id = builtin_parameter_id(effect_type, "second_layer_source");
             let from_id = builtin_parameter_id(effect_type, "from");
             let to_id = builtin_parameter_id(effect_type, "to");
             let invert_id = builtin_parameter_id(effect_type, "invert");
@@ -18815,9 +18821,6 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     effect_id: effect.id,
                     reason,
                 };
-                // The second input layer does not exist in this build, so the
-                // authoring surface fails closed instead of silently reading the
-                // first layer twice.
                 let use_second_layer =
                     match effect.evaluate_parameter(&use_second_layer_id, context.time) {
                         Some(PropertyValue::Bool(value)) => value,
@@ -18828,13 +18831,8 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                         }
                         None => false,
                     };
-                if use_second_layer {
-                    return Err(invalid(
-                        crate::ChannelCombinerError::SecondLayer.to_string(),
-                    ));
-                }
-                // `源图层` is inert without the second layer: it is validated and
-                // then dropped, so it never reaches the grade or the uniform.
+                // Keep validating legacy values. An ordinal never identifies a
+                // source in the current project.
                 let source_layer = match effect.evaluate_parameter(&source_layer_id, context.time) {
                     Some(PropertyValue::Int(value)) => value,
                     Some(_) => {
@@ -18891,7 +18889,25 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     context.working_color_space.luminance_coefficients(),
                 )
                 .map_err(|error| invalid(error.to_string()))?;
-                if !grade.is_identity() {
+                if use_second_layer {
+                    let auxiliary = graph.append_visual_source_input(
+                        effect,
+                        &second_layer_source_id,
+                        crate::EffectValueFormat::new(
+                            crate::EffectWorkingPrecision::Float32,
+                            EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        EffectColorDomainContract::SCENE_LINEAR,
+                    )?;
+                    let output = graph.add_auxiliary_effect_with_role(
+                        graph.current_output(),
+                        auxiliary,
+                        EffectRenderOp::ChannelCombiner { grade },
+                        crate::AuxiliaryRole::Layer,
+                    );
+                    graph.set_current_output(output);
+                } else if !grade.is_identity() {
                     graph.append_unary(EffectRenderOp::ChannelCombiner { grade });
                 }
                 Ok(())
@@ -35474,11 +35490,12 @@ mod tests {
         let properties = default_properties_for(effect_type.clone());
         let expected = [
             ("use_second_layer", "使用第二图层", "第二图层"),
-            ("source_layer", "源图层", "第二图层"),
+            ("source_layer", "旧版源图层槽位", "第二图层"),
             ("from", "自", "通道合成器"),
             ("to", "至", "通道合成器"),
             ("invert", "反转", "通道合成器"),
             ("solid_alpha", "纯色 Alpha", "通道合成器"),
+            ("second_layer_source", "源图层", "第二图层"),
         ];
         assert_eq!(properties.iter().count(), expected.len());
         for (order, (parameter, name, group)) in expected.iter().enumerate() {
@@ -35600,17 +35617,15 @@ mod tests {
         let effect = author_channel_combiner(&[("use_second_layer", PropertyValue::Bool(true))]);
         let effect_id = effect.id;
         let error = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
-            .expect_err("the second input layer is not available in this build");
-        match error {
-            EffectGraphBuildError::InvalidAuthorState { effect_id: reported, reason, .. } => {
-                assert_eq!(reported, effect_id);
-                assert!(
-                    reason.contains("第二图层"),
-                    "the reason should name the second layer: {reason}"
-                );
-            }
-            _ => panic!("expected an invalid author state"),
-        }
+            .expect_err("an enabled second layer requires a bound source");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::MissingAuxiliaryInput { effect_id: reported, parameter_id, .. }
+                if reported == effect_id
+                    && parameter_id == builtin_parameter_id(
+                        &EffectType::ChannelCombiner, "second_layer_source",
+                    )
+        ));
     }
 
     #[test]
@@ -35740,7 +35755,7 @@ mod tests {
             contract.resource_lifetime,
             crate::EffectResourceLifetime::Frame
         );
-        assert_eq!(contract.topology, crate::EffectGraphTopology::LinearChain);
+        assert_eq!(contract.topology, crate::EffectGraphTopology::GeneralDag);
 
         let grade =
             channel_combiner_op(&compile_channel_combiner(&[]).expect("the default compiles"))

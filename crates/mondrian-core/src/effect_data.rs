@@ -830,19 +830,69 @@ impl EffectType {
 /// The struct holds identity (id, type), animatable properties, and opaque
 /// JSON params. Effect evaluation is performed by `mondrian-effects`, not by
 /// methods on this struct.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EffectNode {
-    #[serde(default)]
     pub id: EffectId,
     pub effect_type: EffectType,
-    #[serde(default)]
     pub properties: PropertyBag,
-    #[serde(default)]
     pub params: serde_json::Value,
     pub is_enabled: bool,
 }
 
+impl<'de> Deserialize<'de> for EffectNode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename = "EffectNode")]
+        struct StoredEffectNode {
+            #[serde(default)]
+            id: EffectId,
+            effect_type: EffectType,
+            #[serde(default)]
+            properties: PropertyBag,
+            #[serde(default)]
+            params: serde_json::Value,
+            is_enabled: bool,
+        }
+
+        let StoredEffectNode { id, effect_type, properties, params, is_enabled } =
+            StoredEffectNode::deserialize(deserializer)?;
+        let mut effect = Self { id, effect_type, properties, params, is_enabled };
+        if effect.effect_type == EffectType::ChannelCombiner {
+            let mut descriptor = Self::channel_combiner_second_layer_source_descriptor();
+            let legacy_path = effect.effect_type.property_path("source_layer");
+            let namespaced_legacy = namespaced_effect_path(id, &legacy_path);
+            if effect.properties.property(&namespaced_legacy).is_some() {
+                descriptor.path = namespaced_effect_path(id, &descriptor.path);
+            }
+            if (effect.properties.property(&legacy_path).is_some()
+                || effect.properties.property(&namespaced_legacy).is_some())
+                && !effect.properties.iter().any(|(_, property)| {
+                    property.descriptor.parameter_id() == descriptor.parameter_id()
+                })
+            {
+                effect.define_property(descriptor);
+            }
+        }
+        Ok(effect)
+    }
+}
+
 impl EffectNode {
+    /// Static source field shared by the definition and legacy Channel Combiner loading.
+    pub fn channel_combiner_second_layer_source_descriptor() -> PropertyDescriptor {
+        let effect_type = EffectType::ChannelCombiner;
+        let parameter = "second_layer_source";
+        let mut descriptor = PropertyDescriptor::new(
+            effect_type.property_path(parameter),
+            "源图层",
+            PropertyValue::VisualSource(crate::VisualSourceReference::Unbound),
+        )
+        .with_parameter_id(effect_type.parameter_id(parameter).expect("built-in parameter id"));
+        descriptor.ui_metadata.group_name = Some("第二图层".to_owned());
+        descriptor.ui_metadata.display_order = Some(6);
+        descriptor
+    }
+
     /// Create a new effect node with an empty property bag.
     ///
     /// Product authoring must use the fallible `instantiate_effect_node()`

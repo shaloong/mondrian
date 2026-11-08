@@ -123,6 +123,10 @@ fn auxiliary_matte_sequence_sources(asset_ids: &[AssetId]) -> Sequence {
         })),
     )
     .unwrap();
+    auxiliary_sequence_with_effect(instantiate_effect_node(kind).unwrap())
+}
+
+fn auxiliary_sequence_with_effect(effect: mondrian_effects::EffectNode) -> Sequence {
     let mut sequence = Sequence::new("Asset-backed auxiliary host test");
     sequence.settings.resolution = Resolution { width: 3, height: 1 };
     let mut clip = mondrian_timeline::clip::Clip::new_solid_color(
@@ -132,7 +136,7 @@ fn auxiliary_matte_sequence_sources(asset_ids: &[AssetId]) -> Sequence {
         mondrian_core::TimelineTime::new(2, 1).unwrap(),
     )
     .unwrap();
-    clip.add_effect_node(instantiate_effect_node(kind).unwrap());
+    clip.add_effect_node(effect);
     sequence.video_tracks[0].add_clip(clip).unwrap();
     sequence
 }
@@ -265,6 +269,49 @@ fn auxiliary_asset_host_binding_reaches_cpu_on_the_actual_primary_grid() {
             )
         )
     ));
+}
+
+#[test]
+fn preview_channel_combiner_reads_the_selected_source_on_the_actual_grid() {
+    use mondrian_core::{PropertyValue, VisualSourceReference};
+    use mondrian_effects::{instantiate_effect_node, EffectType};
+
+    let (_root, asset) = asset_fixture(Some(Duration::from_secs(2)));
+    let kind = EffectType::ChannelCombiner;
+    let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+    for (key, value) in [
+        ("use_second_layer", PropertyValue::Bool(true)),
+        (
+            "second_layer_source",
+            PropertyValue::VisualSource(VisualSourceReference::Asset {
+                asset_id: asset.id,
+                retime: Default::default(),
+            }),
+        ),
+    ] {
+        effect
+            .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+            .unwrap();
+    }
+    let sequence = auxiliary_sequence_with_effect(effect);
+    let resolved = resolve_auxiliary_fixture(&sequence, &asset);
+    let output = crate::app::preview_cpu_execution::composite_resolved_preview_working(
+        3,
+        1,
+        &resolved.plan.elements,
+        &resolved.plan.color_context,
+        resolved.plan.sampling,
+        &mut TimelineCompositeScratch::default(),
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .unwrap();
+    let pixels = &output.frame.rgba_f32().data;
+    assert_eq!(pixels.len(), 3);
+    for pixel in pixels {
+        for (actual, expected) in pixel.iter().zip([0.25, 0.25, 0.0, 1.0]) {
+            assert!((actual - expected).abs() < 1e-6, "{pixel:?}");
+        }
+    }
 }
 
 #[test]

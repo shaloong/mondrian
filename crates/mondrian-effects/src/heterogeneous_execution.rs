@@ -2088,6 +2088,23 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Native auxiliary spatial pass with a graph-local matte.
         pass: crate::EffectGpuSpatialPass,
     },
+    /// Sample a graph-local picture with the Channel Combiner spatial kernel.
+    ChannelCombinerLayer {
+        /// Exact semantic auxiliary node.
+        node: EffectGraphNodeId,
+        /// Scene-linear input materialization.
+        input: EffectMaterializationId,
+        /// Independent scene-linear source materialization.
+        auxiliary: EffectMaterializationId,
+        /// New scene-linear materialization on the primary grid.
+        output: EffectMaterializationId,
+        /// Producer completions in primary/auxiliary order.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token for the spatial draw.
+        signal: EffectCompletionToken,
+        /// Native auxiliary spatial pass with a graph-local picture.
+        pass: crate::EffectGpuSpatialPass,
+    },
     /// Combine two AlphaMask-domain materializations.
     MaskCombine {
         node: EffectGraphNodeId,
@@ -2122,6 +2139,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::MultiInput { output, .. }
             | Self::Mask { output, .. }
             | Self::FillMatte { output, .. }
+            | Self::ChannelCombinerLayer { output, .. }
             | Self::MaskCombine { output, .. }
             | Self::MatteMix { output, .. } => *output,
         }
@@ -2138,6 +2156,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::MultiInput { waits, .. }
             | Self::Mask { waits, .. }
             | Self::FillMatte { waits, .. }
+            | Self::ChannelCombinerLayer { waits, .. }
             | Self::MaskCombine { waits, .. }
             | Self::MatteMix { waits, .. } => waits,
         }
@@ -2154,6 +2173,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::MultiInput { signal, .. }
             | Self::Mask { signal, .. }
             | Self::FillMatte { signal, .. }
+            | Self::ChannelCombinerLayer { signal, .. }
             | Self::MaskCombine { signal, .. }
             | Self::MatteMix { signal, .. } => *signal,
         }
@@ -2169,6 +2189,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::MultiInput { node, .. }
             | Self::Mask { node, .. }
             | Self::FillMatte { node, .. }
+            | Self::ChannelCombinerLayer { node, .. }
             | Self::MaskCombine { node, .. }
             | Self::MatteMix { node, .. } => output.push(*node),
         }
@@ -2192,7 +2213,9 @@ impl PreparedHeterogeneousGpuDispatch {
                     visit(input)?;
                 }
             }
-            Self::Mask { input, mask, .. } | Self::FillMatte { input, mask, .. } => {
+            Self::Mask { input, mask, .. }
+            | Self::FillMatte { input, mask, .. }
+            | Self::ChannelCombinerLayer { input, auxiliary: mask, .. } => {
                 visit(*input)?;
                 visit(*mask)?;
             }
@@ -2714,6 +2737,12 @@ fn hash_effect_operation_shape(
         EffectGraphNodeKind::AuxiliaryEffect {
             op: op @ EffectRenderOp::Fill { .. },
             role: crate::AuxiliaryRole::Matte,
+            sampling,
+            ..
+        }
+        | EffectGraphNodeKind::AuxiliaryEffect {
+            op: op @ EffectRenderOp::ChannelCombiner { .. },
+            role: crate::AuxiliaryRole::Layer,
             sampling,
             ..
         } => {
@@ -3938,21 +3967,26 @@ fn execute_cpu_dag_prefix(
                 role: crate::AuxiliaryRole::Matte,
                 sampling,
                 ..
+            }
+            | EffectGraphNodeKind::AuxiliaryEffect {
+                op: op @ EffectRenderOp::ChannelCombiner { .. },
+                role: crate::AuxiliaryRole::Layer,
+                sampling,
+                ..
             } => {
-                let [primary, matte]: [crate::EffectFloatFrame; 2] =
-                    inputs.try_into().map_err(|_| {
-                        PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
-                            node: dispatch.node,
-                        }
+                let [primary, auxiliary]: [crate::EffectFloatFrame; 2] = inputs
+                    .try_into()
+                    .map_err(|_| PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
                     })?;
-                primary.ensure_same_grid(matte.view())?;
+                primary.ensure_same_grid(auxiliary.view())?;
                 let mut primary = crate::materialize_finite_coverage_controlled(
                     primary,
                     crate::EffectAlphaConsumer::StraightCoverageOperation,
                     &mut || heterogeneous_processor_checkpoint(control, generation),
                 )?;
                 let raster = crate::AuxiliaryFloatFrame::new(
-                    matte.view(),
+                    auxiliary.view(),
                     crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
                 );
                 let supported = crate::auxiliary::apply_auxiliary_effect_f32(
@@ -4530,10 +4564,10 @@ fn prepare_gpu_suffix(
                                     reason: "gpu_auxiliary_dispatch_kernel_unavailable",
                                 },
                             )?;
-                            let [input, mask] = inputs.as_ref() else {
+                            let [input, auxiliary] = inputs.as_ref() else {
                                 return Err(
                                     PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
-                                        reason: "gpu_fill_matte_dispatch_input_arity",
+                                        reason: "gpu_auxiliary_dispatch_input_arity",
                                     },
                                 );
                             };
@@ -4549,24 +4583,50 @@ fn prepare_gpu_suffix(
                                 )
                             };
                             let scene_linear = exact(EffectColorDomain::SceneLinearRgb);
+                            let auxiliary_format = match role {
+                                crate::AuxiliaryRole::Matte => exact(EffectColorDomain::AlphaMask),
+                                crate::AuxiliaryRole::Layer | crate::AuxiliaryRole::Map => {
+                                    scene_linear
+                                }
+                            };
                             if format(*input) != Some(scene_linear)
-                                || format(*mask) != Some(exact(EffectColorDomain::AlphaMask))
+                                || format(*auxiliary) != Some(auxiliary_format)
                                 || format(*output) != Some(scene_linear)
                             {
                                 return Err(
                                     PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
-                                        reason: "gpu_fill_matte_dispatch_domain_mismatch",
+                                        reason: "gpu_auxiliary_dispatch_domain_mismatch",
                                     },
                                 );
                             }
-                            Ok(PreparedHeterogeneousGpuDispatch::FillMatte {
-                                node: *node_id,
-                                input: *input,
-                                mask: *mask,
-                                output: *output,
-                                waits: Arc::clone(waits),
-                                signal: *signal,
-                                pass,
+                            Ok(match pass {
+                                crate::EffectGpuSpatialPass::FillMatte { .. } => {
+                                    PreparedHeterogeneousGpuDispatch::FillMatte {
+                                        node: *node_id,
+                                        input: *input,
+                                        mask: *auxiliary,
+                                        output: *output,
+                                        waits: Arc::clone(waits),
+                                        signal: *signal,
+                                        pass,
+                                    }
+                                }
+                                crate::EffectGpuSpatialPass::ChannelCombinerLayer { .. } => {
+                                    PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer {
+                                        node: *node_id,
+                                        input: *input,
+                                        auxiliary: *auxiliary,
+                                        output: *output,
+                                        waits: Arc::clone(waits),
+                                        signal: *signal,
+                                        pass,
+                                    }
+                                }
+                                _ => return Err(
+                                    PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                        reason: "gpu_auxiliary_dispatch_kernel_unavailable",
+                                    },
+                                ),
                             })
                         }
                         EffectGraphNodeKind::Mask { invert, mask_op, .. } => {

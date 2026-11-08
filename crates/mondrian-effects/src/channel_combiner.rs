@@ -9,6 +9,8 @@
 //! destination slot, a shorter source is broadcast through its first member,
 //! and a longer source is truncated. Slots that the destination does not name
 //! are kept bit-for-bit.
+//! The second-layer form reads these same slots from the sampled auxiliary
+//! picture and keeps the primary picture as the destination.
 //!
 //! Alpha contract:
 //!
@@ -29,7 +31,7 @@
 //!
 //! Identity is exact only at the graph-builder level. `is_identity()` reports
 //! `true` for a self-mapping template (`自 = 至`, e.g. luminance → luminance)
-//! so the builder can elide the node; the kernel itself has no identity branch.
+//! so the single-input builder can elide the node; the kernel itself has no identity branch.
 //! Running such a grade by hand is *not* bit-identical: the luminance target
 //! multiplies RGB by `target / base`, and `base <= 0` (pure black, or a
 //! negative-luminance HDR pixel) is defined as a scale of `0.0`, which maps
@@ -392,7 +394,7 @@ pub enum ChannelCombinerError {
     SourceChannel,
     /// `至` is outside `1..=17`.
     DestinationChannel,
-    /// The second input layer is not available in this build.
+    /// The second-layer toggle is malformed.
     SecondLayer,
     /// `源图层` is outside `1..=19`.
     SourceLayer,
@@ -409,9 +411,7 @@ impl std::fmt::Display for ChannelCombinerError {
         formatter.write_str(match self {
             Self::SourceChannel => "源通道编号必须落在 1..=19",
             Self::DestinationChannel => "目标通道编号必须落在 1..=17",
-            Self::SecondLayer => {
-                "本版本不支持「使用第二图层」：需要第二输入架构（见 .work/second-input-design.md M1–M6）"
-            }
+            Self::SecondLayer => "「使用第二图层」必须是布尔值",
             Self::SourceLayer => "源图层必须落在 1..=19",
             Self::SolidAlpha => "纯色 Alpha 必须是 [0,1] 内的有限数",
             Self::Coefficients => "亮度系数必须是有限数",
@@ -553,8 +553,13 @@ impl ChannelCombinerGrade {
 
     /// Apply the grade to one pixel.
     pub fn apply_pixel(&self, pixel: [f32; 4]) -> [f32; 4] {
+        self.apply_pixel_from(pixel, pixel)
+    }
+
+    /// Read the selected channels from another pixel and write into the primary pixel.
+    pub(crate) fn apply_pixel_from(&self, pixel: [f32; 4], source_pixel: [f32; 4]) -> [f32; 4] {
         if let Some(target) = self.derived_target {
-            let value = sample_slot(pixel, self.slots[0], self.luminance_coefficients);
+            let value = sample_slot(source_pixel, self.slots[0], self.luminance_coefficients);
             let value = if self.invert { 1.0 - value } else { value };
             let mut out = pixel;
             match target {
@@ -591,7 +596,7 @@ impl ChannelCombinerGrade {
             if matches!(slot, ChannelCombinerSlot::Keep) {
                 continue;
             }
-            let value = sample_slot(pixel, *slot, self.luminance_coefficients);
+            let value = sample_slot(source_pixel, *slot, self.luminance_coefficients);
             values[index] = if self.invert { 1.0 - value } else { value };
             written[index] = true;
         }

@@ -188,6 +188,150 @@ fn assert_pixel(actual: [f32; 4], expected: [f32; 4]) {
 }
 
 #[test]
+fn channel_combiner_reads_same_named_channels_from_the_second_layer() {
+    let mut effect = instantiate_effect_node(EffectType::ChannelCombiner).unwrap();
+    let reference = VisualSourceReference::Clip {
+        clip_id: mondrian_core::ClipId::new(),
+        retime: VisualSourceRetime::default(),
+    };
+    for (key, value) in [
+        ("use_second_layer", PropertyValue::Bool(true)),
+        (
+            "second_layer_source",
+            PropertyValue::VisualSource(reference),
+        ),
+        ("from", PropertyValue::Enum("red".into())),
+        ("to", PropertyValue::Enum("red".into())),
+    ] {
+        let parameter = effect.effect_type.parameter_id(key).unwrap();
+        effect.set_static_value_by_parameter(&parameter, value).unwrap();
+    }
+    let graph = program(std::slice::from_ref(&effect)).evaluate(TimelineTime::ZERO).unwrap();
+    let binding = graph.auxiliary_source_binding(0).unwrap();
+    assert_eq!(binding.reference(), reference);
+    assert_eq!(binding.effect_id(), effect.id);
+    assert_eq!(graph.auxiliary_inputs()[0].role(), AuxiliaryRole::Layer);
+    let gpu = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+    assert!(matches!(
+        gpu.stages(),
+        [EffectGpuStage::Spatial {
+            pass: EffectGpuSpatialPass::ChannelCombinerLayer { external_slot: Some(0), .. },
+            ..
+        }]
+    ));
+    let primary = [[0.2, 0.4, 1.7, 0.8]];
+    let auxiliary = [[-0.5, 3.0, 0.9, 0.0]];
+    let mut session = EffectExecutionSession::default();
+    let output = session
+        .apply_compiled_rgba_f32_with_auxiliary(
+            view(&primary),
+            &graph,
+            0,
+            &[AuxiliaryFloatInput {
+                slot: 0,
+                raster: AuxiliaryFloatFrame::new(view(&auxiliary), AuxiliaryPolicy::MATCH_PRIMARY),
+            }],
+            &mut EffectProcessorControl::uncancelled(),
+        )
+        .unwrap();
+    assert_eq!(output.pixels(), &[[-0.5, 0.4, 1.7, 0.8]]);
+
+    let destination = effect.effect_type.parameter_id("to").unwrap();
+    effect
+        .set_static_value_by_parameter(&destination, PropertyValue::Enum("alpha".into()))
+        .unwrap();
+    let source = effect.effect_type.parameter_id("from").unwrap();
+    for (channel, alpha) in [("red", 0.0), ("green", 1.0)] {
+        effect
+            .set_static_value_by_parameter(&source, PropertyValue::Enum(channel.into()))
+            .unwrap();
+        let graph = program(std::slice::from_ref(&effect)).evaluate(TimelineTime::ZERO).unwrap();
+        let output = session
+            .apply_compiled_rgba_f32_with_auxiliary(
+                view(&primary),
+                &graph,
+                0,
+                &[AuxiliaryFloatInput {
+                    slot: 0,
+                    raster: AuxiliaryFloatFrame::new(
+                        view(&auxiliary),
+                        AuxiliaryPolicy::MATCH_PRIMARY,
+                    ),
+                }],
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert_eq!(output.pixels(), &[[0.2, 0.4, 1.7, alpha]]);
+    }
+
+    let toggle = effect.effect_type.parameter_id("use_second_layer").unwrap();
+    effect
+        .set_static_value_by_parameter(&toggle, PropertyValue::Bool(false))
+        .unwrap();
+    let off = program(&[effect]).evaluate(TimelineTime::ZERO).unwrap();
+    assert!(off.auxiliary_inputs().is_empty());
+    assert!(off.auxiliary_source_binding(0).is_none());
+}
+
+#[test]
+fn channel_combiner_legacy_clip_restores_an_editable_unbound_source() {
+    let kind = EffectType::ChannelCombiner;
+    let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+    let toggle = kind.parameter_id("use_second_layer").unwrap();
+    let legacy = kind.parameter_id("source_layer").unwrap();
+    let source = kind.parameter_id("second_layer_source").unwrap();
+    effect
+        .set_static_value_by_parameter(&toggle, PropertyValue::Bool(true))
+        .unwrap();
+    effect.set_static_value_by_parameter(&legacy, PropertyValue::Int(9)).unwrap();
+    effect.instantiate_for_clip("Channel Combiner".into());
+    let path = mondrian_core::effect_data::namespaced_effect_path(
+        effect.id,
+        &kind.property_path("second_layer_source"),
+    );
+    let mut old = serde_json::to_value(&effect).unwrap();
+    assert!(old["properties"]["properties"].as_object_mut().unwrap().remove(&path).is_some());
+    let mut restored: EffectNode = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        restored.evaluate_parameter(&legacy, TimelineTime::ZERO),
+        Some(PropertyValue::Int(9))
+    );
+    assert_eq!(
+        restored.evaluate_visual_source_parameter(&source),
+        Some(VisualSourceReference::Unbound),
+    );
+    assert!(restored.properties.property(&path).is_some());
+    let effects = std::slice::from_ref(&restored);
+    assert!(matches!(
+        PreparedEffectProgram::prepare(effects, &[], WorkingColorSpace::LinearRec709),
+        Err(EffectGraphBuildError::MissingAuxiliaryInput { effect_id, .. }) if effect_id == effect.id
+    ));
+    let preview = PreparedEffectProgram::prepare_for_auxiliary_preview(
+        effects,
+        &[],
+        WorkingColorSpace::LinearRec709,
+    )
+    .unwrap()
+    .evaluate(TimelineTime::ZERO)
+    .unwrap();
+    assert!(preview.auxiliary_inputs().is_empty());
+    let fallback = preview.stage_bindings()[0].auxiliary_preview_fallback().unwrap();
+    assert_eq!(fallback.effect_id(), effect.id);
+    assert_eq!(fallback.cause(), AuxiliaryPreviewFallbackCause::Unbound);
+
+    let bound = VisualSourceReference::Sequence {
+        sequence_id: mondrian_core::SequenceId::new(),
+        retime: VisualSourceRetime::default(),
+    };
+    restored
+        .set_static_value_by_parameter(&source, PropertyValue::VisualSource(bound))
+        .unwrap();
+    let saved: EffectNode =
+        serde_json::from_value(serde_json::to_value(&restored).unwrap()).unwrap();
+    assert_eq!(saved, restored);
+}
+
+#[test]
 fn auxiliary_source_binding_is_frozen_outside_the_pixel_graph_identity() {
     let a = AssetId::new();
     let b = AssetId::new();

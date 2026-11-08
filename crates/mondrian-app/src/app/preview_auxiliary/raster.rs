@@ -13,8 +13,8 @@ use crate::app::preview_media_frame::MediaPreviewFrame;
 use crate::app::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
 use mondrian_core::{ImageSampling, WorkingColorSpace};
 use mondrian_effects::{
-    AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryPolicy, AuxiliaryResolution, AuxiliaryRole,
-    EffectFrameExtent, EffectProcessorControl,
+    AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryPolicy, AuxiliaryRole, EffectFrameExtent,
+    EffectProcessorControl,
 };
 use mondrian_renderer::{
     register_timeline_auxiliary_raster, timeline_auxiliary_frame_view,
@@ -110,25 +110,27 @@ pub(crate) fn plan_auxiliary_registration<'a>(
             })
         })
         .transpose()?;
-    let ((extent, sampling), policy) = if role == AuxiliaryRole::Map {
-        let domain = if let Some(domain) = source_domain {
-            domain
-        } else {
-            let resolution = plan.validated_key.residency_resolution();
-            let sampling = plan.validated_key.picture_geometry.image_sampling(resolution).map_err(
-                |error| PreviewCpuExecutionError::AuxiliaryRegistration {
-                    detail: error.to_string(),
-                },
-            )?;
-            (
-                EffectFrameExtent::new(resolution.width, resolution.height),
-                sampling,
-            )
-        };
-        (domain, AuxiliaryPolicy::new(AuxiliaryResolution::Authored))
-    } else {
-        (primary, AuxiliaryPolicy::MATCH_PRIMARY)
+    let registration_domain = match role {
+        AuxiliaryRole::Matte => primary,
+        AuxiliaryRole::Map | AuxiliaryRole::Layer => {
+            if let Some(domain) = source_domain {
+                domain
+            } else {
+                let resolution = plan.validated_key.residency_resolution();
+                let sampling =
+                    plan.validated_key.picture_geometry.image_sampling(resolution).map_err(
+                        |error| PreviewCpuExecutionError::AuxiliaryRegistration {
+                            detail: error.to_string(),
+                        },
+                    )?;
+                (
+                    EffectFrameExtent::new(resolution.width, resolution.height),
+                    sampling,
+                )
+            }
+        }
     };
+    let ((extent, sampling), policy) = registration_geometry(role, primary, registration_domain);
     Ok(AuxiliaryRegistration {
         key: AuxiliaryRegistrationKey {
             source: AuxiliaryRegistrationSource::Asset(&plan.validated_key),
@@ -403,7 +405,8 @@ mod tests {
     use super::*;
     use mondrian_core::{ColorFrameAlpha, ImageSampling, WorkingColorSpace, WorkingRgbaF32Frame};
     use mondrian_effects::{
-        EffectColorDomain, EffectFloatFrameError, EffectValueFormat, EffectWorkingPrecision,
+        AuxiliaryResolution, EffectColorDomain, EffectFloatFrameError, EffectValueFormat,
+        EffectWorkingPrecision,
     };
 
     fn register(

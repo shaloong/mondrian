@@ -286,9 +286,27 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain. A graph dispatcher supplies its own value.
         external_slot: Option<u32>,
     },
+    /// Read selected channels from an independent raster into the primary.
+    ChannelCombinerLayer {
+        /// Channel transfer and output controls shared with the point pass.
+        grade: crate::ChannelCombinerGrade,
+        /// Reconstruction and boundary behavior of the second edge.
+        sampling: crate::AuxiliarySampling,
+        /// Host slot for a linear chain, or a graph-local input if absent.
+        external_slot: Option<u32>,
+    },
 }
 
 impl EffectGpuSpatialPass {
+    /// Auxiliary pass and its optional host slot, or no second texture.
+    pub const fn auxiliary_slot(self) -> Option<Option<u32>> {
+        match self {
+            Self::FillMatte { external_slot, .. }
+            | Self::ChannelCombinerLayer { external_slot, .. } => Some(external_slot),
+            _ => None,
+        }
+    }
+
     /// Stable name used by diagnostics and renderer dispatch.
     pub const fn name(self) -> &'static str {
         match self {
@@ -345,6 +363,7 @@ impl EffectGpuSpatialPass {
             Self::CameraView { .. } => "camera_view",
             Self::BlankingFill { .. } => "blanking_fill",
             Self::FillMatte { .. } => "fill_matte",
+            Self::ChannelCombinerLayer { .. } => "channel_combiner_layer",
         }
     }
 
@@ -433,7 +452,7 @@ impl EffectGpuSpatialPass {
             Self::SmartBlur { grade } => smart_blur_halo(grade),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
-            Self::FillMatte { .. } => 0,
+            Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
         }
     }
 
@@ -508,7 +527,7 @@ impl EffectGpuSpatialPass {
             Self::SmartBlur { grade } => smart_blur_halo(grade),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
-            Self::FillMatte { .. } => 0,
+            Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
         }
     }
 }
@@ -519,10 +538,19 @@ pub(crate) fn lower_auxiliary_spatial_pass(
     sampling: crate::AuxiliarySampling,
     external_slot: Option<u32>,
 ) -> Option<EffectGpuSpatialPass> {
-    let (EffectRenderOp::Fill { grade }, crate::AuxiliaryRole::Matte) = (op, role) else {
-        return None;
-    };
-    Some(EffectGpuSpatialPass::FillMatte { grade: *grade, sampling, external_slot })
+    match (op, role) {
+        (EffectRenderOp::Fill { grade }, crate::AuxiliaryRole::Matte) => {
+            Some(EffectGpuSpatialPass::FillMatte { grade: *grade, sampling, external_slot })
+        }
+        (EffectRenderOp::ChannelCombiner { grade }, crate::AuxiliaryRole::Layer) => {
+            Some(EffectGpuSpatialPass::ChannelCombinerLayer {
+                grade: *grade,
+                sampling,
+                external_slot,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Reach of the stroke kernel in source pixels.
