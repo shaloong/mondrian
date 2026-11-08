@@ -10,7 +10,7 @@ use crate::app_ui::panels::{InspectorEffectPropertyModel, InspectorPanelModel};
 use mondrian_core::{
     AnimationParameterAddress, AssetId, ClipId, EffectId, MaskId, ParameterResourceKind,
     ParameterResourceReference, ParameterSchema, PropertyValue, ResourcePathKind,
-    ResourcePathSelection, SequenceId,
+    ResourcePathSelection, SequenceId, VisualSourceReference,
 };
 use mondrian_editor_state::{Action, AuthoringSessionId};
 use mondrian_ui_core::types::*;
@@ -20,6 +20,8 @@ use mondrian_ui_widgets::{Button, DialogSurface, Dropdown, Label, MenuItem, Text
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Weak;
+
+mod visual_layers;
 
 /// Connection identity and revision of the chooser's last library projection.
 #[derive(Clone)]
@@ -129,6 +131,7 @@ pub(crate) enum ResourceKind {
     ExternalFile,
     ProjectAsset,
     Uri,
+    VisualLayer,
 }
 impl ResourceKind {
     fn message(self) -> &'static str {
@@ -137,6 +140,7 @@ impl ResourceKind {
             Self::ExternalFile => "resource-file",
             Self::ProjectAsset => "resource-project-asset",
             Self::Uri => "resource-uri",
+            Self::VisualLayer => "visual-source-layer-kind",
         }
     }
 }
@@ -145,7 +149,33 @@ pub(crate) enum ResourceUpdate {
     Kind(ResourceKind),
     Text(String),
     Asset(AssetId),
+    VisualLayer(VisualLayerAddress),
     Search(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum VisualLayerAddress {
+    Clip(ClipId),
+    Sequence(SequenceId),
+}
+
+impl VisualLayerAddress {
+    fn from_reference(source: VisualSourceReference) -> Option<Self> {
+        match source {
+            VisualSourceReference::Clip { clip_id, .. } => Some(Self::Clip(clip_id)),
+            VisualSourceReference::Sequence { sequence_id, .. } => {
+                Some(Self::Sequence(sequence_id))
+            }
+            VisualSourceReference::Unbound | VisualSourceReference::Asset { .. } => None,
+        }
+    }
+
+    fn reference(self, retime: mondrian_core::VisualSourceRetime) -> VisualSourceReference {
+        match self {
+            Self::Clip(clip_id) => VisualSourceReference::Clip { clip_id, retime },
+            Self::Sequence(sequence_id) => VisualSourceReference::Sequence { sequence_id, retime },
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum ResourceEditorAction {
@@ -203,9 +233,8 @@ pub(crate) struct ResourceDraft {
     pub(crate) clip_id: ClipId,
     pub(crate) target: InspectorPropertyTarget,
     pub(crate) original: ParameterResourceReference,
-    /// Present only for a typed visual-source draft. The picker edits the
-    /// address while retaining the exact authored retiming unchanged.
-    visual_retime: Option<mondrian_core::VisualSourceRetime>,
+    visual_original: Option<VisualSourceReference>,
+    visual_layer: Option<VisualLayerAddress>,
     pub(crate) schema: ParameterSchema,
     kind: ResourceKind,
     file: Option<mondrian_core::NativePath>,
@@ -249,7 +278,8 @@ impl ResourceDraft {
             clip_id,
             target,
             original,
-            visual_retime: None,
+            visual_original: None,
+            visual_layer: None,
             schema,
             kind,
             file,
@@ -264,21 +294,19 @@ impl ResourceDraft {
     pub(crate) fn for_visual_source(
         clip_id: ClipId,
         target: InspectorPropertyTarget,
-        original: mondrian_core::VisualSourceReference,
+        original: VisualSourceReference,
         schema: ParameterSchema,
         session: Option<AuthoringSessionId>,
         sequence: Option<SequenceId>,
         project_file: Option<PathBuf>,
     ) -> Self {
-        let (address, retime) = match original {
-            mondrian_core::VisualSourceReference::Unbound => (
-                ParameterResourceReference::Unbound,
-                mondrian_core::VisualSourceRetime::default(),
-            ),
-            mondrian_core::VisualSourceReference::Asset { asset_id, retime } => (
-                ParameterResourceReference::ProjectAsset { asset_id },
-                retime,
-            ),
+        let address = match original {
+            VisualSourceReference::Asset { asset_id, .. } => {
+                ParameterResourceReference::ProjectAsset { asset_id }
+            }
+            VisualSourceReference::Unbound
+            | VisualSourceReference::Clip { .. }
+            | VisualSourceReference::Sequence { .. } => ParameterResourceReference::Unbound,
         };
         let mut draft = Self::new(
             clip_id,
@@ -289,23 +317,52 @@ impl ResourceDraft {
             sequence,
             project_file,
         );
-        draft.visual_retime = Some(retime);
+        draft.visual_original = Some(original);
+        draft.visual_layer = VisualLayerAddress::from_reference(original);
+        if draft.visual_layer.is_some() {
+            draft.kind = ResourceKind::VisualLayer;
+        }
         draft
     }
 
     pub(crate) fn is_visual_source(&self) -> bool {
-        self.visual_retime.is_some()
+        self.visual_original.is_some()
+    }
+
+    pub(crate) fn is_visual_layer_mode(&self) -> bool {
+        self.kind == ResourceKind::VisualLayer
+    }
+
+    pub(crate) fn confirmed_visual_layer(
+        &self,
+    ) -> Result<Option<VisualLayerAddress>, &'static str> {
+        let address = self.visual_layer.ok_or("visual-source-select-layer")?;
+        let original = self.visual_original.and_then(VisualLayerAddress::from_reference);
+        Ok((original != Some(address)).then_some(address))
+    }
+
+    pub(crate) fn author_visual_layer_action(&self, address: VisualLayerAddress) -> Option<Action> {
+        let retime = self.visual_original?.retime().unwrap_or_default();
+        self.write_property_action(PropertyValue::VisualSource(address.reference(retime)))
+    }
+
+    fn original_property_value(&self) -> PropertyValue {
+        self.visual_original.map_or_else(
+            || PropertyValue::Resource(self.original.clone()),
+            PropertyValue::VisualSource,
+        )
     }
 
     fn property_value(&self, reference: ParameterResourceReference) -> Option<PropertyValue> {
-        let Some(retime) = self.visual_retime else {
+        let Some(original) = self.visual_original else {
             return Some(PropertyValue::Resource(reference));
         };
         let source = match reference {
-            ParameterResourceReference::Unbound => mondrian_core::VisualSourceReference::Unbound,
-            ParameterResourceReference::ProjectAsset { asset_id } => {
-                mondrian_core::VisualSourceReference::Asset { asset_id, retime }
-            }
+            ParameterResourceReference::Unbound => VisualSourceReference::Unbound,
+            ParameterResourceReference::ProjectAsset { asset_id } => VisualSourceReference::Asset {
+                asset_id,
+                retime: original.retime().unwrap_or_default(),
+            },
             ParameterResourceReference::ExternalFile { .. }
             | ParameterResourceReference::Uri { .. } => return None,
         };
@@ -315,13 +372,19 @@ impl ResourceDraft {
     /// Whether the provider admits this reference kind in its authoring schema.
     pub(crate) fn allows_kind(&self, kind: ResourceKind) -> bool {
         if self.is_visual_source() {
-            return matches!(kind, ResourceKind::Unbound | ResourceKind::ProjectAsset);
+            return match kind {
+                ResourceKind::Unbound | ResourceKind::ProjectAsset | ResourceKind::VisualLayer => {
+                    true
+                }
+                ResourceKind::ExternalFile | ResourceKind::Uri => false,
+            };
         }
         let binding = match kind {
             ResourceKind::Unbound => return true,
             ResourceKind::ExternalFile => ParameterResourceKind::ExternalFile,
             ResourceKind::ProjectAsset => ParameterResourceKind::ProjectAsset,
             ResourceKind::Uri => ParameterResourceKind::Uri,
+            ResourceKind::VisualLayer => return false,
         };
         self.schema
             .resource
@@ -349,7 +412,9 @@ impl ResourceDraft {
         &self,
     ) -> Result<Option<ParameterResourceReference>, &'static str> {
         let unchanged = match (self.kind, &self.original) {
-            (ResourceKind::Unbound, ParameterResourceReference::Unbound) => true,
+            (ResourceKind::Unbound, ParameterResourceReference::Unbound) => {
+                self.visual_original.and_then(VisualLayerAddress::from_reference).is_none()
+            }
             (ResourceKind::ExternalFile, ParameterResourceReference::ExternalFile { path }) => {
                 self.file.as_ref() == Some(path)
             }
@@ -376,7 +441,10 @@ impl ResourceDraft {
                 return Err("resource-not-admitted");
             }
         }
-        Ok((value != self.original).then_some(value))
+        Ok(
+            (self.property_value(value.clone()).as_ref() != Some(&self.original_property_value()))
+                .then_some(value),
+        )
     }
     pub(crate) fn allows_browse(&self, folder: bool) -> bool {
         self.kind == ResourceKind::ExternalFile
@@ -408,6 +476,7 @@ impl ResourceDraft {
     fn input_message(&self) -> &'static str {
         match self.kind {
             ResourceKind::ProjectAsset => "resource-search-assets",
+            ResourceKind::VisualLayer => "visual-source-search-layers",
             ResourceKind::ExternalFile => match self.path_selection() {
                 Some(ResourcePathSelection::Existing) => "resource-path-existing",
                 Some(ResourcePathSelection::ExistingOrNew) => "resource-path-existing-or-new",
@@ -422,9 +491,12 @@ impl ResourceDraft {
                 self.file.as_ref().map_or_else(String::new, |path| path.display().to_string())
             }
             ResourceKind::Uri => self.uri.clone(),
-            ResourceKind::ProjectAsset => self.search.clone(),
+            ResourceKind::ProjectAsset | ResourceKind::VisualLayer => self.search.clone(),
             ResourceKind::Unbound => String::new(),
         }
+    }
+    fn input_enabled(&self) -> bool {
+        self.kind != ResourceKind::Unbound
     }
     fn update(&mut self, update: ResourceUpdate) {
         match update {
@@ -438,12 +510,17 @@ impl ResourceDraft {
                 _ => {}
             },
             ResourceUpdate::Asset(asset) => self.asset = Some(asset),
+            ResourceUpdate::VisualLayer(address) if self.is_visual_layer_mode() => {
+                self.visual_layer = Some(address);
+            }
+            ResourceUpdate::VisualLayer(_) => {}
             ResourceUpdate::Search(search) => self.search = search,
         }
     }
     pub(crate) fn value(&self) -> Result<ParameterResourceReference, &'static str> {
         let value = match self.kind {
             ResourceKind::Unbound => Ok(ParameterResourceReference::Unbound),
+            ResourceKind::VisualLayer => Err("resource-not-admitted"),
             ResourceKind::ExternalFile => self
                 .file
                 .as_ref()
@@ -517,8 +594,7 @@ impl ResourceDraft {
         let matches = |bag: &mondrian_core::automation::PropertyBag, parameter| {
             bag.property_by_address(parameter).is_some_and(|(_, property)| {
                 property.descriptor.schema == self.schema
-                    && self.property_value(self.original.clone()).as_ref()
-                        == Some(property.static_value())
+                    && &self.original_property_value() == property.static_value()
             })
         };
         match &self.target {
@@ -538,15 +614,17 @@ impl ResourceDraft {
     }
     pub(crate) fn matches_model(&self, model: &InspectorPanelModel) -> bool {
         self.target.property(self.clip_id, model).is_some_and(|property| {
-            property.schema == self.schema
-                && self.property_value(self.original.clone()).as_ref() == Some(&property.value)
+            property.schema == self.schema && self.original_property_value() == property.value
         })
     }
     pub(crate) fn author_action(&self, value: ParameterResourceReference) -> Option<Action> {
-        if value == self.original {
+        self.write_property_action(self.property_value(value)?)
+    }
+
+    fn write_property_action(&self, value: PropertyValue) -> Option<Action> {
+        if value == self.original_property_value() {
             return None;
         }
-        let value = self.property_value(value)?;
         Some(
             self.target.write_action(self.clip_id, |parameter| ParameterValueWrite::Value {
                 parameter,
@@ -575,6 +653,8 @@ pub struct ResourceDialog {
     pub(crate) asset_catalog_revision: Option<ResourceAssetCatalogRevision>,
     assets: Vec<ResourceAssetChoice>,
     asset_search_keys: Vec<String>,
+    visual_layers: Vec<visual_layers::VisualLayerChoice>,
+    visual_author_generation: Option<u64>,
     error_key: Option<String>,
     localizer: Localizer,
     surface: DialogSurface,
@@ -610,6 +690,8 @@ impl ResourceDialog {
             asset_catalog_revision,
             assets,
             asset_search_keys,
+            visual_layers: Vec::new(),
+            visual_author_generation: None,
             error_key: None,
             surface: DialogSurface::new(Size::new(320.0, 340.0), Size::new(560.0, 340.0))
                 .with_content_padding(2.0 * theme.spacing.md),
@@ -645,6 +727,7 @@ impl ResourceDialog {
             ResourceKind::Unbound,
             ResourceKind::ExternalFile,
             ResourceKind::ProjectAsset,
+            ResourceKind::VisualLayer,
             ResourceKind::Uri,
         ]
         .into_iter()
@@ -662,14 +745,14 @@ impl ResourceDialog {
             items,
         );
         if replace_input {
-            let asset = self.draft.kind == ResourceKind::ProjectAsset;
+            let search = self.uses_choices();
             self.input = TextInput::new(self.localizer.text(self.draft.input_message()))
                 .with_text(self.draft.text())
-                .enabled(self.draft.kind != ResourceKind::Unbound)
+                .enabled(self.draft.input_enabled())
                 .on_change(move |text| {
                     ResourceEditorAction::Update {
                         id,
-                        update: if asset {
+                        update: if search {
                             ResourceUpdate::Search(text.to_owned())
                         } else {
                             ResourceUpdate::Text(text.to_owned())
@@ -678,8 +761,81 @@ impl ResourceDialog {
                     .action()
                 });
         }
-        self.rebuild_asset_choices();
+        self.rebuild_choices();
         self.layout(self.bounds);
+    }
+
+    pub(crate) fn refresh_visual_layers(
+        &mut self,
+        state: &crate::app::AppState,
+    ) -> mondrian_core::Result<()> {
+        let generation = state.project_author_generation();
+        if self.draft.is_visual_source() && self.visual_author_generation != Some(generation) {
+            self.visual_layers = match state.active_sequence() {
+                Some(sequence) => visual_layers::visual_layer_choices(
+                    sequence,
+                    state.sequences(),
+                    self.draft.clip_id,
+                )?,
+                None => Vec::new(),
+            };
+            self.visual_author_generation = Some(generation);
+            self.rebuild_choices();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn admits_visual_layer(&self, address: VisualLayerAddress) -> bool {
+        self.visual_layers.iter().any(|choice| choice.address == address)
+    }
+
+    fn rebuild_choices(&mut self) {
+        if self.draft.is_visual_layer_mode() {
+            self.rebuild_visual_layer_choices();
+        } else {
+            self.rebuild_asset_choices();
+        }
+    }
+
+    fn rebuild_visual_layer_choices(&mut self) {
+        let id = self.draft.id;
+        let query = self.draft.search.to_lowercase();
+        let mut selected_label = None;
+        let mut items = Vec::new();
+        for choice in &self.visual_layers {
+            let label = choice.label(&self.localizer);
+            let selected = self.draft.visual_layer == Some(choice.address);
+            if selected {
+                selected_label = Some(label.clone());
+            }
+            if label.to_lowercase().contains(&query) {
+                items.push(
+                    MenuItem::new(
+                        label,
+                        ResourceEditorAction::Update {
+                            id,
+                            update: ResourceUpdate::VisualLayer(choice.address),
+                        }
+                        .action(),
+                    )
+                    .checked(selected),
+                );
+            }
+        }
+        if !query.is_empty() && items.is_empty() {
+            self.set_error("visual-source-no-layers-match");
+        } else if self.error_key.as_deref() == Some("visual-source-no-layers-match") {
+            self.error_key = None;
+            self.error.set_text(String::new());
+        }
+        let label = selected_label.unwrap_or_else(|| {
+            self.localizer.text(if self.draft.visual_layer.is_some() {
+                "visual-source-unavailable-layer"
+            } else {
+                "visual-source-select-layer"
+            })
+        });
+        self.choices.set_model(label, items);
     }
     fn rebuild_asset_choices(&mut self) {
         let id = self.draft.id;
@@ -698,7 +854,7 @@ impl ResourceDialog {
                 .checked(self.draft.asset == Some(asset.id))
             })
             .collect();
-        if self.asset_mode() && !query.is_empty() && items.is_empty() {
+        if self.draft.kind == ResourceKind::ProjectAsset && !query.is_empty() && items.is_empty() {
             self.set_error("resource-no-assets-match");
         } else if self.error_key.as_deref() == Some("resource-no-assets-match") {
             self.error_key = None;
@@ -726,12 +882,15 @@ impl ResourceDialog {
         self.asset_search_keys = assets.iter().map(|asset| asset.label.to_lowercase()).collect();
         self.assets = assets;
         self.asset_catalog_revision = revision;
-        self.rebuild_asset_choices();
+        self.rebuild_choices();
     }
     pub(crate) fn apply_update(&mut self, update: ResourceUpdate) {
         self.clear_inspection();
         let replace_input = matches!(update, ResourceUpdate::Kind(_));
-        let search = matches!(update, ResourceUpdate::Search(_) | ResourceUpdate::Asset(_));
+        let search = matches!(
+            update,
+            ResourceUpdate::Search(_) | ResourceUpdate::Asset(_) | ResourceUpdate::VisualLayer(_)
+        );
         self.draft.update(update);
         self.error_key = None;
         self.error.set_text(String::new());
@@ -788,8 +947,8 @@ impl ResourceDialog {
     pub(crate) fn is_composing(&self) -> bool {
         self.input.is_composing()
     }
-    fn asset_mode(&self) -> bool {
-        self.draft.kind == ResourceKind::ProjectAsset
+    fn uses_choices(&self) -> bool {
+        self.draft.kind == ResourceKind::ProjectAsset || self.draft.is_visual_layer_mode()
     }
 }
 impl Widget for ResourceDialog {
@@ -845,7 +1004,7 @@ impl Widget for ResourceDialog {
         if self.kind.is_open() && self.kind.event(event, ctx) == EventResult::Handled {
             return EventResult::Handled;
         }
-        if self.asset_mode()
+        if self.uses_choices()
             && self.choices.is_open()
             && self.choices.event(event, ctx) == EventResult::Handled
         {
@@ -910,8 +1069,8 @@ impl Widget for ResourceDialog {
         match index {
             0 => Some(&self.title),
             1 => Some(&self.kind),
-            2 if self.draft.kind != ResourceKind::Unbound => Some(&self.input),
-            3 if self.asset_mode() => Some(&self.choices),
+            2 if self.draft.input_enabled() => Some(&self.input),
+            3 if self.uses_choices() => Some(&self.choices),
             4 if self.draft.allows_browse(false) => Some(&self.file),
             5 if self.draft.allows_browse(true) => Some(&self.folder),
             6 => Some(&self.error),
@@ -924,8 +1083,8 @@ impl Widget for ResourceDialog {
         match index {
             0 => Some(&mut self.title),
             1 => Some(&mut self.kind),
-            2 if self.draft.kind != ResourceKind::Unbound => Some(&mut self.input),
-            3 if self.asset_mode() => Some(&mut self.choices),
+            2 if self.draft.input_enabled() => Some(&mut self.input),
+            3 if self.uses_choices() => Some(&mut self.choices),
             4 if self.draft.allows_browse(false) => Some(&mut self.file),
             5 if self.draft.allows_browse(true) => Some(&mut self.folder),
             6 => Some(&mut self.error),
@@ -984,7 +1143,32 @@ mod tests {
     }
 
     #[test]
-    fn visual_source_picker_admits_only_asset_addresses_and_keeps_retime() {
+    fn an_existing_clip_or_sequence_reference_requires_an_explicit_clear() {
+        for reference in [
+            VisualSourceReference::Clip { clip_id: ClipId::new(), retime: Default::default() },
+            VisualSourceReference::Sequence {
+                sequence_id: SequenceId::new(),
+                retime: Default::default(),
+            },
+        ] {
+            let mut draft = visual_draft(reference);
+            assert_eq!(draft.confirmed_visual_layer(), Ok(None));
+            assert_eq!(
+                draft.original_property_value(),
+                PropertyValue::VisualSource(reference)
+            );
+            draft.update(ResourceUpdate::Kind(ResourceKind::Unbound));
+            let clear = draft.confirmed_value().unwrap().unwrap();
+            assert_eq!(
+                draft.property_value(clear.clone()),
+                Some(PropertyValue::VisualSource(VisualSourceReference::Unbound))
+            );
+            assert!(draft.author_action(clear).is_some());
+        }
+    }
+
+    #[test]
+    fn visual_source_picker_admits_typed_addresses_and_keeps_retime() {
         use mondrian_core::{VisualSourceBoundary, VisualSourceReference, VisualSourceRetime};
         let retime = VisualSourceRetime {
             time_offset: mondrian_core::TimelineTime::new(-1001, 24000).unwrap(),
@@ -995,6 +1179,7 @@ mod tests {
         assert!(input.is_visual_source());
         assert!(input.allows_kind(ResourceKind::Unbound));
         assert!(input.allows_kind(ResourceKind::ProjectAsset));
+        assert!(input.allows_kind(ResourceKind::VisualLayer));
         assert!(!input.allows_kind(ResourceKind::ExternalFile));
         assert!(!input.allows_kind(ResourceKind::Uri));
         assert!(!input.allows_browse(false));

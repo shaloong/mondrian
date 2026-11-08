@@ -205,6 +205,49 @@ fn cpu_auxiliary_solid_and_media_layers_use_the_bound_raster() {
 }
 
 #[test]
+fn cpu_auxiliary_lookup_scopes_one_shared_graph_to_each_layer_and_transition_endpoint() {
+    let graph = graph(AssetId::new(), false);
+    let extent = EffectFrameExtent::new(1, 1);
+    let first_pixels = [[0.0, 0.0, 0.0, 0.25]];
+    let second_pixels = [[0.0, 0.0, 0.0, 0.5]];
+    let first = [binding(&first_pixels)];
+    let second = [binding(&second_pixels)];
+    let first = TimelineAuxiliaryInputs::new(&graph, extent, &first);
+    let second = TimelineAuxiliaryInputs::new(&graph, extent, &second);
+    assert_pixel(
+        render(
+            &[
+                TimelineCompositeElement::SolidColor(solid(graph.clone())),
+                TimelineCompositeElement::SolidColor(solid(graph.clone())),
+            ],
+            &[
+                first.for_occurrence(0, TimelineAuxiliarySide::Element),
+                second.for_occurrence(1, TimelineAuxiliarySide::Element),
+            ],
+        )
+        .unwrap(),
+        [0.5, 0.0, 1.0, 1.0],
+    );
+    assert_pixel(
+        render(
+            &[TimelineCompositeElement::CrossDissolve(
+                TimelineCrossDissolveLayer {
+                    left: TimelineTransitionInput::SolidColor(solid(graph.clone())),
+                    right: TimelineTransitionInput::SolidColor(solid(graph.clone())),
+                    progress: 0.5,
+                },
+            )],
+            &[
+                first.for_occurrence(0, TimelineAuxiliarySide::TransitionLeft),
+                second.for_occurrence(0, TimelineAuxiliarySide::TransitionRight),
+            ],
+        )
+        .unwrap(),
+        [0.375, 0.0, 1.25, 1.0],
+    );
+}
+
+#[test]
 fn cpu_auxiliary_lookup_distinguishes_equal_pixel_graphs_with_different_assets() {
     let first = graph(AssetId::new(), false);
     let second = graph(AssetId::new(), false);

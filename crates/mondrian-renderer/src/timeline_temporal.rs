@@ -131,6 +131,7 @@ pub struct TimelineFrameExecutionRequest {
     authority: TimelineFrameExecutionAuthority,
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
+    auxiliary_clip: Option<TimelineClipExecutionRef>,
 }
 
 /// One actual job's authority, separate from reusable semantic frame plans.
@@ -179,6 +180,7 @@ impl TimelineFrameExecutionRequest {
             authority: TimelineFrameExecutionAuthority::new(generation, continuity, cancellation),
             frame_extent,
             output_roi,
+            auxiliary_clip: None,
         }
     }
 
@@ -211,6 +213,16 @@ impl TimelineFrameExecutionRequest {
     pub const fn cancellation(&self) -> &ExecutionCancellationToken {
         self.authority.cancellation()
     }
+
+    /// Exact Clip-local input if this request prepares a standalone source.
+    pub const fn auxiliary_clip(&self) -> Option<TimelineClipExecutionRef> {
+        self.auxiliary_clip
+    }
+
+    pub(crate) fn with_auxiliary_clip(mut self, placement: TimelineClipExecutionRef) -> Self {
+        self.auxiliary_clip = Some(placement);
+        self
+    }
 }
 
 /// Immutable Clip input semantics carried through a resolved frame and into
@@ -222,6 +234,7 @@ pub struct PreparedTimelineClipInputPlan {
     evaluation: crate::TimelineEvaluationRequest,
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
+    auxiliary_clip: Option<TimelineClipExecutionRef>,
 }
 
 type TimelineProcessorSourceResolver<'a> = dyn FnMut(
@@ -281,6 +294,7 @@ impl PreparedTimelineClipInputPlan {
             && self.evaluation == other.evaluation
             && self.frame_extent == other.frame_extent
             && self.output_roi == other.output_roi
+            && self.auxiliary_clip == other.auxiliary_clip
     }
 
     pub const fn placement(&self) -> TimelineClipExecutionRef {
@@ -553,6 +567,7 @@ impl PreparedTimelineClipInputPlan {
             authority: authority.clone(),
             frame_extent: self.frame_extent,
             output_roi: self.output_roi,
+            auxiliary_clip: self.auxiliary_clip,
         }
     }
 
@@ -724,6 +739,7 @@ impl PreparedVisualProgram {
             evaluation: *owner.evaluation(),
             frame_extent: owner.frame_extent(),
             output_roi: owner.output_roi(),
+            auxiliary_clip: owner.auxiliary_clip(),
         })
     }
 
@@ -762,6 +778,16 @@ impl PreparedVisualProgram {
             clip_id: placement.clip_id,
             reason: e.to_string(),
         };
+        if let Some(target) = owner.auxiliary_clip() {
+            if placement == target {
+                self.schedule().clip_content(placement).map_err(sampling_error)?;
+                return Ok(());
+            }
+            return Err(TimelineTemporalPreparationError::SourceSampling {
+                clip_id: placement.clip_id,
+                reason: "input service belongs to a different auxiliary Clip occurrence".into(),
+            });
+        }
         let actual = crate::timeline_render_plan::validate_timeline_evaluation_position(
             self.schedule(),
             owner.evaluation().position,

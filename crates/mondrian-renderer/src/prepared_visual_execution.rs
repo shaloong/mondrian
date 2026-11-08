@@ -9,8 +9,9 @@
 //! traversal.
 
 use crate::{
-    PreparedVisualFrameClosure, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
-    PreparedVisualNestedBinding, PreparedVisualNestedSample,
+    PreparedAuxiliaryVisualSource, PreparedVisualAuxiliaryKey, PreparedVisualFrameClosure,
+    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualNestedBinding,
+    PreparedVisualNestedSample,
 };
 use mondrian_core::timeline_data::TimelineClipExecutionRef;
 use std::fmt;
@@ -27,7 +28,7 @@ pub trait PreparedVisualExecutionAdapter<T> {
     /// Consumer-owned execution failure.
     type Error;
 
-    /// Materialize one prepared Sequence occurrence.
+    /// Materialize one prepared Sequence or standalone Clip occurrence.
     fn materialize_node(
         &mut self,
         inputs: PreparedVisualExecutionNodeInputs<'_, T, Self::Output>,
@@ -38,7 +39,7 @@ pub trait PreparedVisualExecutionAdapter<T> {
 pub struct PreparedVisualExecutionNodeInputs<'a, T, O> {
     closure: &'a PreparedVisualFrameClosure<T>,
     node: &'a PreparedVisualFrameNode<T>,
-    inbound: Option<&'a PreparedVisualNestedBinding>,
+    inbound: Option<InboundBinding<'a>>,
     outputs: &'a [Option<O>],
 }
 
@@ -58,9 +59,22 @@ impl<'a, T, O> PreparedVisualExecutionNodeInputs<'a, T, O> {
         self.node.id() == self.closure.root()
     }
 
-    /// Exact parent binding, absent only for the root.
+    /// Exact inbound ordinary or temporal nested binding.
     pub const fn inbound_binding(&self) -> Option<&'a PreparedVisualNestedBinding> {
-        self.inbound
+        match self.inbound {
+            Some(InboundBinding::Nested(binding)) => Some(binding),
+            Some(InboundBinding::Auxiliary { .. }) | None => None,
+        }
+    }
+
+    /// Exact inbound auxiliary consumer in its parent node.
+    pub const fn inbound_auxiliary(
+        &self,
+    ) -> Option<(PreparedVisualFrameNodeId, &'a PreparedVisualAuxiliaryKey)> {
+        match self.inbound {
+            Some(InboundBinding::Auxiliary { parent, key }) => Some((parent, key)),
+            Some(InboundBinding::Nested(_)) | None => None,
+        }
     }
 
     /// Already-materialized output for one exact direct child.
@@ -82,6 +96,28 @@ impl<'a, T, O> PreparedVisualExecutionNodeInputs<'a, T, O> {
             .nested_child(placement, sample)
             .and_then(|child| self.child_output(child))
     }
+
+    /// Resolve the materialized output of one exact visual source slot.
+    pub fn auxiliary_output(&self, key: PreparedVisualAuxiliaryKey) -> Option<&O> {
+        self.node
+            .auxiliary_visual_sources()
+            .iter()
+            .find_map(|(candidate, source)| match source {
+                PreparedAuxiliaryVisualSource::Child { child, .. } if *candidate == key => {
+                    self.outputs.get(child.index()).and_then(Option::as_ref)
+                }
+                _ => None,
+            })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InboundBinding<'a> {
+    Nested(&'a PreparedVisualNestedBinding),
+    Auxiliary {
+        parent: PreparedVisualFrameNodeId,
+        key: &'a PreparedVisualAuxiliaryKey,
+    },
 }
 
 /// Execute every reachable node through one consumer Adapter.
@@ -105,6 +141,18 @@ where
                 PreparedVisualExecutionStructureError::UnboundTemporalMedia { node: node.id() },
             ));
         }
+        if let Some((key, _)) = node
+            .auxiliary_visual_sources()
+            .iter()
+            .find(|(_, source)| matches!(source, PreparedAuxiliaryVisualSource::Unavailable(_)))
+        {
+            return Err(PreparedVisualExecutionError::Structure(
+                PreparedVisualExecutionStructureError::UnresolvedAuxiliaryVisualSource {
+                    node: node.id(),
+                    slot: key.slot,
+                },
+            ));
+        }
     }
     let schedule = PreparedVisualExecutionSchedule::prepare(closure)
         .map_err(PreparedVisualExecutionError::Structure)?;
@@ -118,34 +166,49 @@ where
                 PreparedVisualExecutionStructureError::MissingNode { node: entry.node },
             )
         })?;
-        for binding in node.bindings() {
-            if outputs.get(binding.child().index()).and_then(Option::as_ref).is_none() {
+        let children = node.bindings().iter().map(PreparedVisualNestedBinding::child).chain(
+            node.auxiliary_visual_sources()
+                .iter()
+                .filter_map(|(_, source)| auxiliary_child(source)),
+        );
+        for child in children {
+            if outputs.get(child.index()).and_then(Option::as_ref).is_none() {
                 return Err(PreparedVisualExecutionError::Structure(
                     PreparedVisualExecutionStructureError::ChildOutputUnavailable {
                         parent: node.id(),
-                        child: binding.child(),
+                        child,
                     },
                 ));
             }
         }
-        let inbound = match entry.inbound {
-            Some(inbound) => {
-                let binding = closure
+        let inbound = entry
+            .inbound
+            .map(|inbound| {
+                closure
                     .node(inbound.parent)
-                    .and_then(|parent| parent.bindings().get(inbound.binding_index))
-                    .filter(|binding| binding.child() == entry.node)
-                    .ok_or_else(|| {
-                        PreparedVisualExecutionError::Structure(
-                            PreparedVisualExecutionStructureError::MissingInboundBinding {
+                    .and_then(|parent| match inbound.edge {
+                        InboundEdge::Nested(index) => parent
+                            .bindings()
+                            .get(index)
+                            .filter(|binding| binding.child() == entry.node)
+                            .map(InboundBinding::Nested),
+                        InboundEdge::Auxiliary(index) => parent
+                            .auxiliary_visual_sources()
+                            .get(index)
+                            .filter(|(_, source)| auxiliary_child(source) == Some(entry.node))
+                            .map(|(key, _)| InboundBinding::Auxiliary {
                                 parent: inbound.parent,
-                                child: entry.node,
-                            },
-                        )
-                    })?;
-                Some(binding)
-            }
-            None => None,
-        };
+                                key,
+                            }),
+                    })
+                    .ok_or(PreparedVisualExecutionError::Structure(
+                        PreparedVisualExecutionStructureError::MissingInboundBinding {
+                            parent: inbound.parent,
+                            child: entry.node,
+                        },
+                    ))
+            })
+            .transpose()?;
         let output = adapter
             .materialize_node(PreparedVisualExecutionNodeInputs {
                 closure,
@@ -167,7 +230,21 @@ where
 #[derive(Debug, Clone, Copy)]
 struct PreparedVisualExecutionInbound {
     parent: PreparedVisualFrameNodeId,
-    binding_index: usize,
+    edge: InboundEdge,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InboundEdge {
+    Nested(usize),
+    Auxiliary(usize),
+}
+
+fn auxiliary_child(source: &PreparedAuxiliaryVisualSource) -> Option<PreparedVisualFrameNodeId> {
+    match source {
+        PreparedAuxiliaryVisualSource::Child { child, .. } => Some(*child),
+        PreparedAuxiliaryVisualSource::Transparent { .. }
+        | PreparedAuxiliaryVisualSource::Unavailable(_) => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,7 +294,27 @@ impl PreparedVisualExecutionSchedule {
             }
             state[node_id.index()] = 1;
             stack.push((node_id, true));
-            for (binding_index, binding) in node.bindings().iter().enumerate().rev() {
+            let mut push_child = |child,
+                                  edge|
+             -> Result<(), PreparedVisualExecutionStructureError> {
+                if closure.node(child).is_none() {
+                    return Err(PreparedVisualExecutionStructureError::MissingNode { node: child });
+                }
+                if inbound[child.index()]
+                    .replace(PreparedVisualExecutionInbound { parent: node_id, edge })
+                    .is_some()
+                {
+                    return Err(PreparedVisualExecutionStructureError::MultipleParents { child });
+                }
+                stack.push((child, false));
+                Ok(())
+            };
+            for (index, (_, source)) in node.auxiliary_visual_sources().iter().enumerate().rev() {
+                if let Some(child) = auxiliary_child(source) {
+                    push_child(child, InboundEdge::Auxiliary(index))?;
+                }
+            }
+            for (index, binding) in node.bindings().iter().enumerate().rev() {
                 if binding.parent() != node_id {
                     return Err(
                         PreparedVisualExecutionStructureError::BindingParentMismatch {
@@ -226,18 +323,7 @@ impl PreparedVisualExecutionSchedule {
                         },
                     );
                 }
-                let child = binding.child();
-                if closure.node(child).is_none() {
-                    return Err(PreparedVisualExecutionStructureError::MissingNode { node: child });
-                }
-                let slot = &mut inbound[child.index()];
-                if slot
-                    .replace(PreparedVisualExecutionInbound { parent: node_id, binding_index })
-                    .is_some()
-                {
-                    return Err(PreparedVisualExecutionStructureError::MultipleParents { child });
-                }
-                stack.push((child, false));
+                push_child(binding.child(), InboundEdge::Nested(index))?;
             }
         }
         if let Some(index) = state.iter().position(|state| *state != 2) {
@@ -261,6 +347,13 @@ impl PreparedVisualFrameNodeId {
 /// Structural failure detected before or during the shared execution walk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparedVisualExecutionStructureError {
+    /// A Preview decision still requires source projection before execution.
+    UnresolvedAuxiliaryVisualSource {
+        /// Exact consumer frame instance.
+        node: PreparedVisualFrameNodeId,
+        /// Unresolved graph input slot.
+        slot: u32,
+    },
     /// A file-backed temporal input has no producer-selected pixel domain.
     UnboundTemporalMedia {
         /// Node whose Media input preparation is incomplete.
@@ -324,6 +417,11 @@ pub enum PreparedVisualExecutionStructureError {
 impl fmt::Display for PreparedVisualExecutionStructureError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnresolvedAuxiliaryVisualSource { node, slot } => write!(
+                formatter,
+                "node {} auxiliary visual source slot {slot} has not been projected",
+                node.index(),
+            ),
             Self::UnboundTemporalMedia { node } => {
                 write!(
                     formatter,

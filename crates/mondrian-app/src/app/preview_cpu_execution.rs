@@ -309,8 +309,17 @@ pub(crate) fn composite_resolved_preview_working_with_inputs(
     let mut input_color_stage_diagnostics = RenderColorStageDiagnostics::default();
 
     let mut auxiliary_bindings = Vec::new();
-    for element in resolved {
-        super::preview_auxiliary::collect_auxiliary_bindings(element, &mut auxiliary_bindings);
+    let mut auxiliary_occurrences = Vec::new();
+    for (index, mut element) in resolved.iter().enumerate() {
+        while let ResolvedPreviewElement::WithAuxiliary { element: inner, inputs } = element {
+            for input in inputs {
+                auxiliary_bindings.push(input);
+                if !input.sources.is_empty() {
+                    auxiliary_occurrences.push((index, input.side));
+                }
+            }
+            element = inner;
+        }
     }
     super::preview_auxiliary::preflight_auxiliary_composite(
         width,
@@ -330,12 +339,14 @@ pub(crate) fn composite_resolved_preview_working_with_inputs(
     let auxiliary_sets = auxiliary_rasters
         .iter()
         .zip(&auxiliary_inputs)
-        .map(|(set, inputs)| {
+        .zip(auxiliary_occurrences)
+        .map(|((set, inputs), (index, side))| {
             mondrian_renderer::TimelineAuxiliaryInputs::new(
                 &set.binding.graph,
                 set.binding.primary_extent,
                 inputs,
             )
+            .for_occurrence(index, side)
         })
         .collect::<Vec<_>>();
 

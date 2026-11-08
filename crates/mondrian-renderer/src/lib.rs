@@ -329,11 +329,14 @@ pub use prepared_visual_execution::{
     PreparedVisualExecutionNodeInputs, PreparedVisualExecutionStructureError,
 };
 pub use prepared_visual_frame_closure::{
-    prepare_bound_visual_frame_closure, prepare_visual_frame_closure,
+    prepare_bound_visual_frame_closure, prepare_bound_visual_frame_closure_for_targets,
+    prepare_visual_frame_closure, PreparedAuxiliaryVisualSource,
+    PreparedAuxiliaryVisualUnavailable, PreparedVisualAuxiliaryKey,
     PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureError,
-    PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation, PreparedVisualFrameNode,
-    PreparedVisualFrameNodeId, PreparedVisualNestedBinding, PreparedVisualNestedInstanceStep,
-    PreparedVisualNestedSample,
+    PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
+    PreparedVisualFrameInvocation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
+    PreparedVisualFrameTarget, PreparedVisualInstanceStep, PreparedVisualNestedBinding,
+    PreparedVisualNestedInstanceStep, PreparedVisualNestedSample,
 };
 pub use prepared_visual_program::{
     prepared_visual_author_fingerprint, PreparedAuxiliaryConsumerLocation,
@@ -396,8 +399,8 @@ pub use timeline_composite::{
     composite_timeline_elements_color_frame_with_inputs, composite_timeline_elements_into,
     estimate_timeline_cpu_working_set, estimate_timeline_cpu_working_set_with_auxiliary,
     is_identity_transform, quantize_transform_signature, GpuRoute, TimelineAdjustmentLayer,
-    TimelineAuxiliaryInputs, TimelineCompositeBackground, TimelineCompositeColorPath,
-    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineAuxiliaryInputs, TimelineAuxiliarySide, TimelineCompositeBackground,
+    TimelineCompositeColorPath, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement, TimelineCompositeError,
     TimelineCompositeExecutionDiagnostics, TimelineCompositeFrame,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
@@ -412,8 +415,9 @@ pub use timeline_effect_routes::{
 };
 pub use timeline_render_plan::{
     evaluate_prepared_visual_program, evaluate_prepared_visual_program_for_auxiliary_preview,
-    evaluate_prepared_visual_program_with_session, mat3_to_affine,
-    project_affine_to_sampled_extents, TimelineAdjustmentPlan, TimelineBasicTitlePlan,
+    evaluate_prepared_visual_program_with_session, mat3_to_affine, prepare_auxiliary_clip_source,
+    project_affine_to_sampled_extents, PreparedAuxiliaryClipSource,
+    PreparedAuxiliaryClipSourceError, TimelineAdjustmentPlan, TimelineBasicTitlePlan,
     TimelineColorDiagnostic, TimelineCrossDissolvePlan, TimelineEvaluationDiagnostics,
     TimelineEvaluationRequest, TimelineGradePlan, TimelineMediaPlan, TimelineNestedSequencePlan,
     TimelineRenderColorTarget, TimelineRenderIntent, TimelineRenderPlan, TimelineRenderPlanElement,

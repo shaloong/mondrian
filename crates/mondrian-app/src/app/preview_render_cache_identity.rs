@@ -4,16 +4,19 @@
 //! sources into versioned bytes. Execution providers, scheduling state,
 //! Program Output, monitor transforms, and Viewer presentation are excluded.
 
-use mondrian_core::{ColorEngine, Resolution, WorkingColorSpace};
+use mondrian_core::timeline_data::{TimelineClipEndpointContext, TimelineClipExecutionRef};
+use mondrian_core::{ColorEngine, Resolution, VisualSourceReference, WorkingColorSpace};
 use mondrian_effects::{CompiledEffectGraph, EffectCachePolicy};
 use mondrian_media::{PreviewDecodeRepresentation, PreviewSourceColorContract};
 use mondrian_renderer::{
+    PreparedVisualInstanceStep, PreparedVisualNestedSample,
     ResolvedVisualNodeMaterializationIdentity, SourceFramePreparationIntent,
     TimelineSolidColorLayer,
 };
 use serde::Serialize;
 
 use super::preview_access_mode::MediaPreviewKey;
+use super::preview_auxiliary::PreviewAuxiliaryEvidence;
 use super::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
 
 /// Canonical encoding failure. Supported semantic projections contain no maps
@@ -131,7 +134,32 @@ pub(crate) fn canonical_resolved_node_materialization(
         match element {
             ResolvedPreviewElement::WithAuxiliary { element, inputs } => {
                 let projected = inputs.iter().any(|input| input.projection_context.is_some());
-                bytes.u8(if projected { 7 } else { 5 });
+                let visual = inputs
+                    .iter()
+                    .flat_map(|input| &input.sources)
+                    .any(|source| matches!(source.evidence, PreviewAuxiliaryEvidence::Visual(_)));
+                let scoped_notices = inputs
+                    .iter()
+                    .filter_map(|input| input.projection_context.as_ref())
+                    .any(|context| {
+                        context.notices.iter().any(|notice| {
+                            matches!(
+                                notice.fallback.reference(),
+                                VisualSourceReference::Clip { .. }
+                                    | VisualSourceReference::Sequence { .. }
+                            ) || notice.path.iter().any(|step| {
+                                matches!(step, PreparedVisualInstanceStep::Auxiliary(_))
+                            })
+                        })
+                    });
+                bytes.u8(match (visual, projected, scoped_notices) {
+                    (false, _, true) => 10,
+                    (true, _, true) => 11,
+                    (false, false, false) => 5,
+                    (false, true, false) => 7,
+                    (true, false, false) => 8,
+                    (true, true, false) => 9,
+                });
                 bytes.u64(inputs.len() as u64);
                 for input in inputs {
                     if projected {
@@ -141,29 +169,9 @@ pub(crate) fn canonical_resolved_node_materialization(
                             for notice in &context.notices {
                                 bytes.json(&notice.sequence_id)?;
                                 bytes.json(&notice.time)?;
-                                if let Some(placement) = notice.placement {
-                                    bytes.u8(1);
-                                    bytes.json(&placement.sequence_id)?;
-                                    bytes.json(&placement.clip_id)?;
-                                    bytes.json(&placement.clip_time)?;
-                                    use mondrian_core::timeline_data::TimelineClipEndpointContext;
-                                    match placement.endpoint {
-                                        TimelineClipEndpointContext::Ordinary => bytes.u8(0),
-                                        TimelineClipEndpointContext::TransitionLeft {
-                                            transition_id,
-                                        } => {
-                                            bytes.u8(1);
-                                            bytes.json(&transition_id)?;
-                                        }
-                                        TimelineClipEndpointContext::TransitionRight {
-                                            transition_id,
-                                        } => {
-                                            bytes.u8(2);
-                                            bytes.json(&transition_id)?;
-                                        }
-                                    }
-                                } else {
-                                    bytes.u8(0);
+                                canonical_auxiliary_placement(&mut bytes, notice.placement)?;
+                                if scoped_notices {
+                                    canonical_auxiliary_instance_path(&mut bytes, &notice.path)?;
                                 }
                                 bytes.u64(notice.stage_index as u64);
                                 bytes.json(&notice.location)?;
@@ -190,15 +198,34 @@ pub(crate) fn canonical_resolved_node_materialization(
                     bytes.u64(input.sources.len() as u64);
                     for source in &input.sources {
                         bytes.u32(source.slot);
-                        bytes.json(&source.request.reference)?;
-                        bytes.json(&source.request.sequence_time)?;
-                        bytes.json(&source.request.target_resolution)?;
-                        bytes.fixed(&canonical_media_source_fingerprint(
-                            &source.plan.validated_key,
-                        )?);
-                        bytes.json(&source.plan.time.requested_time)?;
-                        bytes.json(&source.plan.time.source_sample)?;
-                        bytes.u8(u8::from(source.plan.time.out_of_range));
+                        let time = match &source.evidence {
+                            PreviewAuxiliaryEvidence::Asset(asset) => {
+                                if visual {
+                                    bytes.u8(0);
+                                }
+                                bytes.json(&asset.request.reference)?;
+                                bytes.json(&asset.request.sequence_time)?;
+                                bytes.json(&asset.request.target_resolution)?;
+                                bytes.fixed(&canonical_media_source_fingerprint(
+                                    &asset.plan.validated_key,
+                                )?);
+                                asset.plan.time
+                            }
+                            PreviewAuxiliaryEvidence::Visual(source) => {
+                                bytes.u8(1);
+                                bytes.json(&source.reference)?;
+                                bytes.json(&source.sequence_id)?;
+                                bytes.u64(source.revision.get());
+                                bytes.u32(source.domain.0.width());
+                                bytes.u32(source.domain.0.height());
+                                bytes.json(&source.domain.1)?;
+                                bytes.json(&source.working_color_space)?;
+                                source.time
+                            }
+                        };
+                        bytes.json(&time.requested_time)?;
+                        bytes.json(&time.source_sample)?;
+                        bytes.u8(u8::from(time.out_of_range));
                         if let Some(frame) = &source.frame {
                             bytes.u8(1);
                             bytes.fixed(
@@ -265,6 +292,65 @@ pub(crate) fn canonical_resolved_node_materialization(
         }
     }
     Ok(ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(&bytes.finish()))
+}
+
+fn canonical_auxiliary_placement(
+    bytes: &mut CanonicalBytes,
+    placement: Option<TimelineClipExecutionRef>,
+) -> Result<(), PreviewRenderCacheIdentityError> {
+    let Some(placement) = placement else {
+        bytes.u8(0);
+        return Ok(());
+    };
+    bytes.u8(1);
+    bytes.json(&placement.sequence_id)?;
+    bytes.json(&placement.clip_id)?;
+    bytes.json(&placement.clip_time)?;
+    match placement.endpoint {
+        TimelineClipEndpointContext::Ordinary => bytes.u8(0),
+        TimelineClipEndpointContext::TransitionLeft { transition_id } => {
+            bytes.u8(1);
+            bytes.json(&transition_id)?;
+        }
+        TimelineClipEndpointContext::TransitionRight { transition_id } => {
+            bytes.u8(2);
+            bytes.json(&transition_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn canonical_auxiliary_instance_path(
+    bytes: &mut CanonicalBytes,
+    path: &[PreparedVisualInstanceStep],
+) -> Result<(), PreviewRenderCacheIdentityError> {
+    bytes.u64(path.len() as u64);
+    for step in path {
+        match step {
+            PreparedVisualInstanceStep::Nested(step) => {
+                bytes.u8(0);
+                canonical_auxiliary_placement(bytes, Some(step.placement))?;
+                match step.sample {
+                    PreparedVisualNestedSample::Current => bytes.u8(0),
+                    PreparedVisualNestedSample::Temporal(request) => {
+                        bytes.u8(1);
+                        bytes.json(&request.time())?;
+                        bytes.u32(request.frame_extent().width());
+                        bytes.u32(request.frame_extent().height());
+                        bytes.json(&request.sampling())?;
+                    }
+                }
+            }
+            PreparedVisualInstanceStep::Auxiliary(key) => {
+                bytes.u8(1);
+                canonical_auxiliary_placement(bytes, key.placement)?;
+                bytes.u64(key.stage_index as u64);
+                bytes.u32(key.slot);
+                bytes.json(&key.reference)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn encode_transition(

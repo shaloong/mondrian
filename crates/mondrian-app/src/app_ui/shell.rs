@@ -1269,13 +1269,15 @@ impl AppUiAppRoot {
                 } else {
                     (None, Vec::new())
                 };
-            self.show_modal(ShellModal::Resource(Box::new(ResourceDialog::new(
+            let mut dialog = ResourceDialog::new(
                 draft,
                 property.label.clone(),
                 assets,
                 catalog_revision,
                 self.localizer.locale(),
-            ))));
+            );
+            dialog.refresh_visual_layers(state)?;
+            self.show_modal(ShellModal::Resource(Box::new(dialog)));
             self.layout(self.bounds);
             return Ok(ResourceActionOutcome::Handled(None));
         }
@@ -1347,6 +1349,25 @@ impl AppUiAppRoot {
             ResourceEditorAction::Confirm { .. } => {
                 if dialog.is_composing() || dialog.pending_inspection.is_some() {
                     return Ok(ResourceActionOutcome::Handled(None));
+                }
+                if dialog.draft.is_visual_layer_mode() {
+                    let author = match dialog.draft.confirmed_visual_layer() {
+                        Ok(Some(address)) => {
+                            dialog.refresh_visual_layers(state)?;
+                            if !dialog.admits_visual_layer(address) {
+                                dialog.set_error("visual-source-unavailable-layer");
+                                return Ok(ResourceActionOutcome::Handled(None));
+                            }
+                            dialog.draft.author_visual_layer_action(address)
+                        }
+                        Ok(None) => None,
+                        Err(key) => {
+                            dialog.set_error(key);
+                            return Ok(ResourceActionOutcome::Handled(None));
+                        }
+                    };
+                    self.modal = None;
+                    return Ok(ResourceActionOutcome::Handled(author));
                 }
                 let value = match dialog.draft.confirmed_value() {
                     Ok(Some(value)) => value,
@@ -1855,6 +1876,7 @@ impl AppUiAppRoot {
         let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_resource_mut) else {
             return Ok(());
         };
+        dialog.refresh_visual_layers(state)?;
         if !dialog
             .draft
             .allows_kind(crate::app_ui::resource_dialog::ResourceKind::ProjectAsset)
@@ -6534,7 +6556,7 @@ mod tests {
     fn visual_source_picker_preserves_missing_addresses_and_commits_one_undoable_write() {
         use crate::app_ui::resource_dialog::{
             InspectorPropertyTarget, ResourceActionOutcome, ResourceEditorAction, ResourceKind,
-            ResourceUpdate,
+            ResourceUpdate, VisualLayerAddress,
         };
         use mondrian_core::{
             PropertyDescriptor, PropertyValue, TimelineTime, VisualSourceBoundary,
@@ -6587,7 +6609,21 @@ mod tests {
         let clip_id = clip.id;
         clip.add_effect_node(effect);
         let mut sequence = mondrian_timeline::Sequence::new("Visual source authoring");
-        sequence.video_tracks[0].add_clip(clip).unwrap();
+        sequence.video_tracks[1].add_clip(clip).unwrap();
+        let mut add_source = |track: usize, label: &str| {
+            let clip = mondrian_timeline::Clip::new_basic_title(
+                label,
+                "Arial",
+                TimelineTime::ZERO,
+                TimelineTime::ONE,
+            )
+            .unwrap();
+            let id = clip.id;
+            sequence.video_tracks[track].add_clip(clip).unwrap();
+            id
+        };
+        let earlier = add_source(0, "Earlier picture");
+        let later = add_source(2, "Later picture");
         let mut state = AppState::new();
         state.test_set_sequence(Some(sequence));
         state.select_clip_by_id(clip_id).unwrap();
@@ -6632,9 +6668,10 @@ mod tests {
             panic!("one authored VisualSource write");
         };
         state.dispatch_action(action).unwrap();
+        let localizer = Localizer::new(root.localizer.locale()).unwrap();
         let read_value = |state: &AppState| {
             let model =
-                crate::app_ui::panels::InspectorPanelModel::from_app_state(state, &root.localizer);
+                crate::app_ui::panels::InspectorPanelModel::from_app_state(state, &localizer);
             target.property(clip_id, &model).unwrap().value.clone()
         };
         assert_eq!(
@@ -6653,6 +6690,54 @@ mod tests {
             read_value(&state),
             PropertyValue::VisualSource(VisualSourceReference::Unbound)
         );
+        state.dispatch_action(Action::Undo).unwrap();
+        root.try_handle_resource_action(&open, &state, &platform).unwrap();
+        let id = root.modal.as_ref().and_then(ShellModal::as_resource).unwrap().draft.id;
+        let change = |update| ResourceEditorAction::Update { id, update }.action();
+        let confirm = ResourceEditorAction::Confirm { id }.action();
+        root.try_handle_resource_action(
+            &change(ResourceUpdate::Kind(ResourceKind::VisualLayer)),
+            &state,
+            &platform,
+        )
+        .unwrap();
+        let dialog = root.modal.as_ref().and_then(ShellModal::as_resource).unwrap();
+        assert!(dialog.admits_visual_layer(VisualLayerAddress::Clip(earlier)));
+        assert!(!dialog.admits_visual_layer(VisualLayerAddress::Clip(later)));
+        root.try_handle_resource_action(
+            &change(ResourceUpdate::VisualLayer(VisualLayerAddress::Clip(later))),
+            &state,
+            &platform,
+        )
+        .unwrap();
+        assert!(matches!(
+            root.try_handle_resource_action(&confirm, &state, &platform).unwrap(),
+            ResourceActionOutcome::Handled(None)
+        ));
+        assert!(root.modal.is_some());
+        root.try_handle_resource_action(
+            &change(ResourceUpdate::VisualLayer(VisualLayerAddress::Clip(
+                earlier,
+            ))),
+            &state,
+            &platform,
+        )
+        .unwrap();
+        let ResourceActionOutcome::Handled(Some(action)) =
+            root.try_handle_resource_action(&confirm, &state, &platform).unwrap()
+        else {
+            panic!("legal layer should yield an authored write");
+        };
+        state.dispatch_action(action).unwrap();
+        assert_eq!(
+            read_value(&state),
+            PropertyValue::VisualSource(VisualSourceReference::Clip {
+                clip_id: earlier,
+                retime: reference.retime().unwrap()
+            })
+        );
+        state.dispatch_action(Action::Undo).unwrap();
+        assert_eq!(read_value(&state), PropertyValue::VisualSource(reference));
     }
 
     #[test]

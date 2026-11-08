@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
 use mondrian_core::types::{AssetId, ColorSpace, SequenceId};
+use mondrian_core::VisualSourceReference;
 use mondrian_core::{ExecutionCancellationToken, FramePosition, Resolution, WorkingRgbaF32Frame};
 use mondrian_effects::{
     CompiledEffectGraph, EffectFrameExtent, EffectFrameTileF32, EffectGraphExecutionBudget,
@@ -26,14 +27,15 @@ use mondrian_render_cache::{TimelineRenderCacheFormat, TimelineRenderCacheIdenti
 use mondrian_renderer::{
     basic_title_raster_request_identity,
     color::{RenderColorStageDiagnostics, WorkingColorModule},
-    execute_prepared_visual_closure, prepare_bound_visual_frame_closure,
+    execute_prepared_visual_closure, prepare_bound_visual_frame_closure_for_targets,
     project_basic_title_transform, BasicTitleRasterFrame, BasicTitleRasterRequestIdentity,
-    CpuColorFrame, PreparedHeterogeneousEffectRoute, PreparedTimelinePreviewEffectRoutes,
-    PreparedVisualAuthorSnapshotIdentity, PreparedVisualChildCanvasPolicy,
-    PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
-    PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
-    PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation, PreparedVisualFrameNode,
-    PreparedVisualFrameNodeId, PreparedVisualMaterializationContract, PreparedVisualNestedSample,
+    CpuColorFrame, PreparedAuxiliaryVisualSource, PreparedHeterogeneousEffectRoute,
+    PreparedTimelinePreviewEffectRoutes, PreparedVisualAuthorSnapshotIdentity,
+    PreparedVisualAuxiliaryKey, PreparedVisualChildCanvasPolicy, PreparedVisualExecutionAdapter,
+    PreparedVisualExecutionError, PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
+    PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
+    PreparedVisualFrameInvocation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
+    PreparedVisualFrameTarget, PreparedVisualMaterializationContract, PreparedVisualNestedSample,
     PreparedVisualProgramBinding, PreparedVisualProgramCache, RenderColorTransformDiagnostics,
     TimelineAdjustmentLayer, TimelineBasicTitlePlan, TimelineCompositeDiagnostics,
     TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineEvaluationRequest,
@@ -49,6 +51,7 @@ use mondrian_timeline::sequence::{MediaInputColorContext, ProgramColorContext, S
 
 use super::preview_auxiliary::{
     PreviewAuxiliaryAssetPlan, PreviewAuxiliaryAssetRequest, PreviewAuxiliaryAssetResolver,
+    ResolvedAuxiliaryVisualEvidence,
 };
 mod auxiliary_budget;
 pub(crate) mod auxiliary_projection;
@@ -527,6 +530,7 @@ fn prepare_preview_timeline_sources(
         original_closure: Arc::clone(&closure),
         closure,
         frozen_programs,
+        unavailable_visual: Default::default(),
         unavailable_auxiliary: Vec::new(),
         projection_context: None,
         demands,
@@ -1296,6 +1300,7 @@ impl PreparedPreviewTimelineWork {
                         inputs: vec![super::preview_auxiliary::ResolvedPreviewAuxiliaryInputs {
                             graph: mondrian_effects::identity_compiled_effect_graph()
                                 .expect("built-in identity compiles"),
+                            side: mondrian_renderer::TimelineAuxiliarySide::Element,
                             primary_extent: EffectFrameExtent::new(
                                 target_resolution.width,
                                 target_resolution.height,
@@ -1422,40 +1427,39 @@ impl<'a> PreviewTimelineGraph<'a> {
     fn evaluate(
         self,
         program: &Arc<mondrian_renderer::PreparedVisualProgram>,
-        position: FramePosition,
-        target_resolution: Resolution,
-        normalized_preview_resolution_scale: f32,
+        invocation: PreparedVisualFrameInvocation<'_>,
     ) -> Result<PreparedVisualFrameEvaluation<()>, PreviewUnavailability> {
-        let extent = EffectFrameExtent::new(target_resolution.width, target_resolution.height);
-        let prepared = self
-            .scratch
-            .borrow_mut()
-            .prepare_timeline_frame_execution(
-                program.as_ref(),
-                TimelineFrameExecutionRequest::new(
-                    TimelineEvaluationRequest::preview(
-                        position,
-                        normalized_preview_resolution_scale,
-                    ),
-                    self.generation,
-                    mondrian_effects::EffectExecutionContinuity::Discontinuous,
-                    extent,
-                    extent.full_frame_roi(),
-                    self.cancellation.clone(),
+        let position = invocation.position;
+        let extent =
+            EffectFrameExtent::new(invocation.resolution.width, invocation.resolution.height);
+        let request = TimelineFrameExecutionRequest::new(
+            TimelineEvaluationRequest::preview(position, invocation.preview_resolution_scale),
+            self.generation,
+            mondrian_effects::EffectExecutionContinuity::Discontinuous,
+            extent,
+            extent.full_frame_roi(),
+            self.cancellation.clone(),
+        );
+        let mut scratch = self.scratch.borrow_mut();
+        let prepared = match invocation.target {
+            PreparedVisualFrameTarget::Sequence => {
+                scratch.prepare_timeline_frame_execution(program, request)
+            }
+            PreparedVisualFrameTarget::AuxiliaryClip(sample) => {
+                scratch.prepare_auxiliary_clip_frame_execution(program, request, sample)
+            }
+        }
+        .map_err(|error| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "Sequence {} frame {} execution preparation failed closed: {error}",
+                    program.sequence_id(),
+                    position.frame.max(0)
                 ),
             )
-            .map_err(|error| {
-                PreviewUnavailability::blocked(
-                    PreviewOutputStage::TimelineEvaluation,
-                    format!(
-                        "Sequence {} frame {} execution preparation failed closed: {error}",
-                        program.sequence_id(),
-                        position.frame.max(0)
-                    ),
-                )
-            })?;
-        self.scratch
-            .borrow()
+        })?;
+        scratch
             .admit_cpu_active_working_set(
                 prepared.source_coverage_bytes(),
                 TimelineCpuCompositePrecision::Float32,
@@ -1534,22 +1538,32 @@ where
                 resolved_visual_identity,
             });
         }
-        let inbound = inputs.inbound_binding().ok_or_else(|| {
-            PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
-                PreviewOutputStage::TimelineEvaluation,
-                format!(
-                    "prepared nested visual node {} has no inbound binding",
-                    node.id().index()
-                ),
-            ))
-        })?;
+        let parent_working_color_space = inputs
+            .inbound_binding()
+            .map(|binding| binding.parent_working_color_space())
+            .or_else(|| {
+                let (parent, _) = inputs.inbound_auxiliary()?;
+                inputs
+                    .closure()
+                    .node(parent)
+                    .map(|node| node.color_context().working_color_space())
+            })
+            .ok_or_else(|| {
+                PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
+                    PreviewOutputStage::TimelineEvaluation,
+                    format!(
+                        "prepared nested visual node {} has no inbound binding",
+                        node.id().index()
+                    ),
+                ))
+            })?;
         let frame = materialize_prepared_nested_node(
             node.sequence_id(),
             node.author_resolution(),
             node.frame(),
             node.execution_resolution(),
             node.materialization_contract(),
-            inbound.parent_working_color_space(),
+            parent_working_color_space,
             node.color_context().clone(),
             resolved.unwrap_or_default(),
             resolved_visual_identity,
@@ -2265,7 +2279,7 @@ fn prepare_preview_frame_closure_with_projection(
                 })?
         }
     };
-    let closure = prepare_bound_visual_frame_closure(
+    let closure = prepare_bound_visual_frame_closure_for_targets(
         PreparedVisualFrameClosureRequest {
             root_sequence,
             sequences,
@@ -2278,15 +2292,12 @@ fn prepare_preview_frame_closure_with_projection(
             Some(projection) => projection.resolve(sequence, graph),
             None => graph.resolve_program(sequence).map_err(|error| error.to_string()),
         },
-        |program, frame, resolution, _color_context, normalized_preview_resolution_scale| {
-            let view = projection.map(|projection| projection.view(program)).transpose()?;
+        |program, invocation| {
+            let view = projection
+                .map(|projection| projection.view(program, invocation.instance_path))
+                .transpose()?;
             let evaluation = graph
-                .evaluate(
-                    view.as_ref().unwrap_or(program),
-                    frame,
-                    resolution,
-                    normalized_preview_resolution_scale,
-                )
+                .evaluate(view.as_ref().unwrap_or(program), invocation)
                 .map_err(|error| error.to_string())?;
             match view {
                 Some(view) => Ok(evaluation.with_auxiliary_preview_program(view)),
@@ -2297,6 +2308,22 @@ fn prepare_preview_frame_closure_with_projection(
     .map_err(|error| {
         PreviewUnavailability::blocked(PreviewOutputStage::TimelineEvaluation, error.to_string())
     })?;
+    for node in closure.nodes() {
+        for (_, source) in node.auxiliary_visual_sources() {
+            if let PreparedAuxiliaryVisualSource::Unavailable(
+                mondrian_renderer::PreparedAuxiliaryVisualUnavailable::Cycle(path),
+            ) = source
+            {
+                return Err(PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineEvaluation,
+                    mondrian_renderer::PreparedVisualFrameClosureError::Cycle {
+                        path: path.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+    }
     let mut scratch = graph.scratch.borrow_mut();
     let closure = closure
         .try_map_payload(|node, closure| {
@@ -2406,6 +2433,7 @@ pub(crate) struct PreviewTimelinePreparation {
     original_closure: Arc<PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>>,
     frozen_programs: HashMap<SequenceId, Arc<mondrian_renderer::PreparedVisualProgram>>,
     unavailable_auxiliary: Vec<mondrian_core::VisualSourceReference>,
+    unavailable_visual: auxiliary_projection::UnavailableVisualSources,
     projection_context: Option<Arc<auxiliary_projection::PreviewAuxiliaryProjectionContext>>,
     demands: Vec<PreparedPreviewSourceDemand>,
     state: PreviewPreparationState,
@@ -2909,56 +2937,30 @@ fn collect_prepared_auxiliary_source_demands(
                 "primary temporal auxiliary inputs require time-expanded source bindings",
             ));
         }
-        let mut graphs = Vec::new();
         for element in &node.evaluation().plan().elements {
-            match element {
-                TimelineRenderPlanElement::Media(value) => graphs.push(&value.effect_graph),
-                TimelineRenderPlanElement::NestedSequence(value) => {
-                    graphs.push(&value.effect_graph)
-                }
-                TimelineRenderPlanElement::BasicTitle(value) => graphs.push(&value.effect_graph),
-                TimelineRenderPlanElement::SolidColor(value) => graphs.push(&value.effect_graph),
-                TimelineRenderPlanElement::Adjustment(value) => graphs.push(&value.effect_graph),
-                TimelineRenderPlanElement::TimelineGrade(value) => graphs.push(&value.effect_graph),
-                TimelineRenderPlanElement::CrossDissolve(value) => {
-                    for input in [&value.left, &value.right] {
-                        match input {
-                            TimelineTransitionInputPlan::Media(value) => {
-                                graphs.push(&value.effect_graph)
-                            }
-                            TimelineTransitionInputPlan::NestedSequence(value) => {
-                                graphs.push(&value.effect_graph)
-                            }
-                            TimelineTransitionInputPlan::BasicTitle(value) => {
-                                graphs.push(&value.effect_graph)
-                            }
-                            TimelineTransitionInputPlan::SolidColor(value) => {
-                                graphs.push(&value.effect_graph)
-                            }
-                            TimelineTransitionInputPlan::Transparent => {}
-                        }
+            element.visit_effect_graphs(|_, graph| -> Result<(), PreviewUnavailability> {
+                for spec in graph.auxiliary_inputs() {
+                    let source = graph.auxiliary_source_binding(spec.slot()).ok_or_else(|| {
+                        PreviewUnavailability::blocked(
+                            PreviewOutputStage::TimelineEvaluation,
+                            format!("auxiliary slot {} has no frozen author source", spec.slot()),
+                        )
+                    })?;
+                    if !matches!(source.reference(), VisualSourceReference::Asset { .. }) {
+                        continue;
+                    }
+                    let request = PreviewAuxiliaryAssetRequest {
+                        reference: source.reference(),
+                        sequence_time: node.time(),
+                        target_resolution: node.execution_resolution(),
+                        input_color: node.color_context().media_input(false),
+                    };
+                    if seen.insert(request.clone()) {
+                        demands.push(PreparedPreviewSourceDemand::Auxiliary(request));
                     }
                 }
-            }
-        }
-        for graph in graphs {
-            for spec in graph.auxiliary_inputs() {
-                let source = graph.auxiliary_source_binding(spec.slot()).ok_or_else(|| {
-                    PreviewUnavailability::blocked(
-                        PreviewOutputStage::TimelineEvaluation,
-                        format!("auxiliary slot {} has no frozen author source", spec.slot()),
-                    )
-                })?;
-                let request = PreviewAuxiliaryAssetRequest {
-                    reference: source.reference(),
-                    sequence_time: node.time(),
-                    target_resolution: node.execution_resolution(),
-                    input_color: node.color_context().media_input(false),
-                };
-                if seen.insert(request.clone()) {
-                    demands.push(PreparedPreviewSourceDemand::Auxiliary(request));
-                }
-            }
+                Ok(())
+            })?;
         }
     }
     Ok(())
@@ -3002,6 +3004,14 @@ where
 
     let mut resolved = Vec::with_capacity(elements.len());
     for element in elements {
+        let mut owners = Vec::new();
+        let _: Result<(), std::convert::Infallible> =
+            element.visit_effect_graphs(|placement, graph| {
+                if !graph.auxiliary_inputs().is_empty() {
+                    owners.push((placement, Arc::clone(graph)));
+                }
+                Ok(())
+            });
         match element {
             TimelineRenderPlanElement::SolidColor(solid) => {
                 if let Some(temporal) = temporal_layers.get(&solid.placement) {
@@ -3224,23 +3234,33 @@ where
                 });
             }
         }
+        let element = resolved.pop().expect("one resolved element per visual plan element");
+        resolved.push(bind_resolved_preview_auxiliary(
+            element,
+            &owners,
+            inputs,
+            execution.sources,
+        )?);
     }
-    let node = prepared_visual_node(execution.closure, node_id)?;
-    let resolved = resolved
-        .into_iter()
-        .map(|element| bind_resolved_preview_auxiliary(element, node, execution.sources))
-        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(resolved))
 }
 
 fn bind_resolved_preview_auxiliary(
     element: ResolvedPreviewElement,
-    node: &PreparedVisualFrameNode<PreparedTimelinePreviewEffectRoutes>,
+    owners: &[(Option<TimelineClipExecutionRef>, Arc<CompiledEffectGraph>)],
+    node_inputs: &PreviewNodeInputs<'_>,
     sources: &PreviewSourcePreparation,
 ) -> Result<ResolvedPreviewElement, PreviewTimelineAbort> {
     use super::preview_auxiliary::{
-        ResolvedPreviewAuxiliaryInputs, ResolvedPreviewAuxiliarySource,
+        PreviewAuxiliaryEvidence, ResolvedAuxiliaryAssetEvidence, ResolvedPreviewAuxiliaryInputs,
+        ResolvedPreviewAuxiliarySource,
     };
+    use mondrian_renderer::TimelineAuxiliarySide::{Element, TransitionLeft, TransitionRight};
+
+    if owners.is_empty() {
+        return Ok(element);
+    }
+    let node = node_inputs.node();
     let refused = |detail: &str| {
         PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
             PreviewOutputStage::TimelineEvaluation,
@@ -3259,47 +3279,86 @@ fn bind_resolved_preview_auxiliary(
         ResolvedPreviewElement::WithAuxiliary { .. } => return Ok(element),
         ResolvedPreviewElement::SolidColor(layer)
         | ResolvedPreviewElement::HeterogeneousSolidColor { layer, .. } => {
-            graphs.push((&layer.effect_graph, Some(canvas)));
+            graphs.push((Element, &layer.effect_graph, Some(canvas)));
         }
         ResolvedPreviewElement::Adjustment(layer) => {
-            graphs.push((&layer.effect_graph, Some(canvas)))
+            graphs.push((Element, &layer.effect_graph, Some(canvas)))
         }
         ResolvedPreviewElement::Media { frame, effect_graph, .. } => {
-            graphs.push((effect_graph, frame.cpu_image_domain()));
+            graphs.push((Element, effect_graph, frame.cpu_image_domain()));
         }
         ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
-            for input in [left, right] {
+            for (side, input) in [(TransitionLeft, left), (TransitionRight, right)] {
                 match input.as_ref() {
                     ResolvedPreviewTransitionInput::Transparent => {}
                     ResolvedPreviewTransitionInput::SolidColor(layer)
                     | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, .. } => {
-                        graphs.push((&layer.effect_graph, Some(canvas)));
+                        graphs.push((side, &layer.effect_graph, Some(canvas)));
                     }
                     ResolvedPreviewTransitionInput::Media { frame, effect_graph, .. } => {
-                        graphs.push((effect_graph, frame.cpu_image_domain()));
+                        graphs.push((side, effect_graph, frame.cpu_image_domain()));
                     }
                 }
             }
         }
     }
+    graphs.retain(|(_, graph, _)| !graph.auxiliary_inputs().is_empty());
+    if graphs.len() != owners.len() {
+        return Err(refused(
+            "resolved visual element lost its planned graph occurrences",
+        ));
+    }
     let mut inputs = Vec::new();
-    for (graph, domain) in graphs {
-        if graph.auxiliary_inputs().is_empty() {
-            continue;
+    for ((side, graph, domain), (placement, planned)) in graphs.into_iter().zip(owners) {
+        if !Arc::ptr_eq(graph, planned) {
+            return Err(refused(
+                "resolved visual element changed its planned graph occurrence",
+            ));
         }
         let (primary_extent, primary_sampling) = domain.ok_or_else(|| {
             refused("auxiliary consumer requires an actual CPU working primary image domain")
         })?;
-        if inputs.iter().any(|input: &ResolvedPreviewAuxiliaryInputs| {
-            Arc::ptr_eq(&input.graph, graph) && input.primary_extent == primary_extent
-        }) {
-            continue;
-        }
         let mut bound = Vec::new();
         for spec in graph.auxiliary_inputs() {
             let source = graph
                 .auxiliary_source_binding(spec.slot())
                 .ok_or_else(|| refused("auxiliary slot lost its frozen author binding"))?;
+            if matches!(
+                source.reference(),
+                VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. }
+            ) {
+                let (key, evidence, child) = prepared_auxiliary_visual_evidence(
+                    node_inputs.closure(),
+                    node,
+                    *placement,
+                    graph,
+                    spec.slot(),
+                    source.reference(),
+                )
+                .map_err(PreviewTimelineAbort::Unavailable)?;
+                let frame = match child {
+                    Some(_) => match node_inputs.auxiliary_output(key) {
+                        Some(PreparedPreviewVisualOutput::Nested(frame)) => Some(frame.clone()),
+                        _ => {
+                            return Err(refused(
+                                "auxiliary visual source lost its exact materialized child",
+                            ))
+                        }
+                    },
+                    None => None,
+                };
+                bound.push(ResolvedPreviewAuxiliarySource {
+                    slot: spec.slot(),
+                    evidence: PreviewAuxiliaryEvidence::Visual(evidence),
+                    frame,
+                });
+                continue;
+            }
+            if !matches!(source.reference(), VisualSourceReference::Asset { .. }) {
+                return Err(refused(
+                    "unbound auxiliary source escaped frame preparation",
+                ));
+            }
             let request = PreviewAuxiliaryAssetRequest {
                 reference: source.reference(),
                 sequence_time: node.time(),
@@ -3329,13 +3388,15 @@ fn bind_resolved_preview_auxiliary(
             };
             bound.push(ResolvedPreviewAuxiliarySource {
                 slot: spec.slot(),
-                request,
-                plan: plan.clone(),
+                evidence: PreviewAuxiliaryEvidence::Asset(Box::new(
+                    ResolvedAuxiliaryAssetEvidence { request, plan: plan.clone() },
+                )),
                 frame,
             });
         }
         inputs.push(ResolvedPreviewAuxiliaryInputs {
             graph: Arc::clone(graph),
+            side,
             primary_extent,
             primary_sampling,
             sources: bound.into_boxed_slice(),
@@ -3350,6 +3411,113 @@ fn bind_resolved_preview_auxiliary(
             inputs: inputs.into_boxed_slice(),
         })
     }
+}
+
+fn prepared_auxiliary_visual_evidence(
+    closure: &PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
+    node: &PreparedVisualFrameNode<PreparedTimelinePreviewEffectRoutes>,
+    placement: Option<TimelineClipExecutionRef>,
+    graph: &CompiledEffectGraph,
+    slot: u32,
+    reference: VisualSourceReference,
+) -> Result<
+    (
+        PreparedVisualAuxiliaryKey,
+        ResolvedAuxiliaryVisualEvidence,
+        Option<PreparedVisualFrameNodeId>,
+    ),
+    PreviewUnavailability,
+> {
+    let refused = |detail: &str| {
+        PreviewUnavailability::blocked(PreviewOutputStage::TimelineEvaluation, detail)
+    };
+    let sequence_id = match reference {
+        VisualSourceReference::Sequence { sequence_id, .. } => sequence_id,
+        VisualSourceReference::Clip { .. } => node.sequence_id(),
+        VisualSourceReference::Asset { .. } | VisualSourceReference::Unbound => {
+            return Err(refused("expected an auxiliary Clip or Sequence source"));
+        }
+    };
+    let stage = graph
+        .stage_bindings()
+        .iter()
+        .find(|stage| {
+            stage
+                .auxiliary_sources()
+                .iter()
+                .any(|binding| binding.slot() == slot && binding.reference() == reference)
+        })
+        .ok_or_else(|| refused("auxiliary visual source slot has no frozen owner stage"))?;
+    let key = PreparedVisualAuxiliaryKey {
+        placement,
+        stage_index: stage.stage_index(),
+        slot,
+        reference,
+    };
+    let (_, source) = node
+        .auxiliary_visual_sources()
+        .iter()
+        .find(|(candidate, _)| *candidate == key)
+        .ok_or_else(|| refused("auxiliary visual source has no exact closure binding"))?;
+    let (time, revision, resolution, sampling, child) = match source {
+        PreparedAuxiliaryVisualSource::Child { child, time } => {
+            let source_node = closure
+                .node(*child)
+                .filter(|source| {
+                    if source.sequence_id() != sequence_id {
+                        return false;
+                    }
+                    let target = source.evaluation().execution_request().auxiliary_clip();
+                    match reference {
+                        VisualSourceReference::Clip { clip_id, .. } => {
+                            target.is_some_and(|placement| placement.clip_id == clip_id)
+                        }
+                        _ => target.is_none(),
+                    }
+                })
+                .ok_or_else(|| {
+                    refused("auxiliary visual source closure lost its expected child")
+                })?;
+            let resolution = source_node.execution_resolution();
+            let sampling = source_node
+                .materialization_contract()
+                .image_sampling(resolution)
+                .map_err(|_| refused("auxiliary visual source image domain is invalid"))?;
+            (
+                *time,
+                source_node.sequence_revision(),
+                resolution,
+                sampling,
+                Some(*child),
+            )
+        }
+        PreparedAuxiliaryVisualSource::Transparent { time, revision, resolution, sampling } => {
+            (*time, *revision, *resolution, *sampling, None)
+        }
+        PreparedAuxiliaryVisualSource::Unavailable(reason) => {
+            return Err(PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "auxiliary visual source {reference:?} is unavailable for slot {slot}: {reason:?}"
+                ),
+            ));
+        }
+    };
+    Ok((
+        key,
+        ResolvedAuxiliaryVisualEvidence {
+            reference,
+            sequence_id,
+            revision,
+            time,
+            domain: (
+                EffectFrameExtent::new(resolution.width, resolution.height),
+                sampling,
+            ),
+            working_color_space: node.color_context().working_color_space(),
+        },
+        child,
+    ))
 }
 
 fn collect_prepared_transition_input_source_demand(

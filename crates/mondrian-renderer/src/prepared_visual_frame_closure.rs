@@ -15,12 +15,16 @@ use crate::{
 };
 use mondrian_core::timeline_data::{NestedColorProcessing, TimelineClipExecutionRef};
 use mondrian_core::{
-    FramePosition, Rational, Resolution, SequenceId, SequenceRevision, SourceSampleTarget,
-    TimelineTime, WorkingColorSpace,
+    FramePosition, FrameRounding, Rational, Resolution, SequenceId, SequenceRevision,
+    SourceSampleTarget, TimelineTime, TimelineTimeRange, VisualSourceReference,
+    VisualSourceTimeSample, WorkingColorSpace,
 };
 use mondrian_effects::EffectTemporalFrameRequest;
 use mondrian_timeline::sequence::{
     ProgramColorContext, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
+};
+use mondrian_timeline::visual_schedule::{
+    AuxiliaryClipAdmissionError, PreparedAuxiliaryClipSample,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -64,6 +68,70 @@ pub struct PreparedVisualNestedInstanceStep {
     pub placement: TimelineClipExecutionRef,
     /// Current or exact temporal sample role.
     pub sample: PreparedVisualNestedSample,
+}
+
+/// Exact consumer of a Clip- or Sequence-valued source within one frame node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PreparedVisualAuxiliaryKey {
+    /// Ordinary or Transition placement. None identifies the Timeline Grade.
+    pub placement: Option<TimelineClipExecutionRef>,
+    /// Definition stage in the consumer's compiled graph.
+    pub stage_index: usize,
+    /// Source slot in that graph.
+    pub slot: u32,
+    /// Frozen address, including exact retiming and boundary behavior.
+    pub reference: VisualSourceReference,
+}
+
+/// One authored edge in a visual execution instance path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreparedVisualInstanceStep {
+    /// Ordinary or temporal nested placement.
+    Nested(PreparedVisualNestedInstanceStep),
+    /// Clip or Sequence sampled through a compiled auxiliary slot.
+    Auxiliary(PreparedVisualAuxiliaryKey),
+}
+
+/// An unavailable visual source reported against its exact consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedAuxiliaryVisualUnavailable {
+    /// The authored identity has no snapshot in the Project.
+    Missing,
+    /// The source Sequence has no sampleable duration.
+    Empty,
+    /// Traversing the source would re-enter the active dependency path.
+    Cycle(Vec<SequenceId>),
+    /// The Clip is missing, disabled, hidden, or muted.
+    ClipUnavailable,
+    /// The Clip is not strictly earlier than this consumer.
+    ClipNotEarlier,
+    /// The Clip does not produce an independent picture.
+    ClipNotIndependent,
+}
+
+/// Source evidence before pixel materialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedAuxiliaryVisualSource {
+    /// Exact child instance and retime evidence.
+    Child {
+        /// The independently prepared child program.
+        child: PreparedVisualFrameNodeId,
+        /// Boundary decision on the selected source's authored interval.
+        time: VisualSourceTimeSample,
+    },
+    /// The boundary policy supplies transparent coverage without a child.
+    Transparent {
+        /// Exact boundary decision.
+        time: VisualSourceTimeSample,
+        /// Proven source revision even though no child pixels are needed.
+        revision: SequenceRevision,
+        /// Independent source execution grid.
+        resolution: Resolution,
+        /// Sampling of the independent source grid.
+        sampling: mondrian_core::ImageSampling,
+    },
+    /// Interactive evidence for this specific consumer.
+    Unavailable(PreparedAuxiliaryVisualUnavailable),
 }
 
 /// Consumer-owned execution preparation attached to one canonical frame node.
@@ -266,10 +334,11 @@ pub struct PreparedVisualFrameNode<T> {
     materialization: PreparedVisualMaterializationContract,
     execution_resolution: Resolution,
     color_context: ProgramColorContext,
-    instance_path: Arc<[PreparedVisualNestedInstanceStep]>,
+    instance_path: Arc<[PreparedVisualInstanceStep]>,
     evaluation: PreparedVisualFrameEvaluation<T>,
     bindings: Vec<PreparedVisualNestedBinding>,
     binding_index: HashMap<PreparedVisualNestedBindingKey, PreparedVisualFrameNodeId>,
+    auxiliary_visual_sources: Vec<(PreparedVisualAuxiliaryKey, PreparedAuxiliaryVisualSource)>,
 }
 
 impl<T> PreparedVisualFrameNode<T> {
@@ -334,7 +403,7 @@ impl<T> PreparedVisualFrameNode<T> {
     }
 
     /// Exact placement/sample path. Root has an empty path.
-    pub fn instance_path(&self) -> &[PreparedVisualNestedInstanceStep] {
+    pub fn instance_path(&self) -> &[PreparedVisualInstanceStep] {
         &self.instance_path
     }
 
@@ -346,6 +415,13 @@ impl<T> PreparedVisualFrameNode<T> {
     /// Deterministically ordered child bindings emitted by this node.
     pub fn bindings(&self) -> &[PreparedVisualNestedBinding] {
         &self.bindings
+    }
+
+    /// Deterministically ordered auxiliary Sequence dependencies of this node.
+    pub fn auxiliary_visual_sources(
+        &self,
+    ) -> &[(PreparedVisualAuxiliaryKey, PreparedAuxiliaryVisualSource)] {
+        &self.auxiliary_visual_sources
     }
 
     /// Resolve an exact current or temporal nested child.
@@ -374,6 +450,7 @@ impl<T> PreparedVisualFrameNode<T> {
             evaluation: self.evaluation.with_payload(payload),
             bindings: self.bindings,
             binding_index: self.binding_index,
+            auxiliary_visual_sources: self.auxiliary_visual_sources,
         }
     }
 }
@@ -615,13 +692,70 @@ pub fn prepare_visual_frame_closure<T>(
 /// and Sequence revision checks.
 pub fn prepare_bound_visual_frame_closure<T>(
     request: PreparedVisualFrameClosureRequest<'_>,
-    mut resolve_program: impl FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
+    resolve_program: impl FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
     mut evaluate: impl FnMut(
         &Arc<PreparedVisualProgram>,
         FramePosition,
         Resolution,
         &ProgramColorContext,
         f32,
+    ) -> Result<PreparedVisualFrameEvaluation<T>, String>,
+) -> Result<PreparedVisualFrameClosure<T>, PreparedVisualFrameClosureError> {
+    prepare_bound_visual_frame_closure_for_targets(
+        request,
+        resolve_program,
+        |program, invocation| {
+            if matches!(
+                invocation.target,
+                PreparedVisualFrameTarget::AuxiliaryClip(_)
+            ) {
+                return Err("this visual Adapter does not prepare standalone Clip sources".into());
+            }
+            evaluate(
+                program,
+                invocation.position,
+                invocation.resolution,
+                invocation.color_context,
+                invocation.preview_resolution_scale,
+            )
+        },
+    )
+}
+
+/// Visual value to prepare within one certified Sequence program.
+#[derive(Debug, Clone, Copy)]
+pub enum PreparedVisualFrameTarget<'a> {
+    /// Composite the ordinary Sequence at the supplied position.
+    Sequence,
+    /// Render one standalone, independently sampled Clip on the Sequence canvas.
+    AuxiliaryClip(&'a PreparedAuxiliaryClipSample),
+}
+
+/// Exact invocation supplied to the visual frame preparation Adapter.
+#[derive(Debug, Clone, Copy)]
+pub struct PreparedVisualFrameInvocation<'a> {
+    /// Scheduler position on the Sequence grid. A Clip sample also carries its
+    /// exact author time independently of this position.
+    pub position: FramePosition,
+    /// Execution canvas for this invocation.
+    pub resolution: Resolution,
+    /// Input and working-space contract of this invocation.
+    pub color_context: &'a ProgramColorContext,
+    /// Authored Preview scale retained for preparation metadata.
+    pub preview_resolution_scale: f32,
+    /// Parent placements and auxiliary slots that own this invocation.
+    pub instance_path: &'a [PreparedVisualInstanceStep],
+    /// The exact value the Adapter must prepare.
+    pub target: PreparedVisualFrameTarget<'a>,
+}
+
+/// Prepare all bound frame and standalone Clip targets in one shared closure.
+pub fn prepare_bound_visual_frame_closure_for_targets<T>(
+    request: PreparedVisualFrameClosureRequest<'_>,
+    mut resolve_program: impl FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
+    mut evaluate: impl FnMut(
+        &Arc<PreparedVisualProgram>,
+        PreparedVisualFrameInvocation<'_>,
     ) -> Result<PreparedVisualFrameEvaluation<T>, String>,
 ) -> Result<PreparedVisualFrameClosure<T>, PreparedVisualFrameClosureError> {
     if request.root_position.frame < 0 {
@@ -666,6 +800,7 @@ pub fn prepare_bound_visual_frame_closure<T>(
         request.root_color_context,
         Arc::from([]),
         0,
+        PreparedVisualFrameTarget::Sequence,
     )?;
     Ok(PreparedVisualFrameClosure { root, nodes: builder.nodes })
 }
@@ -684,10 +819,7 @@ impl<'a, T, Evaluate> PreparedVisualFrameClosureBuilder<'a, T, Evaluate>
 where
     Evaluate: FnMut(
         &Arc<PreparedVisualProgram>,
-        FramePosition,
-        Resolution,
-        &ProgramColorContext,
-        f32,
+        PreparedVisualFrameInvocation<'_>,
     ) -> Result<PreparedVisualFrameEvaluation<T>, String>,
 {
     #[allow(clippy::too_many_arguments)]
@@ -697,8 +829,9 @@ where
         position: FramePosition,
         execution_resolution: Resolution,
         color_context: ProgramColorContext,
-        instance_path: Arc<[PreparedVisualNestedInstanceStep]>,
+        instance_path: Arc<[PreparedVisualInstanceStep]>,
         depth: usize,
+        target: PreparedVisualFrameTarget<'_>,
     ) -> Result<PreparedVisualFrameNodeId, PreparedVisualFrameClosureError> {
         if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
             return Err(PreparedVisualFrameClosureError::DepthExceeded {
@@ -706,8 +839,10 @@ where
                 maximum: MAX_NESTED_SEQUENCE_RENDER_DEPTH,
             });
         }
-        if let Some(cycle_start) =
-            self.active_path.iter().position(|candidate| *candidate == sequence.id)
+        let whole_sequence = matches!(target, PreparedVisualFrameTarget::Sequence);
+        if whole_sequence
+            && let Some(cycle_start) =
+                self.active_path.iter().position(|candidate| *candidate == sequence.id)
         {
             let mut path = self.active_path[cycle_start..].to_vec();
             path.push(sequence.id);
@@ -720,27 +855,46 @@ where
             });
         }
         validate_resolution(sequence.id, execution_resolution)?;
-        let time = TimelineTime::from_frame_position(position).map_err(|error| {
-            PreparedVisualFrameClosureError::FrameTimeProjection {
-                sequence_id: sequence.id,
-                frame: position.frame,
-                reason: error.to_string(),
-            }
-        })?;
+        let invalid_time = |reason| PreparedVisualFrameClosureError::FrameTimeProjection {
+            sequence_id: sequence.id,
+            frame: position.frame,
+            reason,
+        };
 
-        self.active_path.push(sequence.id);
+        if whole_sequence {
+            self.active_path.push(sequence.id);
+        }
         let result = (|| {
             let program = self.program(sequence)?;
+            let (time, clip) = match target {
+                PreparedVisualFrameTarget::Sequence => (
+                    TimelineTime::from_frame_position(position)
+                        .map_err(|error| invalid_time(error.to_string()))?,
+                    None,
+                ),
+                PreparedVisualFrameTarget::AuxiliaryClip(sample) => {
+                    let placement = sample.placement();
+                    let time = program
+                        .schedule()
+                        .clip_to_sequence_time(placement, placement.clip_time)
+                        .map_err(|error| invalid_time(error.to_string()))?;
+                    (time, Some(placement))
+                }
+            };
             let materialization = program.materialization_contract();
             let preview_resolution_scale = normalize_preview_resolution_scale(
                 materialization.authored_preview_resolution_scale(),
             );
             let evaluation = (self.evaluate)(
                 &program,
-                position,
-                execution_resolution,
-                &color_context,
-                preview_resolution_scale,
+                PreparedVisualFrameInvocation {
+                    position,
+                    resolution: execution_resolution,
+                    color_context: &color_context,
+                    preview_resolution_scale,
+                    instance_path: &instance_path,
+                    target,
+                },
             )
             .map_err(|reason| PreparedVisualFrameClosureError::Evaluation {
                 sequence_id: sequence.id,
@@ -748,6 +902,13 @@ where
                 reason,
             })?;
             validate_evaluation(sequence, position, evaluation.plan())?;
+            if evaluation.execution_request().auxiliary_clip() != clip {
+                return Err(PreparedVisualFrameClosureError::Evaluation {
+                    sequence_id: sequence.id,
+                    frame: position.frame,
+                    reason: "Adapter prepared a different visual target".into(),
+                });
+            }
             let program = if let Some(view) = &evaluation.auxiliary_preview_program {
                 if !view.is_auxiliary_preview_view_of(&program) {
                     return Err(PreparedVisualFrameClosureError::Evaluation {
@@ -773,13 +934,15 @@ where
                 program
             };
             let demands = collect_nested_demands(evaluation.plan(), evaluation.temporal_batches());
+            let auxiliary_keys = collect_auxiliary_visual_keys(evaluation.plan());
+            let intent = evaluation.plan().intent;
             let node_index = u32::try_from(self.nodes.len())
                 .map_err(|_| PreparedVisualFrameClosureError::NodeCapacityExceeded)?;
             let id = PreparedVisualFrameNodeId(node_index);
             self.nodes.push(PreparedVisualFrameNode {
                 id,
                 materialization,
-                program,
+                program: Arc::clone(&program),
                 sequence_id: sequence.id,
                 sequence_revision: sequence.revision,
                 position,
@@ -790,6 +953,7 @@ where
                 evaluation,
                 bindings: Vec::new(),
                 binding_index: HashMap::new(),
+                auxiliary_visual_sources: Vec::new(),
             });
 
             for demand in demands {
@@ -850,10 +1014,12 @@ where
                     })?;
                 let mut child_path = Vec::with_capacity(instance_path.len().saturating_add(1));
                 child_path.extend_from_slice(&instance_path);
-                child_path.push(PreparedVisualNestedInstanceStep {
-                    placement: demand.placement,
-                    sample: demand.sample,
-                });
+                child_path.push(PreparedVisualInstanceStep::Nested(
+                    PreparedVisualNestedInstanceStep {
+                        placement: demand.placement,
+                        sample: demand.sample,
+                    },
+                ));
                 let child_id = self.prepare_node(
                     child,
                     child_position,
@@ -861,6 +1027,7 @@ where
                     child_context.clone(),
                     Arc::from(child_path),
                     depth.saturating_add(1),
+                    PreparedVisualFrameTarget::Sequence,
                 )?;
                 let binding = PreparedVisualNestedBinding {
                     parent: id,
@@ -888,11 +1055,179 @@ where
                 }
                 node.bindings.push(binding);
             }
+            for key in auxiliary_keys {
+                let source = match key.reference {
+                    VisualSourceReference::Sequence { .. } => self.prepare_auxiliary_sequence(
+                        key,
+                        time,
+                        &color_context,
+                        &instance_path,
+                        depth,
+                        intent,
+                    )?,
+                    VisualSourceReference::Clip { .. } => {
+                        self.prepare_auxiliary_clip(id, key, sequence, depth)?
+                    }
+                    VisualSourceReference::Unbound | VisualSourceReference::Asset { .. } => {
+                        unreachable!("only visual sources enter recursive preparation")
+                    }
+                };
+                self.nodes[id.index()].auxiliary_visual_sources.push((key, source));
+            }
             Ok(id)
         })();
-        let popped = self.active_path.pop();
-        debug_assert_eq!(popped, Some(sequence.id));
+        if whole_sequence {
+            let popped = self.active_path.pop();
+            debug_assert_eq!(popped, Some(sequence.id));
+        }
         result
+    }
+
+    fn prepare_auxiliary_sequence(
+        &mut self,
+        key: PreparedVisualAuxiliaryKey,
+        consumer_time: TimelineTime,
+        parent_color: &ProgramColorContext,
+        instance_path: &[PreparedVisualInstanceStep],
+        depth: usize,
+        intent: crate::TimelineRenderIntent,
+    ) -> Result<PreparedAuxiliaryVisualSource, PreparedVisualFrameClosureError> {
+        let VisualSourceReference::Sequence { sequence_id, retime } = key.reference else {
+            unreachable!("only Sequence keys enter recursive preparation");
+        };
+        let unavailable = |reason| unavailable_auxiliary_visual_source(key, intent, reason);
+        let Some(child) = self.sequence(sequence_id) else {
+            return unavailable(PreparedAuxiliaryVisualUnavailable::Missing);
+        };
+        let invalid = |reason| PreparedVisualFrameClosureError::AuxiliaryVisualSourcePreparation {
+            key: Box::new(key),
+            reason,
+        };
+        let duration = child.total_duration().map_err(|error| invalid(error.to_string()))?;
+        if duration == TimelineTime::ZERO {
+            return unavailable(PreparedAuxiliaryVisualUnavailable::Empty);
+        }
+        let available = TimelineTimeRange::new(TimelineTime::ZERO, duration)
+            .map_err(|error| invalid(error.to_string()))?;
+        let time = retime
+            .sample(consumer_time, available)
+            .map_err(|error| invalid(error.to_string()))?;
+        let child_materialization = self.program(child)?.materialization_contract();
+        let child_resolution =
+            self.child_canvas_policy.child_resolution(sequence_id, child_materialization)?;
+        let Some(sample) = time.source_sample else {
+            return Ok(PreparedAuxiliaryVisualSource::Transparent {
+                time,
+                revision: child.revision,
+                resolution: child_resolution,
+                sampling: child_materialization
+                    .image_sampling(child_resolution)
+                    .map_err(|error| invalid(error.to_string()))?,
+            });
+        };
+        let child_position = exact_nested_visual_position(sample, child).map_err(invalid)?;
+        let child_context = child
+            .settings
+            .nested_render_color_context(
+                parent_color,
+                NestedColorProcessing::PreserveChildWorkingSpace,
+            )
+            .map_err(|error| invalid(error.to_string()))?;
+        let mut child_path = instance_path.to_vec();
+        child_path.push(PreparedVisualInstanceStep::Auxiliary(key));
+        let checkpoint = self.nodes.len();
+        match self.prepare_node(
+            child,
+            child_position,
+            child_resolution,
+            child_context,
+            child_path.into(),
+            depth.saturating_add(1),
+            PreparedVisualFrameTarget::Sequence,
+        ) {
+            Ok(child) => Ok(PreparedAuxiliaryVisualSource::Child { child, time }),
+            Err(PreparedVisualFrameClosureError::Cycle { path }) => {
+                self.nodes.truncate(checkpoint);
+                unavailable(PreparedAuxiliaryVisualUnavailable::Cycle(path))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn prepare_auxiliary_clip(
+        &mut self,
+        owner: PreparedVisualFrameNodeId,
+        key: PreparedVisualAuxiliaryKey,
+        sequence: &Sequence,
+        depth: usize,
+    ) -> Result<PreparedAuxiliaryVisualSource, PreparedVisualFrameClosureError> {
+        let VisualSourceReference::Clip { clip_id, retime } = key.reference else {
+            unreachable!("only Clip keys enter standalone Clip preparation");
+        };
+        let node = &self.nodes[owner.index()];
+        let schedule = node.program().schedule();
+        let invalid = |reason| PreparedVisualFrameClosureError::AuxiliaryVisualSourcePreparation {
+            key: Box::new(key),
+            reason,
+        };
+        let sample = match key.placement {
+            Some(consumer) => schedule.evaluate_auxiliary_clip(consumer, clip_id, retime),
+            None => schedule.evaluate_auxiliary_clip_for_grade(node.time(), clip_id, retime),
+        };
+        let sample = match sample {
+            Ok(sample) => sample,
+            Err(error) => {
+                let reason = match error {
+                    AuxiliaryClipAdmissionError::Unavailable { .. } => {
+                        PreparedAuxiliaryVisualUnavailable::ClipUnavailable
+                    }
+                    AuxiliaryClipAdmissionError::NotEarlier { .. } => {
+                        PreparedAuxiliaryVisualUnavailable::ClipNotEarlier
+                    }
+                    AuxiliaryClipAdmissionError::NotIndependent { .. } => {
+                        PreparedAuxiliaryVisualUnavailable::ClipNotIndependent
+                    }
+                    other => return Err(invalid(other.to_string())),
+                };
+                return unavailable_auxiliary_visual_source(
+                    key,
+                    node.evaluation().plan().intent,
+                    reason,
+                );
+            }
+        };
+        let time = sample.time();
+        let resolution = node.execution_resolution();
+        if sample.source().is_none() {
+            return Ok(PreparedAuxiliaryVisualSource::Transparent {
+                time,
+                revision: node.sequence_revision(),
+                resolution,
+                sampling: node
+                    .materialization_contract()
+                    .image_sampling(resolution)
+                    .map_err(|error| invalid(error.to_string()))?,
+            });
+        }
+        let placement = sample.placement();
+        let source_time = schedule
+            .clip_to_sequence_time(placement, placement.clip_time)
+            .map_err(|error| invalid(error.to_string()))?;
+        let position = source_time
+            .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
+            .map_err(|error| invalid(error.to_string()))?;
+        let mut path = node.instance_path().to_vec();
+        path.push(PreparedVisualInstanceStep::Auxiliary(key));
+        let child = self.prepare_node(
+            sequence,
+            position,
+            resolution,
+            node.color_context().clone(),
+            path.into(),
+            depth.saturating_add(1),
+            PreparedVisualFrameTarget::AuxiliaryClip(&sample),
+        )?;
+        Ok(PreparedAuxiliaryVisualSource::Child { child, time })
     }
 
     fn sequence(&self, id: SequenceId) -> Option<&'a Sequence> {
@@ -927,6 +1262,26 @@ where
         }
         self.programs.insert(sequence.id, Arc::clone(&program));
         Ok(program)
+    }
+}
+
+fn unavailable_auxiliary_visual_source(
+    key: PreparedVisualAuxiliaryKey,
+    intent: crate::TimelineRenderIntent,
+    reason: PreparedAuxiliaryVisualUnavailable,
+) -> Result<PreparedAuxiliaryVisualSource, PreparedVisualFrameClosureError> {
+    if matches!(
+        intent,
+        crate::TimelineRenderIntent::Export | crate::TimelineRenderIntent::ReferenceOutput
+    ) {
+        Err(
+            PreparedVisualFrameClosureError::UnavailableAuxiliaryVisualSource {
+                key: Box::new(key),
+                reason,
+            },
+        )
+    } else {
+        Ok(PreparedAuxiliaryVisualSource::Unavailable(reason))
     }
 }
 
@@ -988,6 +1343,33 @@ fn exact_nested_visual_position(
         ));
     }
     Ok(field_position)
+}
+
+fn collect_auxiliary_visual_keys(plan: &TimelineRenderPlan) -> Vec<PreparedVisualAuxiliaryKey> {
+    let mut keys = Vec::new();
+    for element in &plan.elements {
+        let _: Result<(), std::convert::Infallible> =
+            element.visit_effect_graphs(|placement, graph| {
+                for stage in graph.stage_bindings() {
+                    keys.extend(stage.auxiliary_sources().iter().filter_map(|binding| {
+                        let reference = binding.reference();
+                        matches!(
+                            reference,
+                            VisualSourceReference::Sequence { .. }
+                                | VisualSourceReference::Clip { .. }
+                        )
+                        .then_some(PreparedVisualAuxiliaryKey {
+                            placement,
+                            stage_index: stage.stage_index(),
+                            slot: binding.slot(),
+                            reference,
+                        })
+                    }));
+                }
+                Ok(())
+            });
+    }
+    keys
 }
 
 fn collect_nested_demands(
@@ -1154,6 +1536,20 @@ pub enum PreparedVisualFrameClosureError {
     Cycle {
         /// Closed cycle path, including the repeated final identity.
         path: Vec<SequenceId>,
+    },
+    /// A strict visual execution requires every referenced Sequence source.
+    UnavailableAuxiliaryVisualSource {
+        /// Exact consumer and address.
+        key: Box<PreparedVisualAuxiliaryKey>,
+        /// Proven unavailability.
+        reason: PreparedAuxiliaryVisualUnavailable,
+    },
+    /// A present visual source had an invalid time, image or color contract.
+    AuxiliaryVisualSourcePreparation {
+        /// Exact consumer and address.
+        key: Box<PreparedVisualAuxiliaryKey>,
+        /// Specific preparation failure.
+        reason: String,
     },
     /// A nested plan referred to a Sequence absent from the immutable closure.
     MissingNestedSequence {
@@ -1324,6 +1720,12 @@ impl fmt::Display for PreparedVisualFrameClosureError {
                     .collect::<Vec<_>>()
                     .join(" -> ")
             ),
+            Self::UnavailableAuxiliaryVisualSource { key, reason } => {
+                write!(formatter, "auxiliary visual source {key:?} is unavailable: {reason:?}")
+            }
+            Self::AuxiliaryVisualSourcePreparation { key, reason } => {
+                write!(formatter, "auxiliary visual source {key:?} failed preparation: {reason}")
+            }
             Self::MissingNestedSequence {
                 parent_sequence_id,
                 nested_sequence_id,
@@ -1593,6 +1995,7 @@ mod tests {
             root_resolution,
             child_canvas_policy,
             &ProjectColorEnvironment::default(),
+            crate::TimelineRenderIntent::Export,
         )
     }
 
@@ -1603,6 +2006,7 @@ mod tests {
         root_resolution: Resolution,
         child_canvas_policy: PreparedVisualChildCanvasPolicy,
         color_environment: &ProjectColorEnvironment,
+        intent: crate::TimelineRenderIntent,
     ) -> Result<PreparedVisualFrameClosure<()>, PreparedVisualFrameClosureError> {
         let root_color_context = root
             .settings
@@ -1623,11 +2027,13 @@ mod tests {
                     .map_err(|error| error.to_string())
             },
             |program, position, resolution, _, _| {
-                let plan = evaluate_prepared_visual_program(
-                    program,
-                    crate::TimelineEvaluationRequest::export(position),
-                )
-                .map_err(|error| error.to_string())?;
+                let request = if intent == crate::TimelineRenderIntent::Preview {
+                    crate::TimelineEvaluationRequest::preview(position, 1.0)
+                } else {
+                    crate::TimelineEvaluationRequest::export(position)
+                };
+                let plan = evaluate_prepared_visual_program(program, request)
+                    .map_err(|error| error.to_string())?;
                 let extent =
                     mondrian_effects::EffectFrameExtent::new(resolution.width, resolution.height);
                 let prepared = crate::timeline_temporal::prepare_timeline_temporal_execution(
@@ -1643,6 +2049,245 @@ mod tests {
                 Ok(PreparedVisualFrameEvaluation::new(prepared, ()))
             },
         )
+    }
+
+    #[derive(Default)]
+    struct AuxiliaryRecordingAdapter(Vec<PreparedVisualFrameNodeId>);
+
+    impl PreparedVisualExecutionAdapter<()> for AuxiliaryRecordingAdapter {
+        type Output = PreparedVisualFrameNodeId;
+        type Error = std::convert::Infallible;
+
+        fn materialize_node(
+            &mut self,
+            inputs: PreparedVisualExecutionNodeInputs<'_, (), Self::Output>,
+        ) -> Result<Self::Output, Self::Error> {
+            let node = inputs.node();
+            if let Some((parent, key)) = inputs.inbound_auxiliary() {
+                assert!(inputs.inbound_binding().is_none());
+                assert_eq!(
+                    node.instance_path().last(),
+                    Some(&PreparedVisualInstanceStep::Auxiliary(*key))
+                );
+                assert!(inputs
+                    .closure()
+                    .node(parent)
+                    .unwrap()
+                    .auxiliary_visual_sources()
+                    .iter()
+                    .any(|(candidate, _)| candidate == key));
+            }
+            for (key, source) in node.auxiliary_visual_sources() {
+                if let PreparedAuxiliaryVisualSource::Child { child, .. } = source {
+                    assert_eq!(inputs.auxiliary_output(*key), Some(child));
+                    assert!(inputs.child_output(*child).is_none());
+                }
+            }
+            self.0.push(node.id());
+            Ok(node.id())
+        }
+    }
+
+    #[test]
+    fn auxiliary_sequence_binds_its_own_exact_child_even_with_an_ordinary_nested_placement() {
+        use crate::prepared_visual_program::tests::auxiliary_preview_matte;
+        use mondrian_core::{AssetId, Color, VisualSourceRetime};
+
+        let mut child = Sequence::new("sampled child");
+        child.settings.frame_rate = Rational::new(50, 1);
+        child.settings.resolution = Resolution { width: 16, height: 16 };
+        child.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    Color::from_hex(0x22_44_66),
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut root = Sequence::new("two occurrences of one child");
+        root.settings.frame_rate = Rational::new(25, 1);
+        let offset = TimelineTime::new(1, 25).unwrap();
+        let reference = VisualSourceReference::Sequence {
+            sequence_id: child.id,
+            retime: VisualSourceRetime { time_offset: offset, ..Default::default() },
+        };
+        let mut clip =
+            Clip::new_nested_sequence(child.id, TimelineTime::ZERO, TimelineTime::ONE, None)
+                .unwrap();
+        clip.add_effect_node(auxiliary_preview_matte(reference));
+        root.video_tracks[0].add_clip(clip).unwrap();
+
+        let closure = prepare_direct_closure(
+            &root,
+            std::slice::from_ref(&child),
+            2,
+            Resolution { width: 16, height: 16 },
+            PreparedVisualChildCanvasPolicy::Authored,
+        )
+        .unwrap();
+        let root = closure.node(closure.root()).unwrap();
+        let [(key, PreparedAuxiliaryVisualSource::Child { child: auxiliary_id, time })] =
+            root.auxiliary_visual_sources()
+        else {
+            panic!("expected exactly one auxiliary child binding");
+        };
+        assert_eq!(key.reference, reference);
+        assert_eq!(key.stage_index, 0);
+        assert_eq!(key.slot, 0);
+        let expected_auxiliary_time = root.time().checked_add(offset).unwrap();
+        assert_eq!(
+            time.source_sample,
+            Some(SourceSampleTarget::covering(expected_auxiliary_time))
+        );
+        let normal_id = root.bindings()[0].child();
+        assert_ne!(normal_id, *auxiliary_id);
+        let normal = closure.node(normal_id).unwrap();
+        let auxiliary = closure.node(*auxiliary_id).unwrap();
+        assert_eq!(auxiliary.sequence_id(), child.id);
+        assert_eq!(normal.time(), root.time());
+        assert_eq!(normal.frame(), 4);
+        assert_eq!(auxiliary.time(), expected_auxiliary_time);
+        assert_eq!(auxiliary.frame(), 6);
+        assert_eq!(
+            auxiliary.instance_path(),
+            &[PreparedVisualInstanceStep::Auxiliary(*key)]
+        );
+        assert_ne!(auxiliary.instance_path(), normal.instance_path());
+        let mut adapter = AuxiliaryRecordingAdapter::default();
+        let result = execute_prepared_visual_closure(&closure, &mut adapter).unwrap();
+        assert_eq!(result, closure.root());
+        assert_eq!(adapter.0, vec![normal_id, *auxiliary_id, closure.root()]);
+    }
+
+    #[test]
+    fn auxiliary_sequence_detects_cycles_that_include_an_ordinary_nested_edge() {
+        use crate::prepared_visual_program::tests::auxiliary_preview_matte;
+        use mondrian_core::{AssetId, Color, VisualSourceRetime};
+
+        let mut root = Sequence::new("root auxiliary consumer");
+        let mut child = Sequence::new("nested route back to root");
+        child.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(root.id, TimelineTime::ZERO, TimelineTime::ONE, None)
+                    .unwrap(),
+            )
+            .unwrap();
+        let reference = VisualSourceReference::Sequence {
+            sequence_id: child.id,
+            retime: VisualSourceRetime::default(),
+        };
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            Color::from_hex(0x22_44_66),
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .unwrap();
+        clip.add_effect_node(auxiliary_preview_matte(reference));
+        root.video_tracks[0].add_clip(clip).unwrap();
+        let expected = vec![root.id, child.id, root.id];
+        let error = prepare_direct_closure(
+            &root,
+            &[child],
+            0,
+            Resolution { width: 16, height: 16 },
+            PreparedVisualChildCanvasPolicy::Authored,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, PreparedVisualFrameClosureError::UnavailableAuxiliaryVisualSource {
+            key, reason: PreparedAuxiliaryVisualUnavailable::Cycle(path),
+        } if key.reference == reference && path == expected)
+        );
+    }
+
+    #[test]
+    fn auxiliary_sequence_cycle_is_scoped_to_one_preview_occurrence() {
+        use crate::prepared_visual_program::tests::auxiliary_preview_matte;
+        use mondrian_core::{AssetId, Color, VisualSourceRetime};
+
+        let mut root = Sequence::new("root");
+        let mut x = Sequence::new("sampled X");
+        let mut y = Sequence::new("consumer Y");
+        for sequence in [&mut root, &mut x, &mut y] {
+            sequence.settings.frame_rate = Rational::new(25, 1);
+            sequence.settings.resolution = Resolution { width: 16, height: 16 };
+        }
+        let nested = |id, duration| {
+            Clip::new_nested_sequence(id, TimelineTime::ZERO, duration, None).unwrap()
+        };
+        let solid = || {
+            Clip::new_solid_color(
+                AssetId::new(),
+                Color::from_hex(0x22_44_66),
+                TimelineTime::ZERO,
+                TimelineTime::ONE,
+            )
+            .unwrap()
+        };
+        x.video_tracks[0].add_clip(solid()).unwrap();
+        x.video_tracks[1]
+            .add_clip(nested(y.id, TimelineTime::new(1, 5).unwrap()))
+            .unwrap();
+        let reference = VisualSourceReference::Sequence {
+            sequence_id: x.id,
+            retime: VisualSourceRetime::default(),
+        };
+        let mut consumer = solid();
+        consumer.add_effect_node(auxiliary_preview_matte(reference));
+        y.video_tracks[0].add_clip(consumer).unwrap();
+        root.video_tracks[0].add_clip(nested(x.id, TimelineTime::ONE)).unwrap();
+        let late_sample = TimelineTime::new(1, 2).unwrap();
+        let mut late_y = nested(y.id, late_sample);
+        late_y.set_source_origin(late_sample).unwrap();
+        root.video_tracks[1].add_clip(late_y).unwrap();
+
+        let (x_id, y_id) = (x.id, y.id);
+        let closure = prepare_direct_closure_with_color_environment(
+            &root,
+            &[x, y],
+            0,
+            root.settings.resolution,
+            PreparedVisualChildCanvasPolicy::Authored,
+            &ProjectColorEnvironment::default(),
+            crate::TimelineRenderIntent::Preview,
+        )
+        .unwrap();
+        let root = closure.node(closure.root()).unwrap();
+        let early_x = closure.node(root.bindings()[0].child()).unwrap();
+        let early_y = closure.node(early_x.bindings()[0].child()).unwrap();
+        let late_y = closure.node(root.bindings()[1].child()).unwrap();
+        let [(
+            early_key,
+            PreparedAuxiliaryVisualSource::Unavailable(PreparedAuxiliaryVisualUnavailable::Cycle(
+                cycle,
+            )),
+        )] = early_y.auxiliary_visual_sources()
+        else {
+            panic!("early Y must retain its own cycle evidence");
+        };
+        let [(late_key, PreparedAuxiliaryVisualSource::Child { child, .. })] =
+            late_y.auxiliary_visual_sources()
+        else {
+            panic!("later Y must retain the available X source");
+        };
+        assert_eq!(early_key.reference, late_key.reference);
+        assert_eq!(cycle, &[x_id, y_id, x_id]);
+        let late_x = closure.node(*child).unwrap();
+        assert_eq!(late_x.time(), late_sample);
+        assert!(late_x.bindings().is_empty());
+        assert_eq!(closure.nodes().len(), 5);
+        let mut adapter = AuxiliaryRecordingAdapter::default();
+        assert!(matches!(
+            execute_prepared_visual_closure(&closure, &mut adapter),
+            Err(crate::PreparedVisualExecutionError::Structure(
+                crate::PreparedVisualExecutionStructureError::UnresolvedAuxiliaryVisualSource { node, slot },
+            )) if node == early_y.id() && slot == early_key.slot
+        ));
+        assert!(adapter.0.is_empty());
     }
 
     #[test]
@@ -2107,6 +2752,7 @@ mod tests {
             &ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
                 preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
             }),
+            crate::TimelineRenderIntent::Export,
         )
         .expect("prepared closure");
         let binding = &closure.node(closure.root()).expect("root").bindings()[0];
@@ -2199,10 +2845,12 @@ mod tests {
         assert!(bindings.iter().all(|binding| {
             closure.node(binding.child()).is_some_and(|node| {
                 node.instance_path()
-                    == [PreparedVisualNestedInstanceStep {
-                        placement: binding.placement(),
-                        sample: PreparedVisualNestedSample::Current,
-                    }]
+                    == [PreparedVisualInstanceStep::Nested(
+                        PreparedVisualNestedInstanceStep {
+                            placement: binding.placement(),
+                            sample: PreparedVisualNestedSample::Current,
+                        },
+                    )]
             })
         }));
     }

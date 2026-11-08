@@ -4,7 +4,7 @@ use super::*;
 use mondrian_core::VisualSourceReference;
 use mondrian_effects::AuxiliaryPreviewFallback;
 use mondrian_renderer::{
-    PreparedAuxiliaryConsumerLocation, PreparedVisualNestedInstanceStep, PreparedVisualProgram,
+    PreparedAuxiliaryConsumerLocation, PreparedVisualInstanceStep, PreparedVisualProgram,
 };
 use std::sync::OnceLock;
 
@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 pub struct PreviewAuxiliaryNotice {
     pub(crate) sequence_id: SequenceId,
     pub(crate) time: mondrian_core::TimelineTime,
-    pub(crate) path: Arc<[PreparedVisualNestedInstanceStep]>,
+    pub(crate) path: Arc<[PreparedVisualInstanceStep]>,
     pub(crate) placement: Option<TimelineClipExecutionRef>,
     pub(crate) stage_index: usize,
     pub(crate) location: PreparedAuxiliaryConsumerLocation,
@@ -61,21 +61,29 @@ impl PreviewAuxiliaryProjectionContext {
 pub(super) struct SourceProjection {
     pub(super) programs: RefCell<HashMap<SequenceId, Arc<PreparedVisualProgram>>>,
     unavailable: Vec<VisualSourceReference>,
-    views: RefCell<HashMap<SequenceId, Arc<PreparedVisualProgram>>>,
+    unavailable_visual: UnavailableVisualSources,
+    unscoped_views: RefCell<HashMap<SequenceId, Arc<PreparedVisualProgram>>>,
     registry_revision: u64,
     maximum_bytes: usize,
 }
+
+pub(super) type UnavailableVisualSources = HashMap<
+    Arc<[PreparedVisualInstanceStep]>,
+    Vec<(Option<mondrian_core::ClipId>, VisualSourceReference)>,
+>;
 
 impl SourceProjection {
     fn new(
         prepared: &PreviewTimelinePreparation,
         graph: PreviewTimelineGraph<'_>,
         unavailable: Vec<VisualSourceReference>,
+        unavailable_visual: UnavailableVisualSources,
     ) -> Self {
         Self {
             programs: RefCell::new(prepared.frozen_programs.clone()),
             unavailable,
-            views: RefCell::new(HashMap::new()),
+            unavailable_visual,
+            unscoped_views: RefCell::new(HashMap::new()),
             registry_revision: prepared
                 .original_closure
                 .node(prepared.original_closure.root())
@@ -112,16 +120,20 @@ impl SourceProjection {
     pub(super) fn view(
         &self,
         program: &Arc<PreparedVisualProgram>,
+        path: &[PreparedVisualInstanceStep],
     ) -> Result<Arc<PreparedVisualProgram>, String> {
-        if self.unavailable.is_empty() {
+        let scoped = self.unavailable_visual.get(path).map(Vec::as_slice).unwrap_or_default();
+        if self.unavailable.is_empty() && scoped.is_empty() {
             return Ok(Arc::clone(program));
         }
-        if let Some(view) = self.views.borrow().get(&program.sequence_id()) {
+        if scoped.is_empty()
+            && let Some(view) = self.unscoped_views.borrow().get(&program.sequence_id())
+        {
             return Ok(Arc::clone(view));
         }
         let view = Arc::new(
             program
-                .with_auxiliary_preview_unavailable_sources(&self.unavailable)
+                .with_auxiliary_preview_unavailable_sources_by_consumer(&self.unavailable, scoped)
                 .map_err(|error| error.to_string())?,
         );
         if view.retained_bytes_estimate() > self.maximum_bytes {
@@ -129,9 +141,45 @@ impl SourceProjection {
                 "auxiliary Preview source view exceeds the immutable-program metadata grant".into(),
             );
         }
-        self.views.borrow_mut().insert(program.sequence_id(), Arc::clone(&view));
+        if scoped.is_empty() {
+            self.unscoped_views
+                .borrow_mut()
+                .insert(program.sequence_id(), Arc::clone(&view));
+        }
         Ok(view)
     }
+}
+
+fn record_unavailable_visual_sources(
+    closure: &PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
+    unavailable: &mut UnavailableVisualSources,
+) -> bool {
+    let mut changed = false;
+    for node in closure.nodes() {
+        for (consumer, source) in node.auxiliary_visual_sources() {
+            if matches!(
+                source,
+                PreparedAuxiliaryVisualSource::Unavailable(
+                    mondrian_renderer::PreparedAuxiliaryVisualUnavailable::Missing
+                        | mondrian_renderer::PreparedAuxiliaryVisualUnavailable::Empty
+                        | mondrian_renderer::PreparedAuxiliaryVisualUnavailable::ClipUnavailable
+                        | mondrian_renderer::PreparedAuxiliaryVisualUnavailable::ClipNotEarlier
+                        | mondrian_renderer::PreparedAuxiliaryVisualUnavailable::ClipNotIndependent
+                )
+            ) {
+                let decisions = unavailable.entry(node.instance_path().into()).or_default();
+                let decision = (
+                    consumer.placement.map(|placement| placement.clip_id),
+                    consumer.reference,
+                );
+                if !decisions.contains(&decision) {
+                    decisions.push(decision);
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
 }
 
 fn visit_graphs(
@@ -142,41 +190,14 @@ fn visit_graphs(
     ) -> Result<(), PreviewTimelineAbort>,
 ) -> Result<(), PreviewTimelineAbort> {
     for element in &plan.elements {
-        match element {
-            TimelineRenderPlanElement::Media(v) => visit(Some(v.placement), &v.effect_graph)?,
-            TimelineRenderPlanElement::NestedSequence(v) => {
-                visit(Some(v.placement), &v.effect_graph)?
-            }
-            TimelineRenderPlanElement::BasicTitle(v) => visit(Some(v.placement), &v.effect_graph)?,
-            TimelineRenderPlanElement::SolidColor(v) => visit(Some(v.placement), &v.effect_graph)?,
-            TimelineRenderPlanElement::Adjustment(v) => visit(Some(v.placement), &v.effect_graph)?,
-            TimelineRenderPlanElement::TimelineGrade(v) => visit(None, &v.effect_graph)?,
-            TimelineRenderPlanElement::CrossDissolve(v) => {
-                for input in [&v.left, &v.right] {
-                    match input {
-                        TimelineTransitionInputPlan::Media(v) => {
-                            visit(Some(v.placement), &v.effect_graph)?
-                        }
-                        TimelineTransitionInputPlan::NestedSequence(v) => {
-                            visit(Some(v.placement), &v.effect_graph)?
-                        }
-                        TimelineTransitionInputPlan::BasicTitle(v) => {
-                            visit(Some(v.placement), &v.effect_graph)?
-                        }
-                        TimelineTransitionInputPlan::SolidColor(v) => {
-                            visit(Some(v.placement), &v.effect_graph)?
-                        }
-                        TimelineTransitionInputPlan::Transparent => {}
-                    }
-                }
-            }
-        }
+        element.visit_effect_graphs(&mut visit)?;
     }
     Ok(())
 }
 
 fn original_queries(
     prepared: &PreviewTimelinePreparation,
+    graph: PreviewTimelineGraph<'_>,
 ) -> Result<Vec<PreparedPreviewSourceDemand>, PreviewTimelineAbort> {
     let mut requests = Vec::new();
     let mut seen = HashSet::new();
@@ -185,13 +206,51 @@ fn original_queries(
             .frozen_programs
             .get(&node.sequence_id())
             .ok_or_else(|| invalid("active node lost its original frozen program"))?;
-        let plan = mondrian_renderer::evaluate_prepared_visual_program(
-            program,
-            *node.evaluation().execution_request().evaluation(),
-        )
-        .map_err(|error| invalid(error.to_string()))?;
+        let request = node.evaluation().execution_request();
+        let plan = if let Some(target) = request.auxiliary_clip() {
+            let Some((PreparedVisualInstanceStep::Auxiliary(key), parent_path)) =
+                node.instance_path().split_last()
+            else {
+                return Err(invalid("standalone Clip lost its frozen auxiliary path"));
+            };
+            let VisualSourceReference::Clip { clip_id, retime } = key.reference else {
+                return Err(invalid(
+                    "standalone Clip has a different frozen source type",
+                ));
+            };
+            let schedule = program.schedule();
+            let sample = match key.placement {
+                Some(consumer) => schedule.evaluate_auxiliary_clip(consumer, clip_id, retime),
+                None => {
+                    let parent = prepared
+                        .closure
+                        .nodes()
+                        .iter()
+                        .find(|candidate| candidate.instance_path() == parent_path)
+                        .ok_or_else(|| invalid("standalone Clip lost its Timeline Grade owner"))?;
+                    schedule.evaluate_auxiliary_clip_for_grade(parent.time(), clip_id, retime)
+                }
+            }
+            .map_err(|error| invalid(error.to_string()))?;
+            if sample.placement() != target {
+                return Err(invalid("standalone Clip changed its original sample"));
+            }
+            graph
+                .scratch
+                .borrow_mut()
+                .prepare_auxiliary_clip_frame_execution(program, request.clone(), &sample)
+                .map_err(|error| invalid(error.to_string()))?
+                .execution_plan()
+                .clone()
+        } else {
+            mondrian_renderer::evaluate_prepared_visual_program(program, *request.evaluation())
+                .map_err(|error| invalid(error.to_string()))?
+        };
         visit_graphs(&plan, |_, graph| {
             for source in graph.auxiliary_source_bindings() {
+                if !matches!(source.reference(), VisualSourceReference::Asset { .. }) {
+                    continue;
+                }
                 let request = PreviewAuxiliaryAssetRequest {
                     reference: source.reference(),
                     sequence_time: node.time(),
@@ -275,8 +334,11 @@ pub(super) fn prepare_sources(
                 ),
             ));
         }
-        let queries = if preview && !prepared.unavailable_auxiliary.is_empty() {
-            original_queries(prepared)?
+        let queries = if preview
+            && (!prepared.unavailable_auxiliary.is_empty()
+                || !prepared.unavailable_visual.is_empty())
+        {
+            original_queries(prepared, graph)?
         } else {
             prepared.demands.clone()
         };
@@ -285,8 +347,12 @@ pub(super) fn prepare_sources(
         };
         refresh_prepared_auxiliary_sources(sources, &queries, resolver, preview, &mut queried)?;
         let missing = missing_references(&queries, sources)?;
-        if missing != prepared.unavailable_auxiliary {
-            let projection = SourceProjection::new(prepared, graph, missing.clone());
+        let mut unavailable_visual = prepared.unavailable_visual.clone();
+        let visual_changed = preview
+            && record_unavailable_visual_sources(&prepared.closure, &mut unavailable_visual);
+        if missing != prepared.unavailable_auxiliary || visual_changed {
+            let projection =
+                SourceProjection::new(prepared, graph, missing.clone(), unavailable_visual.clone());
             let closure = prepare_preview_frame_closure_with_projection(
                 graph,
                 request.root_sequence,
@@ -302,9 +368,12 @@ pub(super) fn prepare_sources(
             prepared.frozen_programs = projection.programs.into_inner();
             prepared.closure = Arc::new(closure);
             prepared.unavailable_auxiliary = missing;
+            prepared.unavailable_visual = unavailable_visual;
             continue;
         }
-        let active = if prepared.unavailable_auxiliary.is_empty() {
+        let active = if prepared.unavailable_auxiliary.is_empty()
+            && prepared.unavailable_visual.is_empty()
+        {
             prepared.demands.clone()
         } else {
             collect_prepared_visual_source_demands(&prepared.closure)
@@ -432,9 +501,10 @@ fn context(
                 .map(|notice| {
                     std::mem::size_of::<PreviewAuxiliaryNotice>()
                         .saturating_add(
-                            notice.path.len().saturating_mul(std::mem::size_of::<
-                                PreparedVisualNestedInstanceStep,
-                            >()),
+                            notice
+                                .path
+                                .len()
+                                .saturating_mul(std::mem::size_of::<PreparedVisualInstanceStep>()),
                         )
                         .saturating_add(notice.fallback.parameter_id().storage_owner().capacity())
                 })

@@ -11,12 +11,13 @@ use crate::sequence::{
 use crate::track::Track;
 use crate::video_transition::VideoTransition;
 use mondrian_core::timeline_data::{
-    ClipContent, FlatVideoTransitionDefinitionSnapshot, FlatVisualItem, RenderPlanSource,
-    TimelineClipEndpointContext, TimelineClipExecutionRef,
+    ClipContent, FlatActiveClip, FlatVideoTransitionDefinitionSnapshot, FlatVisualItem,
+    RenderPlanSource, TimelineClipEndpointContext, TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    AssetId, ClipId, MondrianError, Rational, Result, SequenceId, SequenceRevision, TimelineTime,
-    TimelineTimeRange, VideoTransitionId, WorkingColorSpace,
+    AssetId, ClipId, MondrianError, Rational, Result, SequenceId, SequenceRevision,
+    SourceSamplingBoundary, TimelineTime, TimelineTimeRange, VideoTransitionId, VisualSourceRetime,
+    VisualSourceTimeError, VisualSourceTimeSample, WorkingColorSpace,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -247,6 +248,139 @@ impl PreparedVisualSchedule {
     pub fn clip_content(&self, placement: TimelineClipExecutionRef) -> Result<&ClipContent> {
         let (track_index, clip_index) = self.clip_location(placement)?;
         Ok(&self.tracks[track_index].track.clips[clip_index].content)
+    }
+
+    /// Prove a same-Sequence picture Clip dependency in strict compositor order.
+    ///
+    /// Ordinary clips use the schedule's track and sorted clip indexes. A
+    /// Transition is emitted before ordinary clips on its track, so either
+    /// endpoint may only reference an earlier track.
+    pub fn admit_auxiliary_clip(
+        &self,
+        consumer: TimelineClipExecutionRef,
+        source_id: ClipId,
+    ) -> std::result::Result<PreparedAuxiliaryClipPlacement, AuxiliaryClipAdmissionError> {
+        self.admit_auxiliary_clip_source(source_id, Some(consumer))
+    }
+
+    fn admit_auxiliary_clip_source(
+        &self,
+        source_id: ClipId,
+        consumer: Option<TimelineClipExecutionRef>,
+    ) -> std::result::Result<PreparedAuxiliaryClipPlacement, AuxiliaryClipAdmissionError> {
+        let consumer = consumer
+            .map(|placement| self.clip_location(placement).map(|location| (placement, location)))
+            .transpose()
+            .map_err(AuxiliaryClipAdmissionError::InvalidConsumer)?;
+        let source = self
+            .clip_locations
+            .get(&source_id)
+            .copied()
+            .ok_or(AuxiliaryClipAdmissionError::Unavailable { clip_id: source_id })?;
+        if let Some((consumer, consumer_location)) = consumer {
+            let earlier = match consumer.endpoint {
+                TimelineClipEndpointContext::Ordinary => source < consumer_location,
+                TimelineClipEndpointContext::TransitionLeft { .. }
+                | TimelineClipEndpointContext::TransitionRight { .. } => {
+                    source.0 < consumer_location.0
+                }
+            };
+            if !earlier {
+                return Err(AuxiliaryClipAdmissionError::NotEarlier {
+                    clip_id: source_id,
+                    consumer_id: consumer.clip_id,
+                });
+            }
+        }
+        let track = &self.tracks[source.0].track;
+        let clip = &track.clips[source.1];
+        if clip.is_disabled || !track.is_visible || track.is_muted {
+            return Err(AuxiliaryClipAdmissionError::Unavailable { clip_id: source_id });
+        }
+        if matches!(clip.content, ClipContent::AdjustmentLayer { .. }) {
+            return Err(AuxiliaryClipAdmissionError::NotIndependent { clip_id: source_id });
+        }
+        let available = TimelineTimeRange::new(clip.position, clip.duration).map_err(|error| {
+            AuxiliaryClipAdmissionError::InvalidRange { clip_id: source_id, error }
+        })?;
+        Ok(PreparedAuxiliaryClipPlacement {
+            placement: TimelineClipExecutionRef {
+                sequence_id: self.key.sequence_id,
+                sequence_revision: self.key.revision,
+                clip_id: source_id,
+                clip_time: clip.clip_time_in,
+                endpoint: TimelineClipEndpointContext::Ordinary,
+            },
+            available,
+        })
+    }
+
+    /// Evaluate an admitted source at the consumer's retimed Sequence instant.
+    /// The source keeps its own Clip-local processing and media retime.
+    pub fn evaluate_auxiliary_clip(
+        &self,
+        consumer: TimelineClipExecutionRef,
+        source_id: ClipId,
+        retime: VisualSourceRetime,
+    ) -> std::result::Result<PreparedAuxiliaryClipSample, AuxiliaryClipAdmissionError> {
+        let admitted = self.admit_auxiliary_clip(consumer, source_id)?;
+        let sequence_time = self
+            .clip_to_sequence_time(consumer, consumer.clip_time)
+            .map_err(AuxiliaryClipAdmissionError::InvalidConsumer)?;
+        self.evaluate_admitted_auxiliary_clip(admitted, sequence_time, retime)
+    }
+
+    /// Sample an independent picture Clip for the final Timeline Grade.
+    /// The grade follows all tracks and supplies its own Sequence instant.
+    pub fn evaluate_auxiliary_clip_for_grade(
+        &self,
+        sequence_time: TimelineTime,
+        source_id: ClipId,
+        retime: VisualSourceRetime,
+    ) -> std::result::Result<PreparedAuxiliaryClipSample, AuxiliaryClipAdmissionError> {
+        let admitted = self.admit_auxiliary_clip_source(source_id, None)?;
+        self.evaluate_admitted_auxiliary_clip(admitted, sequence_time, retime)
+    }
+
+    fn evaluate_admitted_auxiliary_clip(
+        &self,
+        admitted: PreparedAuxiliaryClipPlacement,
+        sequence_time: TimelineTime,
+        retime: VisualSourceRetime,
+    ) -> std::result::Result<PreparedAuxiliaryClipSample, AuxiliaryClipAdmissionError> {
+        let time = retime.sample(sequence_time, admitted.available)?;
+        let mut placement = admitted.placement;
+        let Some(target) = time.source_sample else {
+            return Ok(PreparedAuxiliaryClipSample { placement, time, source: None });
+        };
+        let sample_time = match target.boundary() {
+            SourceSamplingBoundary::Covering => target.time(),
+            SourceSamplingBoundary::StrictPredecessor => {
+                let frame_rate = Rational::new(self.time_base.den, self.time_base.num);
+                let position =
+                    target.to_frame_position(frame_rate).map_err(VisualSourceTimeError::from)?;
+                // A Clip can be shorter than a grid cell. Its exact in-edge
+                // remains a legal sample even in that case.
+                TimelineTime::from_frame_position(position)
+                    .map_err(VisualSourceTimeError::from)?
+                    .max(admitted.available.start)
+            }
+        };
+        let (track_index, clip_index) =
+            self.clip_location(placement).map_err(AuxiliaryClipAdmissionError::Evaluation)?;
+        let track = &self.tracks[track_index];
+        let source = flatten_visual_clip_with_effect_snapshots(
+            &track.track.clips[clip_index],
+            &track.track,
+            track.track_index,
+            track.track.evaluate_opacity(sample_time).clamp(0.0, 1.0),
+            sample_time,
+            Arc::clone(&track.clip_effects[clip_index]),
+            Arc::clone(&track.clip_masks[clip_index]),
+        )
+        .map_err(AuxiliaryClipAdmissionError::Evaluation)?;
+        placement.clip_time = source.clip_time;
+        Ok(PreparedAuxiliaryClipSample { placement, time, source: Some(source) })
     }
 
     /// Map one exact Clip-local Effect instant back into the owning Sequence
@@ -519,6 +653,92 @@ impl PreparedVisualSchedule {
             source_range: TimelineTimeRange::new(source_start, range.duration)?,
         }))
     }
+}
+
+/// Admitted source placement and its half-open Sequence-time interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedAuxiliaryClipPlacement {
+    placement: TimelineClipExecutionRef,
+    available: TimelineTimeRange,
+}
+
+/// Exact result of sampling an independent auxiliary Clip.
+#[derive(Debug, Clone)]
+pub struct PreparedAuxiliaryClipSample {
+    placement: TimelineClipExecutionRef,
+    time: VisualSourceTimeSample,
+    source: Option<FlatActiveClip>,
+}
+
+impl PreparedAuxiliaryClipSample {
+    /// Canonical source Clip placement and selected author time.
+    pub const fn placement(&self) -> TimelineClipExecutionRef {
+        self.placement
+    }
+
+    /// Exact request and boundary decision before lowering onto the visual grid.
+    pub const fn time(&self) -> VisualSourceTimeSample {
+        self.time
+    }
+
+    /// Frozen visual input. None is an explicit transparent boundary result.
+    pub const fn source(&self) -> Option<&FlatActiveClip> {
+        self.source.as_ref()
+    }
+}
+
+impl PreparedAuxiliaryClipPlacement {
+    /// Canonical placement with the Clip-local author time at its in-edge.
+    pub const fn placement(self) -> TimelineClipExecutionRef {
+        self.placement
+    }
+
+    /// Visible placement interval before auxiliary retime is applied.
+    pub const fn available(self) -> TimelineTimeRange {
+        self.available
+    }
+}
+
+/// Reason a Clip reference cannot be resolved against this visual schedule.
+#[derive(Debug, thiserror::Error)]
+pub enum AuxiliaryClipAdmissionError {
+    /// The consumer has an invalid or stale placement proof.
+    #[error("invalid auxiliary consumer placement: {0}")]
+    InvalidConsumer(MondrianError),
+    /// The source is absent or currently disabled, hidden, or muted.
+    #[error("auxiliary Clip {clip_id} is unavailable")]
+    Unavailable {
+        /// Authored source Clip identity.
+        clip_id: ClipId,
+    },
+    /// Source must be strictly earlier than the consumer.
+    #[error("auxiliary Clip {clip_id} must precede its consumer {consumer_id}")]
+    NotEarlier {
+        /// Authored source Clip identity.
+        clip_id: ClipId,
+        /// Exact consumer Clip identity.
+        consumer_id: ClipId,
+    },
+    /// An adjustment layer has no independent picture output.
+    #[error("auxiliary Clip {clip_id} has no independent picture output")]
+    NotIndependent {
+        /// Authored source Clip identity.
+        clip_id: ClipId,
+    },
+    /// Source's frozen interval is not representable.
+    #[error("invalid auxiliary Clip {clip_id} interval: {error}")]
+    InvalidRange {
+        /// Authored source Clip identity.
+        clip_id: ClipId,
+        /// Exact time contract failure.
+        error: mondrian_core::TimelineTimeError,
+    },
+    /// The authored source retime or exact grid projection is invalid.
+    #[error(transparent)]
+    Time(#[from] VisualSourceTimeError),
+    /// The frozen source failed visual evaluation.
+    #[error("auxiliary Clip evaluation failed: {0}")]
+    Evaluation(MondrianError),
 }
 
 impl RenderPlanSource for PreparedVisualSchedule {
@@ -1057,6 +1277,101 @@ mod tests {
         .expect("valid deterministic solid Clip");
         clip.id = ClipId(Uuid::from_u128(id));
         clip
+    }
+
+    #[test]
+    fn auxiliary_clip_uses_frozen_compositor_order_and_half_open_placement() {
+        use mondrian_core::{SourceSampleTarget, VisualSourceBoundary};
+
+        let mut sequence = Sequence::new("auxiliary ordering");
+        sequence.settings.frame_rate = Rational::FPS_25;
+        let source = solid_clip(901, 910, 0x11_22_33, 2, 8);
+        let consumer = solid_clip(902, 911, 0x55_66_77, 0, 20);
+        let source_id = source.id;
+        let consumer_id = consumer.id;
+        sequence.video_tracks.clear();
+        let mut earlier = Track::new_video("V1 source");
+        earlier.add_clip(source).unwrap();
+        let mut later = Track::new_video("V2 consumer");
+        later.add_clip(consumer).unwrap();
+        sequence.video_tracks.push(earlier);
+        sequence.video_tracks.push(later);
+
+        let owner = TimelineClipExecutionRef {
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            clip_id: consumer_id,
+            clip_time: tt(5),
+            endpoint: TimelineClipEndpointContext::Ordinary,
+        };
+        let original = PreparedVisualSchedule::compile(&sequence).unwrap();
+        let admitted = original.admit_auxiliary_clip(owner, source_id).unwrap();
+        assert_eq!(admitted.placement().clip_id, source_id);
+        assert_eq!(
+            admitted.available(),
+            TimelineTimeRange::new(tt(2), tt(8)).unwrap()
+        );
+        assert_eq!(
+            VisualSourceRetime::default()
+                .sample(tt(10), admitted.available())
+                .unwrap()
+                .source_sample,
+            Some(SourceSampleTarget::strict_predecessor(tt(10))),
+        );
+        let interior = original
+            .evaluate_auxiliary_clip(
+                owner,
+                source_id,
+                VisualSourceRetime {
+                    time_offset: tt(1),
+                    mode: VisualSourceBoundary::Clamp,
+                },
+            )
+            .unwrap();
+        assert_eq!(interior.time.requested_time, tt(6));
+        assert_eq!(interior.placement.clip_time, tt(4));
+        assert_eq!(
+            interior.source.unwrap().source_sample,
+            SourceSampleTarget::covering(tt(4))
+        );
+
+        let edge = VisualSourceRetime {
+            time_offset: tt(5),
+            mode: VisualSourceBoundary::Clamp,
+        };
+        let clamped = original.evaluate_auxiliary_clip(owner, source_id, edge).unwrap();
+        assert!(clamped.time.out_of_range);
+        assert_eq!(clamped.placement.clip_time, tt(7));
+        let transparent = original
+            .evaluate_auxiliary_clip(
+                owner,
+                source_id,
+                VisualSourceRetime { mode: VisualSourceBoundary::Transparent, ..edge },
+            )
+            .unwrap();
+        assert!(transparent.time.out_of_range);
+        assert!(transparent.source.is_none());
+        assert!(matches!(
+            original.admit_auxiliary_clip(owner, consumer_id),
+            Err(AuxiliaryClipAdmissionError::NotEarlier { .. })
+        ));
+        sequence.video_tracks.swap(0, 1);
+        sequence.revision = sequence.revision.checked_next().unwrap();
+        let moved = PreparedVisualSchedule::compile(&sequence).unwrap();
+        assert!(matches!(
+            moved.admit_auxiliary_clip(owner, source_id),
+            Err(AuxiliaryClipAdmissionError::InvalidConsumer(_))
+        ));
+        let moved_owner =
+            TimelineClipExecutionRef { sequence_revision: sequence.revision, ..owner };
+        assert!(matches!(
+            moved.admit_auxiliary_clip(moved_owner, source_id),
+            Err(AuxiliaryClipAdmissionError::NotEarlier { .. })
+        ));
+        assert_eq!(
+            original.admit_auxiliary_clip(owner, source_id).unwrap(),
+            admitted
+        );
     }
 
     fn rich_visual_sequence() -> Sequence {

@@ -26,6 +26,7 @@ use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 mod raster;
 pub(crate) use raster::{
     plan_auxiliary_registration, preflight_auxiliary_composite, prepare_auxiliary_rasters,
+    visual_auxiliary_working_bytes,
 };
 
 /// A temporary auxiliary preparation charge in the existing Viewer ledger.
@@ -86,8 +87,7 @@ pub(crate) fn collect_auxiliary_bindings<'a>(
                     && existing.sources.len() == input.sources.len()
                     && existing.sources.iter().zip(&input.sources).all(|(a, b)| {
                         a.slot == b.slot
-                            && a.request == b.request
-                            && a.plan == b.plan
+                            && a.evidence == b.evidence
                             && a.frame.as_ref().map(|frame| frame.identity())
                                 == b.frame.as_ref().map(|frame| frame.identity())
                     })
@@ -179,6 +179,7 @@ pub(crate) struct PreviewAuxiliaryAssetPlan {
 /// registration happens only after the actual primary grid is known.
 pub(crate) struct ResolvedPreviewAuxiliaryInputs {
     pub(crate) graph: Arc<mondrian_effects::CompiledEffectGraph>,
+    pub(crate) side: mondrian_renderer::TimelineAuxiliarySide,
     pub(crate) primary_extent: mondrian_effects::EffectFrameExtent,
     pub(crate) primary_sampling: mondrian_core::ImageSampling,
     pub(crate) sources: Box<[ResolvedPreviewAuxiliarySource]>,
@@ -187,10 +188,34 @@ pub(crate) struct ResolvedPreviewAuxiliaryInputs {
 
 pub(crate) struct ResolvedPreviewAuxiliarySource {
     pub(crate) slot: u32,
-    pub(crate) request: PreviewAuxiliaryAssetRequest,
-    pub(crate) plan: PreviewAuxiliaryAssetPlan,
+    pub(crate) evidence: PreviewAuxiliaryEvidence,
     /// None is exclusively the explicit Transparent boundary result.
     pub(crate) frame: Option<MediaPreviewFrame>,
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) enum PreviewAuxiliaryEvidence {
+    Asset(Box<ResolvedAuxiliaryAssetEvidence>),
+    Visual(ResolvedAuxiliaryVisualEvidence),
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct ResolvedAuxiliaryAssetEvidence {
+    pub(crate) request: PreviewAuxiliaryAssetRequest,
+    pub(crate) plan: PreviewAuxiliaryAssetPlan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedAuxiliaryVisualEvidence {
+    pub(crate) reference: VisualSourceReference,
+    pub(crate) sequence_id: mondrian_core::SequenceId,
+    pub(crate) revision: mondrian_core::SequenceRevision,
+    pub(crate) time: VisualSourceTimeSample,
+    pub(crate) domain: (
+        mondrian_effects::EffectFrameExtent,
+        mondrian_core::ImageSampling,
+    ),
+    pub(crate) working_color_space: mondrian_core::WorkingColorSpace,
 }
 
 impl ResolvedPreviewAuxiliaryInputs {
@@ -206,10 +231,18 @@ impl ResolvedPreviewAuxiliaryInputs {
         self.sources.len().hash(hasher);
         for source in &self.sources {
             source.slot.hash(hasher);
-            source.request.hash(hasher);
-            source.plan.validated_key.hash(hasher);
-            source.plan.time.hash(hasher);
-            source.plan.media_request.hash(hasher);
+            match &source.evidence {
+                PreviewAuxiliaryEvidence::Asset(asset) => {
+                    asset.request.hash(hasher);
+                    asset.plan.validated_key.hash(hasher);
+                    asset.plan.time.hash(hasher);
+                    asset.plan.media_request.hash(hasher);
+                }
+                PreviewAuxiliaryEvidence::Visual(visual) => {
+                    b"auxiliary-visual".hash(hasher);
+                    visual.hash(hasher);
+                }
+            }
             source.frame.as_ref().map(MediaPreviewFrame::identity).hash(hasher);
             source.frame.as_ref().and_then(MediaPreviewFrame::cpu_image_domain).hash(hasher);
         }

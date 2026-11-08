@@ -1832,10 +1832,7 @@ fn compile_node_execution_modes(
             return None;
         }
         for source in binding.auxiliary_sources.iter() {
-            let mondrian_core::VisualSourceReference::Asset { retime, .. } = source.reference
-            else {
-                return None;
-            };
+            let retime = source.reference.retime()?;
             if !binding.emitted_nodes.contains(&source.producer)
                 || !source_slots.insert(source.slot)
                 || !matches!(graph.node(source.producer).map(|node| &node.kind),
@@ -2373,9 +2370,7 @@ impl EffectGraphBuilderState {
                 slot,
             });
         }
-        let mondrian_core::VisualSourceReference::Asset { retime, .. } = reference else {
-            return Err(crate::EffectGraphBuildError::InvalidGraph);
-        };
+        let retime = reference.retime().ok_or(crate::EffectGraphBuildError::InvalidGraph)?;
         let producer = self.append_external_input_with(
             slot,
             format,

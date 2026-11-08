@@ -351,6 +351,40 @@ fn visual_source_retime_enters_the_spec_and_the_existing_temporal_contract_gate(
 }
 
 #[test]
+fn clip_and_sequence_addresses_bind_distinct_frozen_slots_with_exact_retime() {
+    let offset = TimelineTime::new(1001, 24000).unwrap();
+    let retime = VisualSourceRetime {
+        time_offset: offset,
+        mode: VisualSourceBoundary::Hold,
+    };
+    let clip = VisualSourceReference::Clip { clip_id: mondrian_core::ClipId::new(), retime };
+    let sequence = VisualSourceReference::Sequence {
+        sequence_id: mondrian_core::SequenceId::new(),
+        retime,
+    };
+    let effects = [clip, sequence].map(|reference| {
+        fixture(
+            reference,
+            [1.0, 0.0, 0.0],
+            EffectTemporalInputExtent {
+                past: EffectTemporalSpan::None,
+                future: EffectTemporalSpan::Finite(offset),
+            },
+            Tamper::None,
+        )
+    });
+    let graph = program(&effects).evaluate(TimelineTime::ZERO).unwrap();
+    assert_eq!(graph.auxiliary_inputs().len(), 2);
+    for (slot, reference) in [clip, sequence].into_iter().enumerate() {
+        let spec = &graph.auxiliary_inputs()[slot];
+        assert_eq!(spec.time_offset(), offset);
+        let binding = graph.auxiliary_source_binding(spec.slot()).unwrap();
+        assert_eq!(binding.reference(), reference);
+        assert_eq!(binding.effect_id(), effects[slot].id);
+    }
+}
+
+#[test]
 fn compiled_source_evidence_rejects_wrong_slots_producers_and_time_offsets() {
     let graph = program(&[fill(source(AssetId::new()), [1.0, 0.0, 0.0])])
         .evaluate(TimelineTime::ZERO)

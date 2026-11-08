@@ -380,10 +380,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         snapshot: &PreviewExecutionSnapshot<'_>,
         evaluation: &ResolvedFrameEvaluation,
     ) -> bool {
-        if let Some(context) =
-            crate::app::preview_auxiliary::resolved_auxiliary_projection(&evaluation.elements)
-        {
-            return self.auxiliary_projection_sources_are_current(snapshot, context);
+        use crate::app::preview_auxiliary::PreviewAuxiliaryEvidence;
+
+        let projection =
+            crate::app::preview_auxiliary::resolved_auxiliary_projection(&evaluation.elements);
+        if projection.is_some_and(|context| {
+            !self.auxiliary_projection_sources_are_current(snapshot, context)
+        }) {
+            return false;
         }
         let mut bindings = Vec::new();
         for element in evaluation.elements.iter() {
@@ -392,11 +396,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut observed = std::collections::HashMap::new();
         for binding in bindings {
             for source in &binding.sources {
-                let current = observed
-                    .entry(&source.request)
-                    .or_insert_with(|| self.resolve_auxiliary_asset(snapshot, &source.request));
-                if !matches!(current, Ok(plan) if plan == &source.plan) {
-                    return false;
+                match &source.evidence {
+                    PreviewAuxiliaryEvidence::Asset(asset) if projection.is_none() => {
+                        let current = observed.entry(&asset.request).or_insert_with(|| {
+                            self.resolve_auxiliary_asset(snapshot, &asset.request)
+                        });
+                        if !matches!(current, Ok(plan) if plan == &asset.plan) {
+                            return false;
+                        }
+                    }
+                    PreviewAuxiliaryEvidence::Asset(_) => {}
+                    PreviewAuxiliaryEvidence::Visual(visual) => {
+                        if !snapshot.authoring().is_some_and(|authoring| {
+                            authoring.sequences().iter().any(|sequence| {
+                                sequence.id == visual.sequence_id
+                                    && sequence.revision == visual.revision
+                            })
+                        }) {
+                            return false;
+                        }
+                    }
                 }
             }
         }

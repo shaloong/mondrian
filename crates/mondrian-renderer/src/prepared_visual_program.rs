@@ -929,6 +929,18 @@ impl PreparedVisualProgram {
         &self,
         unavailable: &[mondrian_core::VisualSourceReference],
     ) -> Result<Self> {
+        self.with_auxiliary_preview_unavailable_sources_by_consumer(unavailable, &[])
+    }
+
+    /// Derive a source view for one exact frame instance. Scoped decisions
+    /// identify a Clip's effect stack, or the Timeline Grade with no Clip.
+    /// A host resolves these facts against the placement and instance path
+    /// before constructing the immutable view.
+    pub fn with_auxiliary_preview_unavailable_sources_by_consumer(
+        &self,
+        unavailable: &[mondrian_core::VisualSourceReference],
+        scoped: &[(Option<ClipId>, mondrian_core::VisualSourceReference)],
+    ) -> Result<Self> {
         if !self.auxiliary_preview_enabled() {
             return Err(MondrianError::EffectGraphEvaluationFailed {
                 reason: "auxiliary Preview source views require a Preview program".to_owned(),
@@ -943,7 +955,16 @@ impl PreparedVisualProgram {
             })?;
         canonical.sort_unstable();
         canonical.dedup();
-        let fingerprint = if canonical.is_empty() {
+        let mut canonical_scoped = scoped
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                reason: error.to_string(),
+            })?;
+        canonical_scoped.sort_unstable();
+        canonical_scoped.dedup();
+        let fingerprint = if canonical.is_empty() && canonical_scoped.is_empty() {
             [0; 32]
         } else {
             let mut hasher = Sha256::new();
@@ -952,6 +973,13 @@ impl PreparedVisualProgram {
                 hasher.update((bytes.len() as u64).to_le_bytes());
                 hasher.update(bytes);
             }
+            if !canonical_scoped.is_empty() {
+                hasher.update(0u64.to_le_bytes());
+                for bytes in canonical_scoped {
+                    hasher.update((bytes.len() as u64).to_le_bytes());
+                    hasher.update(bytes);
+                }
+            }
             hasher.finalize().into()
         };
         if self.key.auxiliary_source_view == fingerprint {
@@ -959,21 +987,30 @@ impl PreparedVisualProgram {
         }
         let mut view = self.clone();
         view.key.auxiliary_source_view = fingerprint;
+        let local_sources = |clip_id| {
+            unavailable
+                .iter()
+                .copied()
+                .chain(scoped.iter().filter_map(move |(consumer, source)| {
+                    (*consumer == clip_id).then_some(*source)
+                }))
+                .collect::<Vec<_>>()
+        };
         for (clip_id, effects) in &mut view.clip_effects {
             if let PreparedClipEffects::Ready { program, .. } = effects {
                 *program = program
-                    .with_auxiliary_preview_unavailable_sources(unavailable)
+                    .with_auxiliary_preview_unavailable_sources(&local_sources(Some(*clip_id)))
                     .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
                         reason: format!("Clip {clip_id} auxiliary source view failed: {error}"),
                     })?;
             }
         }
         if let PreparedTimelineGrade::Ready(program) = &mut view.timeline_grade {
-            *program = program.with_auxiliary_preview_unavailable_sources(unavailable).map_err(
-                |error| MondrianError::EffectGraphEvaluationFailed {
+            *program = program
+                .with_auxiliary_preview_unavailable_sources(&local_sources(None))
+                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
                     reason: format!("Timeline Grade auxiliary source view failed: {error}"),
-                },
-            )?;
+                })?;
         }
         // Charge the retained base snapshot plus all derived program payloads.
         // Shared author/resource Arcs are deliberately charged conservatively;
@@ -2561,7 +2598,7 @@ impl Default for PreparedVisualProgramCache {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::timeline_render_plan::evaluate_timeline_render_plan;
     use crate::{
@@ -2659,7 +2696,9 @@ mod tests {
         assert!(program.preflight().is_err());
     }
 
-    fn auxiliary_preview_matte(reference: mondrian_core::VisualSourceReference) -> EffectNode {
+    pub(crate) fn auxiliary_preview_matte(
+        reference: mondrian_core::VisualSourceReference,
+    ) -> EffectNode {
         use mondrian_core::{ColorFrameAlpha, PropertyBag, PropertyDescriptor};
         use mondrian_effects::*;
         let kind = EffectType::External(format!(
@@ -2676,6 +2715,16 @@ mod tests {
             )
             .with_parameter_id(parameter.clone()),
         );
+        let mut contract = cpu_float_contract();
+        if let Some(retime) = reference.retime().filter(|retime| !retime.time_offset.is_zero()) {
+            let offset = retime.time_offset;
+            if offset.is_negative() {
+                contract.temporal_input.past =
+                    EffectTemporalSpan::Finite(TimelineTime::ZERO.checked_sub(offset).unwrap());
+            } else {
+                contract.temporal_input.future = EffectTemporalSpan::Finite(offset);
+            }
+        }
         register_effect_definition(
             EffectDefinition::new(
                 kind.key(),
@@ -2683,7 +2732,7 @@ mod tests {
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
             )
-            .with_execution_contract(cpu_float_contract())
+            .with_execution_contract(contract)
             .with_branching_graph_builder(Arc::new(move |effect, _, builder| {
                 let input = builder.current_output();
                 let auxiliary = builder.append_visual_source_input(

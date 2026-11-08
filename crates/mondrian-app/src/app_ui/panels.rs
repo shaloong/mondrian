@@ -1446,7 +1446,13 @@ fn viewer_auxiliary_detail(
         Some(())
     };
     for step in notice.path.iter() {
-        push_placement(step.placement)?;
+        let placement = match step {
+            mondrian_renderer::PreparedVisualInstanceStep::Nested(step) => Some(step.placement),
+            mondrian_renderer::PreparedVisualInstanceStep::Auxiliary(key) => key.placement,
+        };
+        if let Some(placement) = placement {
+            push_placement(placement)?;
+        }
     }
     if let Some(placement) = notice.placement {
         push_placement(placement)?;

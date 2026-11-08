@@ -4152,6 +4152,12 @@ pub(super) fn inspector_property_value_widget(
                 mondrian_core::VisualSourceReference::Asset { .. } => {
                     localizer.text("visual-source-selected-asset")
                 }
+                mondrian_core::VisualSourceReference::Clip { .. } => {
+                    localizer.text("visual-source-selected-clip")
+                }
+                mondrian_core::VisualSourceReference::Sequence { .. } => {
+                    localizer.text("visual-source-selected-sequence")
+                }
             };
             let action = selection.map(|selection| {
                 crate::app_ui::resource_dialog::ResourceEditorAction::Open {

@@ -3,7 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    PreviewAuxiliaryAssetPlan, ResolvedPreviewAuxiliaryInputs, ResolvedPreviewAuxiliarySource,
+    PreviewAuxiliaryAssetPlan, PreviewAuxiliaryEvidence, ResolvedAuxiliaryVisualEvidence,
+    ResolvedPreviewAuxiliaryInputs, ResolvedPreviewAuxiliarySource,
 };
 use crate::app::preview_access_mode::MediaPreviewKey;
 use crate::app::preview_cpu_execution::PreviewCpuExecutionError;
@@ -51,11 +52,43 @@ fn bytes(extent: EffectFrameExtent) -> Result<u64, PreviewCpuExecutionError> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct AuxiliaryRegistrationKey<'a> {
-    source: &'a MediaPreviewKey,
+    source: AuxiliaryRegistrationSource<'a>,
     ready: Option<PreviewSemanticIdentity>,
     extent: EffectFrameExtent,
     sampling: ImageSampling,
     working_color: WorkingColorSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AuxiliaryRegistrationSource<'a> {
+    Asset(&'a MediaPreviewKey),
+    Visual(&'a ResolvedAuxiliaryVisualEvidence),
+}
+
+type ImageDomain = (EffectFrameExtent, ImageSampling);
+
+fn registration_geometry(
+    role: AuxiliaryRole,
+    primary: ImageDomain,
+    source: ImageDomain,
+) -> (ImageDomain, AuxiliaryPolicy) {
+    if role == AuxiliaryRole::Map {
+        (source, AuxiliaryPolicy::new(AuxiliaryResolution::Authored))
+    } else {
+        (primary, AuxiliaryPolicy::MATCH_PRIMARY)
+    }
+}
+
+/// Use the same output grid as registration when admitting a visual child
+/// before its actual pixels have been produced.
+pub(crate) fn visual_auxiliary_working_bytes(
+    role: AuxiliaryRole,
+    primary: ImageDomain,
+    source: ImageDomain,
+    has_pixels: bool,
+) -> Result<usize, PreviewCpuExecutionError> {
+    let ((extent, _), _) = registration_geometry(role, primary, source);
+    auxiliary_source_working_bytes(has_pixels.then_some(source.0), extent)
 }
 
 pub(crate) struct AuxiliaryRegistration<'a> {
@@ -107,7 +140,7 @@ pub(crate) fn plan_auxiliary_registration<'a>(
     };
     Ok(AuxiliaryRegistration {
         key: AuxiliaryRegistrationKey {
-            source: &plan.validated_key,
+            source: AuxiliaryRegistrationSource::Asset(&plan.validated_key),
             ready: frame.map(MediaPreviewFrame::identity),
             extent,
             sampling,
@@ -131,13 +164,38 @@ impl ResolvedPreviewAuxiliaryInputs {
             .ok_or_else(|| PreviewCpuExecutionError::AuxiliaryRegistration {
                 detail: "resolved auxiliary source has no compiled slot".into(),
             })?;
-        plan_auxiliary_registration(
-            &source.plan,
-            source.frame.as_ref(),
-            spec.role(),
-            (self.primary_extent, self.primary_sampling),
-            source.request.input_color.working_color_space,
-        )
+        let primary = (self.primary_extent, self.primary_sampling);
+        let frame = source.frame.as_ref();
+        match &source.evidence {
+            PreviewAuxiliaryEvidence::Asset(asset) => plan_auxiliary_registration(
+                &asset.plan,
+                frame,
+                spec.role(),
+                primary,
+                asset.request.input_color.working_color_space,
+            ),
+            PreviewAuxiliaryEvidence::Visual(visual) => {
+                if frame.is_some_and(|frame| frame.cpu_image_domain() != Some(visual.domain)) {
+                    return Err(PreviewCpuExecutionError::AuxiliaryRegistration {
+                        detail: "auxiliary visual output differs from its prepared image domain"
+                            .into(),
+                    });
+                }
+                let ((extent, sampling), policy) =
+                    registration_geometry(spec.role(), primary, visual.domain);
+                Ok(AuxiliaryRegistration {
+                    key: AuxiliaryRegistrationKey {
+                        source: AuxiliaryRegistrationSource::Visual(visual),
+                        ready: frame.map(MediaPreviewFrame::identity),
+                        extent,
+                        sampling,
+                        working_color: visual.working_color_space,
+                    },
+                    source_extent: frame.map(|_| visual.domain.0),
+                    policy,
+                })
+            }
+        }
     }
 }
 
@@ -579,11 +637,18 @@ mod tests {
                 .with_source_key(plan.validated_key.clone())
             });
             let binding = ResolvedPreviewAuxiliaryInputs {
+                side: mondrian_renderer::TimelineAuxiliarySide::Element,
                 graph: std::sync::Arc::clone(&graph),
                 primary_extent: EffectFrameExtent::new(3, 1),
                 primary_sampling: ImageSampling::UNIT_SQUARE,
-                sources: vec![ResolvedPreviewAuxiliarySource { slot: 0, request, plan, frame }]
-                    .into_boxed_slice(),
+                sources: vec![ResolvedPreviewAuxiliarySource {
+                    slot: 0,
+                    evidence: PreviewAuxiliaryEvidence::Asset(Box::new(
+                        super::super::ResolvedAuxiliaryAssetEvidence { request, plan },
+                    )),
+                    frame,
+                }]
+                .into_boxed_slice(),
                 projection_context: None,
             };
             let mut scratch = TimelineCompositeScratch::default();

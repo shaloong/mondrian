@@ -71,10 +71,12 @@ fn an_asset_backed_image_matte_renders_in_preview() {
         source.cpu_image_domain().unwrap().0,
         mondrian_effects::EffectFrameExtent::new(4, 2)
     );
-    assert_eq!(
-        source.source_key(),
-        Some(&inputs[0].sources[0].plan.validated_key)
-    );
+    let crate::app::preview_auxiliary::PreviewAuxiliaryEvidence::Asset(evidence) =
+        &inputs[0].sources[0].evidence
+    else {
+        panic!("expected Asset evidence");
+    };
+    assert_eq!(source.source_key(), Some(&evidence.plan.validated_key));
     let media_charge = source.reserved_cpu_bytes();
     assert!(
         media_charge >= 4 * 2 * 16,

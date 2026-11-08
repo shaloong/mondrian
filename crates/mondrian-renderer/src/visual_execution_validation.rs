@@ -7,7 +7,8 @@
 //! second interpretation path.
 
 use crate::{
-    PreparedVisualFrameClosure, PreparedVisualFrameNodeId, PreparedVisualNestedSample,
+    PreparedAuxiliaryVisualSource, PreparedVisualAuxiliaryKey, PreparedVisualFrameClosure,
+    PreparedVisualFrameNodeId, PreparedVisualInstanceStep, PreparedVisualNestedSample,
     TimelineTemporalSource,
 };
 use mondrian_core::timeline_data::{
@@ -53,18 +54,25 @@ pub struct PreparedVisualExecutionNodeTrace {
     pub instance_path: Arc<[PreparedVisualExecutionInstanceStepTrace]>,
     /// Exact nested bindings emitted from this occurrence.
     pub nested_bindings: Arc<[PreparedVisualExecutionNestedBindingTrace]>,
+    /// Exact auxiliary Sequence bindings emitted from this occurrence.
+    pub auxiliary_visual_sources:
+        Arc<[(PreparedVisualAuxiliaryKey, PreparedAuxiliaryVisualSource)]>,
     /// Finite temporal batches removed from this occurrence's ordinary plan.
     pub temporal_batches: Arc<[PreparedVisualExecutionTemporalBatchTrace]>,
 }
 
 /// One normalized edge in a prepared visual instance path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedVisualExecutionInstanceStepTrace {
-    /// Parent placement, including Transition endpoint identity.
-    pub placement: TimelineClipExecutionRef,
-    /// Current or temporal sample semantics. Scheduler generation is
-    /// intentionally excluded because it does not alter authored pixels.
-    pub sample: PreparedVisualExecutionSampleTrace,
+pub enum PreparedVisualExecutionInstanceStepTrace {
+    /// Ordinary or temporal nested placement, excluding scheduler generation.
+    Nested {
+        /// Parent placement, including Transition endpoint identity.
+        placement: TimelineClipExecutionRef,
+        /// Current or temporal sample semantics.
+        sample: PreparedVisualExecutionSampleTrace,
+    },
+    /// Exact auxiliary Sequence consumer and frozen source identity.
+    Auxiliary(PreparedVisualAuxiliaryKey),
 }
 
 /// Consumer-independent current or finite temporal sample identity.
@@ -194,9 +202,16 @@ pub fn prepared_visual_execution_semantic_trace<T>(
             let instance_path = node
                 .instance_path()
                 .iter()
-                .map(|step| PreparedVisualExecutionInstanceStepTrace {
-                    placement: step.placement,
-                    sample: normalized_sample(step.sample),
+                .map(|step| match step {
+                    PreparedVisualInstanceStep::Nested(step) => {
+                        PreparedVisualExecutionInstanceStepTrace::Nested {
+                            placement: step.placement,
+                            sample: normalized_sample(step.sample),
+                        }
+                    }
+                    PreparedVisualInstanceStep::Auxiliary(key) => {
+                        PreparedVisualExecutionInstanceStepTrace::Auxiliary(*key)
+                    }
                 })
                 .collect::<Vec<_>>();
             let nested_bindings = node
@@ -229,6 +244,7 @@ pub fn prepared_visual_execution_semantic_trace<T>(
                 visual_author_fingerprint: node.program().visual_author_fingerprint(),
                 instance_path: instance_path.into(),
                 nested_bindings: nested_bindings.into(),
+                auxiliary_visual_sources: node.auxiliary_visual_sources().into(),
                 temporal_batches: temporal_batches.into(),
             })
         })

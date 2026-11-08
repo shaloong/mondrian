@@ -2114,7 +2114,7 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
         assert_eq!(child_node.instance_path.len(), 1);
         assert_eq!(
             child_node.instance_path[0],
-            mondrian_renderer::PreparedVisualExecutionInstanceStepTrace {
+            mondrian_renderer::PreparedVisualExecutionInstanceStepTrace::Nested {
                 placement: sample.placement,
                 sample: mondrian_renderer::PreparedVisualExecutionSampleTrace::Temporal(
                     sample.effect_request,
@@ -2141,8 +2141,11 @@ fn nested_temporal_preview_and_export_share_prepared_semantics_and_pixels() {
         node.sequence_id == child.id
             && node.instance_path.len() == 1
             && matches!(
-                node.instance_path[0].sample,
-                mondrian_renderer::PreparedVisualExecutionSampleTrace::Temporal(_)
+                node.instance_path[0],
+                mondrian_renderer::PreparedVisualExecutionInstanceStepTrace::Nested {
+                    sample: mondrian_renderer::PreparedVisualExecutionSampleTrace::Temporal(_),
+                    ..
+                }
             )
     }));
     let pixel = preview_working.frame.rgba_f32().data[0];

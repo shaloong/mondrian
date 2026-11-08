@@ -18,24 +18,44 @@ pub(super) fn prepared_auxiliary_working_bytes(
                 .map_err(|error| refused(error.to_string()))?,
         );
         let mut local = 0usize;
-        let mut seen: Vec<(Arc<CompiledEffectGraph>, ImageDomain)> = Vec::new();
         let mut registered = HashSet::new();
-        let mut observe = |graph: &Arc<CompiledEffectGraph>,
+        let mut observe = |placement,
+                           graph: &Arc<CompiledEffectGraph>,
                            primary: ImageDomain|
          -> Result<(), PreviewUnavailability> {
-            if graph.auxiliary_inputs().is_empty()
-                || seen
-                    .iter()
-                    .any(|(previous, domain)| Arc::ptr_eq(previous, graph) && *domain == primary)
-            {
-                return Ok(());
-            }
-            // Invocation association only; source cache identity never uses an address.
-            seen.push((Arc::clone(graph), primary));
             for spec in graph.auxiliary_inputs() {
                 let binding = graph
                     .auxiliary_source_binding(spec.slot())
                     .ok_or_else(|| refused("auxiliary budget lost its frozen source binding"))?;
+                if matches!(
+                    binding.reference(),
+                    VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. }
+                ) {
+                    let (_, evidence, child) = prepared_auxiliary_visual_evidence(
+                        closure,
+                        node,
+                        placement,
+                        graph,
+                        spec.slot(),
+                        binding.reference(),
+                    )?;
+                    let bytes = super::super::preview_auxiliary::visual_auxiliary_working_bytes(
+                        spec.role(),
+                        primary,
+                        evidence.domain,
+                        child.is_some(),
+                    )
+                    .map_err(|error| error.unavailability())?;
+                    local = local
+                        .checked_add(bytes)
+                        .ok_or_else(|| refused("auxiliary working pixel size overflowed"))?;
+                    continue;
+                }
+                if !matches!(binding.reference(), VisualSourceReference::Asset { .. }) {
+                    return Err(refused(
+                        "unbound auxiliary source escaped frame preparation",
+                    ));
+                }
                 let request = PreviewAuxiliaryAssetRequest {
                     reference: binding.reference(),
                     sequence_time: node.time(),
@@ -78,23 +98,26 @@ pub(super) fn prepared_auxiliary_working_bytes(
         for element in &node.evaluation().plan().elements {
             match element {
                 TimelineRenderPlanElement::Media(value) => observe(
+                    Some(value.placement),
                     &value.effect_graph,
                     media_domain(node, value, sources, canvas)?,
                 )?,
                 TimelineRenderPlanElement::SolidColor(value) => {
-                    observe(&value.effect_graph, canvas)?
+                    observe(Some(value.placement), &value.effect_graph, canvas)?
                 }
                 TimelineRenderPlanElement::Adjustment(value) => {
-                    observe(&value.effect_graph, canvas)?
+                    observe(Some(value.placement), &value.effect_graph, canvas)?
                 }
                 TimelineRenderPlanElement::TimelineGrade(value) => {
-                    observe(&value.effect_graph, canvas)?
+                    observe(None, &value.effect_graph, canvas)?
                 }
                 TimelineRenderPlanElement::BasicTitle(value) => observe(
+                    Some(value.placement),
                     &value.effect_graph,
                     title_domain(node, value, sources, canvas)?,
                 )?,
                 TimelineRenderPlanElement::NestedSequence(value) => observe(
+                    Some(value.placement),
                     &value.effect_graph,
                     nested_domain(closure, node, value.placement, canvas, &value.effect_graph)?,
                 )?,
@@ -103,17 +126,20 @@ pub(super) fn prepared_auxiliary_working_bytes(
                         match input {
                             TimelineTransitionInputPlan::Transparent => {}
                             TimelineTransitionInputPlan::Media(value) => observe(
+                                Some(value.placement),
                                 &value.effect_graph,
                                 media_domain(node, value, sources, canvas)?,
                             )?,
                             TimelineTransitionInputPlan::SolidColor(value) => {
-                                observe(&value.effect_graph, canvas)?
+                                observe(Some(value.placement), &value.effect_graph, canvas)?
                             }
                             TimelineTransitionInputPlan::BasicTitle(value) => observe(
+                                Some(value.placement),
                                 &value.effect_graph,
                                 title_domain(node, value, sources, canvas)?,
                             )?,
                             TimelineTransitionInputPlan::NestedSequence(value) => observe(
+                                Some(value.placement),
                                 &value.effect_graph,
                                 nested_domain(
                                     closure,

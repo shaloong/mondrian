@@ -4,13 +4,16 @@
 //! resolve it into the consuming graph's color domain and resolution policy;
 //! decoded frames and cache revisions must never be serialized into this value.
 
-use crate::{AssetId, SourceSampleTarget, TimelineTime, TimelineTimeError, TimelineTimeRange};
+use crate::{
+    AssetId, ClipId, SequenceId, SourceSampleTarget, TimelineTime, TimelineTimeError,
+    TimelineTimeRange,
+};
 use serde::{Deserialize, Serialize};
 
 /// Persistent source selection for a visual Effect's auxiliary input.
 ///
-/// This first host milestone admits Project Assets. Clip and Sequence addresses
-/// require the dependency admission implemented by the subsequent host milestone.
+/// The host admits Clip and Sequence dependencies in the consumer's visual
+/// program before materializing their frames.
 /// Unknown addresses or fields are errors, never an implicit unbound reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -25,6 +28,32 @@ pub enum VisualSourceReference {
         /// Constant Sequence-time offset and explicit source-boundary behavior.
         retime: VisualSourceRetime,
     },
+    /// Read a specific picture Clip in the consumer's owning Sequence.
+    Clip {
+        /// Stable Clip identity, independent of its current track and position.
+        clip_id: ClipId,
+        /// Constant Sequence-time offset and explicit source-boundary behavior.
+        retime: VisualSourceRetime,
+    },
+    /// Read the composited picture output of a Project Sequence.
+    Sequence {
+        /// Stable identity of the source Sequence.
+        sequence_id: SequenceId,
+        /// Constant Sequence-time offset and explicit source-boundary behavior.
+        retime: VisualSourceRetime,
+    },
+}
+
+impl VisualSourceReference {
+    /// Shared time mapping for a bound address.
+    pub const fn retime(self) -> Option<VisualSourceRetime> {
+        match self {
+            Self::Unbound => None,
+            Self::Asset { retime, .. }
+            | Self::Clip { retime, .. }
+            | Self::Sequence { retime, .. } => Some(retime),
+        }
+    }
 }
 
 /// Behavior outside the selected source's half-open available interval.
@@ -128,6 +157,14 @@ impl crate::AuthoringFootprint for VisualSourceReference {
                 collector.collect(asset_id)?;
                 collector.collect(retime)
             }
+            Self::Clip { clip_id, retime } => {
+                collector.collect(clip_id)?;
+                collector.collect(retime)
+            }
+            Self::Sequence { sequence_id, retime } => {
+                collector.collect(sequence_id)?;
+                collector.collect(retime)
+            }
         }
     }
 }
@@ -206,6 +243,29 @@ mod tests {
         assert!(decoded.channels().is_empty());
         assert_eq!(decoded.value_type(), PropertyValueType::VisualSource);
         assert_eq!(decoded.static_value().kind(), "visual_source");
+    }
+
+    #[test]
+    fn clip_and_sequence_sources_persist_their_distinct_addresses_and_exact_retime() {
+        let retime = reference().retime().unwrap();
+        let id = uuid::Uuid::from_u128(42);
+        let clip = VisualSourceReference::Clip { clip_id: ClipId(id), retime };
+        let sequence = VisualSourceReference::Sequence { sequence_id: SequenceId(id), retime };
+        let asset = reference();
+        for (tag, address) in [("asset", asset), ("clip", clip), ("sequence", sequence)] {
+            let encoded = serde_json::to_value(address).unwrap();
+            assert!(encoded.get(tag).is_some());
+            assert_eq!(
+                serde_json::from_value::<VisualSourceReference>(encoded).unwrap(),
+                address
+            );
+            assert_eq!(address.retime(), Some(retime));
+        }
+        assert_eq!(
+            std::collections::HashSet::from([asset, clip, sequence]).len(),
+            3
+        );
+        assert_eq!(VisualSourceReference::Unbound.retime(), None);
     }
 
     #[test]

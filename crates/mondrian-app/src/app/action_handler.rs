@@ -2611,7 +2611,9 @@ mod tests {
                             retime: mondrian_core::VisualSourceRetime::default(),
                         }
                     }
-                    mondrian_core::VisualSourceReference::Asset { .. } => {
+                    mondrian_core::VisualSourceReference::Asset { .. }
+                    | mondrian_core::VisualSourceReference::Clip { .. }
+                    | mondrian_core::VisualSourceReference::Sequence { .. } => {
                         mondrian_core::VisualSourceReference::Unbound
                     }
                 })

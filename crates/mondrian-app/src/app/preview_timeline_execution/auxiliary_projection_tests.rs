@@ -107,6 +107,238 @@ fn grey_with_exposure(asset: AssetId) -> Sequence {
     sequence
 }
 
+fn set_matte_source(
+    root: &mut Sequence,
+    reference: VisualSourceReference,
+) -> mondrian_core::EffectId {
+    let effect = &mut root.video_tracks[0].clips[0].effects[0];
+    let parameter = effect.effect_type.parameter_id("source").unwrap();
+    let path = effect
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.parameter_id() == &parameter)
+        .unwrap()
+        .0
+        .to_owned();
+    effect
+        .properties
+        .set_static_value(&path, PropertyValue::VisualSource(reference))
+        .unwrap();
+    effect.id
+}
+
+#[test]
+fn a_sequence_matte_materializes_its_own_picture_and_changes_the_preview_cache_identity() {
+    use mondrian_core::{Color, TimelineTime};
+    use mondrian_timeline::clip::Clip;
+
+    let mut child = Sequence::new("Auxiliary picture");
+    child.settings.resolution = Resolution { width: 6, height: 2 };
+    child.video_tracks[0]
+        .add_clip(
+            Clip::new_solid_color(
+                AssetId::new(),
+                Color::from_rgba8(0, 255, 0, 255),
+                TimelineTime::ZERO,
+                TimelineTime::new(2, 1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut root = auxiliary_matte_sequence(AssetId::new());
+    set_matte_source(
+        &mut root,
+        VisualSourceReference::Sequence { sequence_id: child.id, retime: Default::default() },
+    );
+
+    let evaluate = |child| {
+        output(resolve(
+            &root,
+            &[child],
+            &RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview()),
+            &RefCell::new(TimelineCompositeScratch::default()),
+            &mut |_| panic!("Sequence never queries Asset authority"),
+            &mut |_| panic!("procedural child never decodes media"),
+            None,
+        ))
+    };
+    let opaque = evaluate(child.clone());
+    assert_eq!(pixels(&opaque), vec![[1.0, 0.0, 0.0, 1.0]; 3]);
+
+    child.video_tracks[0].clips[0]
+        .set_solid_color(Color::from_rgba8(0, 255, 0, 0))
+        .unwrap();
+    let transparent = evaluate(child);
+    assert_eq!(pixels(&transparent), vec![[0.0, 0.0, 0.0, 1.0]; 3]);
+    assert!(opaque.plan.render_cache_identity.is_some());
+    assert!(transparent.plan.render_cache_identity.is_some());
+    assert_ne!(
+        opaque.plan.render_cache_identity,
+        transparent.plan.render_cache_identity
+    );
+}
+
+#[test]
+fn a_track_matte_from_an_earlier_layer_renders_in_preview_and_falls_back_after_reordering() {
+    use mondrian_core::{Color, SourceSampleTarget, TimelineTime};
+    use mondrian_timeline::clip::Clip;
+
+    let mut sequence = auxiliary_matte_sequence(AssetId::new());
+    sequence.video_tracks.swap(0, 1);
+    let source = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_rgba8(0, 255, 0, 255),
+        TimelineTime::ONE,
+        TimelineTime::ONE,
+    )
+    .unwrap();
+    let clip_id = source.id;
+    sequence.video_tracks[0].add_clip(source).unwrap();
+    let consumer = &mut sequence.video_tracks[1].clips[0].effects[0];
+    let effect_id = consumer.id;
+    let parameter = consumer.effect_type.parameter_id("source").unwrap();
+    let path = consumer
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.parameter_id() == &parameter)
+        .unwrap()
+        .0
+        .to_owned();
+    let reference = VisualSourceReference::Clip { clip_id, retime: Default::default() };
+    consumer
+        .properties
+        .set_static_value(&path, PropertyValue::VisualSource(reference))
+        .unwrap();
+
+    let programs = RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    let evaluate = |sequence: &Sequence, programs: &RefCell<PreparedVisualProgramCache>| {
+        resolve(
+            sequence,
+            &[],
+            programs,
+            &scratch,
+            &mut |_| panic!("Clip never queries Asset authority"),
+            &mut |_| panic!("procedural Clip never decodes media"),
+            None,
+        )
+    };
+    let earlier = output(evaluate(&sequence, &programs));
+    assert_eq!(pixels(&earlier), vec![[1.0, 0.0, 0.0, 1.0]; 3]);
+    let mut bindings = Vec::new();
+    collect_auxiliary_bindings(&earlier.plan.elements[0], &mut bindings);
+    let crate::app::preview_auxiliary::PreviewAuxiliaryEvidence::Visual(evidence) =
+        &bindings[0].sources[0].evidence
+    else {
+        panic!("expected the exact retimed Clip frame");
+    };
+    assert_eq!(evidence.reference, reference);
+    assert_eq!(evidence.time.requested_time, TimelineTime::ZERO);
+    assert_eq!(
+        evidence.time.source_sample,
+        Some(SourceSampleTarget::covering(TimelineTime::ONE))
+    );
+    assert!(evidence.time.out_of_range);
+
+    sequence.video_tracks.swap(0, 1);
+    let author = serde_json::to_value(&sequence).unwrap();
+    let later = output(evaluate(&sequence, &programs));
+    assert_eq!(pixels(&later), vec![[0.0, 0.0, 0.0, 1.0]; 3]);
+    assert_ne!(
+        earlier.plan.render_cache_identity,
+        later.plan.render_cache_identity
+    );
+    let contexts = contexts(&later);
+    let [notice] = contexts[0].notices.as_ref() else {
+        panic!("expected one scoped notice")
+    };
+    assert_eq!(notice.fallback.effect_id(), effect_id);
+    assert_eq!(notice.fallback.reference(), reference);
+    assert_eq!(serde_json::to_value(&sequence).unwrap(), author);
+    assert!(matches!(
+        evaluate(
+            &sequence,
+            &RefCell::new(PreparedVisualProgramCache::default())
+        ),
+        PreviewTimelineResolution::Unavailable { .. }
+    ));
+}
+
+#[test]
+fn a_missing_sequence_reprojects_only_its_consumer_and_preserves_the_authored_reference() {
+    let mut root = grey_with_exposure(AssetId::new());
+    let reference = VisualSourceReference::Sequence {
+        sequence_id: SequenceId::new(),
+        retime: Default::default(),
+    };
+    let effect_id = set_matte_source(&mut root, reference);
+    let authored = serde_json::to_value(&root).unwrap();
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    let evaluate = |root, cache| {
+        resolve(
+            root,
+            &[],
+            &RefCell::new(cache),
+            &scratch,
+            &mut |_| panic!("Sequence never queries Asset authority"),
+            &mut |_| panic!("procedural layer never decodes media"),
+            None,
+        )
+    };
+    let preview = output(evaluate(
+        &root,
+        PreparedVisualProgramCache::for_auxiliary_preview(),
+    ));
+    let context = contexts(&preview);
+    let [notice] = context[0].notices.as_ref() else {
+        panic!("expected one consumer notice")
+    };
+    assert!(notice.path.is_empty());
+    assert_eq!(notice.fallback.effect_id(), effect_id);
+    assert_eq!(notice.fallback.reference(), reference);
+    assert!(context[0].unavailable_queries.is_empty());
+    assert!(preview.plan.render_cache_identity.is_some());
+    assert!(matches!(
+        evaluate(&root, PreparedVisualProgramCache::default()),
+        PreviewTimelineResolution::Unavailable { .. }
+    ));
+    let mut expected = root.clone();
+    expected.video_tracks[0].clips[0].set_effect_enabled(effect_id, false).unwrap();
+    let expected = output(evaluate(&expected, PreparedVisualProgramCache::default()));
+    assert_eq!(pixels(&preview), pixels(&expected));
+    assert_eq!(serde_json::to_value(&root).unwrap(), authored);
+}
+
+#[test]
+fn a_cycled_sequence_reference_is_rejected_before_rendering() {
+    let mut root = auxiliary_matte_sequence(AssetId::new());
+    let sequence_id = root.id;
+    set_matte_source(
+        &mut root,
+        VisualSourceReference::Sequence { sequence_id, retime: Default::default() },
+    );
+    let result = resolve(
+        &root,
+        &[],
+        &RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview()),
+        &RefCell::new(TimelineCompositeScratch::default()),
+        &mut |_| panic!("a cycle never queries Asset authority"),
+        &mut |_| panic!("a cycle never requests media pixels"),
+        None,
+    );
+    let PreviewTimelineResolution::Unavailable { reason } = result else {
+        panic!("expected a Sequence cycle refusal, got {result:?}");
+    };
+    assert!(
+        reason.detail().contains("nested Sequence cycle detected"),
+        "{reason:?}"
+    );
+    assert!(
+        reason.detail().contains(&sequence_id.to_string()),
+        "{reason:?}"
+    );
+}
+
 #[test]
 fn a_missing_asset_degrades_only_its_consumer_and_preserves_later_exposure() {
     let sequence = grey_with_exposure(AssetId::new());

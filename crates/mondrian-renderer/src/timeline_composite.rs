@@ -115,6 +115,18 @@ pub struct TimelineAuxiliaryInputs<'a> {
     graph: &'a CompiledEffectGraph,
     primary_extent: mondrian_effects::EffectFrameExtent,
     rasters: &'a [mondrian_effects::AuxiliaryFloatInput<'a>],
+    occurrence: Option<(usize, TimelineAuxiliarySide)>,
+}
+
+/// The graph's position within an element of the ordered CPU composite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineAuxiliarySide {
+    /// An ordinary layer or Timeline Grade.
+    Element,
+    /// The earlier Cross Dissolve input.
+    TransitionLeft,
+    /// The later Cross Dissolve input.
+    TransitionRight,
 }
 
 impl<'a> TimelineAuxiliaryInputs<'a> {
@@ -126,7 +138,18 @@ impl<'a> TimelineAuxiliaryInputs<'a> {
         primary_extent: mondrian_effects::EffectFrameExtent,
         rasters: &'a [mondrian_effects::AuxiliaryFloatInput<'a>],
     ) -> Self {
-        Self { graph, primary_extent, rasters }
+        Self { graph, primary_extent, rasters, occurrence: None }
+    }
+
+    /// Scope the inputs to an element and endpoint in this invocation, even
+    /// when several consumers share the same compiled graph and primary grid.
+    pub const fn for_occurrence(
+        mut self,
+        element_index: usize,
+        side: TimelineAuxiliarySide,
+    ) -> Self {
+        self.occurrence = Some((element_index, side));
+        self
     }
 }
 
@@ -140,6 +163,7 @@ pub struct TimelineEffectColorRuntime<'a> {
     /// Sequence working space represented by `SceneLinearRgb`.
     pub working_color_space: WorkingColorSpace,
     auxiliary_inputs: &'a [TimelineAuxiliaryInputs<'a>],
+    occurrence: Option<(usize, TimelineAuxiliarySide)>,
 }
 
 impl<'a> TimelineEffectColorRuntime<'a> {
@@ -154,6 +178,7 @@ impl<'a> TimelineEffectColorRuntime<'a> {
             working_color_space,
             sampling,
             auxiliary_inputs: &[],
+            occurrence: None,
         }
     }
 
@@ -164,15 +189,21 @@ impl<'a> TimelineEffectColorRuntime<'a> {
         self
     }
 
+    fn at_occurrence(mut self, element_index: usize, side: TimelineAuxiliarySide) -> Self {
+        self.occurrence = Some((element_index, side));
+        self
+    }
+
     fn auxiliary_for(
         self,
         graph: &CompiledEffectGraph,
         primary_extent: mondrian_effects::EffectFrameExtent,
     ) -> Result<&'a [mondrian_effects::AuxiliaryFloatInput<'a>], EffectFloatExecutionError> {
-        let mut matching = self
-            .auxiliary_inputs
-            .iter()
-            .filter(|set| std::ptr::eq(set.graph, graph) && set.primary_extent == primary_extent);
+        let mut matching = self.auxiliary_inputs.iter().filter(|set| {
+            std::ptr::eq(set.graph, graph)
+                && set.primary_extent == primary_extent
+                && set.occurrence.is_none_or(|occurrence| self.occurrence == Some(occurrence))
+        });
         let Some(first) = matching.next() else {
             return Ok(&[]);
         };
@@ -353,6 +384,39 @@ impl TimelineCompositeScratch {
             program,
             &plan,
             request,
+            &mut self.effect_execution,
+        )
+        .map_err(crate::TimelineFramePreparationError::Temporal)
+    }
+
+    /// Prepare only an admitted Clip source with the same temporal and Effect
+    /// session as ordinary Sequence execution. Its frozen placement supplies
+    /// the exact author instant even when the enclosing grid is coarser.
+    pub fn prepare_auxiliary_clip_frame_execution(
+        &mut self,
+        program: &crate::PreparedVisualProgram,
+        request: crate::TimelineFrameExecutionRequest,
+        sample: &mondrian_timeline::visual_schedule::PreparedAuxiliaryClipSample,
+    ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
+        self.effect_execution.bind_generation(request.generation());
+        let element = crate::timeline_render_plan::compile_auxiliary_clip_sample(
+            program,
+            sample,
+            &mut self.effect_execution,
+        )
+        .map_err(crate::TimelineFramePreparationError::Evaluation)?;
+        let evaluation = request.evaluation();
+        let plan = crate::TimelineRenderPlan {
+            position: evaluation.position,
+            intent: evaluation.intent,
+            settings: evaluation.settings,
+            elements: element.into_iter().collect(),
+            diagnostics: Default::default(),
+        };
+        crate::timeline_temporal::prepare_timeline_temporal_execution_with_session(
+            program,
+            &plan,
+            request.with_auxiliary_clip(sample.placement()),
             &mut self.effect_execution,
         )
         .map_err(crate::TimelineFramePreparationError::Temporal)
@@ -1174,15 +1238,25 @@ pub fn estimate_timeline_cpu_working_set(
     elements: &[TimelineCompositeElement<'_>],
     precision: TimelineCpuCompositePrecision,
 ) -> Result<TimelineCpuWorkingSetEstimate, TimelineCpuWorkingSetError> {
-    estimate_timeline_cpu_working_set_inner(width, height, elements, precision, |graph, extent| {
-        if graph.auxiliary_inputs().is_empty() && graph.has_auxiliary_effects() {
-            let peak =
-                mondrian_effects::estimate_compiled_float_raster_working_bytes(graph, extent, &[])
-                    .map_err(|_| TimelineCpuWorkingSetError::EffectRasterEstimateFailed)?;
-            return u64::try_from(peak).map_err(|_| TimelineCpuWorkingSetError::ArithmeticOverflow);
-        }
-        checked_frame_bytes(extent.width(), extent.height(), 16)
-    })
+    estimate_timeline_cpu_working_set_inner(
+        width,
+        height,
+        elements,
+        precision,
+        |_, _, graph, extent| {
+            if graph.auxiliary_inputs().is_empty() && graph.has_auxiliary_effects() {
+                let peak = mondrian_effects::estimate_compiled_float_raster_working_bytes(
+                    graph,
+                    extent,
+                    &[],
+                )
+                .map_err(|_| TimelineCpuWorkingSetError::EffectRasterEstimateFailed)?;
+                return u64::try_from(peak)
+                    .map_err(|_| TimelineCpuWorkingSetError::ArithmeticOverflow);
+            }
+            checked_frame_bytes(extent.width(), extent.height(), 16)
+        },
+    )
 }
 
 /// Estimate the same compositor ownership with the actual auxiliary rasters.
@@ -1195,20 +1269,27 @@ pub fn estimate_timeline_cpu_working_set_with_auxiliary(
     precision: TimelineCpuCompositePrecision,
     runtime: TimelineEffectColorRuntime<'_>,
 ) -> Result<TimelineCpuWorkingSetEstimate, TimelineCompositeError> {
-    estimate_timeline_cpu_working_set_inner(width, height, elements, precision, |graph, extent| {
-        if graph.auxiliary_inputs().is_empty() && !graph.has_auxiliary_effects() {
-            return checked_frame_bytes(extent.width(), extent.height(), 16).map_err(Into::into);
-        }
-        let auxiliary = runtime.auxiliary_for(graph, extent)?;
-        let extents = auxiliary
-            .iter()
-            .map(|input| (input.slot, input.raster.frame.extent()))
-            .collect::<Vec<_>>();
-        let peak = mondrian_effects::estimate_compiled_float_raster_working_bytes(
-            graph, extent, &extents,
-        )?;
-        u64::try_from(peak).map_err(|_| TimelineCpuWorkingSetError::ArithmeticOverflow.into())
-    })
+    estimate_timeline_cpu_working_set_inner(
+        width,
+        height,
+        elements,
+        precision,
+        |index, side, graph, extent| {
+            if graph.auxiliary_inputs().is_empty() && !graph.has_auxiliary_effects() {
+                return checked_frame_bytes(extent.width(), extent.height(), 16)
+                    .map_err(Into::into);
+            }
+            let auxiliary = runtime.at_occurrence(index, side).auxiliary_for(graph, extent)?;
+            let extents = auxiliary
+                .iter()
+                .map(|input| (input.slot, input.raster.frame.extent()))
+                .collect::<Vec<_>>();
+            let peak = mondrian_effects::estimate_compiled_float_raster_working_bytes(
+                graph, extent, &extents,
+            )?;
+            u64::try_from(peak).map_err(|_| TimelineCpuWorkingSetError::ArithmeticOverflow.into())
+        },
+    )
 }
 
 fn estimate_timeline_cpu_working_set_inner<E: From<TimelineCpuWorkingSetError>>(
@@ -1217,6 +1298,8 @@ fn estimate_timeline_cpu_working_set_inner<E: From<TimelineCpuWorkingSetError>>(
     elements: &[TimelineCompositeElement<'_>],
     precision: TimelineCpuCompositePrecision,
     mut raster_peak: impl FnMut(
+        usize,
+        TimelineAuxiliarySide,
         &CompiledEffectGraph,
         mondrian_effects::EffectFrameExtent,
     ) -> Result<u64, E>,
@@ -1230,12 +1313,15 @@ fn estimate_timeline_cpu_working_set_inner<E: From<TimelineCpuWorkingSetError>>(
         TimelineCpuCompositePrecision::Float32 => {
             let mut peak = output_float_bytes;
             let mut has_composited_layer = false;
-            for element in elements {
+            for (index, element) in elements.iter().enumerate() {
+                let mut element_peak = |graph: &CompiledEffectGraph, extent| {
+                    raster_peak(index, TimelineAuxiliarySide::Element, graph, extent)
+                };
                 match element {
                     TimelineCompositeElement::Media(layer) => {
                         if !layer.effect_graph.graph().is_identity() {
                             let descriptor = layer.frame.descriptor();
-                            let effect_bytes = raster_peak(
+                            let effect_bytes = element_peak(
                                 &layer.effect_graph,
                                 mondrian_effects::EffectFrameExtent::new(
                                     descriptor.width,
@@ -1258,7 +1344,7 @@ fn estimate_timeline_cpu_working_set_inner<E: From<TimelineCpuWorkingSetError>>(
                         {
                             peak = peak.max(
                                 output_float_bytes
-                                    .checked_add(raster_peak(&layer.effect_graph, output_extent)?)
+                                    .checked_add(element_peak(&layer.effect_graph, output_extent)?)
                                     .ok_or(TimelineCpuWorkingSetError::ArithmeticOverflow)?,
                             );
                         }
@@ -1273,7 +1359,7 @@ fn estimate_timeline_cpu_working_set_inner<E: From<TimelineCpuWorkingSetError>>(
                                 peak = peak.max(
                                     output_float_bytes
                                         .checked_add(
-                                            raster_peak(&layer.effect_graph, output_extent)?
+                                            element_peak(&layer.effect_graph, output_extent)?
                                                 .saturating_sub(output_float_bytes),
                                         )
                                         .ok_or(TimelineCpuWorkingSetError::ArithmeticOverflow)?,
@@ -1288,14 +1374,28 @@ fn estimate_timeline_cpu_working_set_inner<E: From<TimelineCpuWorkingSetError>>(
                             output_extent,
                             output_float_bytes,
                             &mut retained,
-                            &mut raster_peak,
+                            &mut |graph, extent| {
+                                raster_peak(
+                                    index,
+                                    TimelineAuxiliarySide::TransitionLeft,
+                                    graph,
+                                    extent,
+                                )
+                            },
                         )?
                         .max(observe_float_input_working_set(
                             &transition.right,
                             output_extent,
                             output_float_bytes,
                             &mut retained,
-                            &mut raster_peak,
+                            &mut |graph, extent| {
+                                raster_peak(
+                                    index,
+                                    TimelineAuxiliarySide::TransitionRight,
+                                    graph,
+                                    extent,
+                                )
+                            },
                         )?);
                         peak = peak.max(
                             output_float_bytes
@@ -2031,7 +2131,7 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                         input,
                         &layer.effect_graph,
                         layer.frame_seed,
-                        runtime,
+                        runtime.at_occurrence(0, TimelineAuxiliarySide::Element),
                         control,
                     )
                 },
@@ -2103,8 +2203,9 @@ fn composite_supported_elements_to_working_frame_with_inputs(
         )
     };
 
-    for element in &elements[consumed_elements..] {
+    for (index, element) in elements.iter().enumerate().skip(consumed_elements) {
         timeline_processor_checkpoint(control)?;
+        let runtime = runtime.at_occurrence(index, TimelineAuxiliarySide::Element);
         match element {
             TimelineCompositeElement::Media(layer) => {
                 let frame = layer.frame.rgba_f32();
@@ -2297,7 +2398,7 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                 left = composite_transition_input_f32(
                     left,
                     &transition.left,
-                    runtime,
+                    runtime.at_occurrence(index, TimelineAuxiliarySide::TransitionLeft),
                     scratch,
                     control,
                     inputs.as_deref_mut(),
@@ -2305,7 +2406,7 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                 right = composite_transition_input_f32(
                     right,
                     &transition.right,
-                    runtime,
+                    runtime.at_occurrence(index, TimelineAuxiliarySide::TransitionRight),
                     scratch,
                     control,
                     inputs.as_deref_mut(),

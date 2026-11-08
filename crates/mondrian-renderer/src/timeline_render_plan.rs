@@ -5,9 +5,13 @@ use mondrian_core::{
         RenderPlanSource, TimelineClipEndpointContext, TimelineClipExecutionRef,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
-    ColorEncodingSpec, EvaluatedBasicTitle, MondrianError, Result, TimelineTime, WorkingColorSpace,
+    ClipId, ColorEncodingSpec, EvaluatedBasicTitle, FrameRounding, MondrianError, Result,
+    TimelineTime, VisualSourceRetime, VisualSourceTimeSample, WorkingColorSpace,
 };
 use mondrian_effects::{CompiledEffectGraph, EffectExecutionSession};
+use mondrian_timeline::visual_schedule::{
+    AuxiliaryClipAdmissionError, PreparedAuxiliaryClipSample,
+};
 use std::sync::Arc;
 
 use crate::prepared_visual_program::PreparedVisualProgram;
@@ -329,6 +333,116 @@ pub enum TimelineRenderPlanElement {
     CrossDissolve(Box<TimelineCrossDissolvePlan>),
     /// Explicit full-composite grade; never masquerades as a Clip placement.
     TimelineGrade(TimelineGradePlan),
+}
+
+impl TimelineRenderPlanElement {
+    /// Visit compiled graphs in execution order with their exact consumer
+    /// occurrence. The Timeline Grade has no Clip placement.
+    pub fn visit_effect_graphs<E>(
+        &self,
+        mut visit: impl FnMut(
+            Option<TimelineClipExecutionRef>,
+            &Arc<CompiledEffectGraph>,
+        ) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        match self {
+            Self::Media(layer) => visit(Some(layer.placement), &layer.effect_graph),
+            Self::Adjustment(layer) => visit(Some(layer.placement), &layer.effect_graph),
+            Self::SolidColor(layer) => visit(Some(layer.placement), &layer.effect_graph),
+            Self::BasicTitle(layer) => visit(Some(layer.placement), &layer.effect_graph),
+            Self::NestedSequence(layer) => visit(Some(layer.placement), &layer.effect_graph),
+            Self::TimelineGrade(layer) => visit(None, &layer.effect_graph),
+            Self::CrossDissolve(transition) => {
+                for input in [&transition.left, &transition.right] {
+                    match input {
+                        TimelineTransitionInputPlan::Transparent => {}
+                        TimelineTransitionInputPlan::Media(layer) => {
+                            visit(Some(layer.placement), &layer.effect_graph)?
+                        }
+                        TimelineTransitionInputPlan::SolidColor(layer) => {
+                            visit(Some(layer.placement), &layer.effect_graph)?
+                        }
+                        TimelineTransitionInputPlan::BasicTitle(layer) => {
+                            visit(Some(layer.placement), &layer.effect_graph)?
+                        }
+                        TimelineTransitionInputPlan::NestedSequence(layer) => {
+                            visit(Some(layer.placement), &layer.effect_graph)?
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// One independent Clip raster requested by a different visual consumer.
+#[derive(Debug, Clone)]
+pub struct PreparedAuxiliaryClipSource {
+    /// Exact source occurrence at the selected Clip-local time.
+    pub placement: TimelineClipExecutionRef,
+    /// Boundary decision in the consumer's Sequence time domain.
+    pub time: VisualSourceTimeSample,
+    /// The source's own transform, interpretation and compiled processing.
+    /// None means transparent coverage.
+    pub element: Option<TimelineRenderPlanElement>,
+}
+
+/// Distinguishes inadmissible Clip addresses from failures evaluating a source.
+#[derive(Debug, thiserror::Error)]
+pub enum PreparedAuxiliaryClipSourceError {
+    /// The address or sample failed Timeline admission.
+    #[error(transparent)]
+    Admission(#[from] AuxiliaryClipAdmissionError),
+    /// The admitted Clip failed preparation in its frozen visual program.
+    #[error("auxiliary Clip plan failed: {0}")]
+    Plan(#[from] MondrianError),
+}
+
+/// Lower a retimed Clip source using the same processing evaluator as the
+/// ordinary visual plan. Retain its own source frame seed and placement.
+pub fn prepare_auxiliary_clip_source(
+    program: &PreparedVisualProgram,
+    consumer: TimelineClipExecutionRef,
+    source_id: ClipId,
+    retime: VisualSourceRetime,
+    session: &mut EffectExecutionSession,
+) -> std::result::Result<PreparedAuxiliaryClipSource, PreparedAuxiliaryClipSourceError> {
+    let schedule = program.schedule();
+    let sample = schedule.evaluate_auxiliary_clip(consumer, source_id, retime)?;
+    Ok(PreparedAuxiliaryClipSource {
+        placement: sample.placement(),
+        time: sample.time(),
+        element: compile_auxiliary_clip_sample(program, &sample, session)?,
+    })
+}
+
+pub(crate) fn compile_auxiliary_clip_sample(
+    program: &PreparedVisualProgram,
+    sample: &PreparedAuxiliaryClipSample,
+    session: &mut EffectExecutionSession,
+) -> Result<Option<TimelineRenderPlanElement>> {
+    let schedule = program.schedule();
+    let placement = sample.placement();
+    let source_time = schedule.clip_to_sequence_time(placement, placement.clip_time)?;
+    if let Some(source) = sample.source() {
+        let time_base = schedule.source_time_base();
+        let frame_rate = Rational::new(time_base.den, time_base.num);
+        let frame_seed = source_time
+            .to_frame_position(frame_rate, FrameRounding::Floor)
+            .map_err(MondrianError::from)?
+            .frame;
+        compile_flat_clip(
+            source.clone(),
+            placement.endpoint,
+            schedule,
+            frame_seed,
+            &mut TimelineEvaluationDiagnostics::default(),
+            &mut SessionPreparedClipEffectResolver { program, session },
+        )
+    } else {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1044,6 +1158,46 @@ mod tests {
         )
         .expect("evaluate timeline")
         .elements
+    }
+
+    #[test]
+    fn auxiliary_clip_plan_retains_source_processing_and_retimed_media() {
+        use mondrian_effects::{EffectExecutionSessionConfig, EffectType};
+
+        let mut sequence = Sequence::new("retimed auxiliary Clip");
+        let grid = sequence.time_base();
+        let source_asset = AssetId::new();
+        let mut source = Clip::new(source_asset, tt(2, grid), tt(5, grid)).unwrap();
+        source.set_source_origin(tt(11, grid)).unwrap();
+        source
+            .add_effect_node(mondrian_effects::instantiate_effect_node(EffectType::Fill).unwrap());
+        let source_id = source.id;
+        sequence.video_tracks[0].add_clip(source).unwrap();
+        let consumer = Clip::new(AssetId::new(), tt(0, grid), tt(30, grid)).unwrap();
+        let placement = TimelineClipExecutionRef {
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            clip_id: consumer.id,
+            clip_time: tt(9, grid),
+            endpoint: TimelineClipEndpointContext::Ordinary,
+        };
+        sequence.video_tracks[1].add_clip(consumer).unwrap();
+        let program = PreparedVisualProgram::prepare(&sequence).unwrap();
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig::default());
+        let retime = VisualSourceRetime { time_offset: tt(-5, grid), ..Default::default() };
+        let prepared =
+            prepare_auxiliary_clip_source(&program, placement, source_id, retime, &mut session)
+                .unwrap();
+        assert_eq!(prepared.time.requested_time, tt(4, grid));
+        assert_eq!(prepared.placement.clip_id, source_id);
+        let Some(TimelineRenderPlanElement::Media(media)) = prepared.element else {
+            panic!("expected a prepared source media Clip");
+        };
+        assert_eq!(media.placement, prepared.placement);
+        assert_eq!(media.asset_id, source_asset);
+        assert_eq!(media.frame_seed, 4);
+        assert_eq!(media.source_sample.time(), tt(13, grid));
+        assert!(!media.effect_graph.graph().is_identity());
     }
 
     #[test]
