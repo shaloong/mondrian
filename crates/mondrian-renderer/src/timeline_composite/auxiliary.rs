@@ -13,16 +13,18 @@ use mondrian_effects::{
 
 type ImageDomain = (EffectFrameExtent, ImageSampling);
 
-/// Maps retain the source grid. Mattes and layers align to the actual primary grid.
+/// Maps and layers retain the source grid for reconstruction by the effect.
+/// Mattes register coverage on the actual primary grid.
 pub fn timeline_auxiliary_registration_geometry(
     role: AuxiliaryRole,
     primary: ImageDomain,
     source: ImageDomain,
 ) -> (ImageDomain, AuxiliaryPolicy) {
-    if role == AuxiliaryRole::Map {
-        (source, AuxiliaryPolicy::new(AuxiliaryResolution::Authored))
-    } else {
-        (primary, AuxiliaryPolicy::MATCH_PRIMARY)
+    match role {
+        AuxiliaryRole::Matte => (primary, AuxiliaryPolicy::MATCH_PRIMARY),
+        AuxiliaryRole::Map | AuxiliaryRole::Layer => {
+            (source, AuxiliaryPolicy::new(AuxiliaryResolution::Authored))
+        }
     }
 }
 

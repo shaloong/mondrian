@@ -1227,19 +1227,26 @@ fn record_gpu_suffix(
                 PreparedHeterogeneousGpuStep::Dispatch(
                     PreparedHeterogeneousGpuDispatch::FillMatte {
                         input, mask, output, pass, ..
+                    }
+                    | PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer {
+                        input,
+                        auxiliary: mask,
+                        output,
+                        pass,
+                        ..
                     },
                 ) => {
                     let input_handle = handles.get(input).ok_or(
                         HeterogeneousGpuContinuationError::InvalidPlan {
-                            reason: "gpu_fill_matte_input_not_materialized",
+                            reason: "gpu_auxiliary_primary_not_materialized",
                         },
                     )?;
                     let mask_handle = handles.get(mask).ok_or(
                         HeterogeneousGpuContinuationError::InvalidPlan {
-                            reason: "gpu_fill_matte_mask_not_materialized",
+                            reason: "gpu_auxiliary_source_not_materialized",
                         },
                     )?;
-                    let output_handle = resources.compositor.record_fill_matte_pass(
+                    let output_handle = resources.compositor.record_graph_auxiliary_pass(
                         resources.device,
                         resources.encoder,
                         resources.ids,
@@ -1996,6 +2003,7 @@ fn gpu_recording_device_demand(
             | PreparedHeterogeneousGpuDispatch::Blend { .. }
             | PreparedHeterogeneousGpuDispatch::Mask { .. }
             | PreparedHeterogeneousGpuDispatch::FillMatte { .. }
+            | PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer { .. }
             | PreparedHeterogeneousGpuDispatch::MaskCombine { .. }
             | PreparedHeterogeneousGpuDispatch::MatteMix { .. } => 1,
         };
@@ -2413,6 +2421,15 @@ fn validate_gpu_suffix_schedule(
                     waits,
                     signal,
                     ..
+                }
+                | PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer {
+                    node,
+                    input,
+                    auxiliary: mask,
+                    output,
+                    waits,
+                    signal,
+                    ..
                 },
             ) => {
                 require_plan(
@@ -2443,9 +2460,19 @@ fn validate_gpu_suffix_schedule(
                     EffectColorDomain::SceneLinearRgb,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
-                let alpha_mask = EffectValueFormat::new(
+                let auxiliary_domain = if matches!(
+                    step,
+                    PreparedHeterogeneousGpuStep::Dispatch(
+                        PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer { .. }
+                    )
+                ) {
+                    EffectColorDomain::SceneLinearRgb
+                } else {
+                    EffectColorDomain::AlphaMask
+                };
+                let auxiliary_format = EffectValueFormat::new(
                     EffectWorkingPrecision::Float32,
-                    EffectColorDomain::AlphaMask,
+                    auxiliary_domain,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
                 require_plan(
@@ -2454,7 +2481,7 @@ fn validate_gpu_suffix_schedule(
                         && output_value.completion() == *signal
                         && output_value.value() == *node
                         && input_value.residency().format().exact_format() == Some(scene_linear)
-                        && mask_value.residency().format().exact_format() == Some(alpha_mask)
+                        && mask_value.residency().format().exact_format() == Some(auxiliary_format)
                         && output_value.residency().format().exact_format() == Some(scene_linear),
                     "gpu_mask_value_domain_or_token_mismatch",
                 )?;
@@ -3952,6 +3979,76 @@ mod tests {
         }
         assert!(!runtime.is_poisoned());
         assert!(runtime.table.is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_wgpu_channel_combiner_layer_joins_two_graph_values() {
+        use mondrian_effects::{AuxiliaryRole, ChannelCombinerChannel, ChannelCombinerGrade};
+
+        let context = GpuContext::new().await.expect("real GPU adapter");
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let auxiliary =
+            builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let grade = ChannelCombinerGrade::new(
+            ChannelCombinerChannel::Green,
+            ChannelCombinerChannel::Red,
+            false,
+            0.0,
+            WORKING_SPACE.luminance_coefficients(),
+        )
+        .unwrap();
+        let output = builder.add_auxiliary_effect_with_role(
+            source,
+            auxiliary,
+            EffectRenderOp::ChannelCombiner { grade },
+            AuxiliaryRole::Layer,
+        );
+        builder.set_current_output(output);
+        let graph = compile_reference_render_graph(builder.finish()).unwrap();
+        let pixels = test_input();
+        let view = mondrian_effects::EffectFloatFrameView::new(
+            EXTENT,
+            EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &pixels,
+        );
+        let expected = apply_compiled_effect_graph_rgba_f32(view, &graph, FRAME_SEED).unwrap();
+        assert_ne!(expected.pixels(), &pixels);
+        let completion = cpu_completion_with_gpu_node_count(Arc::clone(&graph), &pixels, 1);
+        assert_eq!(completion.boundary_values().len(), 2);
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .unwrap();
+        let actual = runtime
+            .execute_to_cpu(
+                request(&graph, generous_gpu_grant()),
+                completion,
+                &ExecutionCancellationToken::new(),
+                gpu_test_deadline(),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+            )
+            .unwrap();
+        let max_error = actual
+            .frame()
+            .rgba_f32()
+            .data
+            .iter()
+            .flatten()
+            .zip(expected.pixels().iter().flatten())
+            .map(|(actual, expected)| {
+                assert!(actual.is_finite() && expected.is_finite());
+                (actual - expected).abs()
+            })
+            .fold(0.0f32, f32::max);
+        eprintln!("graph-local Channel Combiner maximum absolute error = {max_error:.9e}");
+        assert!(max_error <= 1.0e-4);
     }
 
     #[tokio::test]

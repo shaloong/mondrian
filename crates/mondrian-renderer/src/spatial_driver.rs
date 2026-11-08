@@ -223,11 +223,12 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                 stages.push(GpuSpatialStagePlan::PointOps { operations: operations.clone() });
             }
             EffectGpuStage::Spatial { pass, .. } => {
-                if let EffectGpuSpatialPass::FillMatte { external_slot, .. } = pass {
+                if let Some(external_slot) = pass.auxiliary_slot() {
                     let slot =
                         external_slot.ok_or_else(|| GpuSpatialChainBlocker::UnsupportedPass {
                             pass: pass.name(),
-                            detail: "a graph-local matte requires the graph dispatcher".into(),
+                            detail: "a graph-local auxiliary input requires the graph dispatcher"
+                                .into(),
                         })?;
                     if !auxiliary_slots.contains(&slot) {
                         return Err(GpuSpatialChainBlocker::MissingAuxiliaryInput { slot });

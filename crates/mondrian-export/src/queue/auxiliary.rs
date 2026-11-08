@@ -4,7 +4,7 @@ use super::*;
 use mondrian_core::timeline_data::TimelineClipEndpointContext;
 use mondrian_core::{ImageSampling, SourceSampleTarget, VisualSourceReference, VisualSourceRetime};
 use mondrian_effects::{
-    AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryPolicy, AuxiliaryResolution,
+    AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryPolicy, AuxiliaryResolution, AuxiliaryRole,
     CompiledEffectGraph, EffectProcessorControl,
 };
 use mondrian_renderer::{
@@ -124,9 +124,9 @@ pub(super) fn prepare_gpu_rasters(
             }
             VisualSourceReference::Unbound => return Err(format!("required export auxiliary slot {} is unbound", key.slot)),
         };
-        // The admitted pixel-local matte samples its clamped bilinear alpha at
-        // primary pixel centres. This is the same registration as the CPU path.
-        let policy = if (extent.width(), extent.height()) == primary {
+        // Coverage-only mattes can reconstruct their alpha directly. Layers
+        // keep the authored grid so the kernel reconstructs each channel once.
+        let policy = if spec.role() == AuxiliaryRole::Matte && (extent.width(), extent.height()) == primary {
             AuxiliaryPolicy::MATCH_PRIMARY
         } else {
             AuxiliaryPolicy::new(AuxiliaryResolution::Authored)
@@ -521,10 +521,14 @@ mod tests {
     }
 
     fn snapshot(reference: VisualSourceReference) -> TimelineExportSnapshot {
+        snapshot_with_effect(matte(reference))
+    }
+
+    fn snapshot_with_effect(effect: mondrian_effects::EffectNode) -> TimelineExportSnapshot {
         let mut sequence = Sequence::new("Export auxiliary consumer");
         sequence.settings.resolution = Resolution { width: 16, height: 16 };
         let mut consumer = solid(Color::from_rgba8(0, 0, 0, 255), TimelineTime::ZERO);
-        consumer.add_effect_node(matte(reference));
+        consumer.add_effect_node(effect);
         sequence.video_tracks[1].add_clip(consumer).unwrap();
         TimelineExportSnapshot {
             sequence,
@@ -615,6 +619,38 @@ mod tests {
     #[test]
     #[ignore = "real GPU Export second-picture qualification; run independently"]
     fn export_gpu_auxiliary_sequence_matches_cpu_float32() {
+        assert_export_gpu_auxiliary_sequence(matte, [0.5, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    #[ignore = "real GPU Export second-picture qualification; run independently"]
+    fn export_gpu_channel_combiner_second_layer_matches_cpu_float32() {
+        assert_export_gpu_auxiliary_sequence(
+            |reference| {
+                let kind = EffectType::ChannelCombiner;
+                let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+                for (key, value) in [
+                    ("use_second_layer", PropertyValue::Bool(true)),
+                    (
+                        "second_layer_source",
+                        PropertyValue::VisualSource(reference),
+                    ),
+                    ("to", PropertyValue::Enum("red".into())),
+                ] {
+                    effect
+                        .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+                        .unwrap();
+                }
+                effect
+            },
+            [0.5, 0.0, 0.0, 1.0],
+        );
+    }
+
+    fn assert_export_gpu_auxiliary_sequence(
+        effect: impl FnOnce(VisualSourceReference) -> mondrian_effects::EffectNode,
+        expected: [f32; 4],
+    ) {
         let _gpu = GpuVisualExecutionGuard::activate();
         let mut source = Sequence::new("Export GPU matte source");
         source.settings.resolution = Resolution { width: 31, height: 17 };
@@ -624,19 +660,17 @@ mod tests {
                 TimelineTime::ZERO,
             ))
             .unwrap();
-        let mut timeline = snapshot(VisualSourceReference::Sequence {
+        let mut timeline = snapshot_with_effect(effect(VisualSourceReference::Sequence {
             sequence_id: source.id,
             retime: Default::default(),
-        });
+        }));
         timeline.sequences.push(source);
         let mut working = None;
         render(&timeline, &mut working).expect("CPU working reference");
-        assert!(working
-            .unwrap()
-            .rgba_f32()
-            .data
+        assert!(working.unwrap().rgba_f32().data.iter().all(|pixel| pixel
             .iter()
-            .all(|pixel| (pixel[0] - 0.5).abs() < 1.0e-6 && pixel[1..] == [0.0, 0.0, 1.0]));
+            .zip(expected)
+            .all(|(actual, expected)| (actual - expected).abs() < 1.0e-6)));
         let mut session = ExportVisualRenderSession::default();
         let color = timeline
             .sequence

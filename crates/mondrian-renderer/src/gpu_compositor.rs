@@ -42,7 +42,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 const GPU_COMPOSITOR_UNIFORM_PAGE_SLOTS: usize = 128;
-const GPU_COMPOSITOR_SHADER: &str = r#"
+const GPU_COMPOSITOR_SHADER: &str = concat!(
+    r#"
 struct VsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -869,18 +870,6 @@ fn invert_extremes(rgb: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(max(rgb.r, max(rgb.g, rgb.b)), min(rgb.r, min(rgb.g, rgb.b)));
 }
 
-fn invert_hue_of(rgb: vec3<f32>, high: f32, chroma: f32) -> f32 {
-    var hue = 0.0;
-    if (high == rgb.r) {
-        hue = (rgb.g - rgb.b) / chroma;
-    } else if (high == rgb.g) {
-        hue = (rgb.b - rgb.r) / chroma + 2.0;
-    } else {
-        hue = (rgb.r - rgb.g) / chroma + 4.0;
-    }
-    return fract(hue / 6.0);
-}
-
 fn invert_rgb_from_hue_chroma_lightness(
     hue: f32,
     chroma: f32,
@@ -994,64 +983,6 @@ fn black_and_white(rgb: vec3<f32>, head: vec4<f32>, tail: vec2<f32>, tint_amount
     let gray = lightness * gain;
     let tinted = gray + (gray * tint - vec3<f32>(gray)) * tint_amount;
     return tinted;
-}
-
-// CHN-07 samples one of ten per-pixel scalars. Hue turns reuse the HSL helper
-// above; neutral pixels report zero hue and saturation because neither is
-// defined once chroma vanishes.
-fn shift_channels_source(
-    rgb: vec3<f32>,
-    alpha: f32,
-    tag: u32,
-    coefficients: vec3<f32>,
-) -> f32 {
-    if (tag == 0u) { return rgb.r; }
-    if (tag == 1u) { return rgb.g; }
-    if (tag == 2u) { return rgb.b; }
-    if (tag == 3u) { return alpha; }
-    if (tag == 4u) { return dot(rgb, coefficients); }
-    let high = max(rgb.r, max(rgb.g, rgb.b));
-    let low = min(rgb.r, min(rgb.g, rgb.b));
-    let chroma = high - low;
-    let lightness = (high + low) * 0.5;
-    if (tag == 5u) {
-        if (chroma <= 1.0e-6) { return 0.0; }
-        return invert_hue_of(rgb, high, chroma);
-    }
-    if (tag == 6u) {
-        let span = 1.0 - abs(2.0 * lightness - 1.0);
-        if (chroma <= 1.0e-6 || span <= 1.0e-6) { return 0.0; }
-        return chroma / span;
-    }
-    if (tag == 7u) { return lightness; }
-    if (tag == 8u) { return high; }
-    return low;
-}
-
-// CHN-08 samples one of eight source codes. Codes 0..3 are the RGBA slots and
-// reuse the CHN-07 reader verbatim, so a slot that both effects can sample
-// agrees bit for bit; 4 is luminance, 5 lightness, 6 saturation and 7 hue.
-fn channel_combiner_sample(
-    pixel: vec4<f32>,
-    code: u32,
-    coefficients: vec3<f32>,
-) -> f32 {
-    if (code <= 3u) {
-        return shift_channels_source(pixel.rgb, pixel.a, code, coefficients);
-    }
-    if (code == 4u) { return dot(pixel.rgb, coefficients); }
-    if (code == 5u) {
-        let high = max(pixel.r, max(pixel.g, pixel.b));
-        let low = min(pixel.r, min(pixel.g, pixel.b));
-        return (high + low) * 0.5;
-    }
-    if (code == 6u) {
-        return shift_channels_source(pixel.rgb, pixel.a, 6u, coefficients);
-    }
-    if (code == 7u) {
-        return shift_channels_source(pixel.rgb, pixel.a, 5u, coefficients);
-    }
-    return 0.0;
 }
 
 // FLM-02 grain: the hash constants are shared verbatim with the CPU kernel so
@@ -3546,52 +3477,16 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 }
             }
         } else if (effect.header.x == 47u) {
-            // `ChannelCombinerGrade`: params is [solid alpha, luma r, luma g,
-            // luma b]; header.y packs the four destination slot codes (four bits
-            // each, 15 keeps the incoming slot); header.z packs the derived
-            // target code (1 luminance, 2 lightness), the derived source code
-            // and the invert bit. Every written slot is sampled from the input
-            // pixel before anything is assigned, so a slot never reads a value
-            // this stage just wrote.
-            let slots = effect.header.y;
-            let flags = effect.header.z;
-            let coefficients = effect.params.yzw;
-            let inverted = (flags & 256u) != 0u;
-            var out = pixel;
-            if ((flags & 15u) != 0u) {
-                let value = channel_combiner_sample(pixel, (flags >> 4u) & 15u, coefficients);
-                let target_value = select(value, 1.0 - value, inverted);
-                if ((flags & 15u) == 1u) {
-                    let base = dot(pixel.rgb, coefficients);
-                    let scale = select(0.0, target_value / base, base > 0.0);
-                    out = vec4<f32>(pixel.rgb * scale, pixel.a);
-                } else {
-                    let high = max(pixel.r, max(pixel.g, pixel.b));
-                    let low = min(pixel.r, min(pixel.g, pixel.b));
-                    let base = (high + low) * 0.5;
-                    let shift = select(target_value - base, 0.0, base != base);
-                    out = vec4<f32>(pixel.rgb + vec3<f32>(shift), pixel.a);
-                }
-            } else {
-                let sampled = vec4<f32>(
-                    channel_combiner_sample(pixel, slots & 15u, coefficients),
-                    channel_combiner_sample(pixel, (slots >> 4u) & 15u, coefficients),
-                    channel_combiner_sample(pixel, (slots >> 8u) & 15u, coefficients),
-                    channel_combiner_sample(pixel, (slots >> 12u) & 15u, coefficients),
-                );
-                let value = select(sampled, vec4<f32>(1.0) - sampled, inverted);
-                if ((slots & 15u) != 15u) { out.r = value.x; }
-                if (((slots >> 4u) & 15u) != 15u) { out.g = value.y; }
-                if (((slots >> 8u) & 15u) != 15u) { out.b = value.z; }
-                if (((slots >> 12u) & 15u) != 15u) { out.a = value.w; }
-            }
-            if (effect.params.x > 0.0) { out.a = effect.params.x; }
-            pixel = out;
+            pixel = channel_combiner_apply(
+                pixel, pixel, effect.header.y, effect.header.z, effect.params,
+            );
         }
     }
     return pixel;
 }
-"#;
+"#,
+    include_str!("channel_combiner.wgsl")
+);
 
 // Exact Mix has its own module and a lazily owned pipeline. Ordinary Over
 // does not parse, validate or compile the fixed-width integer arithmetic.
@@ -5457,46 +5352,44 @@ impl GpuFrameCompositor {
                             ),
                         });
                     }
-                    let produced =
-                        if let EffectGpuSpatialPass::FillMatte { external_slot, .. } = pass {
-                            let binding = auxiliary_rasters
-                                .iter()
-                                .find(|binding| Some(binding.slot) == *external_slot)
-                                .ok_or_else(|| GpuCompositeError::SpatialChainFailed {
-                                    pass: "spatial_auxiliary_missing",
-                                    detail: format!(
-                                        "auxiliary slot {external_slot:?} lost its binding"
-                                    ),
-                                })?;
-                            let resource = table
-                                .get(binding.frame)
-                                .map_err(GpuCompositeError::ResourceTable)?;
-                            self.spatial.record_auxiliary(
-                                device,
-                                encoder,
-                                pass,
-                                &current_texture,
-                                &resource.resource().texture,
-                                &scratch[0],
-                                binding.transform,
-                            )
-                        } else {
-                            self.spatial.record(
-                                device,
-                                encoder,
-                                pass,
-                                &current_texture,
-                                &scratch,
-                                width,
-                                height,
-                            )
+                    let produced = if let Some(external_slot) = pass.auxiliary_slot() {
+                        let binding = auxiliary_rasters
+                            .iter()
+                            .find(|binding| Some(binding.slot) == external_slot)
+                            .ok_or_else(|| GpuCompositeError::SpatialChainFailed {
+                                pass: "spatial_auxiliary_missing",
+                                detail: format!(
+                                    "auxiliary slot {external_slot:?} lost its binding"
+                                ),
+                            })?;
+                        let resource =
+                            table.get(binding.frame).map_err(GpuCompositeError::ResourceTable)?;
+                        self.spatial.record_auxiliary(
+                            device,
+                            encoder,
+                            pass,
+                            &current_texture,
+                            &resource.resource().texture,
+                            &scratch[0],
+                            binding.transform,
+                        )
+                    } else {
+                        self.spatial.record(
+                            device,
+                            encoder,
+                            pass,
+                            &current_texture,
+                            &scratch,
+                            width,
+                            height,
+                        )
+                    }
+                    .map_err(|error| {
+                        GpuCompositeError::SpatialChainFailed {
+                            pass: spatial_failure_pass(&error),
+                            detail: error.to_string(),
                         }
-                        .map_err(|error| {
-                            GpuCompositeError::SpatialChainFailed {
-                                pass: spatial_failure_pass(&error),
-                                detail: error.to_string(),
-                            }
-                        })?;
+                    })?;
                     let output = create_working_resource(
                         device,
                         ids,
@@ -5977,9 +5870,9 @@ impl GpuFrameCompositor {
         })
     }
 
-    /// Record Fill over a graph-local matte on the same actual grid.
+    /// Record an auxiliary operation over two graph-local materializations.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_fill_matte_pass(
+    pub(crate) fn record_graph_auxiliary_pass(
         &self,
         device: &wgpu::Device,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
@@ -5987,27 +5880,47 @@ impl GpuFrameCompositor {
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
         input: &GpuColorFrameHandle,
-        mask: &GpuColorFrameHandle,
+        auxiliary: &GpuColorFrameHandle,
         pass: &EffectGpuSpatialPass,
         working_color_space: mondrian_core::WorkingColorSpace,
     ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
-        if !matches!(
-            pass,
-            EffectGpuSpatialPass::FillMatte { external_slot: None, .. }
-        ) {
+        if pass.auxiliary_slot() != Some(None) {
             return Err(GpuCompositeError::SpatialChainFailed {
                 pass: pass.name(),
-                detail: "expected a graph-local Fill matte".to_owned(),
+                detail: "expected a graph-local auxiliary pass".to_owned(),
             });
         }
-        validate_alpha_mask_inputs(input, mask, working_color_space)?;
+        if matches!(pass, EffectGpuSpatialPass::FillMatte { .. }) {
+            validate_alpha_mask_inputs(input, auxiliary, working_color_space)?;
+        } else {
+            let expected = ColorFrameDescriptor {
+                color_space: working_color_space.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+                ..input.descriptor()
+            };
+            for frame in [input, auxiliary] {
+                let actual = frame.descriptor();
+                if actual != expected {
+                    return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
+                }
+                if frame.texture_format() != product_gpu_working_texture_format() {
+                    return Err(GpuCompositeError::SpatialChainFailed {
+                        pass: pass.name(),
+                        detail: "expected working Float32 textures".to_owned(),
+                    });
+                }
+            }
+        }
         let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
-        let mask_resource = table.get(mask).map_err(GpuCompositeError::ResourceTable)?;
+        let auxiliary_resource = table.get(auxiliary).map_err(GpuCompositeError::ResourceTable)?;
         let output = create_working_resource(
             device,
             ids,
             input.descriptor(),
-            "gpu-fill-matte-output",
+            "gpu-graph-auxiliary-output",
             resource_pool,
         )?;
         self.spatial
@@ -6016,7 +5929,7 @@ impl GpuFrameCompositor {
                 encoder,
                 pass,
                 &input_resource.resource().texture,
-                &mask_resource.resource().texture,
+                &auxiliary_resource.resource().texture,
                 &output.resource().texture,
                 [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             )
@@ -7927,9 +7840,8 @@ fn prepare_spatial_chains(
             let declared = pipeline.stages().iter().any(|stage| {
                 matches!(
                     stage,
-                    EffectGpuStage::Spatial {
-                        pass: EffectGpuSpatialPass::FillMatte { external_slot: Some(slot), .. }, ..
-                    } if *slot == binding.slot
+                    EffectGpuStage::Spatial { pass, .. }
+                        if pass.auxiliary_slot() == Some(Some(binding.slot))
                 )
             });
             if !declared || slots[..binding_index].contains(&binding.slot) {
@@ -17289,14 +17201,53 @@ mod tests {
     }
 
     fn assert_fill_matte_texture_parity(context: &crate::GpuContext) {
+        use mondrian_effects::{AuxiliaryRole, EffectRenderOp, FillGrade};
+        assert_auxiliary_texture_parity(context, AuxiliaryRole::Matte, |case| {
+            let grade = FillGrade::new(2.0, 1.3, case == 1, [0.9, 0.1, 0.6], 0.7).unwrap();
+            EffectRenderOp::Fill { grade }
+        });
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_channel_combiner_layer_matches_float32_cpu() {
+        use mondrian_effects::{
+            AuxiliaryRole, ChannelCombinerChannel as Channel, ChannelCombinerGrade, EffectRenderOp,
+        };
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for second-layer parity");
+        assert_auxiliary_texture_parity(&context, AuxiliaryRole::Layer, |case| {
+            let (source, target, invert, solid_alpha) = [
+                (Channel::Red, Channel::Red, false, 0.0),
+                (Channel::Hue, Channel::Lightness, true, 0.75),
+                (Channel::Alpha, Channel::Luminance, false, 0.0),
+                (Channel::Red, Channel::Alpha, false, 0.0),
+            ][case];
+            let grade = ChannelCombinerGrade::new(
+                source,
+                target,
+                invert,
+                solid_alpha,
+                WorkingColorSpace::LinearRec709.luminance_coefficients(),
+            )
+            .unwrap();
+            EffectRenderOp::ChannelCombiner { grade }
+        });
+    }
+
+    fn assert_auxiliary_texture_parity(
+        context: &crate::GpuContext,
+        role: mondrian_effects::AuxiliaryRole,
+        operation: impl Fn(usize) -> mondrian_effects::EffectRenderOp,
+    ) {
         use mondrian_core::{ImageSampling, WorkingRgbaF32Frame};
         use mondrian_effects::{
             compile_reference_render_graph, lower_effect_graph_to_gpu_pipeline,
             AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryFloatFrame, AuxiliaryFloatInput,
-            AuxiliaryOutOfBounds, AuxiliaryRole, AuxiliarySampling, EffectColorDomainContract,
+            AuxiliaryOutOfBounds, AuxiliarySampling, EffectColorDomainContract,
             EffectExecutionSession, EffectFloatFrameView, EffectFrameExtent,
-            EffectGraphBuilderState, EffectProcessorControl, EffectRenderOp, EffectValueFormat,
-            EffectWorkingPrecision, FillGrade,
+            EffectGraphBuilderState, EffectProcessorControl, EffectValueFormat,
+            EffectWorkingPrecision,
         };
 
         let (width, height) = (7, 5);
@@ -17307,10 +17258,10 @@ mod tests {
             .collect::<Vec<_>>();
         let matte = [
             [7.0, -1.0, 0.2, 0.0],
-            [0.0, 0.0, 0.0, 0.2],
-            [0.0, 0.0, 0.0, 0.8],
+            [-1.5, 0.0, 0.0, 0.2],
+            [0.25, 0.0, 0.0, 0.8],
             [0.0, 0.0, 0.0, 1.0],
-            [0.0, 0.0, 0.0, 0.6],
+            [1.75, 0.0, 0.0, 0.6],
             [0.0, 0.0, 0.0, 0.0],
         ];
         let frame = |width, height, data| {
@@ -17344,12 +17295,8 @@ mod tests {
             ColorFrameAlpha::StraightCoverage,
         );
         let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        for (sampling, transform, invert) in [
-            (
-                AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
-                identity,
-                false,
-            ),
+        for (case, (sampling, transform)) in [
+            (AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP, identity),
             (
                 AuxiliarySampling::new(
                     AuxiliaryCoordinateMapping::FrameTransform,
@@ -17357,23 +17304,21 @@ mod tests {
                     AuxiliaryOutOfBounds::Transparent,
                 ),
                 [1.0, 0.0, -0.3, 0.0, 1.0, 0.15],
-                true,
             ),
-            (
-                AuxiliarySampling::PRIMARY_GRID_NEAREST_CLAMP,
-                identity,
-                false,
-            ),
-        ] {
-            let grade = FillGrade::new(2.0, 1.3, invert, [0.9, 0.1, 0.6], 0.7).unwrap();
+            (AuxiliarySampling::PRIMARY_GRID_NEAREST_CLAMP, identity),
+            (AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP, identity),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut builder = EffectGraphBuilderState::new();
             let aux =
                 builder.append_external_input(9, format, EffectColorDomainContract::SCENE_LINEAR);
             let output = builder.add_auxiliary_effect(
                 builder.source(),
                 aux,
-                EffectRenderOp::Fill { grade },
-                AuxiliaryRole::Matte,
+                operation(case),
+                role,
                 sampling,
             );
             builder.set_current_output(output);
@@ -17382,9 +17327,9 @@ mod tests {
             assert!(matches!(
                 pipeline.stages(),
                 [EffectGpuStage::Spatial {
-                    pass: EffectGpuSpatialPass::FillMatte { external_slot: Some(9), .. },
+                    pass,
                     ..
-                }]
+                }] if pass.auxiliary_slot() == Some(Some(9))
             ));
             let policy = AuxiliaryPolicy::new(AuxiliaryResolution::Authored);
             let cpu_binding = AuxiliaryFloatInput {
@@ -17418,7 +17363,7 @@ mod tests {
                 .pixels()
                 .iter()
                 .zip(&pixels)
-                .any(|(out, input)| (out[0] - input[0]).abs() > 0.1));
+                .any(|(out, input)| out.iter().zip(input).any(|(a, b)| (a - b).abs() > 0.1)));
             let expected = cpu
                 .pixels()
                 .iter()
@@ -17486,7 +17431,7 @@ mod tests {
                 .zip(actual.iter().flatten())
                 .map(|(cpu, gpu)| (cpu - gpu).abs())
                 .fold(0.0f32, f32::max);
-            eprintln!("Fill matte parity {sampling:?}, max absolute error = {max_error:.9e}");
+            eprintln!("{role:?} parity {sampling:?}, max absolute error = {max_error:.9e}");
         }
     }
 
