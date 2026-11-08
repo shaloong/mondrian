@@ -18269,6 +18269,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_camera_view_fills_only_missed_rays_on_a_transparent_layer() {
+        use mondrian_core::{PropertyHost, PropertyMutation, PropertyValue, TimelineTime};
+        use mondrian_effects::{
+            compile_clip_effect_graph, instantiate_effect_node, lower_effect_graph_to_gpu_pipeline,
+            EffectType,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping Camera View compositor parity: no GPU adapter available");
+            return;
+        };
+        let (width, height) = (31, 19);
+        let pixels = vec![[-0.25, 0.75, 1.25, 0.0]; (width * height) as usize];
+        let working_space = WorkingColorSpace::LinearRec709;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: working_space,
+            data: pixels.clone(),
+        });
+        let kind = EffectType::CameraView;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        let fill_color = Color { r: 0.25, g: 0.5, b: 0.75, a: 0.5 };
+        for (name, value) in [
+            ("longitude", PropertyValue::Float(27.0)),
+            ("latitude", PropertyValue::Float(-18.0)),
+            ("roll", PropertyValue::Float(14.0)),
+            ("distance", PropertyValue::Float(2.0)),
+            ("fill_color", PropertyValue::Color(fill_color)),
+            ("fill_alpha", PropertyValue::Float(0.5)),
+        ] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: kind.property_path(name),
+                    value,
+                })
+                .unwrap();
+        }
+        let compiled =
+            compile_clip_effect_graph(&[effect], &[], TimelineTime::ZERO, working_space).unwrap();
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+        let entries = [GpuCompositeSpatialLayer {
+            layer: spatial_test_layer(&frame),
+            spatial_plan: Some(&pipeline),
+        }];
+        let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+            &context,
+            &entries,
+            width,
+            height,
+            working_space,
+        );
+        let expected = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels,
+            ),
+            &compiled,
+            0,
+        )
+        .unwrap();
+        assert_eq!(actual[0], [0.25, 0.5, 0.75, 0.25]);
+        assert_eq!(actual[(height / 2 * width + width / 2) as usize], [0.0; 4]);
+        assert_eq!(diagnostics.spatial_effect_layers, 1);
+        assert_eq!(diagnostics.spatial_effect_passes, 1);
+        assert_eq!(diagnostics.spatial_scratch_textures_peak, 2);
+        assert_eq!(diagnostics.spatial_point_stages, 0);
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+        let max_error = max_spatial_float_error(&expected, &actual);
+        eprintln!("TRF-08 transparent compositor, max absolute error = {max_error:.9e}");
+        assert!(max_error <= 1.0e-4, "{max_error}");
+    }
+
+    #[tokio::test]
+    async fn gpu_camera_view_matches_soft_alpha_and_depth_on_the_raw_pass() {
+        use mondrian_effects::{camera_view_frame_f32, CameraViewGrade, EffectGpuSpatialPass};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping Camera View Float32 parity: no GPU adapter available");
+            return;
+        };
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let fill = [0.25, 0.5, 0.75, 0.5];
+        for (width, height, angles, focal, distance, zoom, alpha) in [
+            (31, 17, [0.0; 3], 500.0, 1.0, 100.0, 0.5),
+            (31, 17, [29.0, -16.0, 13.0], 470.0, 1.3, 114.0, 0.5),
+            (31, 17, [-16.0, 23.0, -32.0], 740.0, 1.1, 89.0, 0.0),
+            (31, 17, [90.0, 0.0, 0.0], 500.0, 1.0, 100.0, 0.5),
+            (31, 17, [145.0, 16.0, -23.0], 500.0, 1.0, 100.0, 0.0),
+            (31, 17, [60.0, 0.0, 0.0], 250.0, 1.0, 100.0, 0.5),
+            (9, 5, [0.0; 3], 500.0, 1.125, 100.0, 0.5),
+            (1, 17, [0.0; 3], 500.0, 0.5, 100.0, 0.5),
+        ] {
+            let grade = CameraViewGrade::new(angles, focal, distance, zoom, fill, alpha).unwrap();
+            let mut pixels = spatial_test_pixels(width, height);
+            for (index, pixel) in pixels.iter_mut().enumerate() {
+                pixel[0] = pixel[0] * 1.5 + 0.2;
+                pixel[2] -= 0.75;
+                pixel[3] = [0.0, 1.0 / 65_535.0, 0.2, 0.65, 1.0][index % 5];
+            }
+            let mut expected = pixels.clone();
+            assert!(camera_view_frame_f32(
+                &mut expected,
+                width as usize,
+                height as usize,
+                grade
+            ));
+            let actual = readback_single_spatial_pass(
+                &context,
+                &executor,
+                &pixels,
+                width,
+                height,
+                EffectGpuSpatialPass::CameraView { grade },
+            );
+            if grade.is_identity() {
+                for (before, after) in pixels.iter().zip(&actual) {
+                    assert_eq!(before.map(f32::to_bits), after.map(f32::to_bits));
+                }
+            }
+            if angles[0] == 90.0 {
+                assert!(actual.iter().all(|&pixel| pixel == [0.25, 0.5, 0.75, 0.25]));
+            }
+            if angles[0] > 90.0 {
+                assert!(actual.iter().all(|&pixel| pixel == [0.0; 4]));
+            }
+            let max_error = max_spatial_float_error(&expected, &actual);
+            eprintln!(
+                "TRF-08 raw {width}x{height} {grade:?}, max absolute error = {max_error:.9e}"
+            );
+            if max_error > 1.0e-4 {
+                for (index, (cpu, gpu)) in expected.iter().zip(&actual).enumerate() {
+                    if cpu.iter().zip(gpu).any(|(a, b)| (a - b).abs() > 1.0e-4) {
+                        eprintln!(
+                            "Camera View mismatch at ({}, {}): CPU {cpu:?}, GPU {gpu:?}",
+                            index % width as usize,
+                            index / width as usize
+                        );
+                    }
+                }
+            }
+            assert!(max_error <= 1.0e-4, "{grade:?}: {max_error}");
+        }
+    }
+
+    #[tokio::test]
     async fn spatial_chain_runs_on_a_single_layer_before_compositing() {
         use mondrian_effects::{EffectRenderOp, TwirlGrade};
 

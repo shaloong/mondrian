@@ -68,6 +68,7 @@ pub(crate) struct EffectSpatialGpu {
     lens_distortion: wgpu::RenderPipeline,
     chromatic_aberration_removal: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
+    camera_view: wgpu::RenderPipeline,
     flip: wgpu::RenderPipeline,
     ripple: wgpu::RenderPipeline,
     wave_warp: wgpu::RenderPipeline,
@@ -819,6 +820,35 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_basic_3d"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let camera_view = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.camera-view"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_camera_view"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -2074,6 +2104,7 @@ impl EffectSpatialGpu {
             lens_distortion,
             chromatic_aberration_removal,
             basic_3d,
+            camera_view,
             flip,
             ripple,
             wave_warp,
@@ -2864,6 +2895,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::ChromaticAberrationRemoval { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
+            EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
             EffectGpuSpatialPass::Split { .. } => Ok(1),
@@ -3357,6 +3389,32 @@ impl EffectSpatialGpu {
                     device,
                     encoder,
                     &self.basic_3d,
+                    &input_view,
+                    &output_view,
+                    &uniforms,
+                );
+                return Ok(destination.clone());
+            }
+            EffectGpuSpatialPass::CameraView { grade } => {
+                let Some([params, extra, aces, extra1]) =
+                    grade.gpu_controls(source.width(), source.height())
+                else {
+                    return Ok(source.clone());
+                };
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let uniforms = SpatialPassUniform {
+                    size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+                    params,
+                    extra,
+                    aces,
+                    extra1,
+                };
+                let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+                let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.camera_view,
                     &input_view,
                     &output_view,
                     &uniforms,
@@ -8056,6 +8114,30 @@ fn fs_basic_3d(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
         return vec4<f32>(sample.rgb + vec3<f32>(strength * (fourth * fourth)), sample.a);
     }
     return sample;
+}
+
+@fragment
+fn fs_camera_view(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let centre = uniforms.size.xy * 0.5;
+    let inverse_focal_reference = uniforms.params.z;
+    let min_depth = uniforms.params.w;
+    let centre_texel = centre - vec2<f32>(0.5);
+    let destination = floor(position.xy) - centre_texel;
+    let normalized = destination * inverse_focal_reference;
+    let depth = dot(uniforms.aces.xyz, vec3<f32>(normalized, 1.0));
+    if (uniforms.aces.z <= min_depth || depth <= min_depth) {
+        return uniforms.extra1;
+    }
+    let source_offset = vec2<f32>(
+        dot(uniforms.params.xy, destination),
+        dot(uniforms.extra.xy, destination)
+    ) / depth;
+    let bounds = centre + vec2<f32>(uniforms.extra.z);
+    if (!all(abs(source_offset) <= bounds)) {
+        return uniforms.extra1;
+    }
+    let texel = centre_texel + source_offset;
+    return unpremultiply(sample_bilinear_premultiplied(texel.x, texel.y));
 }
 
 @fragment

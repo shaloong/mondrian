@@ -554,4 +554,35 @@ mod tests {
             }]
         ));
     }
+
+    #[test]
+    fn spatial_chain_camera_view_fits_dci_4k_with_full_frame_halo() {
+        let grade = mondrian_effects::CameraViewGrade::new(
+            [22.0, -10.0, 16.0],
+            580.0,
+            2.0,
+            110.0,
+            [1.0; 4],
+            0.5,
+        )
+        .unwrap();
+        let mut graph = EffectGraphBuilderState::new();
+        graph.append_unary(EffectRenderOp::CameraView { grade });
+        let graph = compile_reference_render_graph(graph.finish()).unwrap();
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+        let plan = gpu_spatial_chain_plan(&pipeline, 4096, 2160).unwrap();
+        assert_eq!(plan.scratch_bytes, 283_115_520);
+        assert_eq!(plan.scratch_textures, 2);
+        assert_eq!(plan.spatial_passes, 1);
+        assert_eq!(plan.point_stages, 0);
+        assert!(matches!(
+            plan.stages.as_slice(),
+            [GpuSpatialStagePlan::Spatial {
+                pass: EffectGpuSpatialPass::CameraView { .. },
+                scratch_textures: 1,
+                horizontal_halo: u32::MAX,
+                vertical_halo: u32::MAX,
+            }]
+        ));
+    }
 }
