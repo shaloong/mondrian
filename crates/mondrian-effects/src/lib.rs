@@ -30,6 +30,7 @@ pub use float_frame::{
 pub use float_working_set::estimate_compiled_float_raster_working_bytes;
 pub mod basic_3d;
 pub mod black_white;
+pub mod blanking_fill;
 pub mod box_blur;
 pub mod brightness_contrast;
 pub mod bulge;
@@ -183,6 +184,11 @@ pub use basic_3d::{
 pub use black_white::{
     BlackAndWhiteError, BlackAndWhiteGrade, BLACK_WHITE_HUE_STOPS, BLACK_WHITE_NEUTRAL_WEIGHT,
     BLACK_WHITE_STOP_KEYS, BLACK_WHITE_WEIGHT_MAX, BLACK_WHITE_WEIGHT_MIN,
+};
+pub use blanking_fill::{
+    blanking_fill_frame_f32, BlankingFillError, BlankingFillGrade, BlankingFillMode,
+    BlankingFillParameters, BLANKING_FILL_BLUR_WEIGHTS, BLANKING_FILL_MANUAL_RANGE,
+    BLANKING_FILL_MAX_EDGE, BLANKING_FILL_SOURCE_ZOOM_RANGE,
 };
 pub use box_blur::{box_blur_frame_f32, BoxBlurDirection, BOX_BLUR_AUTHOR_MAX_RADIUS_PIXELS};
 pub use brightness_contrast::{

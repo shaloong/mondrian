@@ -1095,6 +1095,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
         EffectRenderOp::Basic3D { .. } => "basic_3d",
         EffectRenderOp::CameraView { .. } => "camera_view",
+        EffectRenderOp::BlankingFill { .. } => "blanking_fill",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",

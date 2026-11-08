@@ -2848,7 +2848,8 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         EffectRenderOp::SmartBlur { .. }
         | EffectRenderOp::ChromaticAberrationRemoval { .. }
         | EffectRenderOp::Basic3D { .. }
-        | EffectRenderOp::CameraView { .. } => EffectImplementationRequirements {
+        | EffectRenderOp::CameraView { .. }
+        | EffectRenderOp::BlankingFill { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float

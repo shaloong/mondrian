@@ -391,6 +391,11 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "色差校正" => Some("parameter-group-chromatic-aberration-removal"),
         "基本 3D" => Some("parameter-group-basic-3d"),
         "摄像机视图" => Some("parameter-group-camera-view"),
+        "遮幅填充源" => Some("parameter-group-blanking-fill-source"),
+        "填充范围" => Some("parameter-group-blanking-fill-extent"),
+        "填充外观" => Some("parameter-group-blanking-fill-appearance"),
+        "下拉阴影" => Some("parameter-group-blanking-fill-shadow"),
+        "边缘拉伸" => Some("parameter-group-blanking-fill-edge-stretch"),
         _ => None,
     }
 }

@@ -521,6 +521,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::BlankingFill { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "blanking_fill",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::SelectiveColor { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "selective_color",
@@ -1205,6 +1211,13 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::ChromaticAberrationRemoval { .. }
         | EffectRenderOp::Basic3D { .. }
         | EffectRenderOp::CameraView { .. } => 1,
+        EffectRenderOp::BlankingFill { grade } => {
+            if grade.warps_top_layer() {
+                1
+            } else {
+                2
+            }
+        }
         EffectRenderOp::DisplacementMap { .. } => 1,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
@@ -1797,6 +1810,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         ),
         EffectRenderOp::CameraView { grade } => {
             crate::camera_view::apply_camera_view_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *grade,
+                checkpoint,
+            )
+        }
+        EffectRenderOp::BlankingFill { grade } => {
+            crate::blanking_fill::apply_blanking_fill_f32_controlled(
                 working,
                 region.width as usize,
                 region.height as usize,

@@ -1285,6 +1285,10 @@ pub enum EffectRenderOp {
     CameraView {
         grade: crate::CameraViewGrade,
     },
+    /// Fill a cropped source rectangle's blanking within the original raster.
+    BlankingFill {
+        grade: crate::BlankingFillGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1652,6 +1656,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::CameraView { grade } => {
                 formatter.debug_struct("CameraView").field("grade", grade).finish()
+            }
+            Self::BlankingFill { grade } => {
+                formatter.debug_struct("BlankingFill").field("grade", grade).finish()
             }
             Self::DisplacementMap { grade } => {
                 formatter.debug_struct("DisplacementMap").field("grade", grade).finish()
@@ -2733,6 +2740,10 @@ impl EffectRenderOp {
                 116u8.hash(state);
                 grade.authored_values().map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::BlankingFill { grade } => {
+                117u8.hash(state);
+                grade.hash_controls(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2910,6 +2921,7 @@ impl EffectRenderOp {
             EffectRenderOp::SmartBlur { .. } => 3,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
+            EffectRenderOp::BlankingFill { .. } => 8,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3440,7 +3452,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 115] {
+fn builtin_effect_types() -> [EffectType; 116] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3557,6 +3569,7 @@ fn builtin_effect_types() -> [EffectType; 115] {
         EffectType::ChromaticAberrationRemoval,
         EffectType::Basic3D,
         EffectType::CameraView,
+        EffectType::BlankingFill,
     ]
 }
 
@@ -11767,6 +11780,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::BlankingFill => define_blanking_fill_properties(&mut properties, &effect_type),
         EffectType::SmartBlur => {
             // The documented default (radius 3 at threshold 25 %) already
             // softens the frame, and even the 0.1 radius floor keeps changing
@@ -12099,6 +12113,228 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
     }
 
     properties
+}
+
+fn define_blanking_fill_properties(properties: &mut PropertyBag, kind: &EffectType) {
+    const SOURCE: &str = "遮幅填充源";
+    const EXTENT: &str = "填充范围";
+    const LOOK: &str = "填充外观";
+    const SHADOW: &str = "下拉阴影";
+    const STRETCH: &str = "边缘拉伸";
+    let defaults = crate::BlankingFillParameters::default();
+    let edge = crate::BLANKING_FILL_MAX_EDGE;
+    for (key, label, value, range) in [
+        (
+            "source_zoom",
+            "缩放",
+            PropertyValue::Float(defaults.source_zoom),
+            Some(crate::BLANKING_FILL_SOURCE_ZOOM_RANGE),
+        ),
+        (
+            "split_lr",
+            "左右拆分",
+            PropertyValue::Bool(defaults.crop_split[0]),
+            None,
+        ),
+        (
+            "crop_left",
+            "裁切左侧",
+            PropertyValue::Float(defaults.crop[0]),
+            Some([0.0, edge]),
+        ),
+        (
+            "crop_right",
+            "裁切右侧",
+            PropertyValue::Float(defaults.crop[2]),
+            Some([0.0, edge]),
+        ),
+        (
+            "split_tb",
+            "上下拆分",
+            PropertyValue::Bool(defaults.crop_split[1]),
+            None,
+        ),
+        (
+            "crop_top",
+            "裁切顶部",
+            PropertyValue::Float(defaults.crop[1]),
+            Some([0.0, edge]),
+        ),
+        (
+            "crop_bottom",
+            "裁切底部",
+            PropertyValue::Float(defaults.crop[3]),
+            Some([0.0, edge]),
+        ),
+        ("center", "居中", PropertyValue::Bool(defaults.center), None),
+    ] {
+        define_builtin_property(
+            properties,
+            kind,
+            key,
+            SOURCE,
+            label,
+            value,
+            range.map(|[min, _]| f64::from(min)),
+            range.map(|[_, max]| f64::from(max)),
+            range.map(|_| 0.01),
+        );
+    }
+    define_builtin_enum_property(
+        properties,
+        kind,
+        "zoom_mode",
+        EXTENT,
+        "缩放模式",
+        defaults.mode.key(),
+        crate::BlankingFillMode::ALL
+            .into_iter()
+            .zip(["拉伸至画面", "缩放至画面", "手动", "拉伸前景边缘", "镜像"])
+            .map(|(mode, label)| {
+                let key = mode.key();
+                ParameterEnumOption::new(
+                    key,
+                    label,
+                    format!("mondrian.effect.blanking_fill.zoom_mode.{key}"),
+                )
+            })
+            .collect(),
+    );
+    let [fr, fg, fb, fa] = defaults.fade_color;
+    let [sr, sg, sb, sa] = defaults.shadow_color;
+    for (key, group, label, value, range) in [
+        (
+            "expand",
+            EXTENT,
+            "扩展",
+            PropertyValue::Float(defaults.expand),
+            Some(crate::BLANKING_FILL_MANUAL_RANGE),
+        ),
+        (
+            "aspect",
+            EXTENT,
+            "宽高比",
+            PropertyValue::Float(defaults.aspect),
+            Some(crate::BLANKING_FILL_MANUAL_RANGE),
+        ),
+        (
+            "blend_edges",
+            LOOK,
+            "混合边缘",
+            PropertyValue::Float(defaults.blend_edges),
+            Some([0.0, 1.0]),
+        ),
+        (
+            "background_blur",
+            LOOK,
+            "模糊背景",
+            PropertyValue::Float(defaults.background_blur),
+            Some([0.0, 1.0]),
+        ),
+        (
+            "fade",
+            LOOK,
+            "渐变量",
+            PropertyValue::Float(defaults.fade),
+            Some([0.0, 1.0]),
+        ),
+        (
+            "fade_color",
+            LOOK,
+            "渐变色彩",
+            PropertyValue::Color(Color { r: fr, g: fg, b: fb, a: fa }),
+            None,
+        ),
+        (
+            "shadow_strength",
+            SHADOW,
+            "阴影强度",
+            PropertyValue::Float(defaults.shadow_strength),
+            Some([0.0, 1.0]),
+        ),
+        (
+            "shadow_angle",
+            SHADOW,
+            "投影角度",
+            PropertyValue::Float(defaults.shadow_angle),
+            Some([-180.0, 180.0]),
+        ),
+        (
+            "shadow_distance",
+            SHADOW,
+            "投影距离",
+            PropertyValue::Float(defaults.shadow_distance),
+            Some([0.0, 1.0]),
+        ),
+        (
+            "shadow_blur",
+            SHADOW,
+            "阴影模糊",
+            PropertyValue::Float(defaults.shadow_blur),
+            Some([0.0, 1.0]),
+        ),
+        (
+            "shadow_color",
+            SHADOW,
+            "阴影色彩",
+            PropertyValue::Color(Color { r: sr, g: sg, b: sb, a: sa }),
+            None,
+        ),
+        (
+            "stretch_split_lr",
+            STRETCH,
+            "左右拆分",
+            PropertyValue::Bool(defaults.stretch_split[0]),
+            None,
+        ),
+        (
+            "stretch_left",
+            STRETCH,
+            "左侧边缘",
+            PropertyValue::Float(defaults.stretch[0]),
+            Some([-edge, 0.0]),
+        ),
+        (
+            "stretch_right",
+            STRETCH,
+            "右侧边缘",
+            PropertyValue::Float(defaults.stretch[2]),
+            Some([-edge, 0.0]),
+        ),
+        (
+            "stretch_split_tb",
+            STRETCH,
+            "上下拆分",
+            PropertyValue::Bool(defaults.stretch_split[1]),
+            None,
+        ),
+        (
+            "stretch_top",
+            STRETCH,
+            "顶部边缘",
+            PropertyValue::Float(defaults.stretch[1]),
+            Some([-edge, 0.0]),
+        ),
+        (
+            "stretch_bottom",
+            STRETCH,
+            "底部边缘",
+            PropertyValue::Float(defaults.stretch[3]),
+            Some([-edge, 0.0]),
+        ),
+    ] {
+        define_builtin_property(
+            properties,
+            kind,
+            key,
+            group,
+            label,
+            value,
+            range.map(|[min, _]| f64::from(min)),
+            range.map(|[_, max]| f64::from(max)),
+            range.map(|_| if key == "shadow_angle" { 0.1 } else { 0.01 }),
+        );
+    }
 }
 
 fn define_builtin_property(
@@ -12520,6 +12756,13 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::CameraView, "focal_length") => ParameterUnit::Pixels,
         (EffectType::CameraView, "zoom") => ParameterUnit::Percent,
         (EffectType::CameraView, "fill_alpha") => ParameterUnit::Normalized,
+        (EffectType::BlankingFill, "shadow_angle") => ParameterUnit::Degrees,
+        (
+            EffectType::BlankingFill,
+            "crop_left" | "crop_right" | "crop_top" | "crop_bottom" | "blend_edges"
+            | "background_blur" | "fade" | "shadow_strength" | "shadow_distance" | "shadow_blur"
+            | "stretch_left" | "stretch_right" | "stretch_top" | "stretch_bottom",
+        ) => ParameterUnit::Normalized,
         // The patch points are authored in a reference box, not in frame pixels,
         // and the quality option is an iteration count, so neither carries a unit.
         (EffectType::BezierWarp, _) => ParameterUnit::Unitless,
@@ -12950,11 +13193,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
-        EffectType::Basic3D | EffectType::CameraView => EffectExecutionContract {
-            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-            roi_propagation: EffectRoiPropagation::FullFrame,
-            ..cpu_linear
-        },
+        EffectType::Basic3D | EffectType::CameraView | EffectType::BlankingFill => {
+            EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+                roi_propagation: EffectRoiPropagation::FullFrame,
+                ..cpu_linear
+            }
+        }
         EffectType::SelectiveColor => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The effect reads the whole sample to resolve ink, and the
@@ -18780,6 +19025,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::BlankingFill => Some(blanking_fill_graph_builder(effect_type)),
         EffectType::SmartBlur => {
             let radius_id = builtin_parameter_id(effect_type, "radius");
             let threshold_id = builtin_parameter_id(effect_type, "threshold");
@@ -19958,6 +20204,105 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
     }
 }
 
+fn blanking_fill_graph_builder(kind: &EffectType) -> EffectGraphBuilder {
+    let id = |field| builtin_parameter_id(kind, field);
+    let number_ids = [
+        "source_zoom",
+        "expand",
+        "aspect",
+        "blend_edges",
+        "background_blur",
+        "fade",
+        "shadow_strength",
+        "shadow_angle",
+        "shadow_distance",
+        "shadow_blur",
+    ]
+    .map(id);
+    let crop = ["crop_left", "crop_top", "crop_right", "crop_bottom"].map(id);
+    let stretch = [
+        "stretch_left",
+        "stretch_top",
+        "stretch_right",
+        "stretch_bottom",
+    ]
+    .map(id);
+    let crop_split = ["split_lr", "split_tb"].map(id);
+    let stretch_split = ["stretch_split_lr", "stretch_split_tb"].map(id);
+    let center = id("center");
+    let mode = id("zoom_mode");
+    let fade_color = id("fade_color");
+    let shadow_color = id("shadow_color");
+    Arc::new(move |effect, context, graph| {
+        let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+            effect_key: effect.effect_type.key(),
+            effect_id: effect.id,
+            reason,
+        };
+        let read = |id: &ParameterId| effect.evaluate_parameter(id, context.time);
+        let number = |id: &ParameterId, default| match read(id) {
+            Some(PropertyValue::Float(value)) => Ok(value),
+            Some(PropertyValue::Int(value)) => Ok(value as f32),
+            Some(_) => Err(invalid(format!("{} must be a number", id.as_str()))),
+            None => Ok(default),
+        };
+        let boolean = |id: &ParameterId, default| match read(id) {
+            Some(PropertyValue::Bool(value)) => Ok(value),
+            Some(_) => Err(invalid(format!("{} must be a boolean", id.as_str()))),
+            None => Ok(default),
+        };
+        let color = |id: &ParameterId, default| match read(id) {
+            Some(PropertyValue::Color(value)) => Ok([value.r, value.g, value.b, value.a]),
+            Some(_) => Err(invalid(format!("{} must be a color", id.as_str()))),
+            None => Ok(default),
+        };
+        let mut p = crate::BlankingFillParameters::default();
+        for (value, id) in [
+            &mut p.source_zoom,
+            &mut p.expand,
+            &mut p.aspect,
+            &mut p.blend_edges,
+            &mut p.background_blur,
+            &mut p.fade,
+            &mut p.shadow_strength,
+            &mut p.shadow_angle,
+            &mut p.shadow_distance,
+            &mut p.shadow_blur,
+        ]
+        .into_iter()
+        .zip(&number_ids)
+        {
+            *value = number(id, *value)?;
+        }
+        for (value, id) in p.crop.iter_mut().zip(&crop).chain(p.stretch.iter_mut().zip(&stretch)) {
+            *value = number(id, *value)?;
+        }
+        for (value, id) in p
+            .crop_split
+            .iter_mut()
+            .zip(&crop_split)
+            .chain(p.stretch_split.iter_mut().zip(&stretch_split))
+        {
+            *value = boolean(id, *value)?;
+        }
+        p.center = boolean(&center, p.center)?;
+        p.fade_color = color(&fade_color, p.fade_color)?;
+        p.shadow_color = color(&shadow_color, p.shadow_color)?;
+        if let Some(value) = read(&mode) {
+            let PropertyValue::Enum(key) = value else {
+                return Err(invalid("zoom_mode must be a menu value".into()));
+            };
+            p.mode = crate::BlankingFillMode::from_key(&key)
+                .ok_or_else(|| invalid(format!("unknown zoom_mode `{key}`")))?;
+        }
+        let grade = crate::BlankingFillGrade::new(p).map_err(|error| invalid(error.to_string()))?;
+        if !grade.is_identity() {
+            graph.append_unary(EffectRenderOp::BlankingFill { grade });
+        }
+        Ok(())
+    })
+}
+
 fn builtin_display_name(effect_type: &EffectType) -> &'static str {
     match effect_type {
         EffectType::BasicCorrection => "基础调色",
@@ -20074,6 +20419,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChromaticAberrationRemoval => "色差校正",
         EffectType::Basic3D => "基本 3D",
         EffectType::CameraView => "摄像机视图",
+        EffectType::BlankingFill => "遮幅填充",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -21424,6 +21770,7 @@ mod tests {
             EffectType::ChromaticAberrationRemoval,
             EffectType::Basic3D,
             EffectType::CameraView,
+            EffectType::BlankingFill,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -30497,7 +30844,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 115);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 116);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -31025,7 +31372,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 115);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 116);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33982,7 +34329,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 115);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 116);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -35118,7 +35465,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 115);
+        assert_eq!(builtin_effect_types().len(), 116);
     }
 
     #[test]
@@ -36186,6 +36533,252 @@ mod tests {
         .unwrap();
         assert_eq!(output[0], [0.25, 0.5, 0.75, 0.25]);
         assert_eq!(output[40], [0.0; 4]);
+    }
+
+    fn author_blanking_fill(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let kind = EffectType::BlankingFill;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        for (field, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: kind.property_path(field),
+                    value: value.clone(),
+                })
+                .unwrap();
+        }
+        effect
+    }
+
+    #[test]
+    fn blanking_fill_has_twenty_six_controls_and_five_menu_options() {
+        let kind = EffectType::BlankingFill;
+        assert_eq!(EffectType::from_key("builtin.blanking_fill"), kind);
+        let properties = default_properties_for(kind.clone());
+        assert_eq!(properties.iter().count(), 26);
+        let mode = properties.property(&kind.property_path("zoom_mode")).unwrap();
+        assert_eq!(mode.evaluate(tt(0)), PropertyValue::Enum("stretch".into()));
+        assert_eq!(
+            mode.descriptor
+                .schema
+                .enum_options
+                .iter()
+                .map(|option| option.key.as_str())
+                .collect::<Vec<_>>(),
+            ["stretch", "zoom", "manual", "warp", "mirror"]
+        );
+        let crop = properties.property(&kind.property_path("crop_left")).unwrap();
+        assert_eq!(crop.evaluate(tt(0)), PropertyValue::Float(0.05));
+        assert_eq!(crop.descriptor.schema.unit, ParameterUnit::Normalized);
+        let graph =
+            build_effect_render_graph(&[author_blanking_fill(&[])], tt(0), TEST_WORKING_SPACE)
+                .unwrap();
+        assert!(!graph.is_identity());
+        let identity = author_blanking_fill(&[("crop_left", PropertyValue::Float(0.0))]);
+        assert!(
+            build_effect_render_graph(&[identity], tt(0), TEST_WORKING_SPACE)
+                .unwrap()
+                .is_identity()
+        );
+    }
+
+    #[test]
+    fn blanking_fill_round_trips_author_controls_and_animated_fingerprint() {
+        use std::hash::Hasher;
+
+        let kind = EffectType::BlankingFill;
+        let mut effect = author_blanking_fill(&[
+            ("source_zoom", PropertyValue::Float(1.25)),
+            ("split_lr", PropertyValue::Bool(true)),
+            ("split_tb", PropertyValue::Bool(true)),
+            ("crop_left", PropertyValue::Float(0.125)),
+            ("crop_right", PropertyValue::Float(0.25)),
+            ("crop_top", PropertyValue::Float(0.0625)),
+            ("crop_bottom", PropertyValue::Float(0.1875)),
+            ("center", PropertyValue::Bool(true)),
+            ("zoom_mode", PropertyValue::Enum("manual".into())),
+            ("expand", PropertyValue::Float(2.0)),
+            ("aspect", PropertyValue::Float(0.75)),
+            ("blend_edges", PropertyValue::Float(0.25)),
+            ("background_blur", PropertyValue::Float(0.75)),
+            (
+                "fade_color",
+                PropertyValue::Color(Color { r: 0.25, g: 0.5, b: 0.75, a: 0.5 }),
+            ),
+            ("shadow_strength", PropertyValue::Float(0.5)),
+            ("shadow_angle", PropertyValue::Float(-45.0)),
+            ("shadow_distance", PropertyValue::Float(0.25)),
+            ("shadow_blur", PropertyValue::Float(0.125)),
+            (
+                "shadow_color",
+                PropertyValue::Color(Color { r: 0.125, g: 0.25, b: 0.5, a: 0.75 }),
+            ),
+            ("stretch_split_lr", PropertyValue::Bool(true)),
+            ("stretch_split_tb", PropertyValue::Bool(true)),
+            ("stretch_left", PropertyValue::Float(-0.125)),
+            ("stretch_right", PropertyValue::Float(-0.25)),
+            ("stretch_top", PropertyValue::Float(-0.0625)),
+            ("stretch_bottom", PropertyValue::Float(-0.1875)),
+        ]);
+        for (time, value) in [(tt(0), 0.125), (tt(30), 0.75)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: kind.property_path("fade"),
+                    keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+                })
+                .unwrap();
+        }
+        let reopened: EffectNode =
+            serde_json::from_value(serde_json::to_value(effect).unwrap()).unwrap();
+        let at = |time| {
+            compile_clip_effect_graph(
+                std::slice::from_ref(&reopened),
+                &[],
+                time,
+                TEST_WORKING_SPACE,
+            )
+            .unwrap()
+        };
+        let graph = at(tt(0));
+        assert_ne!(
+            graph.semantic_fingerprint(),
+            at(tt(30)).semantic_fingerprint()
+        );
+        let op = graph
+            .graph()
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: op @ EffectRenderOp::BlankingFill { .. },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: op @ EffectRenderOp::BlankingFill { .. },
+                    ..
+                } => Some(op),
+                _ => None,
+            })
+            .unwrap();
+        let EffectRenderOp::BlankingFill { grade } = op else {
+            panic!("the reopened effect must reach the graph");
+        };
+        assert_eq!(
+            grade.parameters(),
+            crate::BlankingFillParameters {
+                source_zoom: 1.25,
+                crop_split: [true; 2],
+                crop: [0.125, 0.0625, 0.25, 0.1875],
+                center: true,
+                mode: crate::BlankingFillMode::Manual,
+                expand: 2.0,
+                aspect: 0.75,
+                blend_edges: 0.25,
+                background_blur: 0.75,
+                fade: 0.125,
+                fade_color: [0.25, 0.5, 0.75, 0.5],
+                shadow_strength: 0.5,
+                shadow_angle: -45.0,
+                shadow_distance: 0.25,
+                shadow_blur: 0.125,
+                shadow_color: [0.125, 0.25, 0.5, 0.75],
+                stretch_split: [true; 2],
+                stretch: [-0.125, -0.0625, -0.25, -0.1875],
+            }
+        );
+        assert_eq!(op.estimated_cost(), 8);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(op),
+            118
+        );
+        let mut actual = std::collections::hash_map::DefaultHasher::new();
+        let mut expected = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual);
+        expected.write_u8(117);
+        grade.hash_controls(&mut expected);
+        assert_eq!(actual.finish(), expected.finish());
+    }
+
+    #[test]
+    fn blanking_fill_rejects_bad_crop_and_mode_in_persisted_projects() {
+        for (field, value) in [
+            ("blanking_fill.crop_right", PropertyValue::Float(0.5)),
+            (
+                "blanking_fill.zoom_mode",
+                PropertyValue::Enum("invalid_mode".into()),
+            ),
+        ] {
+            let mut document = serde_json::to_value(author_blanking_fill(&[])).unwrap();
+            overwrite_static_value(&mut document, field, serde_json::to_value(value).unwrap());
+            let tampered = serde_json::from_value(document).unwrap();
+            assert!(matches!(
+                build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE),
+                Err(EffectGraphBuildError::InvalidAuthorState { reason, .. }) if reason.contains(field)
+            ));
+        }
+    }
+
+    #[test]
+    fn blanking_fill_compiled_graph_keeps_dimensions_and_handles_coverage() {
+        use crate::EffectExecutionModes;
+
+        let contract = effect_definition(&EffectType::BlankingFill).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::FullFrame);
+        let pixels = [[0.0; 4]; 96];
+        for mode in [
+            crate::BlankingFillMode::Stretch,
+            crate::BlankingFillMode::Warp,
+        ] {
+            let effect = author_blanking_fill(&[
+                ("crop_left", PropertyValue::Float(0.25)),
+                ("zoom_mode", PropertyValue::Enum(mode.key().into())),
+                ("fade", PropertyValue::Float(0.5)),
+            ]);
+            let compiled =
+                compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE).unwrap();
+            let pipeline = crate::lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+            let [crate::EffectGpuStage::Spatial {
+                pass: crate::EffectGpuSpatialPass::BlankingFill { grade },
+                ..
+            }] = pipeline.stages()
+            else {
+                panic!("expected one Blanking Fill stage")
+            };
+            assert_eq!(grade.parameters().mode, mode);
+            let scratch =
+                crate::adjustment::render_op_f32_scratch_frames(&EffectRenderOp::BlankingFill {
+                    grade: *grade,
+                });
+            assert_eq!(scratch, if grade.warps_top_layer() { 1 } else { 2 });
+            let output = crate::apply_compiled_effect_graph_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(12, 8),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &pixels,
+                ),
+                &compiled,
+                0,
+            )
+            .unwrap();
+            assert_eq!(output.len(), 96);
+            assert_eq!(
+                output[0],
+                if grade.warps_top_layer() {
+                    [0.0; 4]
+                } else {
+                    [1.0, 1.0, 1.0, 0.5]
+                }
+            );
+            assert_eq!(output[4 * 12 + 6], [0.0; 4]);
+        }
     }
 }
 
