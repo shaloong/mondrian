@@ -67,6 +67,7 @@ pub(crate) struct EffectSpatialGpu {
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
     chromatic_aberration_removal: wgpu::RenderPipeline,
+    basic_3d: wgpu::RenderPipeline,
     flip: wgpu::RenderPipeline,
     ripple: wgpu::RenderPipeline,
     wave_warp: wgpu::RenderPipeline,
@@ -806,6 +807,35 @@ impl EffectSpatialGpu {
                 multiview_mask: None,
                 cache: None,
             });
+        let basic_3d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.basic-3d"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_basic_3d"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let flip = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.flip"),
             layout: Some(&layout),
@@ -2043,6 +2073,7 @@ impl EffectSpatialGpu {
             polar_coordinates,
             lens_distortion,
             chromatic_aberration_removal,
+            basic_3d,
             flip,
             ripple,
             wave_warp,
@@ -2832,6 +2863,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::BezierWarp { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::ChromaticAberrationRemoval { .. } => Ok(1),
+            EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
             EffectGpuSpatialPass::Split { .. } => Ok(1),
@@ -3304,6 +3336,32 @@ impl EffectSpatialGpu {
                     source,
                     destination,
                 ));
+            }
+            EffectGpuSpatialPass::Basic3D { grade } => {
+                let Some([params, extra, aces, extra1]) =
+                    grade.gpu_controls(source.width(), source.height())
+                else {
+                    return Ok(source.clone());
+                };
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let uniforms = SpatialPassUniform {
+                    size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+                    params,
+                    extra,
+                    aces,
+                    extra1,
+                };
+                let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+                let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.basic_3d,
+                    &input_view,
+                    &output_view,
+                    &uniforms,
+                );
+                return Ok(destination.clone());
             }
             EffectGpuSpatialPass::Deband { grade } => {
                 return self.record_deband(device, encoder, *grade, source, scratch, width, height);
@@ -7962,6 +8020,42 @@ fn fs_chromatic_aberration_removal(@builtin(position) position: vec4<f32>) -> @l
         result.b = blue_sample.b / blue_sample.a;
     }
     return result;
+}
+
+@fragment
+fn fs_basic_3d(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let centre = uniforms.size.xy * 0.5;
+    let inverse_focal_length = uniforms.params.w;
+    let pixel_centre = floor(position.xy) + vec2<f32>(0.5);
+    let destination = (pixel_centre - centre) * inverse_focal_length;
+    let homogeneous = vec3<f32>(destination, 1.0);
+    let reciprocal_depth = dot(uniforms.aces.xyz, homogeneous);
+    if (!(reciprocal_depth > 0.0 && reciprocal_depth < uniforms.aces.w)) {
+        return vec4<f32>(0.0);
+    }
+    let source_point = vec2<f32>(
+        dot(uniforms.params.xyz, homogeneous),
+        dot(uniforms.extra.xyz, homogeneous)
+    ) / reciprocal_depth;
+    let bounds = centre * inverse_focal_length + vec2<f32>(uniforms.extra1.w);
+    if (!all(abs(source_point) <= bounds)) {
+        return vec4<f32>(0.0);
+    }
+    let focal_length = max(uniforms.size.x, uniforms.size.y);
+    let texel = centre + source_point * focal_length - vec2<f32>(0.5);
+    let sample = unpremultiply(sample_bilinear_premultiplied(texel.x, texel.y));
+    let strength = uniforms.extra.w;
+    if (strength > 0.0 && sample.a > 0.0) {
+        let light_direction = normalize(vec3<f32>(0.35, -0.45, -1.0));
+        let view_direction = normalize(vec3<f32>(-destination, -1.0));
+        let face = uniforms.extra1.xyz;
+        let normal = select(face, -face, dot(face, view_direction) < 0.0);
+        let alignment = max(dot(normal, normalize(light_direction + view_direction)), 0.0);
+        let squared = alignment * alignment;
+        let fourth = squared * squared;
+        return vec4<f32>(sample.rgb + vec3<f32>(strength * (fourth * fourth)), sample.a);
+    }
+    return sample;
 }
 
 @fragment

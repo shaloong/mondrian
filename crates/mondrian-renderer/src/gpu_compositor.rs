@@ -18008,7 +18008,7 @@ mod tests {
             assert_eq!(diagnostics.spatial_scratch_textures_peak, 2);
             assert_eq!(diagnostics.spatial_point_stages, 0);
             assert_eq!(diagnostics.cpu_fallback_composites, 0);
-            let max_error = chromatic_aberration_removal_max_error(&expected, &actual);
+            let max_error = max_spatial_float_error(&expected, &actual);
             eprintln!("RES-08 compositor {grade:?}, max absolute error = {max_error:.9e}");
             assert!(
                 max_error <= tolerance,
@@ -18017,7 +18017,7 @@ mod tests {
         }
     }
 
-    fn chromatic_aberration_removal_max_error(expected: &[[f32; 4]], actual: &[[f32; 4]]) -> f32 {
+    fn max_spatial_float_error(expected: &[[f32; 4]], actual: &[[f32; 4]]) -> f32 {
         assert_eq!(expected.len(), actual.len());
         expected
             .iter()
@@ -18031,15 +18031,14 @@ mod tests {
             .fold(0.0_f32, f32::max)
     }
 
-    fn readback_chromatic_aberration_removal_pass(
+    fn readback_single_spatial_pass(
         context: &crate::GpuContext,
         executor: &crate::spatial_pass_gpu::EffectSpatialGpu,
         pixels: &[[f32; 4]],
         width: u32,
         height: u32,
-        grade: mondrian_effects::ChromaticAberrationRemovalGrade,
+        pass: mondrian_effects::EffectGpuSpatialPass,
     ) -> Vec<[f32; 4]> {
-        let pass = mondrian_effects::EffectGpuSpatialPass::ChromaticAberrationRemoval { grade };
         assert_eq!(
             crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass).unwrap(),
             1
@@ -18090,8 +18089,13 @@ mod tests {
                 height as usize,
                 grade
             ));
-            let actual = readback_chromatic_aberration_removal_pass(
-                &context, &executor, &pixels, width, height, grade,
+            let actual = readback_single_spatial_pass(
+                &context,
+                &executor,
+                &pixels,
+                width,
+                height,
+                mondrian_effects::EffectGpuSpatialPass::ChromaticAberrationRemoval { grade },
             );
             for (input, output) in pixels.iter().zip(&actual) {
                 assert_eq!(input[1].to_bits(), output[1].to_bits());
@@ -18100,7 +18104,7 @@ mod tests {
                     assert_eq!(input.map(f32::to_bits), output.map(f32::to_bits));
                 }
             }
-            let max_error = chromatic_aberration_removal_max_error(&expected, &actual);
+            let max_error = max_spatial_float_error(&expected, &actual);
             eprintln!("RES-08 alpha {width}x{height}, max absolute error = {max_error:.9e}");
             assert!(max_error <= 2.0e-4, "{width}x{height}: {max_error}");
         }
@@ -18131,8 +18135,13 @@ mod tests {
             .collect();
         let grade = ChromaticAberrationRemovalGrade::new(5.0, 5.0, 10.0, [0.5, 0.5]).unwrap();
         let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
-        let actual = readback_chromatic_aberration_removal_pass(
-            &context, &executor, &pixels, width, height, grade,
+        let actual = readback_single_spatial_pass(
+            &context,
+            &executor,
+            &pixels,
+            width,
+            height,
+            mondrian_effects::EffectGpuSpatialPass::ChromaticAberrationRemoval { grade },
         );
         let mut expected = pixels.clone();
         assert!(chromatic_aberration_removal_frame_f32(
@@ -18144,9 +18153,119 @@ mod tests {
         for index in [0, 4, 8, 4 * 9, 4 * 9 + 8, 8 * 9, 8 * 9 + 4, 8 * 9 + 8] {
             assert_eq!(actual[index][0].to_bits(), pixels[index][0].to_bits());
         }
-        let max_error = chromatic_aberration_removal_max_error(&expected, &actual);
+        let max_error = max_spatial_float_error(&expected, &actual);
         eprintln!("RES-08 clamp, max absolute error = {max_error:.9e}");
         assert!(max_error <= 2.0e-4, "{max_error}");
+    }
+
+    #[tokio::test]
+    async fn gpu_basic_3d_runs_in_the_layer_compositor() {
+        use mondrian_effects::{basic_3d_frame_f32, Basic3DGrade, EffectRenderOp};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping Basic 3D compositor parity: no GPU adapter available");
+            return;
+        };
+        let (width, height) = (35, 21);
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        for (swivel, tilt, distance, specular) in [
+            (32.0, -27.0, 8.0, 0.0),
+            (-20.0, 26.0, -7.0, 0.75),
+            (158.0, -15.0, 0.0, 1.0),
+        ] {
+            let grade = Basic3DGrade::new(swivel, tilt, distance, specular).unwrap();
+            let pipeline = spatial_test_pipeline(EffectRenderOp::Basic3D { grade });
+            let entries = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context,
+                &entries,
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            let mut expected = pixels.clone();
+            assert!(basic_3d_frame_f32(
+                &mut expected,
+                width as usize,
+                height as usize,
+                grade
+            ));
+            assert!(max_spatial_float_error(&pixels, &actual) > 0.1);
+            assert!(actual.iter().any(|pixel| pixel[3] == 0.0));
+            assert!(actual.iter().any(|pixel| pixel[3] > 0.0));
+            assert_eq!(diagnostics.spatial_effect_layers, 1);
+            assert_eq!(diagnostics.spatial_effect_passes, 1);
+            assert_eq!(diagnostics.spatial_scratch_textures_peak, 2);
+            assert_eq!(diagnostics.spatial_point_stages, 0);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+            let max_error = max_spatial_float_error(&expected, &actual);
+            eprintln!("TRF-07 compositor {grade:?}, max absolute error = {max_error:.9e}");
+            assert!(max_error <= 2.0e-4, "{grade:?}: {max_error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_basic_3d_preserves_soft_coverage_and_clips_depth() {
+        use mondrian_effects::{basic_3d_frame_f32, Basic3DGrade, EffectGpuSpatialPass};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping Basic 3D Float32 parity: no GPU adapter available");
+            return;
+        };
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        for (width, height, swivel, tilt, distance, specular, passthrough) in [
+            (31, 17, 0.0, 0.0, 0.0, 0.0, true),
+            (31, 17, 90.0, 0.0, 3.0, 1.0, true),
+            (31, 17, 12.0, -9.0, -31.0, 1.0, true),
+            (1, 17, 12.0, -9.0, 1.0, 1.0, true),
+            (31, 17, -32.0, 29.0, 4.0, 0.9, false),
+            (31, 17, 0.0, 0.0, -30.9999, 1.0, false),
+            (31, 17, 0.0, 0.0, -32.0, 1.0, false),
+        ] {
+            let grade = Basic3DGrade::new(swivel, tilt, distance, specular).unwrap();
+            let mut pixels = spatial_test_pixels(width, height);
+            for (index, pixel) in pixels.iter_mut().enumerate() {
+                pixel[0] = pixel[0] * 1.5 + 0.2;
+                pixel[3] = [0.0, 1.0 / 65_535.0, 0.2, 0.65, 1.0][index % 5];
+            }
+            let mut expected = pixels.clone();
+            assert!(basic_3d_frame_f32(
+                &mut expected,
+                width as usize,
+                height as usize,
+                grade
+            ));
+            let actual = readback_single_spatial_pass(
+                &context,
+                &executor,
+                &pixels,
+                width,
+                height,
+                EffectGpuSpatialPass::Basic3D { grade },
+            );
+            let max_error = max_spatial_float_error(&expected, &actual);
+            eprintln!(
+                "TRF-07 raw {width}x{height} {grade:?}, max absolute error = {max_error:.9e}"
+            );
+            if passthrough {
+                for (before, after) in pixels.iter().zip(&actual) {
+                    assert_eq!(before.map(f32::to_bits), after.map(f32::to_bits));
+                }
+            } else if distance < -30.0 {
+                assert!(actual.iter().all(|pixel| *pixel == [0.0; 4]));
+            } else {
+                assert!(actual
+                    .iter()
+                    .any(|pixel| (0.0..1.0).contains(&pixel[3]) && pixel[3] > 0.0));
+                assert!(actual.iter().any(|pixel| pixel[0] > 1.0));
+                assert!(actual.contains(&[0.0; 4]));
+            }
+            assert!(max_error <= 2.0e-4, "{grade:?}: {max_error}");
+        }
     }
 
     #[tokio::test]
