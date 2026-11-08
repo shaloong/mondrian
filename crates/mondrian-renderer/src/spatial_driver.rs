@@ -454,3 +454,81 @@ fn create_spatial_scratch(device: &wgpu::Device, width: u32, height: u32) -> wgp
         view_formats: &[],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_effects::{
+        compile_reference_render_graph, lower_effect_graph_to_gpu_pipeline,
+        ChromaticAberrationRemovalGrade, EffectGraphBuilderState, EffectRenderOp,
+    };
+
+    fn chromatic_aberration_removal_pipeline() -> CompiledEffectGpuPipeline {
+        let grade = ChromaticAberrationRemovalGrade::new(5.0, -5.0, 10.0, [0.0, 1.0]).unwrap();
+        let mut graph = EffectGraphBuilderState::new();
+        graph.append_unary(EffectRenderOp::ChromaticAberrationRemoval { grade });
+        let graph = compile_reference_render_graph(graph.finish()).unwrap();
+        lower_effect_graph_to_gpu_pipeline(&graph).unwrap()
+    }
+
+    #[test]
+    fn spatial_chain_chromatic_aberration_removal_fits_dci_4k() {
+        let plan =
+            gpu_spatial_chain_plan(&chromatic_aberration_removal_pipeline(), 4096, 2160).unwrap();
+        assert_eq!(plan.scratch_bytes, 283_115_520);
+        assert_eq!(plan.scratch_textures, 2);
+        assert_eq!(plan.spatial_passes, 1);
+        assert_eq!(plan.point_stages, 0);
+        assert_eq!(plan.stages.len(), 1);
+    }
+
+    #[test]
+    fn spatial_chain_chromatic_aberration_removal_rejects_an_over_budget_raster() {
+        let error = gpu_spatial_chain_plan(&chromatic_aberration_removal_pipeline(), 8192, 2160)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            GpuSpatialChainBlocker::ScratchBudgetExceeded {
+                required_bytes: 566_231_040,
+                budget_bytes: 536_870_912,
+            }
+        );
+        assert_eq!(error.code(), "spatial_scratch_budget_exceeded");
+    }
+
+    #[test]
+    fn spatial_chain_chromatic_aberration_removal_accepts_the_exact_budget_boundary() {
+        let plan =
+            gpu_spatial_chain_plan(&chromatic_aberration_removal_pipeline(), 8192, 2048).unwrap();
+        assert_eq!(plan.scratch_bytes, 536_870_912);
+    }
+
+    #[test]
+    fn spatial_chain_chromatic_aberration_removal_checks_device_extent_first() {
+        let error = gpu_spatial_chain_plan(&chromatic_aberration_removal_pipeline(), 8193, 2160)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            GpuSpatialChainBlocker::ExtentExceedsDeviceLimit {
+                width: 8193,
+                height: 2160,
+                limit: 8192
+            }
+        );
+    }
+
+    #[test]
+    fn spatial_chain_chromatic_aberration_removal_reports_the_halo_on_both_axes() {
+        let plan =
+            gpu_spatial_chain_plan(&chromatic_aberration_removal_pipeline(), 4096, 2160).unwrap();
+        assert!(matches!(
+            plan.stages.as_slice(),
+            [GpuSpatialStagePlan::Spatial {
+                pass: EffectGpuSpatialPass::ChromaticAberrationRemoval { .. },
+                scratch_textures: 1,
+                horizontal_halo: 16,
+                vertical_halo: 16,
+            }]
+        ));
+    }
+}

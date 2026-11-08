@@ -66,6 +66,7 @@ pub(crate) struct EffectSpatialGpu {
     mirror: wgpu::RenderPipeline,
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
+    chromatic_aberration_removal: wgpu::RenderPipeline,
     flip: wgpu::RenderPipeline,
     ripple: wgpu::RenderPipeline,
     wave_warp: wgpu::RenderPipeline,
@@ -775,6 +776,36 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let chromatic_aberration_removal =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mondrian.effect-spatial.chromatic-aberration-removal"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_chromatic_aberration_removal"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         let flip = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.flip"),
             layout: Some(&layout),
@@ -2011,6 +2042,7 @@ impl EffectSpatialGpu {
             mirror,
             polar_coordinates,
             lens_distortion,
+            chromatic_aberration_removal,
             flip,
             ripple,
             wave_warp,
@@ -2552,6 +2584,35 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    fn record_chromatic_aberration_removal(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::ChromaticAberrationRemovalGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+    ) -> wgpu::Texture {
+        let (params, extra) = grade.gpu_controls();
+        let uniforms = SpatialPassUniform {
+            size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.chromatic_aberration_removal,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        destination.clone()
+    }
+
     /// Records the lens flare stage.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_flare(
@@ -2770,6 +2831,7 @@ impl EffectSpatialGpu {
             // The bezier warp inverts the patch per fragment in a single draw.
             EffectGpuSpatialPass::BezierWarp { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
+            EffectGpuSpatialPass::ChromaticAberrationRemoval { .. } => Ok(1),
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
             EffectGpuSpatialPass::Split { .. } => Ok(1),
@@ -3232,6 +3294,16 @@ impl EffectSpatialGpu {
                     width,
                     height,
                 );
+            }
+            EffectGpuSpatialPass::ChromaticAberrationRemoval { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return Ok(self.record_chromatic_aberration_removal(
+                    device,
+                    encoder,
+                    *grade,
+                    source,
+                    destination,
+                ));
             }
             EffectGpuSpatialPass::Deband { grade } => {
                 return self.record_deband(device, encoder, *grade, source, scratch, width, height);
@@ -7854,6 +7926,44 @@ fn fs_lens_distortion(@builtin(position) position: vec4<f32>) -> @location(0) ve
     }
     return unpremultiply(accumulated / f32(taps * taps));
 }
+@fragment
+fn fs_chromatic_aberration_removal(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = floor(position.xy);
+    let original = load_clamped(vec2<i32>(pixel));
+    let extent = uniforms.size.xy;
+    let amounts = uniforms.params.zw;
+    if (any(extent < vec2<f32>(2.0)) || all(abs(amounts) <= vec2<f32>(1.0e-6)) || !(original.a > 0.0)) {
+        return original;
+    }
+
+    let centre = uniforms.params.xy * extent - vec2<f32>(0.5);
+    let delta = pixel - centre;
+    let distance = length(delta);
+    if (distance == 0.0) {
+        return original;
+    }
+    let edges = max(abs(centre), abs(extent - vec2<f32>(1.0) - centre));
+    let radius = max(max(edges.x, edges.y), 1.0);
+    let direction = delta / distance;
+    let weight = 1.0 + uniforms.extra.x / 10.0 * min(distance / radius, 1.0);
+    let shift = dot(amounts, direction * direction) / radius * weight;
+    if (shift == 0.0) {
+        return original;
+    }
+    let red_position = centre + delta * max(1.0 + shift, 0.25);
+    let blue_position = centre + delta * max(1.0 - shift, 0.25);
+    let red_sample = sample_bilinear_premultiplied(red_position.x, red_position.y);
+    let blue_sample = sample_bilinear_premultiplied(blue_position.x, blue_position.y);
+    var result = original;
+    if (red_sample.a > 0.0) {
+        result.r = red_sample.r / red_sample.a;
+    }
+    if (blue_sample.a > 0.0) {
+        result.b = blue_sample.b / blue_sample.a;
+    }
+    return result;
+}
+
 @fragment
 fn fs_lens_flare(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let sample = load_clamped(vec2<i32>(position.xy));

@@ -17955,6 +17955,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_chromatic_aberration_removal_matches_the_cpu_layer() {
+        use mondrian_effects::{
+            chromatic_aberration_removal_frame_f32, ChromaticAberrationRemovalGrade, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping chromatic aberration removal parity: no GPU adapter available");
+            return;
+        };
+        let (width, height) = (9, 9);
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        for (lateral, longitudinal, edge, centre, tolerance) in [
+            (1.0, 0.0, 0.0, [0.5, 0.5], 2.0e-4),
+            (-2.0, 0.5, 0.0, [0.25, 0.75], 2.0e-4),
+            (0.0, 3.0, 0.0, [0.5, 0.5], 2.0e-4),
+            (2.0, -2.0, 10.0, [0.5, 0.5], 2.0e-4),
+            (1.0, 0.0, -10.0, [0.5, 0.5], 2.0e-4),
+            (1.0e-3, 0.0, 0.0, [0.5, 0.5], 1.0e-5),
+        ] {
+            let grade =
+                ChromaticAberrationRemovalGrade::new(lateral, longitudinal, edge, centre).unwrap();
+            let pipeline =
+                spatial_test_pipeline(EffectRenderOp::ChromaticAberrationRemoval { grade });
+            let entries = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context,
+                &entries,
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            let mut expected = pixels.clone();
+            assert!(chromatic_aberration_removal_frame_f32(
+                &mut expected,
+                width as usize,
+                height as usize,
+                grade
+            ));
+            assert_eq!(actual.len(), expected.len());
+            assert!(expected
+                .iter()
+                .zip(&pixels)
+                .any(|(after, before)| (after[0] - before[0]).abs() > 1.0e-6
+                    || (after[2] - before[2]).abs() > 1.0e-6));
+            assert_eq!(diagnostics.spatial_effect_layers, 1);
+            assert_eq!(diagnostics.spatial_effect_passes, 1);
+            assert_eq!(diagnostics.spatial_scratch_textures_peak, 2);
+            assert_eq!(diagnostics.spatial_point_stages, 0);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+            let max_error = chromatic_aberration_removal_max_error(&expected, &actual);
+            eprintln!("RES-08 compositor {grade:?}, max absolute error = {max_error:.9e}");
+            assert!(
+                max_error <= tolerance,
+                "{grade:?}: {max_error} > {tolerance}"
+            );
+        }
+    }
+
+    fn chromatic_aberration_removal_max_error(expected: &[[f32; 4]], actual: &[[f32; 4]]) -> f32 {
+        assert_eq!(expected.len(), actual.len());
+        expected
+            .iter()
+            .flatten()
+            .zip(actual.iter().flatten())
+            .map(|(cpu, gpu)| {
+                let error = (cpu - gpu).abs();
+                assert!(error.is_finite(), "CPU {cpu}, GPU {gpu}");
+                error
+            })
+            .fold(0.0_f32, f32::max)
+    }
+
+    fn readback_chromatic_aberration_removal_pass(
+        context: &crate::GpuContext,
+        executor: &crate::spatial_pass_gpu::EffectSpatialGpu,
+        pixels: &[[f32; 4]],
+        width: u32,
+        height: u32,
+        grade: mondrian_effects::ChromaticAberrationRemovalGrade,
+    ) -> Vec<[f32; 4]> {
+        let pass = mondrian_effects::EffectGpuSpatialPass::ChromaticAberrationRemoval { grade };
+        assert_eq!(
+            crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass).unwrap(),
+            1
+        );
+        let source = key_cleaner_upload(context, pixels, width, height);
+        let scratch = key_cleaner_scratch(context, width, height, 1);
+        let mut encoder = context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let output = executor
+            .record(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &source,
+                &scratch,
+                width,
+                height,
+            )
+            .unwrap();
+        context.queue.submit(Some(encoder.finish()));
+        key_cleaner_readback(context, &output, width, height)
+    }
+
+    #[tokio::test]
+    async fn gpu_chromatic_aberration_removal_leaves_green_and_alpha_untouched() {
+        use mondrian_effects::{
+            chromatic_aberration_removal_frame_f32, ChromaticAberrationRemovalGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!(
+                "skipping chromatic aberration removal alpha parity: no GPU adapter available"
+            );
+            return;
+        };
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let grade = ChromaticAberrationRemovalGrade::new(3.0, -2.0, 7.0, [0.4, 0.7]).unwrap();
+        for (width, height) in [(33, 17), (1, 9), (9, 1)] {
+            let mut pixels = spatial_test_pixels(width, height);
+            for (index, pixel) in pixels.iter_mut().enumerate() {
+                pixel[3] = (index as u32 % width) as f32 / width as f32;
+            }
+            let mut expected = pixels.clone();
+            assert!(chromatic_aberration_removal_frame_f32(
+                &mut expected,
+                width as usize,
+                height as usize,
+                grade
+            ));
+            let actual = readback_chromatic_aberration_removal_pass(
+                &context, &executor, &pixels, width, height, grade,
+            );
+            for (input, output) in pixels.iter().zip(&actual) {
+                assert_eq!(input[1].to_bits(), output[1].to_bits());
+                assert_eq!(input[3].to_bits(), output[3].to_bits());
+                if input[3] == 0.0 || width == 1 || height == 1 {
+                    assert_eq!(input.map(f32::to_bits), output.map(f32::to_bits));
+                }
+            }
+            let max_error = chromatic_aberration_removal_max_error(&expected, &actual);
+            eprintln!("RES-08 alpha {width}x{height}, max absolute error = {max_error:.9e}");
+            assert!(max_error <= 2.0e-4, "{width}x{height}: {max_error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_chromatic_aberration_removal_clamps_at_the_frame_edge() {
+        use mondrian_effects::{
+            chromatic_aberration_removal_frame_f32, ChromaticAberrationRemovalGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!(
+                "skipping chromatic aberration removal edge parity: no GPU adapter available"
+            );
+            return;
+        };
+        let (width, height) = (9, 9);
+        let pixels: Vec<_> = (0..width * height)
+            .map(|index| {
+                [
+                    ((index * 23) % 61) as f32 / 61.0,
+                    ((index * 17) % 67) as f32 / 67.0,
+                    ((index * 31) % 73) as f32 / 73.0,
+                    1.0,
+                ]
+            })
+            .collect();
+        let grade = ChromaticAberrationRemovalGrade::new(5.0, 5.0, 10.0, [0.5, 0.5]).unwrap();
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let actual = readback_chromatic_aberration_removal_pass(
+            &context, &executor, &pixels, width, height, grade,
+        );
+        let mut expected = pixels.clone();
+        assert!(chromatic_aberration_removal_frame_f32(
+            &mut expected,
+            width as usize,
+            height as usize,
+            grade
+        ));
+        for index in [0, 4, 8, 4 * 9, 4 * 9 + 8, 8 * 9, 8 * 9 + 4, 8 * 9 + 8] {
+            assert_eq!(actual[index][0].to_bits(), pixels[index][0].to_bits());
+        }
+        let max_error = chromatic_aberration_removal_max_error(&expected, &actual);
+        eprintln!("RES-08 clamp, max absolute error = {max_error:.9e}");
+        assert!(max_error <= 2.0e-4, "{max_error}");
+    }
+
+    #[tokio::test]
     async fn spatial_chain_runs_on_a_single_layer_before_compositing() {
         use mondrian_effects::{EffectRenderOp, TwirlGrade};
 
