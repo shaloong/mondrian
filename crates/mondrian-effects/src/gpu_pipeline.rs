@@ -257,6 +257,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored radius, threshold and the output mode.
         grade: crate::SmartBlurGrade,
     },
+    /// Radial correction around the green reference channel.
+    ChromaticAberrationRemoval {
+        /// Authored amounts, edge scale, and normalized centre.
+        grade: crate::ChromaticAberrationRemovalGrade,
+    },
     /// Fill composited through an independently sampled alpha matte.
     FillMatte {
         /// Authored feather, inversion, RGB and opacity.
@@ -320,6 +325,7 @@ impl EffectGpuSpatialPass {
             Self::DustScratches { .. } => "dust_scratches",
             Self::KeyCleaner { .. } => "key_cleaner",
             Self::SmartBlur { .. } => "smart_blur",
+            Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
             Self::FillMatte { .. } => "fill_matte",
         }
     }
@@ -407,6 +413,7 @@ impl EffectGpuSpatialPass {
             // The blur window is the authored radius plus the one fractional
             // tap, so it is bounded by the authoring ceiling of 100.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::FillMatte { .. } => 0,
         }
     }
@@ -480,6 +487,7 @@ impl EffectGpuSpatialPass {
             Self::KeyCleaner { .. } => u32::MAX,
             // Same reach as the horizontal halo.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::FillMatte { .. } => 0,
         }
     }
@@ -520,6 +528,13 @@ fn magnify_halo(grade: crate::MagnifyGrade) -> u32 {
 ///
 /// The kernel averages every tap inside `radius`, plus the one fractional tap at
 /// `ceil(radius)`, so the authored ceiling of 100 bounds the halo at 101.
+fn chromatic_aberration_removal_halo(grade: crate::ChromaticAberrationRemovalGrade) -> u32 {
+    let axis_amount = grade.lateral().abs().max(grade.longitudinal().abs());
+    let edge_weight =
+        1.0 + grade.edge_scale().abs() / crate::CHROMATIC_ABERRATION_REMOVAL_MAX_EDGE_SCALE;
+    (std::f32::consts::SQRT_2 * edge_weight * axis_amount).ceil() as u32 + 1
+}
+
 fn smart_blur_halo(grade: crate::SmartBlurGrade) -> u32 {
     (grade.radius().ceil() as u32).saturating_add(1).min(101)
 }
@@ -895,6 +910,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::SmartBlur { grade } => {
             Some(EffectGpuSpatialPass::SmartBlur { grade: *grade })
+        }
+        EffectRenderOp::ChromaticAberrationRemoval { grade } => {
+            Some(EffectGpuSpatialPass::ChromaticAberrationRemoval { grade: *grade })
         }
         EffectRenderOp::DisplacementMap { .. } => None,
         _ => None,

@@ -1273,6 +1273,10 @@ pub enum EffectRenderOp {
     DisplacementMap {
         grade: crate::DisplacementMapGrade,
     },
+    /// Counter-shift red and blue around the green reference channel.
+    ChromaticAberrationRemoval {
+        grade: crate::ChromaticAberrationRemovalGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1631,6 +1635,10 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::SmartBlur { grade } => {
                 formatter.debug_struct("SmartBlur").field("grade", grade).finish()
             }
+            Self::ChromaticAberrationRemoval { grade } => formatter
+                .debug_struct("ChromaticAberrationRemoval")
+                .field("grade", grade)
+                .finish(),
             Self::DisplacementMap { grade } => {
                 formatter.debug_struct("DisplacementMap").field("grade", grade).finish()
             }
@@ -2696,6 +2704,13 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::ChromaticAberrationRemoval { grade } => {
+                114u8.hash(state);
+                grade.lateral().to_bits().hash(state);
+                grade.longitudinal().to_bits().hash(state);
+                grade.edge_scale().to_bits().hash(state);
+                grade.centre().map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2871,6 +2886,7 @@ impl EffectRenderOp {
             EffectRenderOp::Colorama { .. } => 2,
             EffectRenderOp::ChannelCombiner { .. } => 1,
             EffectRenderOp::SmartBlur { .. } => 3,
+            EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3401,7 +3417,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 112] {
+fn builtin_effect_types() -> [EffectType; 113] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3515,6 +3531,7 @@ fn builtin_effect_types() -> [EffectType; 112] {
         EffectType::KeyCleaner,
         EffectType::ChannelCombiner,
         EffectType::SmartBlur,
+        EffectType::ChromaticAberrationRemoval,
     ]
 }
 
@@ -11616,6 +11633,38 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::ChromaticAberrationRemoval => {
+            let amount = f64::from(crate::CHROMATIC_ABERRATION_REMOVAL_MAX_AMOUNT);
+            let edge = f64::from(crate::CHROMATIC_ABERRATION_REMOVAL_MAX_EDGE_SCALE);
+            for (parameter, label, limit, step) in [
+                ("lateral", "横向色差", amount, 0.01),
+                ("longitudinal", "纵向色差", amount, 0.01),
+                ("edge_scale", "边缘缩放", edge, 0.1),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "色差校正",
+                    label,
+                    PropertyValue::Float(0.0),
+                    Some(-limit),
+                    Some(limit),
+                    Some(step),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre",
+                "色差校正",
+                "中心",
+                PropertyValue::Vec2(glam::Vec2::splat(0.5)),
+                Some(0.0),
+                Some(1.0),
+                Some(0.001),
+            );
+        }
         EffectType::SmartBlur => {
             // The documented default (radius 3 at threshold 25 %) already
             // softens the frame, and even the 0.1 radius floor keeps changing
@@ -12358,6 +12407,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         // normalised luma range, matching the dump's "阈值 0.1–100".
         (EffectType::SmartBlur, "radius") => ParameterUnit::Pixels,
         (EffectType::SmartBlur, "threshold") => ParameterUnit::Percent,
+        (EffectType::ChromaticAberrationRemoval, "lateral" | "longitudinal") => {
+            ParameterUnit::Pixels
+        }
+        (EffectType::ChromaticAberrationRemoval, "centre") => ParameterUnit::Normalized,
         // The patch points are authored in a reference box, not in frame pixels,
         // and the quality option is an iteration count, so neither carries a unit.
         (EffectType::BezierWarp, _) => ParameterUnit::Unitless,
@@ -12779,6 +12832,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The radius reaches 100 pixels in every direction and the gate
             // reads the source frame during both passes, so the definition-level
             // envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The optical centre and reference radius use the full source grid.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -18479,6 +18538,51 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ChromaticAberrationRemoval => {
+            let lateral_id = builtin_parameter_id(effect_type, "lateral");
+            let longitudinal_id = builtin_parameter_id(effect_type, "longitudinal");
+            let edge_id = builtin_parameter_id(effect_type, "edge_scale");
+            let centre_id = builtin_parameter_id(effect_type, "centre");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let number = |id: &ParameterId, field: &str| match effect
+                    .evaluate_parameter(id, context.time)
+                {
+                    Some(PropertyValue::Float(value)) => Ok(value),
+                    Some(PropertyValue::Int(value)) => Ok(value as f32),
+                    Some(_) => Err(invalid(format!("{field} must be a number"))),
+                    None => Ok(0.0),
+                };
+                let centre = match effect.evaluate_parameter(&centre_id, context.time) {
+                    Some(PropertyValue::Vec2(value)) => value.to_array(),
+                    Some(PropertyValue::DoubleVec2(value)) => {
+                        if !value.iter().all(|component| (0.0..=1.0).contains(component)) {
+                            return Err(invalid(
+                                "centre must be a finite point within 0..=1".into(),
+                            ));
+                        }
+                        value.map(|component| component as f32)
+                    }
+                    Some(_) => return Err(invalid("centre must be a point".into())),
+                    None => [0.5, 0.5],
+                };
+                let grade = crate::ChromaticAberrationRemovalGrade::new(
+                    number(&lateral_id, "lateral")?,
+                    number(&longitudinal_id, "longitudinal")?,
+                    number(&edge_id, "edge_scale")?,
+                    centre,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ChromaticAberrationRemoval { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SmartBlur => {
             let radius_id = builtin_parameter_id(effect_type, "radius");
             let threshold_id = builtin_parameter_id(effect_type, "threshold");
@@ -19770,6 +19874,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Colorama => "色光",
         EffectType::ChannelCombiner => "通道合成器",
         EffectType::SmartBlur => "智能模糊",
+        EffectType::ChromaticAberrationRemoval => "色差校正",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -21117,6 +21222,7 @@ mod tests {
             EffectType::KeyCleaner,
             EffectType::ChannelCombiner,
             EffectType::SmartBlur,
+            EffectType::ChromaticAberrationRemoval,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -30190,7 +30296,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 112);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 113);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -30718,7 +30824,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 112);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 113);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33675,7 +33781,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 112);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 113);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -34811,7 +34917,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 112);
+        assert_eq!(builtin_effect_types().len(), 113);
     }
 
     #[test]
@@ -35292,6 +35398,225 @@ mod tests {
             reason.contains("smart_blur.radius"),
             "the persisted value contract names the parameter: {reason}"
         );
+    }
+
+    fn chromatic_aberration_removal_op(graph: &EffectRenderGraph) -> Option<&EffectRenderOp> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: op @ EffectRenderOp::ChromaticAberrationRemoval { .. },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: op @ EffectRenderOp::ChromaticAberrationRemoval { .. },
+                ..
+            } => Some(op),
+            _ => None,
+        })
+    }
+
+    fn author_chromatic_aberration_removal(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let kind = EffectType::ChromaticAberrationRemoval;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: kind.property_path(parameter),
+                    value: value.clone(),
+                })
+                .unwrap();
+        }
+        effect
+    }
+
+    fn build_chromatic_aberration_removal_directly(
+        parameters: &[(&str, PropertyValue)],
+    ) -> Result<EffectRenderGraph, EffectGraphBuildError> {
+        let kind = EffectType::ChromaticAberrationRemoval;
+        let mut effect = EffectNode::new(kind.clone());
+        for (field, value) in parameters {
+            effect.define_property(
+                PropertyDescriptor::new(kind.property_path(field), *field, value.clone())
+                    .with_parameter_id(builtin_parameter_id(&kind, field)),
+            );
+        }
+        let mut state = EffectGraphBuilderState::new();
+        builtin_graph_builder_for(&kind).unwrap()(
+            &effect,
+            EffectEvalContext {
+                time: tt(0),
+                working_color_space: TEST_WORKING_SPACE,
+                frame_context: None,
+            },
+            &mut state,
+        )?;
+        Ok(state.finish())
+    }
+
+    #[test]
+    fn a_zero_chroma_amount_builds_no_operation() {
+        let effect =
+            author_chromatic_aberration_removal(&[("edge_scale", PropertyValue::Float(10.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE).unwrap();
+        assert!(graph.is_identity());
+    }
+
+    #[test]
+    fn chromatic_aberration_removal_carries_the_authored_amounts() {
+        let effect = author_chromatic_aberration_removal(&[
+            ("lateral", PropertyValue::Float(2.0)),
+            ("longitudinal", PropertyValue::Float(-1.0)),
+            ("edge_scale", PropertyValue::Float(4.0)),
+            ("centre", PropertyValue::Vec2(glam::Vec2::new(0.25, 0.75))),
+        ]);
+        let kind = EffectType::ChromaticAberrationRemoval;
+        assert_eq!(EffectType::from_key(&kind.key()), kind);
+        let properties = default_properties_for(kind.clone());
+        assert_eq!(properties.iter().count(), 4);
+        let centre = properties.property(&kind.property_path("centre")).unwrap();
+        assert_eq!(centre.descriptor.schema.unit, ParameterUnit::Normalized);
+        assert_eq!(
+            centre.evaluate(tt(0)),
+            PropertyValue::Vec2(glam::Vec2::splat(0.5))
+        );
+        let reopened = serde_json::from_value(serde_json::to_value(effect).unwrap()).unwrap();
+        let graph = build_effect_render_graph(&[reopened], tt(0), TEST_WORKING_SPACE).unwrap();
+        let Some(EffectRenderOp::ChromaticAberrationRemoval { grade }) =
+            chromatic_aberration_removal_op(&graph)
+        else {
+            panic!("the reopened correction must reach the graph");
+        };
+        assert_eq!(
+            *grade,
+            crate::ChromaticAberrationRemovalGrade::new(2.0, -1.0, 4.0, [0.25, 0.75]).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_animated_chroma_amount_changes_the_hash() {
+        let mut effect = author_chromatic_aberration_removal(&[]);
+        for (time, value) in [(tt(0), 0.5), (tt(30), 2.0)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: EffectType::ChromaticAberrationRemoval.property_path("lateral"),
+                    keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+                })
+                .unwrap();
+        }
+        let at = |time| {
+            let graph =
+                build_effect_render_graph(std::slice::from_ref(&effect), time, TEST_WORKING_SPACE)
+                    .unwrap();
+            EffectRenderPlan {
+                ops: vec![chromatic_aberration_removal_op(&graph).unwrap().clone()],
+            }
+            .signature_hash()
+        };
+        assert_ne!(at(tt(0)), at(tt(30)));
+    }
+
+    #[test]
+    fn chromatic_aberration_removal_centre_accepts_both_vec2_representations() {
+        for centre in [
+            PropertyValue::Vec2(glam::Vec2::new(0.25, 0.75)),
+            PropertyValue::DoubleVec2([0.25, 0.75]),
+        ] {
+            let graph = build_chromatic_aberration_removal_directly(&[
+                ("lateral", PropertyValue::Float(1.0)),
+                ("centre", centre),
+            ])
+            .unwrap();
+            let Some(EffectRenderOp::ChromaticAberrationRemoval { grade }) =
+                chromatic_aberration_removal_op(&graph)
+            else {
+                panic!("active correction");
+            };
+            assert_eq!(grade.centre(), [0.25, 0.75]);
+        }
+        assert!(matches!(
+            build_chromatic_aberration_removal_directly(&[("centre", PropertyValue::Float(0.5))]),
+            Err(EffectGraphBuildError::InvalidAuthorState { reason, .. }) if reason.contains("point")
+        ));
+    }
+
+    #[test]
+    fn an_out_of_window_chroma_amount_is_refused() {
+        let value = PropertyValue::Float(6.0);
+        assert!(matches!(
+            build_chromatic_aberration_removal_directly(&[("lateral", value.clone())]),
+            Err(EffectGraphBuildError::InvalidAuthorState { reason, .. }) if reason.contains("lateral")
+        ));
+        let mut document = serde_json::to_value(author_chromatic_aberration_removal(&[])).unwrap();
+        overwrite_static_value(
+            &mut document,
+            "chromatic_aberration_removal.lateral",
+            serde_json::to_value(value).unwrap(),
+        );
+        let tampered = serde_json::from_value(document).unwrap();
+        assert!(matches!(
+            build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE),
+            Err(EffectGraphBuildError::InvalidAuthorState { reason, .. }) if reason.contains("chromatic_aberration_removal.lateral")
+        ));
+    }
+
+    #[test]
+    fn a_non_finite_chroma_amount_is_refused() {
+        assert!(matches!(
+            build_chromatic_aberration_removal_directly(&[("lateral", PropertyValue::Float(f32::NAN))]),
+            Err(EffectGraphBuildError::InvalidAuthorState { reason, .. }) if reason.contains("lateral") && reason.contains("finite")
+        ));
+    }
+
+    #[test]
+    fn chromatic_aberration_removal_contract_admits_both_modes_and_executes_the_full_frame() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::ChromaticAberrationRemoval;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::FullFrame);
+        let effect = author_chromatic_aberration_removal(&[("lateral", PropertyValue::Float(1.0))]);
+        let compiled =
+            compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE).unwrap();
+        let op = chromatic_aberration_removal_op(compiled.graph()).unwrap();
+        assert_eq!(op.estimated_cost(), 3);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(op),
+            115
+        );
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(op), 1);
+        let pipeline = crate::lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+        assert!(matches!(
+            pipeline.stages(),
+            [crate::EffectGpuStage::Spatial {
+                pass: crate::EffectGpuSpatialPass::ChromaticAberrationRemoval { .. },
+                ..
+            }]
+        ));
+        let pixels: Vec<_> = (0..81)
+            .map(|index| {
+                let x = (index % 9) as f32;
+                [x, (index / 9) as f32, x, 1.0]
+            })
+            .collect();
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(9, 9),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels,
+            ),
+            &compiled,
+            0,
+        )
+        .unwrap();
+        assert_eq!(output[4 * 9 + 6], [6.5, 4.0, 5.5, 1.0]);
     }
 }
 

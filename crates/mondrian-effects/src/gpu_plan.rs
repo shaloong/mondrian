@@ -1092,6 +1092,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::DustScratches { .. } => "dust_scratches",
         EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
         EffectRenderOp::SmartBlur { .. } => "smart_blur",
+        EffectRenderOp::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",

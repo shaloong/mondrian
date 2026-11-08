@@ -3352,3 +3352,11 @@ parameter-mondrian-effect-builtin-smart-blur-mode-label = 模式
 parameter-mondrian-effect-smart-blur-mode-normal = 正常
 parameter-mondrian-effect-smart-blur-mode-edge-only = 仅边缘
 parameter-mondrian-effect-smart-blur-mode-overlay-edge = 叠加边缘
+
+## 色差校正
+effect-chromatic-aberration-removal = 色差校正
+parameter-group-chromatic-aberration-removal = 色差校正
+parameter-mondrian-effect-builtin-chromatic-aberration-removal-lateral-label = 横向色差
+parameter-mondrian-effect-builtin-chromatic-aberration-removal-longitudinal-label = 纵向色差
+parameter-mondrian-effect-builtin-chromatic-aberration-removal-edge-scale-label = 边缘缩放
+parameter-mondrian-effect-builtin-chromatic-aberration-removal-centre-label = 中心

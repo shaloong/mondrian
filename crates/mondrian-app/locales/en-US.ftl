@@ -3424,3 +3424,11 @@ parameter-mondrian-effect-builtin-smart-blur-mode-label = Mode
 parameter-mondrian-effect-smart-blur-mode-normal = Normal
 parameter-mondrian-effect-smart-blur-mode-edge-only = Edge Only
 parameter-mondrian-effect-smart-blur-mode-overlay-edge = Overlay Edge
+
+## Chromatic Aberration Removal
+effect-chromatic-aberration-removal = Chromatic Aberration Removal
+parameter-group-chromatic-aberration-removal = Chromatic Aberration Removal
+parameter-mondrian-effect-builtin-chromatic-aberration-removal-lateral-label = Lateral Chromatic Aberration
+parameter-mondrian-effect-builtin-chromatic-aberration-removal-longitudinal-label = Longitudinal Chromatic Aberration
+parameter-mondrian-effect-builtin-chromatic-aberration-removal-edge-scale-label = Edge Scale
+parameter-mondrian-effect-builtin-chromatic-aberration-removal-centre-label = Centre

@@ -195,6 +195,7 @@ pub enum EffectType {
     /// Smart blur: a separable range-domain mean that only averages neighbours
     /// whose luminance stays within the authored threshold.
     SmartBlur,
+    ChromaticAberrationRemoval,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -317,6 +318,7 @@ impl EffectType {
             Self::KeyCleaner => "builtin.key_cleaner".to_string(),
             Self::ChannelCombiner => "builtin.channel_combiner".to_string(),
             Self::SmartBlur => "builtin.smart_blur".to_string(),
+            Self::ChromaticAberrationRemoval => "builtin.chromatic_aberration_removal".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -435,6 +437,7 @@ impl EffectType {
             "builtin.key_cleaner" => Self::KeyCleaner,
             "builtin.channel_combiner" => Self::ChannelCombiner,
             "builtin.smart_blur" => Self::SmartBlur,
+            "builtin.chromatic_aberration_removal" => Self::ChromaticAberrationRemoval,
             other => Self::External(other.to_string()),
         }
     }
@@ -553,6 +556,7 @@ impl EffectType {
             Self::KeyCleaner => "键控清理",
             Self::ChannelCombiner => "通道合成器",
             Self::SmartBlur => "智能模糊",
+            Self::ChromaticAberrationRemoval => "色差校正",
             Self::External(name) => name,
         }
     }
@@ -669,6 +673,7 @@ impl EffectType {
             Self::KeyCleaner => vec!["边缘修补"],
             Self::ChannelCombiner => vec!["通道"],
             Self::SmartBlur => vec!["模糊与锐化"],
+            Self::ChromaticAberrationRemoval => vec!["修复"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -787,6 +792,7 @@ impl EffectType {
             Self::KeyCleaner => "key_cleaner".to_string(),
             Self::ChannelCombiner => "channel_combiner".to_string(),
             Self::SmartBlur => "smart_blur".to_string(),
+            Self::ChromaticAberrationRemoval => "chromatic_aberration_removal".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1173,7 +1179,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ChannelCombiner => Ok(()),
             // Range-domain blur: it samples and reweights existing pixels, so it
             // can never paint a region the source left empty.
-            Self::SmartBlur => Ok(()),
+            Self::SmartBlur | Self::ChromaticAberrationRemoval => Ok(()),
         }
     }
 }

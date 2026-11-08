@@ -40,6 +40,7 @@ pub mod channel_mixer;
 pub mod checkerboard;
 pub mod choker;
 pub mod chroma_key;
+pub mod chromatic_aberration_removal;
 pub mod circle_ellipse;
 pub mod color_balance;
 pub mod color_curves;
@@ -210,6 +211,11 @@ pub use channel_blur::{
     CHANNEL_BLUR_DEFAULT_AMOUNT, CHANNEL_BLUR_DEFAULT_EDGE_BEHAVIOR, CHANNEL_BLUR_MAX_RADIUS,
 };
 pub use chroma_key::{ChromaKeyError, PreparedChromaKey};
+pub use chromatic_aberration_removal::{
+    chromatic_aberration_removal_frame_f32, ChromaticAberrationRemovalError,
+    ChromaticAberrationRemovalGrade, CHROMATIC_ABERRATION_REMOVAL_MAX_AMOUNT,
+    CHROMATIC_ABERRATION_REMOVAL_MAX_EDGE_SCALE,
+};
 pub use color_curves::{
     ColorCurvesAuthoring, ColorCurvesMode, PreparedColorCurves, COLOR_CURVE_SAMPLE_COUNT,
     COLOR_CURVE_SAMPLE_ROWS,
