@@ -397,6 +397,10 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // One inverse perspective lookup and optional view-dependent lighting.
         "basic_3d" => 2.0,
         "camera_view" => 1.4,
+        "blanking_fill" => match pass {
+            EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 1.4,
+            _ => 3.6,
+        },
         // The sphere rotation is one trigonometric remap and one bilinear tap
         // per pixel; there is no window or iteration on top of it.
         "vr_rotate_sphere" => 1.2,
@@ -423,6 +427,10 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "chromatic_aberration_removal" => 2.6,
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
+        "blanking_fill" => match pass {
+            EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 3.0,
+            _ => 12.0,
+        },
         "warp" => 2.0,
         // Includes the blend-mode branch, roughly fifty percent above a pure
         // remap of the same footprint.

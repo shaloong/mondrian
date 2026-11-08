@@ -585,4 +585,38 @@ mod tests {
             }]
         ));
     }
+
+    #[test]
+    fn spatial_chain_blanking_fill_budgets_only_the_textures_its_mode_uses() {
+        use mondrian_effects::{BlankingFillGrade, BlankingFillMode, BlankingFillParameters};
+
+        for (mode, passes, scratch_bytes) in [
+            (BlankingFillMode::Stretch, 2_u32, 424_673_280),
+            (BlankingFillMode::Warp, 1, 283_115_520),
+        ] {
+            let grade = BlankingFillGrade::new(BlankingFillParameters {
+                mode,
+                ..BlankingFillParameters::default()
+            })
+            .unwrap();
+            let mut graph = EffectGraphBuilderState::new();
+            graph.append_unary(EffectRenderOp::BlankingFill { grade });
+            let graph = compile_reference_render_graph(graph.finish()).unwrap();
+            let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            let plan = gpu_spatial_chain_plan(&pipeline, 4096, 2160).unwrap();
+            assert_eq!(plan.scratch_bytes, scratch_bytes);
+            assert_eq!(plan.scratch_textures, (passes + 1) as usize);
+            assert_eq!(plan.spatial_passes, passes);
+            assert_eq!(plan.point_stages, 0);
+            assert!(matches!(
+                plan.stages.as_slice(),
+                [GpuSpatialStagePlan::Spatial {
+                    pass: EffectGpuSpatialPass::BlankingFill { .. },
+                    scratch_textures,
+                    horizontal_halo: u32::MAX,
+                    vertical_halo: u32::MAX,
+                }] if *scratch_textures == passes
+            ));
+        }
+    }
 }

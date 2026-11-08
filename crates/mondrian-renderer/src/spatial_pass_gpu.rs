@@ -69,6 +69,9 @@ pub(crate) struct EffectSpatialGpu {
     chromatic_aberration_removal: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
+    blanking_fill_horizontal: wgpu::RenderPipeline,
+    blanking_fill_vertical: wgpu::RenderPipeline,
+    blanking_fill_warp: wgpu::RenderPipeline,
     flip: wgpu::RenderPipeline,
     ripple: wgpu::RenderPipeline,
     wave_warp: wgpu::RenderPipeline,
@@ -1241,6 +1244,50 @@ impl EffectSpatialGpu {
             bind_group_layouts: &[Some(&composite_bindings)],
             immediate_size: 0,
         });
+        let blanking_fill_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian.effect-spatial.blanking-fill"),
+            source: wgpu::ShaderSource::Wgsl(blanking_fill_shader_source().into()),
+        });
+        let blanking_fill_pipeline = |label, entry| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&composite_layout),
+                vertex: wgpu::VertexState {
+                    module: &blanking_fill_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blanking_fill_shader,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let blanking_fill_horizontal = blanking_fill_pipeline(
+            "mondrian.effect-spatial.blanking-fill-horizontal",
+            "fs_horizontal",
+        );
+        let blanking_fill_vertical = blanking_fill_pipeline(
+            "mondrian.effect-spatial.blanking-fill-vertical",
+            "fs_vertical",
+        );
+        let blanking_fill_warp =
+            blanking_fill_pipeline("mondrian.effect-spatial.blanking-fill-warp", "fs_warp");
         let fill_matte = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.fill-matte"),
             layout: Some(&composite_layout),
@@ -2105,6 +2152,9 @@ impl EffectSpatialGpu {
             chromatic_aberration_removal,
             basic_3d,
             camera_view,
+            blanking_fill_horizontal,
+            blanking_fill_vertical,
+            blanking_fill_warp,
             flip,
             ripple,
             wave_warp,
@@ -2896,6 +2946,9 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::ChromaticAberrationRemoval { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
+            EffectGpuSpatialPass::BlankingFill { grade } => {
+                Ok(if grade.warps_top_layer() { 1 } else { 2 })
+            }
             EffectGpuSpatialPass::LensFlare { .. } => Ok(1),
             EffectGpuSpatialPass::Bulge { .. } => Ok(1),
             EffectGpuSpatialPass::Split { .. } => Ok(1),
@@ -3420,6 +3473,9 @@ impl EffectSpatialGpu {
                     &uniforms,
                 );
                 return Ok(destination.clone());
+            }
+            EffectGpuSpatialPass::BlankingFill { grade } => {
+                return self.record_blanking_fill(device, encoder, *grade, source, scratch);
             }
             EffectGpuSpatialPass::Deband { grade } => {
                 return self.record_deband(device, encoder, *grade, source, scratch, width, height);
@@ -5719,9 +5775,59 @@ impl EffectSpatialGpu {
         *written = if *written == 3 { 2 } else { 3 };
     }
 
+    fn record_blanking_fill(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::BlankingFillGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if grade.is_identity() {
+            return Ok(source.clone());
+        }
+        let first = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+        let uniforms = grade.gpu_controls(source.width(), source.height());
+        let original = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let first_view = first.create_view(&wgpu::TextureViewDescriptor::default());
+        if grade.warps_top_layer() {
+            self.record_composite_pass(
+                device,
+                encoder,
+                &self.blanking_fill_warp,
+                &original,
+                &original,
+                &first_view,
+                &uniforms,
+            );
+            return Ok(first.clone());
+        }
+        let output = scratch.get(1).ok_or(EffectSpatialGpuError::EmptyFrame)?;
+        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.blanking_fill_horizontal,
+            &original,
+            &original,
+            &first_view,
+            &uniforms,
+        );
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.blanking_fill_vertical,
+            &original,
+            &first_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(output.clone())
+    }
+
     /// Records one composite pass over the original frame and an auxiliary layer.
     #[allow(clippy::too_many_arguments)]
-    fn record_composite_pass(
+    fn record_composite_pass<T: bytemuck::Pod>(
         &self,
         device: &wgpu::Device,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
@@ -5729,7 +5835,7 @@ impl EffectSpatialGpu {
         original: &wgpu::TextureView,
         auxiliary: &wgpu::TextureView,
         output: &wgpu::TextureView,
-        uniforms: &SpatialPassUniform,
+        uniforms: &T,
     ) {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mondrian.effect-spatial.composite-uniforms"),
@@ -8441,6 +8547,210 @@ fn fs_magnify(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> 
     let out_rgb =
         (blended * magnified_alpha + base.rgb * base_alpha * (1.0 - magnified_alpha)) / out_alpha;
     return vec4<f32>(out_rgb, out_alpha);
+}
+"#;
+
+fn blanking_fill_shader_source() -> String {
+    let weights = mondrian_effects::BLANKING_FILL_BLUR_WEIGHTS
+        .map(|weight| format!("{weight:?}"))
+        .join(", ");
+    format!("const BLUR_WEIGHTS = array<f32, 9>({weights});\n{BLANKING_FILL_SHADER}",)
+}
+
+const BLANKING_FILL_SHADER: &str = r#"
+struct Uniforms {
+    raster: vec4<f32>,
+    source_rect: vec4<f32>,
+    foreground_rect: vec4<f32>,
+    source_texels: vec4<f32>,
+    geometry: vec4<f32>,
+    fade: vec4<f32>,
+    shadow: vec4<f32>,
+    shadow_geometry: vec4<f32>,
+    stretch: vec4<f32>,
+};
+
+@group(0) @binding(0) var original: texture_2d<f32>;
+@group(0) @binding(1) var horizontal: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
+        vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, 1.0)
+    );
+    return vec4<f32>(positions[index], 0.0, 1.0);
+}
+
+fn associated_sample(plane: texture_2d<f32>, texel: vec2<i32>, straight: bool) -> vec4<f32> {
+    let sample = textureLoad(plane, texel, 0);
+    if (straight) {
+        let alpha = clamp(sample.a, 0.0, 1.0);
+        return vec4<f32>(sample.rgb * alpha, alpha);
+    }
+    return sample;
+}
+
+fn sample_bilinear(plane: texture_2d<f32>, texel: vec2<f32>, straight: bool) -> vec4<f32> {
+    let limit = vec2<i32>(textureDimensions(plane)) - vec2<i32>(1);
+    let position = clamp(texel, vec2<f32>(0.0), vec2<f32>(limit));
+    let lower = floor(position);
+    let fraction = position - lower;
+    let base = vec2<i32>(lower);
+    let next = min(base + vec2<i32>(1), limit);
+    let a = associated_sample(plane, base, straight);
+    let b = associated_sample(plane, vec2<i32>(next.x, base.y), straight);
+    let c = associated_sample(plane, vec2<i32>(base.x, next.y), straight);
+    let d = associated_sample(plane, next, straight);
+    let top = a + (b - a) * fraction.x;
+    let bottom = c + (d - c) * fraction.x;
+    return top + (bottom - top) * fraction.y;
+}
+
+fn unassociate(sample: vec4<f32>) -> vec4<f32> {
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(sample.rgb / alpha, alpha);
+}
+
+fn sample_source(position: vec2<f32>) -> vec4<f32> {
+    let texel = clamp(position - vec2<f32>(0.5), uniforms.source_texels.xy, uniforms.source_texels.zw);
+    return sample_bilinear(original, texel, true);
+}
+
+fn rect_contains(rect: vec4<f32>, position: vec2<f32>) -> bool {
+    return all(position >= rect.xy) && all(position <= rect.zw);
+}
+
+fn centre(rect: vec4<f32>) -> vec2<f32> {
+    return (rect.xy + rect.zw) * 0.5;
+}
+
+fn foreground_position(position: vec2<f32>) -> vec2<f32> {
+    let source_centre = centre(uniforms.source_rect);
+    let foreground_centre = centre(uniforms.foreground_rect);
+    if (uniforms.raster.z == 1.0 && all(source_centre == foreground_centre)) {
+        return position;
+    }
+    return source_centre + (position - foreground_centre) * uniforms.raster.z;
+}
+
+fn background_position(position: vec2<f32>) -> vec2<f32> {
+    if (uniforms.geometry.w == 5.0) {
+        let rect = uniforms.foreground_rect;
+        let size = rect.zw - rect.xy;
+        let cycle = (position - rect.xy) / size;
+        let wrapped = cycle - floor(cycle * 0.5) * 2.0;
+        let folded = 1.0 - abs(wrapped - 1.0);
+        return foreground_position(rect.xy + size * folded);
+    }
+    return centre(uniforms.source_rect)
+        + (position - uniforms.raster.xy * 0.5) * uniforms.geometry.xy * uniforms.raster.z;
+}
+
+fn warp_position(position: vec2<f32>) -> vec2<f32> {
+    let rect = uniforms.foreground_rect;
+    let inner_min = rect.xy + uniforms.stretch.xy;
+    let inner_max = rect.zw - uniforms.stretch.zw;
+    let low = rect.xy + position / max(inner_min, vec2<f32>(1.0e-8)) * (inner_min - rect.xy);
+    let high = rect.zw - (uniforms.raster.xy - position)
+        / max(uniforms.raster.xy - inner_max, vec2<f32>(1.0e-8)) * (rect.zw - inner_max);
+    let warped = select(position, low, position < inner_min);
+    return foreground_position(select(warped, high, position > inner_max));
+}
+
+fn cubic(value: f32) -> f32 {
+    return value * value * (3.0 - 2.0 * value);
+}
+
+fn foreground_weight(position: vec2<f32>) -> f32 {
+    let rect = uniforms.foreground_rect;
+    if (!rect_contains(rect, position)) {
+        return 0.0;
+    }
+    let feather = uniforms.geometry.z;
+    if (feather == 0.0) {
+        return 1.0;
+    }
+    let inside = min(position - rect.xy, rect.zw - position);
+    return cubic(clamp(min(inside.x, inside.y) / feather, 0.0, 1.0));
+}
+
+fn composite_background(background: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
+    let fade = uniforms.fade;
+    let faded = background * (1.0 - fade.a) + vec4<f32>(fade.rgb, 1.0) * fade.a;
+    let shadow = uniforms.shadow;
+    if (shadow.a == 0.0) {
+        return faded;
+    }
+    let rect = uniforms.foreground_rect;
+    let half_size = (rect.zw - rect.xy) * 0.5;
+    let delta = abs(position - (centre(rect) + uniforms.shadow_geometry.xy)) - half_size;
+    let distance = length(max(delta, vec2<f32>(0.0))) + min(max(delta.x, delta.y), 0.0);
+    let softness = uniforms.shadow_geometry.z;
+    var coverage = select(0.0, 1.0, distance <= 0.0);
+    if (softness > 0.0) {
+        coverage = 1.0 - cubic(clamp(distance / softness, 0.0, 1.0));
+    }
+    let alpha = coverage * shadow.a;
+    return vec4<f32>(shadow.rgb, 1.0) * alpha + faded * (1.0 - alpha);
+}
+
+@fragment
+fn fs_horizontal(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
+    let position = floor(fragment.xy) + vec2<f32>(0.5);
+    let step_size = uniforms.raster.w;
+    if (step_size == 0.0) {
+        return sample_source(background_position(position));
+    }
+    var background = vec4<f32>(0.0);
+    for (var index = 0u; index < 9u; index += 1u) {
+        let offset = (f32(index) - 4.0) * step_size;
+        let x = clamp(position.x + offset, 0.5, uniforms.raster.x - 0.5);
+        background += sample_source(background_position(vec2<f32>(x, position.y))) * BLUR_WEIGHTS[index];
+    }
+    return background;
+}
+
+@fragment
+fn fs_vertical(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
+    let texel = floor(fragment.xy);
+    let position = texel + vec2<f32>(0.5);
+    let foreground = foreground_position(position);
+    let weight = foreground_weight(position);
+    if (weight == 1.0) {
+        if (all(foreground == position) && rect_contains(uniforms.source_texels, texel)) {
+            return textureLoad(original, vec2<i32>(texel), 0);
+        }
+        return unassociate(sample_source(foreground));
+    }
+    let step_size = uniforms.raster.w;
+    var background = vec4<f32>(0.0);
+    if (step_size == 0.0) {
+        background = textureLoad(horizontal, vec2<i32>(texel), 0);
+    } else {
+        for (var index = 0u; index < 9u; index += 1u) {
+            let offset = (f32(index) - 4.0) * step_size;
+            let sample = sample_bilinear(horizontal, texel + vec2<f32>(0.0, offset), false);
+            background += sample * BLUR_WEIGHTS[index];
+        }
+    }
+    let faded = composite_background(background, position);
+    return unassociate(faded * (1.0 - weight) + sample_source(foreground) * weight);
+}
+
+@fragment
+fn fs_warp(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
+    let texel = floor(fragment.xy);
+    let position = texel + vec2<f32>(0.5);
+    let warped = warp_position(position);
+    if (all(warped == position) && rect_contains(uniforms.source_texels, texel)) {
+        return textureLoad(original, vec2<i32>(texel), 0);
+    }
+    return unassociate(sample_source(warped));
 }
 "#;
 

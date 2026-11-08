@@ -18031,20 +18031,21 @@ mod tests {
             .fold(0.0_f32, f32::max)
     }
 
-    fn readback_single_spatial_pass(
+    fn readback_spatial_stage(
         context: &crate::GpuContext,
         executor: &crate::spatial_pass_gpu::EffectSpatialGpu,
         pixels: &[[f32; 4]],
         width: u32,
         height: u32,
         pass: mondrian_effects::EffectGpuSpatialPass,
+        passes: u32,
     ) -> Vec<[f32; 4]> {
         assert_eq!(
             crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass).unwrap(),
-            1
+            passes
         );
         let source = key_cleaner_upload(context, pixels, width, height);
-        let scratch = key_cleaner_scratch(context, width, height, 1);
+        let scratch = key_cleaner_scratch(context, width, height, passes as usize);
         let mut encoder = context
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -18089,13 +18090,14 @@ mod tests {
                 height as usize,
                 grade
             ));
-            let actual = readback_single_spatial_pass(
+            let actual = readback_spatial_stage(
                 &context,
                 &executor,
                 &pixels,
                 width,
                 height,
                 mondrian_effects::EffectGpuSpatialPass::ChromaticAberrationRemoval { grade },
+                1,
             );
             for (input, output) in pixels.iter().zip(&actual) {
                 assert_eq!(input[1].to_bits(), output[1].to_bits());
@@ -18135,13 +18137,14 @@ mod tests {
             .collect();
         let grade = ChromaticAberrationRemovalGrade::new(5.0, 5.0, 10.0, [0.5, 0.5]).unwrap();
         let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
-        let actual = readback_single_spatial_pass(
+        let actual = readback_spatial_stage(
             &context,
             &executor,
             &pixels,
             width,
             height,
             mondrian_effects::EffectGpuSpatialPass::ChromaticAberrationRemoval { grade },
+            1,
         );
         let mut expected = pixels.clone();
         assert!(chromatic_aberration_removal_frame_f32(
@@ -18239,13 +18242,14 @@ mod tests {
                 height as usize,
                 grade
             ));
-            let actual = readback_single_spatial_pass(
+            let actual = readback_spatial_stage(
                 &context,
                 &executor,
                 &pixels,
                 width,
                 height,
                 EffectGpuSpatialPass::Basic3D { grade },
+                1,
             );
             let max_error = max_spatial_float_error(&expected, &actual);
             eprintln!(
@@ -18384,13 +18388,14 @@ mod tests {
                 height as usize,
                 grade
             ));
-            let actual = readback_single_spatial_pass(
+            let actual = readback_spatial_stage(
                 &context,
                 &executor,
                 &pixels,
                 width,
                 height,
                 EffectGpuSpatialPass::CameraView { grade },
+                1,
             );
             if grade.is_identity() {
                 for (before, after) in pixels.iter().zip(&actual) {
@@ -18419,6 +18424,152 @@ mod tests {
                 }
             }
             assert!(max_error <= 1.0e-4, "{grade:?}: {max_error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_blanking_fill_matches_all_modes_on_the_raw_stage() {
+        use mondrian_effects::{
+            blanking_fill_frame_f32, BlankingFillGrade, BlankingFillMode, BlankingFillParameters,
+        };
+
+        let context = crate::GpuContext::new()
+            .await
+            .expect("Blanking Fill needs an actual GPU adapter");
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let (width, height) = (65, 47);
+        let mut pixels = spatial_test_pixels(width, height);
+        for (index, pixel) in pixels.iter_mut().enumerate() {
+            pixel[0] += 0.8;
+            pixel[2] -= 0.7;
+            pixel[3] = [0.0, 0.015625, 0.25, 0.5, 0.875, 1.0][index % 6];
+        }
+        for (mode, blur, fade) in [
+            (BlankingFillMode::Stretch, 1.0, 0.25),
+            (BlankingFillMode::Zoom, 0.65, 0.125),
+            (BlankingFillMode::Manual, 0.0, 0.0),
+            (BlankingFillMode::Mirror, 0.8, 0.35),
+            (BlankingFillMode::Warp, 1.0, 1.0),
+        ] {
+            let grade = BlankingFillGrade::new(BlankingFillParameters {
+                mode,
+                crop: [0.23, 0.12, 0.15, 0.18],
+                crop_split: [true; 2],
+                center: true,
+                source_zoom: 1.125,
+                expand: 1.5,
+                aspect: 1.3,
+                blend_edges: 0.75,
+                background_blur: blur,
+                fade,
+                fade_color: [0.5, 0.75, 0.25, 0.5],
+                shadow_strength: 0.6,
+                shadow_angle: -23.0,
+                shadow_distance: 0.12,
+                shadow_blur: 0.55,
+                shadow_color: [0.1, 0.2, 0.3, 0.5],
+                stretch: [-0.08, -0.12, -0.15, -0.06],
+                stretch_split: [true; 2],
+            })
+            .unwrap();
+            let mut expected = pixels.clone();
+            assert!(blanking_fill_frame_f32(
+                &mut expected,
+                width as usize,
+                height as usize,
+                grade
+            ));
+            let actual = readback_spatial_stage(
+                &context,
+                &executor,
+                &pixels,
+                width,
+                height,
+                EffectGpuSpatialPass::BlankingFill { grade },
+                if mode == BlankingFillMode::Warp { 1 } else { 2 },
+            );
+            assert!(max_spatial_float_error(&pixels, &actual) > 0.1);
+            assert!(actual.iter().any(|pixel| pixel[0] > 1.0));
+            let max_error = max_spatial_float_error(&expected, &actual);
+            eprintln!("TRF-11 raw {mode:?}, max absolute error = {max_error:.9e}");
+            assert!(max_error <= 1.0e-4, "{mode:?}: {max_error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_blanking_fill_composites_the_authored_crop_on_the_original_grid() {
+        use mondrian_core::{PropertyHost, PropertyMutation, PropertyValue, TimelineTime};
+        use mondrian_effects::{
+            compile_clip_effect_graph, instantiate_effect_node, lower_effect_graph_to_gpu_pipeline,
+            EffectType,
+        };
+
+        let context = crate::GpuContext::new()
+            .await
+            .expect("Blanking Fill needs an actual GPU adapter");
+        let (width, height) = (41, 27);
+        let working_space = WorkingColorSpace::LinearRec709;
+        let pixels = spatial_test_pixels(width, height);
+        let frame = spatial_test_frame(&pixels, width, height);
+        for (mode, passes) in [("stretch", 2_u32), ("warp", 1)] {
+            let kind = EffectType::BlankingFill;
+            let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+            for (field, value) in [
+                ("crop_left", PropertyValue::Float(0.25)),
+                ("crop_top", PropertyValue::Float(0.125)),
+                ("zoom_mode", PropertyValue::Enum(mode.into())),
+                ("fade", PropertyValue::Float(0.5)),
+                ("stretch_left", PropertyValue::Float(-0.25)),
+            ] {
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: kind.property_path(field),
+                        value,
+                    })
+                    .unwrap();
+            }
+            let compiled =
+                compile_clip_effect_graph(&[effect], &[], TimelineTime::ZERO, working_space)
+                    .unwrap();
+            let pipeline = lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+            let entries = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context,
+                &entries,
+                width,
+                height,
+                working_space,
+            );
+            let expected = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(width, height),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &pixels,
+                ),
+                &compiled,
+                0,
+            )
+            .unwrap();
+            assert_eq!(actual.len(), pixels.len());
+            assert!(max_spatial_float_error(&pixels, &actual) > 0.1);
+            let centre = (height / 2 * width + width / 2) as usize;
+            assert_eq!(actual[centre], pixels[centre]);
+            assert_eq!(diagnostics.spatial_effect_layers, 1);
+            assert_eq!(diagnostics.spatial_effect_passes, u64::from(passes));
+            assert_eq!(diagnostics.spatial_scratch_textures_peak, passes + 1);
+            assert_eq!(diagnostics.spatial_point_stages, 0);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+            let max_error = max_spatial_float_error(&expected, &actual);
+            eprintln!("TRF-11 compositor {mode}, max absolute error = {max_error:.9e}");
+            assert!(max_error <= 1.0e-4, "{mode}: {max_error}");
         }
     }
 
