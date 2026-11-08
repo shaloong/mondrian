@@ -3368,3 +3368,15 @@ parameter-mondrian-effect-builtin-basic-3d-swivel-label = 旋转
 parameter-mondrian-effect-builtin-basic-3d-tilt-label = 倾斜
 parameter-mondrian-effect-builtin-basic-3d-distance-label = 与图像的距离
 parameter-mondrian-effect-builtin-basic-3d-specular-label = 镜面高光
+
+## 摄像机视图
+effect-camera-view = 摄像机视图
+parameter-group-camera-view = 摄像机视图
+parameter-mondrian-effect-builtin-camera-view-longitude-label = 经度
+parameter-mondrian-effect-builtin-camera-view-latitude-label = 纬度
+parameter-mondrian-effect-builtin-camera-view-roll-label = 滚动
+parameter-mondrian-effect-builtin-camera-view-focal-length-label = 焦距
+parameter-mondrian-effect-builtin-camera-view-distance-label = 距离
+parameter-mondrian-effect-builtin-camera-view-zoom-label = 缩放
+parameter-mondrian-effect-builtin-camera-view-fill-color-label = 填充颜色
+parameter-mondrian-effect-builtin-camera-view-fill-alpha-label = 填充 Alpha 颜色

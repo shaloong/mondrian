@@ -515,6 +515,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::CameraView { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "camera_view",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::SelectiveColor { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "selective_color",
@@ -1196,7 +1202,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The premultiplied source snapshot is the gate reference for both
         // passes, and the horizontal pass writes a second full-frame plane.
         EffectRenderOp::SmartBlur { .. } => 2,
-        EffectRenderOp::ChromaticAberrationRemoval { .. } | EffectRenderOp::Basic3D { .. } => 1,
+        EffectRenderOp::ChromaticAberrationRemoval { .. }
+        | EffectRenderOp::Basic3D { .. }
+        | EffectRenderOp::CameraView { .. } => 1,
         EffectRenderOp::DisplacementMap { .. } => 1,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
@@ -1787,6 +1795,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             *grade,
             checkpoint,
         ),
+        EffectRenderOp::CameraView { grade } => {
+            crate::camera_view::apply_camera_view_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *grade,
+                checkpoint,
+            )
+        }
         EffectRenderOp::SmartBlur { grade } => {
             crate::smart_blur::apply_smart_blur_f32_controlled(
                 working,

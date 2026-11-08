@@ -390,6 +390,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "智能模糊" => Some("parameter-group-smart-blur"),
         "色差校正" => Some("parameter-group-chromatic-aberration-removal"),
         "基本 3D" => Some("parameter-group-basic-3d"),
+        "摄像机视图" => Some("parameter-group-camera-view"),
         _ => None,
     }
 }

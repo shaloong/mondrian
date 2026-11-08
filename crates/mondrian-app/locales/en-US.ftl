@@ -3440,3 +3440,15 @@ parameter-mondrian-effect-builtin-basic-3d-swivel-label = Swivel
 parameter-mondrian-effect-builtin-basic-3d-tilt-label = Tilt
 parameter-mondrian-effect-builtin-basic-3d-distance-label = Distance to Image
 parameter-mondrian-effect-builtin-basic-3d-specular-label = Specular Highlight
+
+## Camera View
+effect-camera-view = Camera View
+parameter-group-camera-view = Camera View
+parameter-mondrian-effect-builtin-camera-view-longitude-label = Longitude
+parameter-mondrian-effect-builtin-camera-view-latitude-label = Latitude
+parameter-mondrian-effect-builtin-camera-view-roll-label = Roll
+parameter-mondrian-effect-builtin-camera-view-focal-length-label = Focal Length
+parameter-mondrian-effect-builtin-camera-view-distance-label = Distance
+parameter-mondrian-effect-builtin-camera-view-zoom-label = Zoom
+parameter-mondrian-effect-builtin-camera-view-fill-color-label = Fill Color
+parameter-mondrian-effect-builtin-camera-view-fill-alpha-label = Fill Alpha

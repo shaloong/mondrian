@@ -1281,6 +1281,10 @@ pub enum EffectRenderOp {
     Basic3D {
         grade: crate::Basic3DGrade,
     },
+    /// View the layer from an orbital camera and fill rays that miss its rectangle.
+    CameraView {
+        grade: crate::CameraViewGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1645,6 +1649,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .finish(),
             Self::Basic3D { grade } => {
                 formatter.debug_struct("Basic3D").field("grade", grade).finish()
+            }
+            Self::CameraView { grade } => {
+                formatter.debug_struct("CameraView").field("grade", grade).finish()
             }
             Self::DisplacementMap { grade } => {
                 formatter.debug_struct("DisplacementMap").field("grade", grade).finish()
@@ -2722,6 +2729,10 @@ impl EffectRenderOp {
                 115u8.hash(state);
                 grade.authored_values().map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::CameraView { grade } => {
+                116u8.hash(state);
+                grade.authored_values().map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2898,7 +2909,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChannelCombiner { .. } => 1,
             EffectRenderOp::SmartBlur { .. } => 3,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
-            EffectRenderOp::Basic3D { .. } => 5,
+            EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3429,7 +3440,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 114] {
+fn builtin_effect_types() -> [EffectType; 115] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3545,6 +3556,7 @@ fn builtin_effect_types() -> [EffectType; 114] {
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
         EffectType::Basic3D,
+        EffectType::CameraView,
     ]
 }
 
@@ -11700,6 +11712,61 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 );
             }
         }
+        EffectType::CameraView => {
+            let angle = crate::CAMERA_VIEW_MAX_ANGLE;
+            let angle_range = [-angle, angle];
+            for (parameter, label, default, [min, max], step) in [
+                ("longitude", "经度", 0.0, angle_range, 0.1),
+                ("latitude", "纬度", 0.0, angle_range, 0.1),
+                ("roll", "滚动", 0.0, angle_range, 0.1),
+                (
+                    "focal_length",
+                    "焦距",
+                    crate::CAMERA_VIEW_DEFAULT_FOCAL,
+                    crate::CAMERA_VIEW_FOCAL_RANGE,
+                    1.0,
+                ),
+                (
+                    "distance",
+                    "距离",
+                    crate::CAMERA_VIEW_DEFAULT_DISTANCE,
+                    crate::CAMERA_VIEW_DISTANCE_RANGE,
+                    0.01,
+                ),
+                (
+                    "zoom",
+                    "缩放",
+                    crate::CAMERA_VIEW_DEFAULT_ZOOM,
+                    crate::CAMERA_VIEW_ZOOM_RANGE,
+                    0.1,
+                ),
+                ("fill_alpha", "填充 Alpha 颜色", 1.0, [0.0, 1.0], 0.01),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "摄像机视图",
+                    label,
+                    PropertyValue::Float(default),
+                    Some(f64::from(min)),
+                    Some(f64::from(max)),
+                    Some(step),
+                );
+            }
+            let [r, g, b, a] = crate::CAMERA_VIEW_DEFAULT_FILL;
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_color",
+                "摄像机视图",
+                "填充颜色",
+                PropertyValue::Color(Color { r, g, b, a }),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::SmartBlur => {
             // The documented default (radius 3 at threshold 25 %) already
             // softens the frame, and even the 0.1 radius floor keeps changing
@@ -12449,6 +12516,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Basic3D, "swivel" | "tilt") => ParameterUnit::Degrees,
         (EffectType::Basic3D, "distance") => ParameterUnit::Pixels,
         (EffectType::Basic3D, "specular") => ParameterUnit::Normalized,
+        (EffectType::CameraView, "longitude" | "latitude" | "roll") => ParameterUnit::Degrees,
+        (EffectType::CameraView, "focal_length") => ParameterUnit::Pixels,
+        (EffectType::CameraView, "zoom") => ParameterUnit::Percent,
+        (EffectType::CameraView, "fill_alpha") => ParameterUnit::Normalized,
         // The patch points are authored in a reference box, not in frame pixels,
         // and the quality option is an iteration count, so neither carries a unit.
         (EffectType::BezierWarp, _) => ParameterUnit::Unitless,
@@ -12879,7 +12950,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
-        EffectType::Basic3D => EffectExecutionContract {
+        EffectType::Basic3D | EffectType::CameraView => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -18658,6 +18729,57 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::CameraView => {
+            let longitude = builtin_parameter_id(effect_type, "longitude");
+            let latitude = builtin_parameter_id(effect_type, "latitude");
+            let roll = builtin_parameter_id(effect_type, "roll");
+            let focal_length = builtin_parameter_id(effect_type, "focal_length");
+            let distance = builtin_parameter_id(effect_type, "distance");
+            let zoom = builtin_parameter_id(effect_type, "zoom");
+            let fill_color = builtin_parameter_id(effect_type, "fill_color");
+            let fill_alpha = builtin_parameter_id(effect_type, "fill_alpha");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let number = |id: &ParameterId, field: &str, default| match effect
+                    .evaluate_parameter(id, context.time)
+                {
+                    Some(PropertyValue::Float(value)) => Ok(value),
+                    Some(PropertyValue::Int(value)) => Ok(value as f32),
+                    Some(_) => Err(invalid(format!("{field} must be a number"))),
+                    None => Ok(default),
+                };
+                let color = match effect.evaluate_parameter(&fill_color, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b, color.a],
+                    Some(_) => return Err(invalid("fill_color must be a color".into())),
+                    None => crate::CAMERA_VIEW_DEFAULT_FILL,
+                };
+                let grade = crate::CameraViewGrade::new(
+                    [
+                        number(&longitude, "longitude", 0.0)?,
+                        number(&latitude, "latitude", 0.0)?,
+                        number(&roll, "roll", 0.0)?,
+                    ],
+                    number(
+                        &focal_length,
+                        "focal_length",
+                        crate::CAMERA_VIEW_DEFAULT_FOCAL,
+                    )?,
+                    number(&distance, "distance", crate::CAMERA_VIEW_DEFAULT_DISTANCE)?,
+                    number(&zoom, "zoom", crate::CAMERA_VIEW_DEFAULT_ZOOM)?,
+                    color,
+                    number(&fill_alpha, "fill_alpha", 1.0)?,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::CameraView { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SmartBlur => {
             let radius_id = builtin_parameter_id(effect_type, "radius");
             let threshold_id = builtin_parameter_id(effect_type, "threshold");
@@ -19951,6 +20073,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::SmartBlur => "智能模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
         EffectType::Basic3D => "基本 3D",
+        EffectType::CameraView => "摄像机视图",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -21300,6 +21423,7 @@ mod tests {
             EffectType::SmartBlur,
             EffectType::ChromaticAberrationRemoval,
             EffectType::Basic3D,
+            EffectType::CameraView,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -30373,7 +30497,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 114);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 115);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -30901,7 +31025,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 114);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 115);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33858,7 +33982,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 114);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 115);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -34994,7 +35118,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 114);
+        assert_eq!(builtin_effect_types().len(), 115);
     }
 
     #[test]
@@ -35850,6 +35974,218 @@ mod tests {
         assert_eq!(output[4 * 9 + 4], pixels[4 * 9 + 4]);
         assert_eq!(output[4 * 9 + 6], pixels[4 * 9 + 8]);
         assert_eq!(output[4 * 9 + 7], [0.0; 4]);
+    }
+
+    fn author_camera_view(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let kind = EffectType::CameraView;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        for (field, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: kind.property_path(field),
+                    value: value.clone(),
+                })
+                .unwrap();
+        }
+        effect
+    }
+
+    #[test]
+    fn camera_view_exposes_eight_typed_properties_and_elides_default_geometry() {
+        let kind = EffectType::CameraView;
+        assert_eq!(EffectType::from_key("builtin.camera_view"), kind);
+        let properties = default_properties_for(kind.clone());
+        assert_eq!(properties.iter().count(), 8);
+        for (field, unit, expected) in [
+            (
+                "longitude",
+                ParameterUnit::Degrees,
+                PropertyValue::Float(0.0),
+            ),
+            (
+                "latitude",
+                ParameterUnit::Degrees,
+                PropertyValue::Float(0.0),
+            ),
+            ("roll", ParameterUnit::Degrees, PropertyValue::Float(0.0)),
+            (
+                "focal_length",
+                ParameterUnit::Pixels,
+                PropertyValue::Float(500.0),
+            ),
+            (
+                "distance",
+                ParameterUnit::Unitless,
+                PropertyValue::Float(1.0),
+            ),
+            ("zoom", ParameterUnit::Percent, PropertyValue::Float(100.0)),
+            (
+                "fill_color",
+                ParameterUnit::Unitless,
+                PropertyValue::Color(Color::WHITE),
+            ),
+            (
+                "fill_alpha",
+                ParameterUnit::Normalized,
+                PropertyValue::Float(1.0),
+            ),
+        ] {
+            let property = properties.property(&kind.property_path(field)).unwrap();
+            assert_eq!(property.descriptor.schema.unit, unit);
+            assert_eq!(property.evaluate(tt(0)), expected);
+        }
+        for effect in [
+            author_camera_view(&[]),
+            author_camera_view(&[("fill_alpha", PropertyValue::Float(0.25))]),
+        ] {
+            assert!(
+                build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .unwrap()
+                    .is_identity()
+            );
+        }
+    }
+
+    #[test]
+    fn camera_view_preserves_author_values_and_hashes_animation() {
+        use std::hash::{Hash, Hasher};
+
+        let kind = EffectType::CameraView;
+        let mut effect = author_camera_view(&[
+            ("longitude", PropertyValue::Float(33.0)),
+            ("latitude", PropertyValue::Float(-21.0)),
+            ("roll", PropertyValue::Float(15.0)),
+            ("focal_length", PropertyValue::Float(625.0)),
+            ("distance", PropertyValue::Float(2.0)),
+            ("zoom", PropertyValue::Float(125.0)),
+            (
+                "fill_color",
+                PropertyValue::Color(Color { r: 0.25, g: 0.5, b: 0.75, a: 0.5 }),
+            ),
+        ]);
+        for (time, value) in [(tt(0), 0.5), (tt(30), 0.75)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: kind.property_path("fill_alpha"),
+                    keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+                })
+                .unwrap();
+        }
+        let reopened =
+            serde_json::from_value::<EffectNode>(serde_json::to_value(effect).unwrap()).unwrap();
+        let at = |time| {
+            compile_clip_effect_graph(
+                std::slice::from_ref(&reopened),
+                &[],
+                time,
+                TEST_WORKING_SPACE,
+            )
+            .unwrap()
+        };
+        let compiled = at(tt(0));
+        assert_ne!(
+            compiled.semantic_fingerprint(),
+            at(tt(30)).semantic_fingerprint()
+        );
+        let op = compiled
+            .graph()
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: op @ EffectRenderOp::CameraView { .. },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: op @ EffectRenderOp::CameraView { .. },
+                    ..
+                } => Some(op),
+                _ => None,
+            })
+            .unwrap();
+        let EffectRenderOp::CameraView { grade } = op else {
+            panic!("the reopened Camera View must reach the graph");
+        };
+        let expected = [
+            33.0_f32, -21.0, 15.0, 625.0, 2.0, 125.0, 0.25, 0.5, 0.75, 0.5, 0.5,
+        ];
+        assert_eq!(grade.authored_values(), expected);
+        assert_eq!(op.estimated_cost(), 5);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(op),
+            117
+        );
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(op), 1);
+        let mut actual_hash = std::collections::hash_map::DefaultHasher::new();
+        let mut expected_hash = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual_hash);
+        116u8.hash(&mut expected_hash);
+        expected.map(f32::to_bits).hash(&mut expected_hash);
+        assert_eq!(actual_hash.finish(), expected_hash.finish());
+    }
+
+    #[test]
+    fn camera_view_rejects_a_persisted_focal_length_outside_the_schema() {
+        let mut document = serde_json::to_value(author_camera_view(&[])).unwrap();
+        overwrite_static_value(
+            &mut document,
+            "camera_view.focal_length",
+            serde_json::to_value(PropertyValue::Float(0.0)).unwrap(),
+        );
+        let tampered = serde_json::from_value(document).unwrap();
+        assert!(matches!(
+            build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE),
+            Err(EffectGraphBuildError::InvalidAuthorState { reason, .. })
+                if reason.contains("camera_view.focal_length")
+        ));
+    }
+
+    #[test]
+    fn camera_view_compiled_graph_creates_fill_coverage_at_the_frame_edges() {
+        use crate::EffectExecutionModes;
+
+        let contract = effect_definition(&EffectType::CameraView).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::FullFrame);
+        let effect = author_camera_view(&[
+            ("distance", PropertyValue::Float(2.0)),
+            (
+                "fill_color",
+                PropertyValue::Color(Color { r: 0.25, g: 0.5, b: 0.75, a: 0.5 }),
+            ),
+            ("fill_alpha", PropertyValue::Float(0.5)),
+        ]);
+        let compiled =
+            compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE).unwrap();
+        let pipeline = crate::lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+        assert!(matches!(
+            pipeline.stages(),
+            [crate::EffectGpuStage::Spatial {
+                pass: crate::EffectGpuSpatialPass::CameraView { .. },
+                ..
+            }]
+        ));
+        let pixels = [[-0.25, 0.75, 1.25, 0.0]; 81];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(9, 9),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels,
+            ),
+            &compiled,
+            0,
+        )
+        .unwrap();
+        assert_eq!(output[0], [0.25, 0.5, 0.75, 0.25]);
+        assert_eq!(output[40], [0.0; 4]);
     }
 }
 

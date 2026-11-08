@@ -33,6 +33,7 @@ pub mod black_white;
 pub mod box_blur;
 pub mod brightness_contrast;
 pub mod bulge;
+pub mod camera_view;
 pub mod cell_pattern;
 pub mod change_to_color;
 pub mod channel_blur;
@@ -193,6 +194,12 @@ pub use broadcast_safe::{
     broadcast_safe_frame_f32, BroadcastLocale, BroadcastSafeError, BroadcastSafeGrade,
     BroadcastSafeMode, BROADCAST_SAFE_LOCALE_COUNT, BROADCAST_SAFE_MAX_IRE, BROADCAST_SAFE_MIN_IRE,
     BROADCAST_SAFE_MODE_COUNT,
+};
+pub use camera_view::{
+    camera_view_frame_f32, CameraViewError, CameraViewGrade, CAMERA_VIEW_DEFAULT_DISTANCE,
+    CAMERA_VIEW_DEFAULT_FILL, CAMERA_VIEW_DEFAULT_FOCAL, CAMERA_VIEW_DEFAULT_ZOOM,
+    CAMERA_VIEW_DISTANCE_RANGE, CAMERA_VIEW_FOCAL_RANGE, CAMERA_VIEW_MAX_ANGLE,
+    CAMERA_VIEW_ZOOM_RANGE,
 };
 pub use cell_pattern::{
     cell_pattern_frame_f32, CellPatternControls, CellPatternError, CellPatternGrade,

@@ -267,6 +267,11 @@ pub enum EffectGpuSpatialPass {
         /// Validated camera and lighting controls.
         grade: crate::Basic3DGrade,
     },
+    /// One orbital camera projection with a straight-alpha fill outside the source.
+    CameraView {
+        /// Validated camera and fill controls.
+        grade: crate::CameraViewGrade,
+    },
     /// Fill composited through an independently sampled alpha matte.
     FillMatte {
         /// Authored feather, inversion, RGB and opacity.
@@ -332,6 +337,7 @@ impl EffectGpuSpatialPass {
             Self::SmartBlur { .. } => "smart_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
             Self::Basic3D { .. } => "basic_3d",
+            Self::CameraView { .. } => "camera_view",
             Self::FillMatte { .. } => "fill_matte",
         }
     }
@@ -420,7 +426,7 @@ impl EffectGpuSpatialPass {
             // tap, so it is bounded by the authoring ceiling of 100.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
-            Self::Basic3D { .. } => u32::MAX,
+            Self::Basic3D { .. } | Self::CameraView { .. } => u32::MAX,
             Self::FillMatte { .. } => 0,
         }
     }
@@ -495,7 +501,7 @@ impl EffectGpuSpatialPass {
             // Same reach as the horizontal halo.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
-            Self::Basic3D { .. } => u32::MAX,
+            Self::Basic3D { .. } | Self::CameraView { .. } => u32::MAX,
             Self::FillMatte { .. } => 0,
         }
     }
@@ -923,6 +929,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::ChromaticAberrationRemoval { grade: *grade })
         }
         EffectRenderOp::Basic3D { grade } => Some(EffectGpuSpatialPass::Basic3D { grade: *grade }),
+        EffectRenderOp::CameraView { grade } => {
+            Some(EffectGpuSpatialPass::CameraView { grade: *grade })
+        }
         EffectRenderOp::DisplacementMap { .. } => None,
         _ => None,
     }
