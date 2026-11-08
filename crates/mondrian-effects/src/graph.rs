@@ -2845,13 +2845,13 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
-        EffectRenderOp::SmartBlur { .. } | EffectRenderOp::ChromaticAberrationRemoval { .. } => {
-            EffectImplementationRequirements {
-                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-                roi_from_effect_input: EffectRoiPropagation::FullFrame,
-                ..cpu_float
-            }
-        }
+        EffectRenderOp::SmartBlur { .. }
+        | EffectRenderOp::ChromaticAberrationRemoval { .. }
+        | EffectRenderOp::Basic3D { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::DisplacementMap { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32,
             roi_from_effect_input: EffectRoiPropagation::FullFrame,

@@ -28,6 +28,7 @@ pub use float_frame::{
     EffectFloatFrameError, EffectFloatFrameView,
 };
 pub use float_working_set::estimate_compiled_float_raster_working_bytes;
+pub mod basic_3d;
 pub mod black_white;
 pub mod box_blur;
 pub mod brightness_contrast;
@@ -174,6 +175,9 @@ pub use adjustment::{
 pub use arithmetic::{
     arithmetic_frame_f32, ArithmeticError, ArithmeticGrade, ArithmeticOperator,
     ARITHMETIC_MAX_VALUE, ARITHMETIC_MIN_VALUE, ARITHMETIC_OPERATOR_COUNT,
+};
+pub use basic_3d::{
+    basic_3d_frame_f32, Basic3DError, Basic3DGrade, BASIC_3D_MAX_ANGLE, BASIC_3D_MAX_DISTANCE,
 };
 pub use black_white::{
     BlackAndWhiteError, BlackAndWhiteGrade, BLACK_WHITE_HUE_STOPS, BLACK_WHITE_NEUTRAL_WEIGHT,

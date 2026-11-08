@@ -3360,3 +3360,11 @@ parameter-mondrian-effect-builtin-chromatic-aberration-removal-lateral-label = �
 parameter-mondrian-effect-builtin-chromatic-aberration-removal-longitudinal-label = 纵向色差
 parameter-mondrian-effect-builtin-chromatic-aberration-removal-edge-scale-label = 边缘缩放
 parameter-mondrian-effect-builtin-chromatic-aberration-removal-centre-label = 中心
+
+## 基本 3D
+effect-basic-3d = 基本 3D
+parameter-group-basic-3d = 基本 3D
+parameter-mondrian-effect-builtin-basic-3d-swivel-label = 旋转
+parameter-mondrian-effect-builtin-basic-3d-tilt-label = 倾斜
+parameter-mondrian-effect-builtin-basic-3d-distance-label = 与图像的距离
+parameter-mondrian-effect-builtin-basic-3d-specular-label = 镜面高光

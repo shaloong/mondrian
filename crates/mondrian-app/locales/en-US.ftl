@@ -3432,3 +3432,11 @@ parameter-mondrian-effect-builtin-chromatic-aberration-removal-lateral-label = L
 parameter-mondrian-effect-builtin-chromatic-aberration-removal-longitudinal-label = Longitudinal Chromatic Aberration
 parameter-mondrian-effect-builtin-chromatic-aberration-removal-edge-scale-label = Edge Scale
 parameter-mondrian-effect-builtin-chromatic-aberration-removal-centre-label = Centre
+
+## Basic 3D
+effect-basic-3d = Basic 3D
+parameter-group-basic-3d = Basic 3D
+parameter-mondrian-effect-builtin-basic-3d-swivel-label = Swivel
+parameter-mondrian-effect-builtin-basic-3d-tilt-label = Tilt
+parameter-mondrian-effect-builtin-basic-3d-distance-label = Distance to Image
+parameter-mondrian-effect-builtin-basic-3d-specular-label = Specular Highlight

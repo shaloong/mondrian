@@ -1277,6 +1277,10 @@ pub enum EffectRenderOp {
     ChromaticAberrationRemoval {
         grade: crate::ChromaticAberrationRemovalGrade,
     },
+    /// Project the layer as a rotated card under a perspective camera.
+    Basic3D {
+        grade: crate::Basic3DGrade,
+    },
     Lut3D {
         lut: Arc<PreparedLut3D>,
         intensity: f32,
@@ -1639,6 +1643,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .debug_struct("ChromaticAberrationRemoval")
                 .field("grade", grade)
                 .finish(),
+            Self::Basic3D { grade } => {
+                formatter.debug_struct("Basic3D").field("grade", grade).finish()
+            }
             Self::DisplacementMap { grade } => {
                 formatter.debug_struct("DisplacementMap").field("grade", grade).finish()
             }
@@ -2711,6 +2718,10 @@ impl EffectRenderOp {
                 grade.edge_scale().to_bits().hash(state);
                 grade.centre().map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Basic3D { grade } => {
+                115u8.hash(state);
+                grade.authored_values().map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2887,6 +2898,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChannelCombiner { .. } => 1,
             EffectRenderOp::SmartBlur { .. } => 3,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
+            EffectRenderOp::Basic3D { .. } => 5,
             EffectRenderOp::Custom { .. } => 5,
         }
     }
@@ -3417,7 +3429,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 113] {
+fn builtin_effect_types() -> [EffectType; 114] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3532,6 +3544,7 @@ fn builtin_effect_types() -> [EffectType; 113] {
         EffectType::ChannelCombiner,
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
+        EffectType::Basic3D,
     ]
 }
 
@@ -11665,6 +11678,28 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.001),
             );
         }
+        EffectType::Basic3D => {
+            let angle = f64::from(crate::BASIC_3D_MAX_ANGLE);
+            let distance = f64::from(crate::BASIC_3D_MAX_DISTANCE);
+            for (parameter, label, min, max, step) in [
+                ("swivel", "旋转", -angle, angle, 0.1),
+                ("tilt", "倾斜", -angle, angle, 0.1),
+                ("distance", "与图像的距离", -distance, distance, 1.0),
+                ("specular", "镜面高光", 0.0, 1.0, 0.01),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "基本 3D",
+                    label,
+                    PropertyValue::Float(0.0),
+                    Some(min),
+                    Some(max),
+                    Some(step),
+                );
+            }
+        }
         EffectType::SmartBlur => {
             // The documented default (radius 3 at threshold 25 %) already
             // softens the frame, and even the 0.1 radius floor keeps changing
@@ -12411,6 +12446,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Pixels
         }
         (EffectType::ChromaticAberrationRemoval, "centre") => ParameterUnit::Normalized,
+        (EffectType::Basic3D, "swivel" | "tilt") => ParameterUnit::Degrees,
+        (EffectType::Basic3D, "distance") => ParameterUnit::Pixels,
+        (EffectType::Basic3D, "specular") => ParameterUnit::Normalized,
         // The patch points are authored in a reference box, not in frame pixels,
         // and the quality option is an iteration count, so neither carries a unit.
         (EffectType::BezierWarp, _) => ParameterUnit::Unitless,
@@ -12838,6 +12876,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The optical centre and reference radius use the full source grid.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Basic3D => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -18583,6 +18626,38 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Basic3D => {
+            let swivel = builtin_parameter_id(effect_type, "swivel");
+            let tilt = builtin_parameter_id(effect_type, "tilt");
+            let distance = builtin_parameter_id(effect_type, "distance");
+            let specular = builtin_parameter_id(effect_type, "specular");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let number = |id: &ParameterId, field: &str| match effect
+                    .evaluate_parameter(id, context.time)
+                {
+                    Some(PropertyValue::Float(value)) => Ok(value),
+                    Some(PropertyValue::Int(value)) => Ok(value as f32),
+                    Some(_) => Err(invalid(format!("{field} must be a number"))),
+                    None => Ok(0.0),
+                };
+                let grade = crate::Basic3DGrade::new(
+                    number(&swivel, "swivel")?,
+                    number(&tilt, "tilt")?,
+                    number(&distance, "distance")?,
+                    number(&specular, "specular")?,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Basic3D { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SmartBlur => {
             let radius_id = builtin_parameter_id(effect_type, "radius");
             let threshold_id = builtin_parameter_id(effect_type, "threshold");
@@ -19875,6 +19950,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChannelCombiner => "通道合成器",
         EffectType::SmartBlur => "智能模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
+        EffectType::Basic3D => "基本 3D",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -21223,6 +21299,7 @@ mod tests {
             EffectType::ChannelCombiner,
             EffectType::SmartBlur,
             EffectType::ChromaticAberrationRemoval,
+            EffectType::Basic3D,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -30296,7 +30373,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 113);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 114);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -30824,7 +30901,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 113);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 114);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33781,7 +33858,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 113);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 114);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -34917,7 +34994,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 113);
+        assert_eq!(builtin_effect_types().len(), 114);
     }
 
     #[test]
@@ -35617,6 +35694,162 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output[4 * 9 + 6], [6.5, 4.0, 5.5, 1.0]);
+    }
+
+    #[test]
+    fn basic_3d_round_trips_author_values_and_schema() {
+        let kind = EffectType::Basic3D;
+        assert_eq!(EffectType::from_key("builtin.basic_3d"), kind);
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        assert_eq!(default_properties_for(kind.clone()).iter().count(), 4);
+        assert!(build_effect_render_graph(
+            std::slice::from_ref(&effect),
+            tt(0),
+            TEST_WORKING_SPACE
+        )
+        .unwrap()
+        .is_identity());
+        let expected = [
+            ("swivel", 37.0, ParameterUnit::Degrees),
+            ("tilt", -21.0, ParameterUnit::Degrees),
+            ("distance", 12.0, ParameterUnit::Pixels),
+            ("specular", 0.75, ParameterUnit::Normalized),
+        ];
+        let properties = default_properties_for(kind.clone());
+        for (field, value, unit) in expected {
+            let path = kind.property_path(field);
+            let property = properties.property(&path).unwrap();
+            assert_eq!(property.descriptor.schema.unit, unit);
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(0.0));
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path,
+                    value: PropertyValue::Float(value),
+                })
+                .unwrap();
+        }
+        let reopened = serde_json::from_value(serde_json::to_value(effect).unwrap()).unwrap();
+        let compiled =
+            compile_clip_effect_graph(&[reopened], &[], tt(0), TEST_WORKING_SPACE).unwrap();
+        let pipeline = crate::lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+        let [crate::EffectGpuStage::Spatial {
+            pass: crate::EffectGpuSpatialPass::Basic3D { grade },
+            ..
+        }] = pipeline.stages()
+        else {
+            panic!("the reopened card must lower to one Basic 3D stage");
+        };
+        assert_eq!(grade.authored_values(), expected.map(|(_, value, _)| value));
+    }
+
+    #[test]
+    fn a_basic_3d_keyframe_changes_the_compiled_fingerprint() {
+        let kind = EffectType::Basic3D;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        for (time, value) in [(tt(0), 5.0), (tt(30), 15.0)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: kind.property_path("tilt"),
+                    keyframe: Keyframe::linear(time, PropertyValue::Float(value)),
+                })
+                .unwrap();
+        }
+        let at = |time| {
+            compile_clip_effect_graph(std::slice::from_ref(&effect), &[], time, TEST_WORKING_SPACE)
+                .unwrap()
+                .semantic_fingerprint()
+        };
+        assert_ne!(at(tt(0)), at(tt(30)));
+    }
+
+    #[test]
+    fn basic_3d_rejects_persisted_distance_outside_the_schema() {
+        let kind = EffectType::Basic3D;
+        let mut document = serde_json::to_value(instantiate_effect_node(kind).unwrap()).unwrap();
+        overwrite_static_value(
+            &mut document,
+            "basic_3d.distance",
+            serde_json::to_value(PropertyValue::Float(30_001.0)).unwrap(),
+        );
+        let tampered = serde_json::from_value(document).unwrap();
+        assert!(matches!(
+            build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE),
+            Err(EffectGraphBuildError::InvalidAuthorState { reason, .. })
+                if reason.contains("basic_3d.distance")
+        ));
+    }
+
+    #[test]
+    fn basic_3d_executes_a_full_frame_float32_graph() {
+        use std::hash::{Hash, Hasher};
+
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::Basic3D;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::FullFrame);
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: kind.property_path("distance"),
+                value: PropertyValue::Float(9.0),
+            })
+            .unwrap();
+        let compiled =
+            compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE).unwrap();
+        let op = compiled
+            .graph()
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: op @ EffectRenderOp::Basic3D { .. },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: op @ EffectRenderOp::Basic3D { .. },
+                    ..
+                } => Some(op),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(op.estimated_cost(), 5);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(op),
+            116
+        );
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(op), 1);
+        let mut actual_hash = std::collections::hash_map::DefaultHasher::new();
+        let mut expected_hash = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut actual_hash);
+        115u8.hash(&mut expected_hash);
+        [0.0_f32, 0.0, 9.0, 0.0].map(f32::to_bits).hash(&mut expected_hash);
+        assert_eq!(actual_hash.finish(), expected_hash.finish());
+        let pixels: Vec<_> = (0..81)
+            .map(|index| [(index % 9) as f32, (index / 9) as f32, 0.25, 1.0])
+            .collect();
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(9, 9),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels,
+            ),
+            &compiled,
+            0,
+        )
+        .unwrap();
+        assert_eq!(output[4 * 9 + 4], pixels[4 * 9 + 4]);
+        assert_eq!(output[4 * 9 + 6], pixels[4 * 9 + 8]);
+        assert_eq!(output[4 * 9 + 7], [0.0; 4]);
     }
 }
 

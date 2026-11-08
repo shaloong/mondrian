@@ -196,6 +196,7 @@ pub enum EffectType {
     /// whose luminance stays within the authored threshold.
     SmartBlur,
     ChromaticAberrationRemoval,
+    Basic3D,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -319,6 +320,7 @@ impl EffectType {
             Self::ChannelCombiner => "builtin.channel_combiner".to_string(),
             Self::SmartBlur => "builtin.smart_blur".to_string(),
             Self::ChromaticAberrationRemoval => "builtin.chromatic_aberration_removal".to_string(),
+            Self::Basic3D => "builtin.basic_3d".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -438,6 +440,7 @@ impl EffectType {
             "builtin.channel_combiner" => Self::ChannelCombiner,
             "builtin.smart_blur" => Self::SmartBlur,
             "builtin.chromatic_aberration_removal" => Self::ChromaticAberrationRemoval,
+            "builtin.basic_3d" => Self::Basic3D,
             other => Self::External(other.to_string()),
         }
     }
@@ -557,6 +560,7 @@ impl EffectType {
             Self::ChannelCombiner => "通道合成器",
             Self::SmartBlur => "智能模糊",
             Self::ChromaticAberrationRemoval => "色差校正",
+            Self::Basic3D => "基本 3D",
             Self::External(name) => name,
         }
     }
@@ -674,6 +678,7 @@ impl EffectType {
             Self::ChannelCombiner => vec!["通道"],
             Self::SmartBlur => vec!["模糊与锐化"],
             Self::ChromaticAberrationRemoval => vec!["修复"],
+            Self::Basic3D => vec!["变换"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -793,6 +798,7 @@ impl EffectType {
             Self::ChannelCombiner => "channel_combiner".to_string(),
             Self::SmartBlur => "smart_blur".to_string(),
             Self::ChromaticAberrationRemoval => "chromatic_aberration_removal".to_string(),
+            Self::Basic3D => "basic_3d".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1179,7 +1185,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ChannelCombiner => Ok(()),
             // Range-domain blur: it samples and reweights existing pixels, so it
             // can never paint a region the source left empty.
-            Self::SmartBlur | Self::ChromaticAberrationRemoval => Ok(()),
+            Self::SmartBlur | Self::ChromaticAberrationRemoval | Self::Basic3D => Ok(()),
         }
     }
 }

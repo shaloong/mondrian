@@ -2866,6 +2866,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
         crate::EffectRenderOp::SmartBlur { .. } => "smart_blur",
         crate::EffectRenderOp::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
+        crate::EffectRenderOp::Basic3D { .. } => "basic_3d",
         crate::EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
