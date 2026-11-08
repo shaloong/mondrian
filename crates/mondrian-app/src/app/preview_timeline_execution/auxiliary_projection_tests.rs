@@ -310,6 +310,66 @@ fn a_missing_sequence_reprojects_only_its_consumer_and_preserves_the_authored_re
 }
 
 #[test]
+fn export_matches_preview_for_a_layer_with_a_second_input() {
+    use mondrian_core::{Color, TimelineTime};
+    use mondrian_export::preset::{TimelineExportRange, TimelineExportSnapshot};
+    use mondrian_timeline::clip::Clip;
+
+    let mut child = Sequence::new("Parity auxiliary");
+    child.settings.resolution = Resolution { width: 6, height: 2 };
+    child.settings.preview.resolution_scale = 1.0;
+    child.video_tracks[0]
+        .add_clip(
+            Clip::new_solid_color(
+                AssetId::new(),
+                Color { r: 0.0, g: 1.0, b: 0.0, a: 0.5 },
+                TimelineTime::ZERO,
+                TimelineTime::ONE,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut sequence = auxiliary_matte_sequence(AssetId::new());
+    sequence.settings.preview.resolution_scale = 1.0;
+    set_matte_source(
+        &mut sequence,
+        VisualSourceReference::Sequence { sequence_id: child.id, retime: Default::default() },
+    );
+
+    let preview = output(resolve(
+        &sequence,
+        std::slice::from_ref(&child),
+        &RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview()),
+        &RefCell::new(TimelineCompositeScratch::default()),
+        &mut |_| panic!("procedural auxiliary source has no Asset query"),
+        &mut |_| panic!("procedural auxiliary source has no media decode"),
+        None,
+    ));
+    let range = TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 };
+    let prepared = mondrian_export::prepare_timeline_export_dependencies(
+        &sequence,
+        std::slice::from_ref(&child),
+        range,
+        false,
+    )
+    .unwrap();
+    let resolution = sequence.settings.resolution;
+    let export = TimelineExportSnapshot::captured(
+        Default::default(),
+        sequence,
+        vec![child],
+        HashMap::new(),
+        range,
+        prepared.execution_snapshot().clone(),
+    );
+    let export =
+        mondrian_export::queue::export_visual_frame_validation(&export, 0, resolution).unwrap();
+    let preview_pixels = pixels(&preview);
+    assert_eq!(preview_pixels, vec![[0.5, 0.0, 0.0, 1.0]; 3]);
+    assert_eq!(preview_pixels, export.working_frame.rgba_f32().data);
+}
+
+#[test]
 fn a_cycled_sequence_reference_is_rejected_before_rendering() {
     let mut root = auxiliary_matte_sequence(AssetId::new());
     let sequence_id = root.id;

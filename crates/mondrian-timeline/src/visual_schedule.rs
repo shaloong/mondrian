@@ -16,8 +16,8 @@ use mondrian_core::timeline_data::{
 };
 use mondrian_core::{
     AssetId, ClipId, MondrianError, Rational, Result, SequenceId, SequenceRevision,
-    SourceSamplingBoundary, TimelineTime, TimelineTimeRange, VideoTransitionId, VisualSourceRetime,
-    VisualSourceTimeError, VisualSourceTimeSample, WorkingColorSpace,
+    SourceSampleTarget, SourceSamplingBoundary, TimelineTime, TimelineTimeRange, VideoTransitionId,
+    VisualSourceRetime, VisualSourceTimeError, VisualSourceTimeSample, WorkingColorSpace,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -263,6 +263,14 @@ impl PreparedVisualSchedule {
         self.admit_auxiliary_clip_source(source_id, Some(consumer))
     }
 
+    /// Prove an independent Clip source for the final Timeline Grade.
+    pub fn admit_auxiliary_clip_for_grade(
+        &self,
+        source_id: ClipId,
+    ) -> std::result::Result<PreparedAuxiliaryClipPlacement, AuxiliaryClipAdmissionError> {
+        self.admit_auxiliary_clip_source(source_id, None)
+    }
+
     fn admit_auxiliary_clip_source(
         &self,
         source_id: ClipId,
@@ -338,7 +346,7 @@ impl PreparedVisualSchedule {
         source_id: ClipId,
         retime: VisualSourceRetime,
     ) -> std::result::Result<PreparedAuxiliaryClipSample, AuxiliaryClipAdmissionError> {
-        let admitted = self.admit_auxiliary_clip_source(source_id, None)?;
+        let admitted = self.admit_auxiliary_clip_for_grade(source_id)?;
         self.evaluate_admitted_auxiliary_clip(admitted, sequence_time, retime)
     }
 
@@ -353,19 +361,8 @@ impl PreparedVisualSchedule {
         let Some(target) = time.source_sample else {
             return Ok(PreparedAuxiliaryClipSample { placement, time, source: None });
         };
-        let sample_time = match target.boundary() {
-            SourceSamplingBoundary::Covering => target.time(),
-            SourceSamplingBoundary::StrictPredecessor => {
-                let frame_rate = Rational::new(self.time_base.den, self.time_base.num);
-                let position =
-                    target.to_frame_position(frame_rate).map_err(VisualSourceTimeError::from)?;
-                // A Clip can be shorter than a grid cell. Its exact in-edge
-                // remains a legal sample even in that case.
-                TimelineTime::from_frame_position(position)
-                    .map_err(VisualSourceTimeError::from)?
-                    .max(admitted.available.start)
-            }
-        };
+        let frame_rate = Rational::new(self.time_base.den, self.time_base.num);
+        let sample_time = admitted.sample_time(target, frame_rate)?;
         let (track_index, clip_index) =
             self.clip_location(placement).map_err(AuxiliaryClipAdmissionError::Evaluation)?;
         let track = &self.tracks[track_index];
@@ -696,6 +693,23 @@ impl PreparedAuxiliaryClipPlacement {
     /// Visible placement interval before auxiliary retime is applied.
     pub const fn available(self) -> TimelineTimeRange {
         self.available
+    }
+
+    /// Lower one target within this Clip interval using the same strict
+    /// predecessor rule as standalone Clip materialization.
+    pub fn sample_time(
+        self,
+        target: SourceSampleTarget,
+        frame_rate: Rational,
+    ) -> std::result::Result<TimelineTime, VisualSourceTimeError> {
+        Ok(match target.boundary() {
+            SourceSamplingBoundary::Covering => target.time(),
+            SourceSamplingBoundary::StrictPredecessor => {
+                let position = target.to_frame_position(frame_rate)?;
+                // A Clip can be shorter than a grid cell and retain its in-edge.
+                TimelineTime::from_frame_position(position)?.max(self.available.start)
+            }
+        })
     }
 }
 

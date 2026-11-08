@@ -5021,7 +5021,7 @@ impl GpuFrameCompositor {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: composite_output_alpha(request, has_spatial_plan),
+            alpha: composite_output_alpha(request, |index| spatial_chain_at(index).is_some()),
         };
         let opaque_normal_accumulator =
             can_use_opaque_normal_accumulator(request, &execution, has_spatial_plan);
@@ -8020,10 +8020,10 @@ fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
 
 fn composite_output_alpha(
     request: &GpuCompositeRequest<'_>,
-    has_spatial_plan: bool,
+    has_spatial_plan_at: impl Fn(usize) -> bool,
 ) -> crate::ColorFrameAlpha {
     let mut opaque = false;
-    for layer in request.layers {
+    for (index, layer) in request.layers.iter().enumerate() {
         if layer_has_zero_contribution(layer) {
             continue;
         }
@@ -8037,7 +8037,7 @@ fn composite_output_alpha(
             request.width,
             request.height,
             layer,
-            has_spatial_plan,
+            has_spatial_plan_at(index),
         ) {
             opaque = true;
         }
@@ -8531,7 +8531,7 @@ mod tests {
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers,
                 },
-                false,
+                |_| false,
             )
         };
         assert_eq!(
@@ -16462,8 +16462,8 @@ mod tests {
 
     #[test]
     fn opaque_full_canvas_solid_makes_composite_output_opaque() {
-        let transparent_foreground = GpuCompositeLayer {
-            source: GpuCompositeLayerSource::SolidColor(Color { r: 4.0, g: -2.0, b: 1.0, a: 0.0 }),
+        let translucent_foreground = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color { r: 4.0, g: -2.0, b: 1.0, a: 0.5 }),
             opacity: 1.0,
             blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -16472,9 +16472,9 @@ mod tests {
         };
         let opaque_base = GpuCompositeLayer {
             source: GpuCompositeLayerSource::SolidColor(Color::BLACK),
-            ..transparent_foreground
+            ..translucent_foreground
         };
-        let layers = [opaque_base, transparent_foreground];
+        let layers = [opaque_base, translucent_foreground];
         let request = GpuCompositeRequest {
             width: 16,
             height: 16,
@@ -16483,8 +16483,16 @@ mod tests {
         };
 
         assert_eq!(
-            composite_output_alpha(&request, false),
+            composite_output_alpha(&request, |_| false),
             crate::ColorFrameAlpha::Opaque
+        );
+        assert_eq!(
+            composite_output_alpha(&request, |index| index == 1),
+            crate::ColorFrameAlpha::Opaque
+        );
+        assert_eq!(
+            composite_output_alpha(&request, |index| index == 0),
+            crate::ColorFrameAlpha::StraightCoverage
         );
     }
 
@@ -16507,7 +16515,7 @@ mod tests {
         };
 
         assert_eq!(
-            composite_output_alpha(&request, false),
+            composite_output_alpha(&request, |_| false),
             crate::ColorFrameAlpha::StraightCoverage
         );
     }

@@ -11,13 +11,15 @@ use std::sync::Arc;
 
 use mondrian_core::types::{BlendMode, Color, ColorEngine};
 use mondrian_core::WorkingColorSpace;
-use mondrian_effects::{CompiledEffectGpuPlan, EffectColorDomain};
+use mondrian_effects::{
+    AuxiliaryPolicy, CompiledEffectGpuPipeline, CompiledEffectGpuPlan, EffectColorDomain,
+};
 
 use crate::{
     product_gpu_working_bytes_per_pixel, CpuColorFrame, CpuSourceColorFrame, GpuColorFrameHandle,
     GpuCompositeError, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
-    GpuCompositingDiagnostics, GpuFrameCompositor, GpuWorkingFloatDecision,
-    RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
+    GpuCompositingDiagnostics, GpuFrameCompositor, GpuSpatialAuxiliaryRaster,
+    GpuWorkingFloatDecision, RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
     RenderGpuCompositeGraphRecordError, RenderGpuEffectDomainRecordError,
     RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
@@ -65,7 +67,8 @@ pub enum GpuVisualFrameSource {
 }
 
 impl GpuVisualFrameSource {
-    fn extent(&self, canvas_width: u32, canvas_height: u32) -> (u32, u32) {
+    /// Actual source-grid dimensions. Procedural solids use the canvas grid.
+    pub fn extent(&self, canvas_width: u32, canvas_height: u32) -> (u32, u32) {
         match self {
             Self::ColorManaged { source, .. } => {
                 let descriptor = source.descriptor();
@@ -99,8 +102,48 @@ pub struct GpuVisualSourceLayer {
     pub transform: [f32; 6],
     /// Exact homogeneous GPU Effect plan.
     pub effect_plan: Arc<CompiledEffectGpuPlan>,
+    /// Source-local spatial chain. A spatial source uses an identity point plan.
+    pub spatial_plan: Option<GpuVisualSpatialPlan>,
     /// Stable Timeline seed.
     pub frame_seed: i64,
+}
+
+/// Source-local spatial execution and its independent second pictures.
+#[derive(Clone)]
+pub struct GpuVisualSpatialPlan {
+    /// Exact ordered Effect pipeline.
+    pub pipeline: Arc<CompiledEffectGpuPipeline>,
+    /// Frozen external rasters used by the pipeline.
+    pub auxiliary: Vec<GpuVisualAuxiliaryInput>,
+}
+
+/// One frozen second-picture slot.
+#[derive(Clone)]
+pub struct GpuVisualAuxiliaryInput {
+    /// Graph-declared slot index.
+    pub slot: u32,
+    /// Resolved working pixels or an explicit transparent boundary.
+    pub picture: GpuVisualAuxiliaryPicture,
+    /// Registration relative to the primary grid.
+    pub policy: AuxiliaryPolicy,
+    /// Normalized affine transform for graph nodes that use it.
+    pub transform: [f32; 6],
+}
+
+/// Storage of one independently resolved working-space second picture.
+#[derive(Clone)]
+pub enum GpuVisualAuxiliaryPicture {
+    /// Frozen source decoded to CPU working pixels, pending upload.
+    Cpu(Arc<CpuColorFrame>),
+    /// Working texture already owned by this frame closure.
+    Gpu(GpuColorFrameHandle),
+    /// Transparent retime boundary on an admitted raster grid.
+    Transparent {
+        /// Actual raster width.
+        width: u32,
+        /// Actual raster height.
+        height: u32,
+    },
 }
 
 /// One input to a two-source visual transition.
@@ -218,6 +261,20 @@ pub enum GpuVisualFrameActiveWorkingSetEstimateError {
     /// The request carried invalid raster geometry.
     #[error("GPU visual frame dimensions must both be non-zero")]
     EmptyCanvas,
+    /// A source chain cannot be admitted at the source grid.
+    #[error("GPU visual spatial chain cannot run on its {width}x{height} source grid")]
+    InvalidSpatialChain {
+        /// Actual source width.
+        width: u32,
+        /// Actual source height.
+        height: u32,
+    },
+    /// A spatial pipeline already includes any point stages in execution order.
+    #[error("GPU visual source cannot carry both a spatial chain and a nonidentity point plan")]
+    ConflictingSourceEffects,
+    /// Spatial execution currently takes working-linear sources.
+    #[error("GPU visual spatial chain requires the scene-linear effect domain")]
+    UnsupportedSpatialDomain,
     /// Existing renderer frame-table residency could not be represented.
     #[error("GPU visual retained frame-table residency overflowed")]
     RetainedResidencyOverflow,
@@ -344,6 +401,9 @@ pub enum GpuVisualFrameExecutionError {
     /// Shared GPU source-to-working input transform failed.
     #[error("GPU visual input color stage failed: {0:?}")]
     InputColor(Box<RenderGpuInputStageRuntimeRecordError>),
+    /// A frozen second picture could not be uploaded.
+    #[error("GPU visual auxiliary upload failed: {0:?}")]
+    AuxiliaryUpload(Box<crate::RenderGpuWorkingFrameUploadError>),
     /// A source Effect required an external color-domain round trip that failed.
     #[error("GPU visual source Effect-domain execution failed: {0:?}")]
     SourceEffectDomain(Box<RenderGpuEffectDomainRecordError>),
@@ -526,6 +586,8 @@ impl GpuVisualFrameExecutor {
                         blend_mode: BlendMode::Normal,
                         transform: IDENTITY_AFFINE,
                         effect_plan: None,
+                        spatial_plan: None,
+                        auxiliary: Vec::new(),
                         frame_seed: 0,
                     }));
                 }
@@ -533,8 +595,27 @@ impl GpuVisualFrameExecutor {
         }
 
         let layers = prepared.iter().map(PreparedElement::as_composite_layer).collect::<Vec<_>>();
+        let spatial_plans = prepared
+            .iter()
+            .map(|element| match element {
+                PreparedElement::Source(source) => source.spatial_plan.as_deref(),
+                PreparedElement::Adjustment { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let auxiliary = prepared
+            .iter()
+            .map(|element| match element {
+                PreparedElement::Source(source) => source.auxiliary_bindings(),
+                PreparedElement::Adjustment { .. } => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let auxiliary_groups = if auxiliary.iter().any(|group| !group.is_empty()) {
+            auxiliary.iter().map(Vec::as_slice).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let graph = runtime
-            .record_wgpu_composite_graph(
+            .record_wgpu_composite_graph_with_auxiliary(
                 &self.compositor,
                 device,
                 queue,
@@ -545,7 +626,8 @@ impl GpuVisualFrameExecutor {
                     working_color_space: request.working_color_space,
                     layers: &layers,
                 },
-                &[],
+                &spatial_plans,
+                &auxiliary_groups,
                 request.color_engine,
                 RenderColorTransformGpuOptions::default(),
             )
@@ -663,11 +745,61 @@ impl GpuVisualFrameExecutor {
                 color_stage_diagnostics.accumulate(record.stage_diagnostics);
                 GpuVisualFrameSource::GpuWorking(record.output)
             }
+            GpuVisualFrameSource::Solid(color) if source.spatial_plan.is_some() => {
+                let record = runtime.record_wgpu_solid_source(
+                    &self.compositor,
+                    device,
+                    queue,
+                    encoder,
+                    request.width,
+                    request.height,
+                    request.working_color_space,
+                    *color,
+                )?;
+                GpuVisualFrameSource::GpuWorking(record.output)
+            }
             other => other.clone(),
         };
         if source.effect_plan.is_identity()
             || source.effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb
         {
+            let mut auxiliary = Vec::new();
+            if let Some(plan) = &source.spatial_plan {
+                for input in &plan.auxiliary {
+                    let frame = match &input.picture {
+                        GpuVisualAuxiliaryPicture::Gpu(frame) => frame.clone(),
+                        GpuVisualAuxiliaryPicture::Cpu(frame) => {
+                            let record = runtime
+                                .upload_wgpu_working_frame(device, queue, frame)
+                                .map_err(|error| {
+                                    GpuVisualFrameExecutionError::AuxiliaryUpload(Box::new(error))
+                                })?;
+                            color_stage_diagnostics.accumulate(record.stage_diagnostics);
+                            record.output
+                        }
+                        GpuVisualAuxiliaryPicture::Transparent { width, height } => {
+                            runtime
+                                .record_wgpu_solid_source(
+                                    &self.compositor,
+                                    device,
+                                    queue,
+                                    encoder,
+                                    *width,
+                                    *height,
+                                    request.working_color_space,
+                                    Color::TRANSPARENT,
+                                )?
+                                .output
+                        }
+                    };
+                    auxiliary.push(PreparedAuxiliaryInput {
+                        slot: input.slot,
+                        frame,
+                        policy: input.policy,
+                        transform: input.transform,
+                    });
+                }
+            }
             return Ok(PreparedSourceLayer {
                 source: prepared_source,
                 opacity: source.opacity,
@@ -675,6 +807,8 @@ impl GpuVisualFrameExecutor {
                 transform: source.transform,
                 effect_plan: (!source.effect_plan.is_identity())
                     .then(|| Arc::clone(&source.effect_plan)),
+                spatial_plan: source.spatial_plan.as_ref().map(|plan| Arc::clone(&plan.pipeline)),
+                auxiliary,
                 frame_seed: source.frame_seed,
             });
         }
@@ -686,6 +820,8 @@ impl GpuVisualFrameExecutor {
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_AFFINE,
             effect_plan: None,
+            spatial_plan: None,
+            auxiliary: Vec::new(),
             frame_seed: source.frame_seed,
         };
         let source_composite_layer = source_layer.as_composite_layer();
@@ -727,6 +863,8 @@ impl GpuVisualFrameExecutor {
             blend_mode: source.blend_mode,
             transform: source.transform,
             effect_plan: None,
+            spatial_plan: None,
+            auxiliary: Vec::new(),
             frame_seed: source.frame_seed,
         })
     }
@@ -763,7 +901,13 @@ impl GpuVisualFrameExecutor {
             .map(PreparedSourceLayer::as_composite_layer)
             .into_iter()
             .collect::<Vec<_>>();
-        let frame = runtime.record_wgpu_working_composite(
+        let spatial_plan = prepared.as_ref().and_then(|source| source.spatial_plan.as_deref());
+        let auxiliary = prepared
+            .as_ref()
+            .map(PreparedSourceLayer::auxiliary_bindings)
+            .unwrap_or_default();
+        let auxiliary_group = [auxiliary.as_slice()];
+        let frame = runtime.record_wgpu_working_composite_with_auxiliary(
             &self.compositor,
             device,
             queue,
@@ -774,7 +918,16 @@ impl GpuVisualFrameExecutor {
                 working_color_space: request.working_color_space,
                 layers: &layers,
             },
-            &[],
+            if spatial_plan.is_some() {
+                std::slice::from_ref(&spatial_plan)
+            } else {
+                &[]
+            },
+            if auxiliary.is_empty() {
+                &[]
+            } else {
+                &auxiliary_group
+            },
         )?;
         compositing_diagnostics.accumulate(frame.diagnostics);
         Ok(frame.output)
@@ -908,10 +1061,58 @@ fn estimate_visual_source(
     estimate: &mut GpuVisualFrameActiveWorkingSetEstimate,
 ) -> Result<(), GpuVisualFrameActiveWorkingSetEstimateError> {
     let (width, height) = source.source.extent(request.width, request.height);
+    if let Some(spatial) = &source.spatial_plan {
+        if !source.effect_plan.is_identity() {
+            return Err(GpuVisualFrameActiveWorkingSetEstimateError::ConflictingSourceEffects);
+        }
+        if spatial.pipeline.processing_domain() != EffectColorDomain::SceneLinearRgb {
+            return Err(GpuVisualFrameActiveWorkingSetEstimateError::UnsupportedSpatialDomain);
+        }
+        let slots = spatial.auxiliary.iter().map(|input| input.slot).collect::<Vec<_>>();
+        let plan = crate::spatial_driver::gpu_spatial_chain_plan_with_auxiliary(
+            &spatial.pipeline,
+            width,
+            height,
+            &slots,
+        )
+        .map_err(
+            |_| GpuVisualFrameActiveWorkingSetEstimateError::InvalidSpatialChain { width, height },
+        )?;
+        let stage = GpuVisualFrameActiveWorkingSetStage::Effects;
+        let textures = u64::try_from(plan.scratch_textures).map_err(|_| {
+            GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage }
+        })?;
+        estimate.effects.checked_add(
+            GpuVisualFrameActiveTextureDemand { bytes: plan.scratch_bytes, textures },
+            stage,
+        )?;
+        // Each stage copies its result into a distinct frame-table texture.
+        let stage_outputs = u64::try_from(plan.stages.len()).map_err(|_| {
+            GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage }
+        })?;
+        estimate.effects.checked_add(
+            repeated_texture_demand(width, height, stage_outputs, stage)?,
+            stage,
+        )?;
+        for input in &spatial.auxiliary {
+            let (width, height) = match &input.picture {
+                GpuVisualAuxiliaryPicture::Cpu(frame) => {
+                    let descriptor = frame.descriptor();
+                    (descriptor.width, descriptor.height)
+                }
+                GpuVisualAuxiliaryPicture::Transparent { width, height } => (*width, *height),
+                GpuVisualAuxiliaryPicture::Gpu(_) => continue,
+            };
+            estimate
+                .effects
+                .checked_add(repeated_texture_demand(width, height, 1, stage)?, stage)?;
+        }
+    }
     let upload_textures = match source.source {
         GpuVisualFrameSource::ColorManaged { .. } | GpuVisualFrameSource::Native { .. } => 2,
         GpuVisualFrameSource::CompactYuv { .. } => 1,
         GpuVisualFrameSource::Working(_) | GpuVisualFrameSource::DataTexture(_) => 1,
+        GpuVisualFrameSource::Solid(_) if source.spatial_plan.is_some() => 1,
         GpuVisualFrameSource::GpuWorking(_) | GpuVisualFrameSource::Solid(_) => 0,
     };
     if upload_textures > 0 {
@@ -1006,10 +1207,30 @@ struct PreparedSourceLayer {
     blend_mode: BlendMode,
     transform: [f32; 6],
     effect_plan: Option<Arc<CompiledEffectGpuPlan>>,
+    spatial_plan: Option<Arc<CompiledEffectGpuPipeline>>,
+    auxiliary: Vec<PreparedAuxiliaryInput>,
     frame_seed: i64,
 }
 
+struct PreparedAuxiliaryInput {
+    slot: u32,
+    frame: GpuColorFrameHandle,
+    policy: AuxiliaryPolicy,
+    transform: [f32; 6],
+}
+
 impl PreparedSourceLayer {
+    fn auxiliary_bindings(&self) -> Vec<GpuSpatialAuxiliaryRaster<'_>> {
+        self.auxiliary
+            .iter()
+            .map(|input| GpuSpatialAuxiliaryRaster {
+                slot: input.slot,
+                frame: &input.frame,
+                transform: input.transform,
+                policy: input.policy,
+            })
+            .collect()
+    }
     fn as_composite_layer(&self) -> GpuCompositeLayer<'_> {
         GpuCompositeLayer {
             source: match &self.source {

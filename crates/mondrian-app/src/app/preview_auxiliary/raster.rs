@@ -11,13 +11,16 @@ use crate::app::preview_cpu_execution::PreviewCpuExecutionError;
 use crate::app::preview_execution::PreviewSemanticIdentity;
 use crate::app::preview_media_frame::MediaPreviewFrame;
 use crate::app::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
-use mondrian_core::{ColorFrameAlpha, ImageSampling, WorkingColorSpace, WorkingRgbaF32Frame};
+use mondrian_core::{ImageSampling, WorkingColorSpace};
 use mondrian_effects::{
     AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryPolicy, AuxiliaryResolution, AuxiliaryRole,
-    EffectColorDomain, EffectFloatFrameError, EffectFloatFrameView, EffectFrameExtent,
-    EffectProcessorControl, EffectValueFormat, EffectWorkingPrecision,
+    EffectFrameExtent, EffectProcessorControl,
 };
-use mondrian_renderer::{CpuColorFrame, TimelineCompositeScratch, TimelineCpuCompositePrecision};
+use mondrian_renderer::{
+    register_timeline_auxiliary_raster, timeline_auxiliary_frame_view,
+    timeline_auxiliary_registration_geometry as registration_geometry, CpuColorFrame,
+    TimelineCompositeScratch, TimelineCpuCompositePrecision,
+};
 
 pub(crate) struct PreparedAuxiliaryRasters<'a> {
     pub(crate) binding: &'a ResolvedPreviewAuxiliaryInputs,
@@ -30,7 +33,7 @@ impl PreparedAuxiliaryRasters<'_> {
             .iter()
             .map(|(slot, frame, policy)| AuxiliaryFloatInput {
                 slot: *slot,
-                raster: AuxiliaryFloatFrame::new(view(frame), *policy),
+                raster: AuxiliaryFloatFrame::new(timeline_auxiliary_frame_view(frame), *policy),
             })
             .collect()
     }
@@ -66,18 +69,6 @@ enum AuxiliaryRegistrationSource<'a> {
 }
 
 type ImageDomain = (EffectFrameExtent, ImageSampling);
-
-fn registration_geometry(
-    role: AuxiliaryRole,
-    primary: ImageDomain,
-    source: ImageDomain,
-) -> (ImageDomain, AuxiliaryPolicy) {
-    if role == AuxiliaryRole::Map {
-        (source, AuxiliaryPolicy::new(AuxiliaryResolution::Authored))
-    } else {
-        (primary, AuxiliaryPolicy::MATCH_PRIMARY)
-    }
-}
 
 /// Use the same output grid as registration when admitting a visual child
 /// before its actual pixels have been produced.
@@ -215,13 +206,6 @@ fn auxiliary_source_working_bytes(
         .map_err(|_| overflow())
 }
 
-fn frame_error(error: EffectFloatFrameError) -> PreviewCpuExecutionError {
-    mondrian_renderer::TimelineCompositeError::FloatEffect {
-        reason: mondrian_effects::EffectFloatExecutionError::FrameContract(error),
-    }
-    .into()
-}
-
 fn checkpoint(control: &mut EffectProcessorControl<'_>) -> Result<(), PreviewCpuExecutionError> {
     control.checkpoint().map_err(|reason| {
         mondrian_renderer::TimelineCompositeError::FloatEffect {
@@ -229,20 +213,6 @@ fn checkpoint(control: &mut EffectProcessorControl<'_>) -> Result<(), PreviewCpu
         }
         .into()
     })
-}
-
-fn view(frame: &CpuColorFrame) -> EffectFloatFrameView<'_> {
-    let frame = frame.rgba_f32();
-    EffectFloatFrameView::new(
-        EffectFrameExtent::new(frame.width, frame.height),
-        EffectValueFormat::new(
-            EffectWorkingPrecision::Float32,
-            EffectColorDomain::SceneLinearRgb,
-            frame.alpha,
-        ),
-        frame.sampling,
-        &frame.data,
-    )
 }
 
 /// Charge cold source conversion, registered planes, primary preparation and
@@ -388,7 +358,7 @@ pub(crate) fn prepare_auxiliary_rasters<'a>(
                 continue;
             }
             let AuxiliaryRegistrationKey { extent, sampling, working_color, .. } = registration.key;
-            let frame = if let Some(source_frame) = &source.frame {
+            let working = if let Some(source_frame) = &source.frame {
                 let working =
                     source_frame.working_frame_with_session(scratch.color_execution_mut())?;
                 if let Some(diagnostics) = working.color_diagnostics {
@@ -402,37 +372,24 @@ pub(crate) fn prepare_auxiliary_rasters<'a>(
                             .into(),
                     });
                 }
-                let actual = view(&working);
+                let actual = timeline_auxiliary_frame_view(&working);
                 if source_frame.cpu_image_domain() != Some((actual.extent(), actual.sampling())) {
                     return Err(PreviewCpuExecutionError::AuxiliaryRegistration {
                         detail: "auxiliary working payload contradicts its admitted image domain"
                             .into(),
                     });
                 }
-                register(&working, extent, sampling, control)?
+                Some(working)
             } else {
-                let count = usize::try_from(bytes(extent)? / 16).map_err(|_| overflow())?;
-                let mut data = Vec::new();
-                data.try_reserve_exact(count).map_err(|_| {
-                    frame_error(EffectFloatFrameError::AllocationUnavailable {
-                        required_bytes: count.saturating_mul(16),
-                    })
-                })?;
-                for index in 0..count {
-                    if index % 65_536 == 0 {
-                        checkpoint(control)?;
-                    }
-                    data.push([0.0; 4]);
-                }
-                CpuColorFrame::working(WorkingRgbaF32Frame {
-                    width: extent.width(),
-                    height: extent.height(),
-                    sampling,
-                    alpha: ColorFrameAlpha::StraightCoverage,
-                    color_space: working_color,
-                    data,
-                })
+                None
             };
+            let frame = register_timeline_auxiliary_raster(
+                working.as_ref(),
+                extent,
+                sampling,
+                working_color,
+                control,
+            )?;
             registered.insert(registration.key, frame.clone());
             frames.push((source.slot, frame, registration.policy));
         }
@@ -441,103 +398,29 @@ pub(crate) fn prepare_auxiliary_rasters<'a>(
     Ok(prepared)
 }
 
-fn register(
-    source: &CpuColorFrame,
-    extent: EffectFrameExtent,
-    sampling: mondrian_core::ImageSampling,
-    control: &mut EffectProcessorControl<'_>,
-) -> Result<CpuColorFrame, PreviewCpuExecutionError> {
-    let view = view(source);
-    view.validate_controlled(&mut || checkpoint(control))?;
-    if view.extent() == extent
-        && view.sampling() == sampling
-        && !view.format().alpha().is_premultiplied()
-    {
-        return Ok(source.clone());
-    }
-    let alpha = view.format().alpha();
-    let output_alpha = if alpha.is_premultiplied() {
-        ColorFrameAlpha::StraightFloat
-    } else {
-        alpha
-    };
-    let count = usize::try_from(bytes(extent)? / 16).map_err(|_| overflow())?;
-    let mut data = Vec::new();
-    data.try_reserve_exact(count).map_err(|_| {
-        frame_error(EffectFloatFrameError::AllocationUnavailable {
-            required_bytes: count.saturating_mul(16),
-        })
-    })?;
-    let source_width = view.extent().width();
-    let source_height = view.extent().height();
-    if source_width == 0 || source_height == 0 || extent.is_empty() {
-        return Err(PreviewCpuExecutionError::AuxiliaryRegistration {
-            detail: "auxiliary registration has an empty grid".into(),
-        });
-    }
-    for y in 0..extent.height() {
-        checkpoint(control)?;
-        let py = ((y as f32 + mondrian_effects::PIXEL_CENTRE) * source_height as f32
-            / extent.height() as f32
-            - mondrian_effects::PIXEL_CENTRE)
-            .clamp(0.0, (source_height - 1) as f32);
-        for x in 0..extent.width() {
-            if x % 65_536 == 0 {
-                checkpoint(control)?;
-            }
-            let px = ((x as f32 + mondrian_effects::PIXEL_CENTRE) * source_width as f32
-                / extent.width() as f32
-                - mondrian_effects::PIXEL_CENTRE)
-                .clamp(0.0, (source_width - 1) as f32);
-            let ix = px.floor() as u32;
-            let iy = py.floor() as u32;
-            let weights = [
-                (1.0 - px.fract()) * (1.0 - py.fract()),
-                px.fract() * (1.0 - py.fract()),
-                (1.0 - px.fract()) * py.fract(),
-                px.fract() * py.fract(),
-            ];
-            let mut associated = [0.0; 4];
-            for (tap, weight) in mondrian_effects::BILINEAR_TAPS.iter().zip(weights) {
-                let sx = (ix + tap[0] as u32).min(source_width - 1);
-                let sy = (iy + tap[1] as u32).min(source_height - 1);
-                let pixel = mondrian_effects::convert_alpha_sample(
-                    view.pixels()[sy as usize * source_width as usize + sx as usize],
-                    alpha,
-                    ColorFrameAlpha::PremultipliedFloat,
-                )
-                .map_err(frame_error)?;
-                for lane in 0..4 {
-                    associated[lane] += pixel[lane] * weight;
-                }
-            }
-            if output_alpha == ColorFrameAlpha::Opaque {
-                associated[3] = 1.0;
-            }
-            data.push(
-                mondrian_effects::convert_alpha_sample(
-                    associated,
-                    ColorFrameAlpha::PremultipliedFloat,
-                    output_alpha,
-                )
-                .map_err(frame_error)?,
-            );
-        }
-    }
-    Ok(CpuColorFrame::working(WorkingRgbaF32Frame {
-        width: extent.width(),
-        height: extent.height(),
-        sampling,
-        alpha: output_alpha,
-        color_space: source.rgba_f32().color_space,
-        data,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::{ImageSampling, WorkingColorSpace};
+    use mondrian_core::{ColorFrameAlpha, ImageSampling, WorkingColorSpace, WorkingRgbaF32Frame};
+    use mondrian_effects::{
+        EffectColorDomain, EffectFloatFrameError, EffectValueFormat, EffectWorkingPrecision,
+    };
+
+    fn register(
+        source: &CpuColorFrame,
+        extent: EffectFrameExtent,
+        sampling: ImageSampling,
+        control: &mut EffectProcessorControl<'_>,
+    ) -> Result<CpuColorFrame, PreviewCpuExecutionError> {
+        register_timeline_auxiliary_raster(
+            Some(source),
+            extent,
+            sampling,
+            source.rgba_f32().color_space,
+            control,
+        )
+        .map_err(Into::into)
+    }
 
     #[test]
     fn auxiliary_authored_maps_preserve_the_source_grid_even_at_transparent_boundaries() {

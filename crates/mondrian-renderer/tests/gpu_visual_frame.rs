@@ -55,6 +55,7 @@ fn visual_working_set_estimate_includes_retained_closure_and_numeric_upload() {
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_AFFINE,
             effect_plan: identity,
+            spatial_plan: None,
             frame_seed: 0,
         },
     ))];
@@ -104,6 +105,7 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_AFFINE,
             effect_plan: identity,
+            spatial_plan: None,
             frame_seed: 0,
         },
     ))];
@@ -235,6 +237,7 @@ async fn export_visual_path_uses_shared_spatial_composite_execution_plan() {
             blend_mode: BlendMode::Normal,
             transform: IDENTITY_AFFINE,
             effect_plan: Arc::clone(&identity),
+            spatial_plan: None,
             frame_seed: 0,
         })),
         GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
@@ -243,6 +246,7 @@ async fn export_visual_path_uses_shared_spatial_composite_execution_plan() {
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
             effect_plan: identity,
+            spatial_plan: None,
             frame_seed: 0,
         })),
     ];
@@ -365,6 +369,7 @@ async fn compact_yuv_visual_sources_reuse_uploads_without_aliasing_and_retire_pe
                     blend_mode: BlendMode::Normal,
                     transform: IDENTITY_AFFINE,
                     effect_plan: Arc::clone(&identity),
+                    spatial_plan: None,
                     frame_seed: 0,
                 },
             ))];

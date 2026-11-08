@@ -1307,7 +1307,7 @@ fn validate_evaluation(
     Ok(())
 }
 
-fn exact_nested_visual_position(
+pub(crate) fn exact_nested_visual_position(
     target: SourceSampleTarget,
     sequence: &Sequence,
 ) -> Result<FramePosition, String> {

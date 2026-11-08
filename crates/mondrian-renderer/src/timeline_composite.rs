@@ -29,10 +29,16 @@ use std::{
     sync::Arc,
 };
 
+mod auxiliary;
 #[cfg(test)]
 #[path = "timeline_composite_auxiliary_tests.rs"]
 mod auxiliary_tests;
 mod transition;
+
+pub use auxiliary::{
+    register_timeline_auxiliary_raster, timeline_auxiliary_frame_view,
+    timeline_auxiliary_registration_geometry,
+};
 #[cfg(test)]
 pub(crate) use transition::cross_dissolve_straight_rgba_f32;
 use transition::{
@@ -743,6 +749,11 @@ impl TimelineCompositeScratch {
         *self
             .spatial_chain_preference
             .get_or_insert_with(crate::SpatialChainPreference::from_env)
+    }
+
+    /// Override the process preference for this execution owner.
+    pub fn set_spatial_chain_preference(&mut self, preference: crate::SpatialChainPreference) {
+        self.spatial_chain_preference = Some(preference);
     }
 
     /// Record one admission decision for the spatial-chain diagnostics counters.

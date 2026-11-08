@@ -217,7 +217,7 @@ fn render_frozen_working_frame(
                 "prepared Export validation execution failed closed: {error}"
             ));
         }
-        Err(PreparedVisualExecutionError::Adapter(error)) => return Err(error),
+        Err(PreparedVisualExecutionError::Adapter(error)) => return Err(error.to_string()),
     }
     let working_frame = working_frame
         .ok_or_else(|| "Export visual frame did not produce a root working composite".to_owned())?;

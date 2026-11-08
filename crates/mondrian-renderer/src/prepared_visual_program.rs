@@ -403,6 +403,14 @@ pub struct PreparedVisualNestedRangeDemand {
     pub range: PreparedVisualNestedRange,
 }
 
+/// One frozen auxiliary address over the selected consumer's Timeline window.
+pub(crate) struct PreparedAuxiliaryRangeDependency {
+    pub(crate) placement: Option<TimelineClipExecutionRef>,
+    pub(crate) reference: mondrian_core::VisualSourceReference,
+    pub(crate) first: TimelineTime,
+    pub(crate) last: TimelineTime,
+}
+
 /// Immutable media dependency evidence for one inclusive Sequence window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PreparedVisualRangeReachability {
@@ -1517,6 +1525,51 @@ impl PreparedVisualProgram {
         });
         reachability.nested_demands.dedup();
         Ok(reachability)
+    }
+
+    pub(crate) fn auxiliary_range_dependencies(
+        &self,
+        first: TimelineTime,
+        last: TimelineTime,
+    ) -> Result<Vec<PreparedAuxiliaryRangeDependency>> {
+        let mut dependencies = Vec::new();
+        for clip in self.schedule.range_clips(first, last)? {
+            let Some(PreparedClipEffects::Ready { program, .. }) =
+                self.clip_effects.get(&clip.placement.clip_id)
+            else {
+                continue;
+            };
+            let mut references = Vec::new();
+            program.visit_authored_visual_sources(|reference| {
+                if !references.contains(&reference) {
+                    references.push(reference);
+                }
+            });
+            if references.is_empty() {
+                continue;
+            }
+            let a = self.schedule.clip_to_sequence_time(clip.placement, clip.first_clip_time)?;
+            let b = self.schedule.clip_to_sequence_time(clip.placement, clip.last_clip_time)?;
+            dependencies.extend(references.into_iter().map(|reference| {
+                PreparedAuxiliaryRangeDependency {
+                    placement: Some(clip.placement),
+                    reference,
+                    first: a.min(b),
+                    last: a.max(b),
+                }
+            }));
+        }
+        if let PreparedTimelineGrade::Ready(program) = &self.timeline_grade {
+            program.visit_authored_visual_sources(|reference| {
+                dependencies.push(PreparedAuxiliaryRangeDependency {
+                    placement: None,
+                    reference,
+                    first,
+                    last,
+                });
+            });
+        }
+        Ok(dependencies)
     }
 
     pub(crate) fn evaluate_clip_effects(

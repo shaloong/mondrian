@@ -15,12 +15,13 @@ use crate::{
     GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError,
     GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest,
     GpuCompositeSpatialLayer, GpuCompositeSpatialRequest, GpuCompositingDiagnostics,
-    GpuFrameCompositor, GpuSolidSourceRecord, LinearFloatSource, OcioGpuShaderCache,
-    OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
-    OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
-    OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
-    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat,
-    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
+    GpuFrameCompositor, GpuSolidSourceRecord, GpuSpatialAuxiliaryRaster, LinearFloatSource,
+    OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError,
+    OcioGpuWgpuBackendObjectRuntime, OcioGpuWgpuBackendObjectRuntimeDiagnostics,
+    OcioGpuWgpuBackendPrepError, OcioGpuWgpuBackendPrepRuntime,
+    OcioGpuWgpuBackendPrepRuntimeDiagnostics, OcioGpuWgpuBindGroupLayoutDescriptorPlan,
+    OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
+    OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
     OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindingPlan,
     RenderColorTransform, RenderColorTransformError, RenderColorTransformGpuOptions,
     RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
@@ -1114,8 +1115,30 @@ impl RenderGpuOutputBoundaryRuntime {
         request: GpuCompositeRequest<'_>,
         spatial_plans: &[Option<&CompiledEffectGpuPipeline>],
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        self.record_wgpu_working_composite_with_auxiliary(
+            compositor,
+            device,
+            queue,
+            encoder,
+            request,
+            spatial_plans,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_wgpu_working_composite_with_auxiliary(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        request: GpuCompositeRequest<'_>,
+        spatial_plans: &[Option<&CompiledEffectGpuPipeline>],
+        auxiliary: &[&[GpuSpatialAuxiliaryRaster<'_>]],
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         let Self { frame_ids, frame_table, resource_pool, .. } = self;
-        if !spatial_plans.iter().any(Option::is_some) {
+        if !spatial_plans.iter().any(Option::is_some) && auxiliary.is_empty() {
             return compositor.record(
                 device,
                 queue,
@@ -1135,7 +1158,7 @@ impl RenderGpuOutputBoundaryRuntime {
                 spatial_plan: spatial_plans.get(index).copied().flatten(),
             })
             .collect::<Vec<_>>();
-        compositor.record_with_spatial_effect_chains(
+        compositor.record_with_auxiliary_spatial_effect_chains(
             device,
             queue,
             encoder,
@@ -1148,6 +1171,7 @@ impl RenderGpuOutputBoundaryRuntime {
                 working_color_space: request.working_color_space,
                 layers: &layers,
             },
+            auxiliary,
         )
     }
 
@@ -1458,6 +1482,32 @@ impl RenderGpuOutputBoundaryRuntime {
         engine: ColorEngine,
         gpu_options: RenderColorTransformGpuOptions,
     ) -> Result<RenderGpuCompositeGraphRecord, RenderGpuCompositeGraphRecordError> {
+        self.record_wgpu_composite_graph_with_auxiliary(
+            compositor,
+            device,
+            queue,
+            encoder,
+            request,
+            spatial_plans,
+            &[],
+            engine,
+            gpu_options,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_wgpu_composite_graph_with_auxiliary(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        request: GpuCompositeRequest<'_>,
+        spatial_plans: &[Option<&CompiledEffectGpuPipeline>],
+        auxiliary: &[&[GpuSpatialAuxiliaryRaster<'_>]],
+        engine: ColorEngine,
+        gpu_options: RenderColorTransformGpuOptions,
+    ) -> Result<RenderGpuCompositeGraphRecord, RenderGpuCompositeGraphRecordError> {
         let mut compositing_diagnostics = GpuCompositingDiagnostics::default();
         let mut color_stage_diagnostics = RenderColorStageDiagnostics::default();
         let mut external_adjustment_passes = 0_u64;
@@ -1489,6 +1539,7 @@ impl RenderGpuOutputBoundaryRuntime {
                 current.as_ref(),
                 &request.layers[segment_start..index],
                 spatial_plans.get(segment_start..index).unwrap_or(&[]),
+                auxiliary.get(segment_start..index).unwrap_or(&[]),
             )?;
             compositing_diagnostics.accumulate(lower.diagnostics);
             let base = lower.output;
@@ -1548,6 +1599,7 @@ impl RenderGpuOutputBoundaryRuntime {
             current.as_ref(),
             &request.layers[segment_start..],
             spatial_plans.get(segment_start..).unwrap_or(&[]),
+            auxiliary.get(segment_start..).unwrap_or(&[]),
         )?;
         compositing_diagnostics.accumulate(final_segment.diagnostics);
         Ok(RenderGpuCompositeGraphRecord {
@@ -1571,11 +1623,13 @@ impl RenderGpuOutputBoundaryRuntime {
         base: Option<&GpuColorFrameHandle>,
         layers: &[GpuCompositeLayer<'_>],
         spatial_plans: &[Option<&CompiledEffectGpuPipeline>],
+        auxiliary: &[&[GpuSpatialAuxiliaryRaster<'_>]],
     ) -> Result<GpuCompositeRecord, RenderGpuCompositeGraphRecordError> {
         let mut scheduled =
             Vec::with_capacity(layers.len().saturating_add(usize::from(base.is_some())));
         let mut scheduled_spatial =
             Vec::with_capacity(spatial_plans.len().saturating_add(usize::from(base.is_some())));
+        let mut scheduled_auxiliary = Vec::new();
         if let Some(base) = base {
             scheduled.push(GpuCompositeLayer {
                 source: GpuCompositeLayerSource::GpuFrame(base),
@@ -1590,10 +1644,14 @@ impl RenderGpuOutputBoundaryRuntime {
             // The accumulator base is a plain working frame, never an effect
             // layer, so it can never carry a chain.
             scheduled_spatial.push(None);
+            if !auxiliary.is_empty() {
+                scheduled_auxiliary.push(&[][..]);
+            }
         }
         scheduled.extend_from_slice(layers);
         scheduled_spatial.extend_from_slice(spatial_plans);
-        self.record_wgpu_working_composite(
+        scheduled_auxiliary.extend_from_slice(auxiliary);
+        self.record_wgpu_working_composite_with_auxiliary(
             compositor,
             device,
             queue,
@@ -1605,6 +1663,7 @@ impl RenderGpuOutputBoundaryRuntime {
                 layers: &scheduled,
             },
             &scheduled_spatial,
+            &scheduled_auxiliary,
         )
         .map_err(RenderGpuCompositeGraphRecordError::Composite)
     }

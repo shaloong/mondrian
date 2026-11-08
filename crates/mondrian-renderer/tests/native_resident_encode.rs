@@ -189,6 +189,7 @@ async fn compare_production_output(
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: Arc::clone(&identity),
+            spatial_plan: None,
             frame_seed: 0,
         })),
         GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
@@ -197,6 +198,7 @@ async fn compare_production_output(
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: identity,
+            spatial_plan: None,
             frame_seed: 0,
         })),
     ];

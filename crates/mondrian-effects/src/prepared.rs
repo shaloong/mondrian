@@ -1140,6 +1140,36 @@ impl PreparedEffectInput {
 }
 
 impl PreparedEffectProgram {
+    /// Visit the frozen, bound VisualSource addresses of enabled stages.
+    ///
+    /// Range capture is conservative across dynamic graph builders. An
+    /// address can become active at any sample without changing its authored
+    /// value, so a single compiled graph's slots are insufficient here.
+    pub fn visit_authored_visual_sources(
+        &self,
+        mut visit: impl FnMut(mondrian_core::VisualSourceReference),
+    ) {
+        let inner = &self.inner;
+        let stacks = inner
+            .grade_before
+            .iter()
+            .map(|grade| &grade.inner.stack)
+            .chain(std::iter::once(&inner.stack))
+            .chain(inner.grade_after.iter().map(|grade| &grade.inner.stack));
+        for stack in stacks {
+            for instance in stack.instances.iter() {
+                for (_, property) in instance.effect.properties.iter() {
+                    if let mondrian_core::PropertyValue::VisualSource(reference) =
+                        property.static_value()
+                        && *reference != mondrian_core::VisualSourceReference::Unbound
+                    {
+                        visit(*reference);
+                    }
+                }
+            }
+        }
+    }
+
     /// Bind the input of a concrete Custom processor in this program's actual
     /// compiled graph. An internal node fed by another node of its Definition
     /// is deliberately refused: that value is not the Definition entering value.

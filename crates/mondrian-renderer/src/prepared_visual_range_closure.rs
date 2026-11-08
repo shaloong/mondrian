@@ -6,12 +6,15 @@
 //! recursion, cycle/depth, Transition, retime, temporal-extent, and media
 //! reachability implementation.
 
+use crate::prepared_visual_program::PreparedAuxiliaryRangeDependency;
 use crate::{
     BasicTitleFontQuery, PreparedVisualNestedRange, PreparedVisualProgram,
     PreparedVisualProgramBinding,
 };
 use mondrian_core::{
-    AssetId, FramePosition, SequenceId, SequenceRevision, TimelineTime, VideoTransitionId,
+    AssetId, ClipId, FramePosition, SequenceId, SequenceRevision, SourceSampleTarget,
+    SourceSamplingBoundary, TimelineTime, TimelineTimeRange, VideoTransitionId,
+    VisualSourceBoundary, VisualSourceReference, VisualSourceRetime, VisualSourceTimeError,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -81,6 +84,32 @@ impl PreparedVisualRangeClosure {
 /// Failure to prepare one recursive visual range dependency closure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PreparedVisualRangeClosureError {
+    /// The source must be frozen in the selected Sequence's export range.
+    #[error(
+        "auxiliary Clip {clip_id} in Sequence {sequence_id} samples {source_first}..={source_last} outside the export range {first}..={last}"
+    )]
+    AuxiliaryClipOutsideRange {
+        /// Owning Sequence.
+        sequence_id: SequenceId,
+        /// Authored standalone source.
+        clip_id: ClipId,
+        /// Earliest selected export instant.
+        first: TimelineTime,
+        /// Latest selected export instant.
+        last: TimelineTime,
+        /// Earliest demanded source instant in the same Sequence.
+        source_first: TimelineTime,
+        /// Latest demanded source instant in the same Sequence.
+        source_last: TimelineTime,
+    },
+    /// No Sequence snapshot exists for the frozen auxiliary address.
+    #[error("Sequence {parent_sequence_id} visual range references missing auxiliary Sequence {sequence_id}")]
+    MissingAuxiliarySequence {
+        /// Owner of the auxiliary address.
+        parent_sequence_id: SequenceId,
+        /// Referenced Sequence.
+        sequence_id: SequenceId,
+    },
     /// Candidate input contains the same Sequence identity more than once.
     #[error("visual range candidates contain duplicate Sequence {sequence_id}")]
     DuplicateSequenceIdentity {
@@ -226,7 +255,13 @@ pub fn prepare_bound_visual_range_closure(
     prepare_program: impl FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
 ) -> Result<PreparedVisualRangeClosure, PreparedVisualRangeClosureError> {
     let mut programs = PinnedProgramResolver::new(prepare_program);
-    prepare_visual_range_closure_with_resolver(root_sequence, sequences, root_range, &mut programs)
+    prepare_visual_range_closure_with_resolver(
+        root_sequence,
+        sequences,
+        root_range,
+        &mut programs,
+        true,
+    )
 }
 
 /// Find the earliest root frame after `after_frame` and no later than
@@ -376,6 +411,7 @@ where
         sequences,
         PreparedVisualNestedRange::Bounded { first: first_time, last: last_time },
         programs,
+        false,
     )?;
     Ok(closure.has_media_dependencies())
 }
@@ -397,6 +433,7 @@ where
         sequences,
         PreparedVisualNestedRange::Bounded { first: first_time, last: last_time },
         programs,
+        false,
     )?;
     Ok(closure
         .media_asset_ids()
@@ -425,6 +462,7 @@ fn prepare_visual_range_closure_with_resolver<Prepare>(
     sequences: &[Sequence],
     root_range: PreparedVisualNestedRange,
     programs: &mut PinnedProgramResolver<Prepare>,
+    strict_auxiliary: bool,
 ) -> Result<PreparedVisualRangeClosure, PreparedVisualRangeClosureError>
 where
     Prepare: FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
@@ -438,6 +476,7 @@ where
         media_asset_ids: BTreeSet::new(),
         transition_ids: BTreeMap::new(),
         basic_title_font_queries: BTreeSet::new(),
+        strict_auxiliary,
     };
     builder.visit(root_sequence, root_range, 0)?;
     let effect_registry_revision =
@@ -582,6 +621,7 @@ struct PreparedVisualRangeClosureBuilder<'a, 'programs, Prepare> {
     media_asset_ids: BTreeSet<AssetId>,
     transition_ids: BTreeMap<SequenceId, BTreeSet<VideoTransitionId>>,
     basic_title_font_queries: BTreeSet<BasicTitleFontQuery>,
+    strict_auxiliary: bool,
 }
 
 impl<Prepare> PreparedVisualRangeClosureBuilder<'_, '_, Prepare>
@@ -636,11 +676,141 @@ where
                 )?;
                 self.visit(child, demand.range, depth.saturating_add(1))?;
             }
+            if self.strict_auxiliary {
+                let dependencies =
+                    program.auxiliary_range_dependencies(first, last).map_err(|error| {
+                        PreparedVisualRangeClosureError::Dependency {
+                            sequence_id: sequence.id,
+                            reason: error.to_string(),
+                        }
+                    })?;
+                for dependency in dependencies {
+                    self.visit_auxiliary(sequence, &program, dependency, (first, last), depth)?;
+                }
+            }
             Ok(())
         })();
         self.active_path.pop();
         result
     }
+
+    fn visit_auxiliary(
+        &mut self,
+        sequence: &Sequence,
+        program: &PreparedVisualProgram,
+        dependency: PreparedAuxiliaryRangeDependency,
+        authorized: (TimelineTime, TimelineTime),
+        depth: usize,
+    ) -> Result<(), PreparedVisualRangeClosureError> {
+        let invalid = |reason| PreparedVisualRangeClosureError::Dependency {
+            sequence_id: sequence.id,
+            reason,
+        };
+        let consumer = (dependency.first, dependency.last);
+        match dependency.reference {
+            VisualSourceReference::Asset { asset_id, .. } => {
+                self.media_asset_ids.insert(asset_id);
+            }
+            VisualSourceReference::Clip { clip_id, retime } => {
+                let schedule = program.schedule();
+                let proof = match dependency.placement {
+                    Some(placement) => schedule.admit_auxiliary_clip(placement, clip_id),
+                    None => schedule.admit_auxiliary_clip_for_grade(clip_id),
+                }
+                .map_err(|error| invalid(error.to_string()))?;
+                if let Some((first, last)) =
+                    project_auxiliary_window(retime, consumer, proof.available())
+                        .map_err(|error| invalid(error.to_string()))?
+                {
+                    let rate = sequence.settings.frame_rate;
+                    let source_first = proof
+                        .sample_time(first, rate)
+                        .map_err(|error| invalid(error.to_string()))?;
+                    let source_last = proof
+                        .sample_time(last, rate)
+                        .map_err(|error| invalid(error.to_string()))?;
+                    if source_first < authorized.0 || source_last > authorized.1 {
+                        return Err(PreparedVisualRangeClosureError::AuxiliaryClipOutsideRange {
+                            sequence_id: sequence.id,
+                            clip_id,
+                            first: authorized.0,
+                            last: authorized.1,
+                            source_first,
+                            source_last,
+                        });
+                    }
+                }
+            }
+            VisualSourceReference::Sequence { sequence_id, retime } => {
+                let child = self.sequence_index.get(&sequence_id).copied().ok_or(
+                    PreparedVisualRangeClosureError::MissingAuxiliarySequence {
+                        parent_sequence_id: sequence.id,
+                        sequence_id,
+                    },
+                )?;
+                let duration =
+                    child.total_duration().map_err(|error| invalid(error.to_string()))?;
+                let available = TimelineTimeRange::new(TimelineTime::ZERO, duration)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if let Some((first, last)) = project_auxiliary_window(retime, consumer, available)
+                    .map_err(|error| invalid(error.to_string()))?
+                {
+                    let bounds = |target: SourceSampleTarget| {
+                        if target.boundary() == SourceSamplingBoundary::Covering {
+                            return Ok(target.time());
+                        }
+                        let position =
+                            crate::prepared_visual_frame_closure::exact_nested_visual_position(
+                                target, child,
+                            )
+                            .map_err(invalid)?;
+                        TimelineTime::from_frame_position(position)
+                            .map_err(|error| invalid(error.to_string()))
+                    };
+                    self.visit(
+                        child,
+                        PreparedVisualNestedRange::Bounded {
+                            first: bounds(first)?,
+                            last: bounds(last)?,
+                        },
+                        depth.saturating_add(1),
+                    )?;
+                } else {
+                    // Transparent still needs an immutable source identity and
+                    // its execution-grid contract, though no child pixels run.
+                    self.programs.resolve(child)?;
+                    self.selected_sequence_ids.insert(sequence_id);
+                }
+            }
+            VisualSourceReference::Unbound => {}
+        }
+        Ok(())
+    }
+}
+
+fn project_auxiliary_window(
+    retime: VisualSourceRetime,
+    (first, last): (TimelineTime, TimelineTime),
+    available: TimelineTimeRange,
+) -> Result<Option<(SourceSampleTarget, SourceSampleTarget)>, VisualSourceTimeError> {
+    let first = retime.sample(first, available)?;
+    let last = retime.sample(last, available)?;
+    if retime.mode != VisualSourceBoundary::Transparent {
+        return Ok(first.source_sample.zip(last.source_sample));
+    }
+    // Both endpoints can be transparent even though a contiguous interval
+    // between them intersects the source.
+    let first_time = first.requested_time.max(available.start);
+    let end = available.end()?;
+    if first_time >= end || last.requested_time < first_time {
+        return Ok(None);
+    }
+    let last = if last.requested_time < end {
+        SourceSampleTarget::covering(last.requested_time)
+    } else {
+        SourceSampleTarget::strict_predecessor(end)
+    };
+    Ok(Some((SourceSampleTarget::covering(first_time), last)))
 }
 
 fn visual_range_bounds(
