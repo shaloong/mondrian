@@ -534,6 +534,10 @@ mod tests {
             point_stages,
             scratch_textures: usize::try_from(largest).unwrap_or(usize::MAX).saturating_add(1),
             scratch_bytes: 0,
+            scratch_extents: 1,
+            output_bounds: mondrian_effects::EffectRasterBounds::from_extent(
+                mondrian_effects::EffectFrameExtent::new(0, 0),
+            ),
         }
     }
 

@@ -44,7 +44,7 @@ fn displacement_primary(position: vec2<f32>, wrap: bool) -> vec4<f32> {
 
 @fragment
 fn fs_displacement_map(input: VsOut) -> @location(0) vec4<f32> {
-    let index = floor(input.position.xy);
+    let index = floor(input.position.xy) + vec2<f32>(uniforms.aces.w, uniforms.extra1.w);
     if (uniforms.params.z != 0.0) {
         return textureLoad(original_texture, vec2<i32>(index), 0);
     }

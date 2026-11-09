@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use mondrian_effects::{
-    CompiledEffectGpuPipeline, EffectGpuPointOp, EffectGpuSpatialPass, EffectGpuStage,
-    EffectGraphNodeId,
+    CompiledEffectGpuPipeline, EffectFrameExtent, EffectGpuPointOp, EffectGpuSpatialPass,
+    EffectGpuStage, EffectGraphNodeId, EffectRasterBounds,
 };
 
 use crate::product_gpu_working_texture_format;
@@ -97,6 +97,10 @@ pub struct GpuSpatialChainPlan {
     pub scratch_textures: usize,
     /// Bytes those scratch textures occupy at this raster extent.
     pub scratch_bytes: u64,
+    /// Distinct raster extents recorded by spatial stages.
+    pub(crate) scratch_extents: usize,
+    /// Final raster dimensions and pixel origin relative to the input layer.
+    pub output_bounds: EffectRasterBounds,
 }
 
 impl GpuSpatialChainPlan {
@@ -203,6 +207,8 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
     let mut spatial_passes = 0_u32;
     let mut point_stages = 0_u32;
     let mut largest_pass_count = 0_u32;
+    let mut output_bounds = EffectRasterBounds::from_extent(EffectFrameExtent::new(width, height));
+    let mut scratch_extents = std::collections::HashSet::new();
     for stage in pipeline.stages() {
         match stage {
             EffectGpuStage::PointOps { operations, node_ids } => {
@@ -233,6 +239,24 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                     if !auxiliary_slots.contains(&slot) {
                         return Err(GpuSpatialChainBlocker::MissingAuxiliaryInput { slot });
                     }
+                }
+                output_bounds =
+                    output_bounds.checked_outset(pass.output_outset()).ok_or_else(|| {
+                        GpuSpatialChainBlocker::UnsupportedPass {
+                            pass: pass.name(),
+                            detail: "output raster geometry overflow".into(),
+                        }
+                    })?;
+                let output = output_bounds.extent();
+                scratch_extents.insert(output);
+                if output.width() > GPU_SPATIAL_MAX_RASTER_DIMENSION
+                    || output.height() > GPU_SPATIAL_MAX_RASTER_DIMENSION
+                {
+                    return Err(GpuSpatialChainBlocker::ExtentExceedsDeviceLimit {
+                        width: output.width(),
+                        height: output.height(),
+                        limit: GPU_SPATIAL_MAX_RASTER_DIMENSION,
+                    });
                 }
                 let passes = match EffectSpatialGpu::texture_pass_count(pass) {
                     Ok(passes) => passes,
@@ -268,7 +292,12 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
     // so no stage's destination can alias the source it samples.
     let scratch_textures =
         usize::try_from(largest_pass_count).unwrap_or(usize::MAX).saturating_add(1);
-    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if scratch_extents.is_empty() {
+        scratch_extents.insert(output_bounds.extent());
+    }
+    let pixels = scratch_extents.iter().fold(0u64, |pixels, extent| {
+        pixels.saturating_add(u64::from(extent.width()) * u64::from(extent.height()))
+    });
     let scratch_bytes = u64::try_from(scratch_textures)
         .unwrap_or(u64::MAX)
         .saturating_mul(pixels)
@@ -286,6 +315,8 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
         point_stages,
         scratch_textures,
         scratch_bytes,
+        scratch_extents: scratch_extents.len(),
+        output_bounds,
     })
 }
 

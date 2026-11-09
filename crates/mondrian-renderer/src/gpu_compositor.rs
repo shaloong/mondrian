@@ -4901,7 +4901,24 @@ impl GpuFrameCompositor {
         let footprints = request
             .layers
             .iter()
-            .map(|layer| composite_layer_footprint(width, height, layer))
+            .enumerate()
+            .map(|(index, layer)| {
+                let mut footprint = composite_layer_footprint(width, height, layer);
+                if let Some(chain) = spatial_chain_at(index)
+                    && let GpuCompositeLayerFootprint::TransformedSource {
+                        source_width,
+                        source_height,
+                        transform,
+                        ..
+                    } = &mut footprint
+                {
+                    let extent = chain.output_bounds.extent();
+                    *source_width = extent.width();
+                    *source_height = extent.height();
+                    *transform = chain.output_bounds.project_affine(*transform);
+                }
+                footprint
+            })
             .collect::<Vec<_>>();
         let execution = GpuCompositeExecutionPlanner::plan(
             width,
@@ -4994,7 +5011,8 @@ impl GpuFrameCompositor {
                     &target_a,
                 )
             };
-            let (mut layer_binding, source_kind, solid_color, source_size) = match layer.source {
+            let (mut layer_binding, source_kind, solid_color, mut source_size) = match layer.source
+            {
                 GpuCompositeLayerSource::CpuFrame(frame) => {
                     uploaded_cpu_layers = true;
                     let descriptor = frame.descriptor();
@@ -5066,6 +5084,7 @@ impl GpuFrameCompositor {
                     [width as f32, height as f32],
                 ),
             };
+            let mut transform = layer.transform;
             if let Some(chain) = spatial_chain_at(index) {
                 let source_descriptor = layer_source_descriptor(layer.source).ok_or(
                     GpuCompositeError::SpatialPlanOnUnsupportedSource {
@@ -5104,6 +5123,9 @@ impl GpuFrameCompositor {
                 layer_binding = GpuCompositeTextureBinding::Resource(
                     table.get(&chain_output).map_err(GpuCompositeError::ResourceTable)?.resource(),
                 );
+                let extent = chain.output_bounds.extent();
+                source_size = [extent.width() as f32, extent.height() as f32];
+                transform = chain.output_bounds.project_affine(transform);
                 spatial_effect_layers = spatial_effect_layers.saturating_add(1);
                 spatial_chain_gpu_choices = spatial_chain_gpu_choices.saturating_add(1);
                 spatial_effect_passes =
@@ -5114,8 +5136,11 @@ impl GpuFrameCompositor {
                     spatial_scratch_textures_peak.max(chain.scratch_texture_request());
                 spatial_scratch_bytes_peak = spatial_scratch_bytes_peak.max(chain.scratch_bytes);
             }
-            let inv_transform = invert_affine(layer.transform)
-                .expect("validate_request rejects unsupported transforms");
+            let inv_transform = invert_affine(transform)
+                .filter(|values| values.iter().all(|value| value.is_finite()))
+                .ok_or(GpuCompositeError::Blocked {
+                    reason: GpuCompositingBlockerReason::UnsupportedTransform,
+                })?;
             if !opaque_normal_accumulator && !layer_execution.initializes_accumulator {
                 record_preserved_regions(
                     encoder,
@@ -5282,12 +5307,10 @@ impl GpuFrameCompositor {
         frame_seed: i64,
         auxiliary_rasters: &[GpuSpatialAuxiliaryRaster<'_>],
     ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
-        let width = descriptor.width;
-        let height = descriptor.height;
         // The chain writes working rasters, while the source descriptor may
         // still describe a CPU-resident upload; only the extent and colour
         // space carry over.
-        let working_descriptor = ColorFrameDescriptor {
+        let mut working_descriptor = ColorFrameDescriptor {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
@@ -5298,6 +5321,8 @@ impl GpuFrameCompositor {
         let mut current_view = source_view.clone();
         let mut current_handle = None;
         for stage in &chain.stages {
+            let width = working_descriptor.width;
+            let height = working_descriptor.height;
             match stage {
                 GpuSpatialStagePlan::PointOps { operations } => {
                     let output = create_working_resource(
@@ -5335,6 +5360,18 @@ impl GpuFrameCompositor {
                     current_handle = Some(handle);
                 }
                 GpuSpatialStagePlan::Spatial { pass, scratch_textures, .. } => {
+                    let bounds = mondrian_effects::EffectRasterBounds::from_extent(
+                        mondrian_effects::EffectFrameExtent::new(width, height),
+                    )
+                    .checked_outset(pass.output_outset())
+                    .ok_or_else(|| GpuCompositeError::SpatialChainFailed {
+                        pass: pass.name(),
+                        detail: "output raster geometry overflow".into(),
+                    })?;
+                    let extent = bounds.extent();
+                    working_descriptor.width = extent.width();
+                    working_descriptor.height = extent.height();
+                    let (width, height) = (extent.width(), extent.height());
                     // The pool holds `max(pass count) + 1` textures so no
                     // stage's destination aliases its own source; the guard
                     // here proves the kernel's declared pass count fits.
@@ -17272,7 +17309,7 @@ mod tests {
                 ),
             ][case];
             let grade =
-                DisplacementMapGrade::new(amounts, channels, behavior, wrap, false).unwrap();
+                DisplacementMapGrade::new(amounts, channels, behavior, wrap, case == 3).unwrap();
             EffectRenderOp::DisplacementMap { grade }
         });
     }
@@ -17356,14 +17393,19 @@ mod tests {
             let mut builder = EffectGraphBuilderState::new();
             let aux =
                 builder.append_external_input(9, format, EffectColorDomainContract::SCENE_LINEAR);
-            let output = builder.add_auxiliary_effect(
-                builder.source(),
-                aux,
-                operation(case),
-                role,
-                sampling,
-            );
+            let op = operation(case);
+            let grows = matches!(op, mondrian_effects::EffectRenderOp::DisplacementMap { grade }
+                if grade.output_outset() != [0, 0]);
+            let output = builder.add_auxiliary_effect(builder.source(), aux, op, role, sampling);
             builder.set_current_output(output);
+            if grows {
+                builder.append_unary(mondrian_effects::EffectRenderOp::ColorAdjust {
+                    exposure: 1.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    working_color_space,
+                });
+            }
             let graph = compile_reference_render_graph(builder.finish()).unwrap();
             let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
             assert!(matches!(
@@ -17371,8 +17413,16 @@ mod tests {
                 [EffectGpuStage::Spatial {
                     pass,
                     ..
-                }] if pass.auxiliary_slot() == Some(Some(9))
+                }, ..] if pass.auxiliary_slot() == Some(Some(9))
             ));
+            assert_eq!(pipeline.stages().len(), 1 + usize::from(grows));
+            if grows {
+                let limit = crate::spatial_driver::GPU_SPATIAL_MAX_RASTER_DIMENSION;
+                assert!(matches!(
+                    gpu_spatial_chain_plan_with_auxiliary(&pipeline, limit, height, &[9]),
+                    Err(crate::GpuSpatialChainBlocker::ExtentExceedsDeviceLimit { .. })
+                ));
+            }
             let policy = AuxiliaryPolicy::new(AuxiliaryResolution::Authored);
             let cpu_binding = AuxiliaryFloatInput {
                 slot: 9,
@@ -17411,13 +17461,28 @@ mod tests {
                 .iter()
                 .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
                 .collect::<Vec<_>>();
-            let layers = [GpuCompositeSpatialLayer {
-                layer: spatial_test_layer(&primary_cpu),
-                spatial_plan: Some(&pipeline),
-            }];
+            let bounds = graph.output_raster_bounds(EffectFrameExtent::new(width, height)).unwrap();
+            assert_eq!(cpu.extent(), bounds.extent());
+            let [x, y] = bounds.origin();
+            let mut layer = spatial_test_layer(&primary_cpu);
+            // Translate the original layer so that the full grown raster is
+            // visible on the canvas, including pixels outside its old bounds.
+            layer.transform[2] = -x as f32;
+            layer.transform[5] = -y as f32;
+            let canvas_width = bounds.extent().width();
+            let canvas_height = bounds.extent().height();
+            if grows {
+                assert!(expected.iter().enumerate().any(|(index, pixel)| {
+                    let col = index as i32 % canvas_width as i32 + x;
+                    let row = index as i32 / canvas_width as i32 + y;
+                    pixel[3] > 0.0
+                        && (!(0..width as i32).contains(&col) || !(0..height as i32).contains(&row))
+                }));
+            }
+            let layers = [GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }];
             let request = || GpuCompositeSpatialRequest {
-                width,
-                height,
+                width: canvas_width,
+                height: canvas_height,
                 working_color_space,
                 layers: &layers,
             };
@@ -17457,14 +17522,15 @@ mod tests {
                 .expect("record a dual-texture spatial pass");
             assert_eq!(record.diagnostics.spatial_effect_layers, 1);
             assert_eq!(record.diagnostics.spatial_effect_passes, 1);
+            assert_eq!(record.diagnostics.spatial_point_stages, u64::from(grows));
             assert_eq!(record.diagnostics.cpu_fallback_composites, 0);
             let actual = readback_composite_output(
                 context,
                 encoder,
                 &mut table,
                 &record.output,
-                width,
-                height,
+                canvas_width,
+                canvas_height,
             );
             assert_spatial_chain_matches(&expected, &actual);
             let max_error = expected
@@ -17473,7 +17539,7 @@ mod tests {
                 .zip(actual.iter().flatten())
                 .map(|(cpu, gpu)| (cpu - gpu).abs())
                 .fold(0.0f32, f32::max);
-            eprintln!("{role:?} parity {sampling:?}, max absolute error = {max_error:.9e}");
+            eprintln!("{role:?} parity {sampling:?}, bounds {bounds:?}, max absolute error = {max_error:.9e}");
         }
     }
 

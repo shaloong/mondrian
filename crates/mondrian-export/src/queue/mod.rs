@@ -8589,8 +8589,10 @@ fn prepared_export_source_supports_gpu(
         Ok(GpuRoute::Spatial(pipeline)) => {
             pipeline.processing_domain() == EffectColorDomain::SceneLinearRgb
                 && graph.auxiliary_inputs().iter().all(|input| {
-                    matches!(input.role(), AuxiliaryRole::Matte | AuxiliaryRole::Layer)
-                        && input.sampling() == AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP
+                    matches!(
+                        input.role(),
+                        AuxiliaryRole::Matte | AuxiliaryRole::Layer | AuxiliaryRole::Map
+                    ) && input.sampling() == AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP
                 })
         }
         Err(_) => false,

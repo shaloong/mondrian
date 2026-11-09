@@ -315,6 +315,49 @@ fn preview_channel_combiner_reads_the_selected_source_on_the_actual_grid() {
 }
 
 #[test]
+fn preview_displacement_map_projects_the_expanded_output_to_the_original_layer() {
+    use mondrian_core::{PropertyValue, VisualSourceReference};
+    use mondrian_effects::{instantiate_effect_node, EffectType};
+
+    let (_root, asset) = asset_fixture(Some(Duration::from_secs(2)));
+    let kind = EffectType::DisplacementMap;
+    let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+    for (key, value) in [
+        (
+            "map_source",
+            PropertyValue::VisualSource(VisualSourceReference::Asset {
+                asset_id: asset.id,
+                retime: Default::default(),
+            }),
+        ),
+        ("horizontal_channel", PropertyValue::Enum("alpha".into())),
+        ("horizontal_amount", PropertyValue::Float(1.0)),
+        ("vertical_amount", PropertyValue::Float(0.0)),
+    ] {
+        effect
+            .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+            .unwrap();
+    }
+    let sequence = auxiliary_sequence_with_effect(effect);
+    let resolved = resolve_auxiliary_fixture(&sequence, &asset);
+    let output = crate::app::preview_cpu_execution::composite_resolved_preview_working(
+        3,
+        1,
+        &resolved.plan.elements,
+        &resolved.plan.color_context,
+        resolved.plan.sampling,
+        &mut TimelineCompositeScratch::default(),
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .unwrap();
+    let pixels = &output.frame.rgba_f32().data;
+    assert_eq!(pixels.len(), 3);
+    for (pixel, alpha) in pixels.iter().zip([0.5, 1.0, 1.0]) {
+        assert!((pixel[3] - alpha).abs() < 1e-6, "{pixel:?}");
+    }
+}
+
+#[test]
 fn two_auxiliary_slots_share_one_registered_asset_plane_and_working_charge() {
     use crate::app::preview_auxiliary::{
         prepare_auxiliary_rasters, resolved_auxiliary_working_bytes,

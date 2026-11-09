@@ -2833,6 +2833,21 @@ impl EffectSpatialGpu {
         }
         params[3] = f32::from(u8::from(sampling.filter == AuxiliaryFilter::Linear));
         let [a, b, tx, c, d, ty] = transform;
+        let input_extent =
+            mondrian_effects::EffectFrameExtent::new(primary.width(), primary.height());
+        let bounds = mondrian_effects::EffectRasterBounds::from_extent(input_extent)
+            .checked_outset(pass.output_outset())
+            .ok_or(EffectSpatialGpuError::UnsupportedPass(
+                "auxiliary_output_extent",
+            ))?;
+        if (destination.width(), destination.height())
+            != (bounds.extent().width(), bounds.extent().height())
+        {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "auxiliary_output_extent",
+            ));
+        }
+        let [origin_x, origin_y] = bounds.origin();
         let uniforms = SpatialPassUniform {
             size: [
                 primary.width() as f32,
@@ -2846,8 +2861,8 @@ impl EffectSpatialGpu {
             ],
             params,
             extra,
-            aces: [a, b, tx, 0.0],
-            extra1: [c, d, ty, 0.0],
+            aces: [a, b, tx, origin_x as f32],
+            extra1: [c, d, ty, origin_y as f32],
         };
         let primary = primary.create_view(&wgpu::TextureViewDescriptor::default());
         let auxiliary = auxiliary.create_view(&wgpu::TextureViewDescriptor::default());

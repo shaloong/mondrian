@@ -61,12 +61,16 @@ pub(super) fn composite_transition_input_f32(
                 )?;
                 effect_output.view()
             };
+            let transform = layer
+                .effect_graph
+                .output_raster_bounds(input.extent())?
+                .project_affine(layer.transform);
             canvas = alpha_blend_typed_float_layer(
                 canvas,
                 source,
                 layer.opacity,
                 layer.blend_mode,
-                layer.transform,
+                transform,
                 layer.frame_seed,
                 &mut scratch.cpu_visual_execution,
                 control,
@@ -108,12 +112,16 @@ pub(super) fn composite_transition_input_f32(
                 )?;
                 effect_output.view()
             };
+            let transform = layer
+                .effect_graph
+                .output_raster_bounds(input.extent())?
+                .project_affine(layer.transform);
             canvas = alpha_blend_typed_float_layer(
                 canvas,
                 source,
                 layer.opacity,
                 layer.blend_mode,
-                layer.transform,
+                transform,
                 layer.frame_seed,
                 &mut scratch.cpu_visual_execution,
                 control,

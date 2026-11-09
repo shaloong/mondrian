@@ -2115,6 +2115,7 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                 && layer.blend_mode == BlendMode::Normal
                 && layer.opacity > 0.0
                 && is_identity_transform(layer.transform)
+                && !layer.effect_graph.has_raster_growth()
                 && layer.frame.rgba_f32().width == width
                 && layer.frame.rgba_f32().height == height
                 && layer.frame.rgba_f32().sampling == runtime.sampling =>
@@ -2251,12 +2252,16 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                     && layer.blend_mode == BlendMode::Normal
                     && is_identity_transform(layer.transform)
                     && source.extent() == extent;
+                let transform = layer
+                    .effect_graph
+                    .output_raster_bounds(input.extent())?
+                    .project_affine(layer.transform);
                 let (next_canvas, kernel) = alpha_blend_typed_float_layer(
                     canvas,
                     source,
                     layer.opacity,
                     layer.blend_mode,
-                    layer.transform,
+                    transform,
                     layer.frame_seed,
                     &mut scratch.cpu_visual_execution,
                     control,
@@ -2337,12 +2342,16 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                     )?;
                     effect_output.view()
                 };
+                let transform = layer
+                    .effect_graph
+                    .output_raster_bounds(input.extent())?
+                    .project_affine(layer.transform);
                 let (next_canvas, kernel) = alpha_blend_typed_float_layer(
                     canvas,
                     source,
                     layer.opacity,
                     layer.blend_mode,
-                    layer.transform,
+                    transform,
                     layer.frame_seed,
                     &mut scratch.cpu_visual_execution,
                     control,

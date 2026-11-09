@@ -619,7 +619,11 @@ mod tests {
     #[test]
     #[ignore = "real GPU Export second-picture qualification; run independently"]
     fn export_gpu_auxiliary_sequence_matches_cpu_float32() {
-        assert_export_gpu_auxiliary_sequence(matte, [0.5, 0.0, 0.0, 1.0]);
+        assert_export_gpu_auxiliary_sequence(
+            matte,
+            Color { r: 0.0, g: 1.0, b: 0.0, a: 0.5 },
+            [0.5, 0.0, 0.0, 1.0],
+        );
     }
 
     #[test]
@@ -643,23 +647,43 @@ mod tests {
                 }
                 effect
             },
+            Color { r: 0.0, g: 1.0, b: 0.0, a: 0.5 },
             [0.5, 0.0, 0.0, 1.0],
+        );
+    }
+
+    #[test]
+    #[ignore = "real GPU Export second-picture qualification; run independently"]
+    fn export_gpu_displacement_map_expands_the_layer_without_shifting_the_original() {
+        assert_export_gpu_auxiliary_sequence(
+            |reference| {
+                let kind = EffectType::DisplacementMap;
+                let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+                for (key, value) in [
+                    ("map_source", PropertyValue::VisualSource(reference)),
+                    ("horizontal_channel", PropertyValue::Enum("alpha".into())),
+                    ("vertical_channel", PropertyValue::Enum("alpha".into())),
+                ] {
+                    effect
+                        .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+                        .unwrap();
+                }
+                effect
+            },
+            Color { r: 0.5, g: 0.5, b: 0.0, a: 0.5 },
+            [0.0, 0.0, 0.0, 1.0],
         );
     }
 
     fn assert_export_gpu_auxiliary_sequence(
         effect: impl FnOnce(VisualSourceReference) -> mondrian_effects::EffectNode,
+        map_color: Color,
         expected: [f32; 4],
     ) {
         let _gpu = GpuVisualExecutionGuard::activate();
         let mut source = Sequence::new("Export GPU matte source");
         source.settings.resolution = Resolution { width: 31, height: 17 };
-        source.video_tracks[0]
-            .add_clip(solid(
-                Color { r: 0.0, g: 1.0, b: 0.0, a: 0.5 },
-                TimelineTime::ZERO,
-            ))
-            .unwrap();
+        source.video_tracks[0].add_clip(solid(map_color, TimelineTime::ZERO)).unwrap();
         let mut timeline = snapshot_with_effect(effect(VisualSourceReference::Sequence {
             sequence_id: source.id,
             retime: Default::default(),

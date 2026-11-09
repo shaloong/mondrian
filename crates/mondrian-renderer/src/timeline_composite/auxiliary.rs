@@ -30,7 +30,17 @@ pub fn timeline_auxiliary_registration_geometry(
 
 /// View a working picture as the renderer's linear Float32 effect format.
 pub fn timeline_auxiliary_frame_view(frame: &CpuColorFrame) -> EffectFloatFrameView<'_> {
-    working_float_view(frame.rgba_f32())
+    let view = working_float_view(frame.rgba_f32());
+    if view.format().alpha() != ColorFrameAlpha::Opaque {
+        return view;
+    }
+    // An admitted opaque raster is an exact subset of straight coverage.
+    EffectFloatFrameView::new(
+        view.extent(),
+        view.format().with_alpha(ColorFrameAlpha::StraightCoverage),
+        view.sampling(),
+        view.pixels(),
+    )
 }
 
 fn pixel_count(extent: EffectFrameExtent) -> Result<usize, TimelineCompositeError> {
@@ -101,7 +111,7 @@ pub fn register_timeline_auxiliary_raster(
             actual: descriptor,
         });
     }
-    let view = timeline_auxiliary_frame_view(source);
+    let view = working_float_view(source.rgba_f32());
     if view.extent().is_empty() {
         return Err(empty_grid(view.extent()));
     }
@@ -114,7 +124,11 @@ pub fn register_timeline_auxiliary_raster(
     }
     let alpha = view.format().alpha();
     let output_alpha = if alpha.is_premultiplied() {
-        ColorFrameAlpha::StraightFloat
+        if alpha.is_coverage() {
+            ColorFrameAlpha::StraightCoverage
+        } else {
+            ColorFrameAlpha::StraightFloat
+        }
     } else {
         alpha
     };

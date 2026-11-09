@@ -1079,9 +1079,11 @@ fn estimate_visual_source(
             |_| GpuVisualFrameActiveWorkingSetEstimateError::InvalidSpatialChain { width, height },
         )?;
         let stage = GpuVisualFrameActiveWorkingSetStage::Effects;
-        let textures = u64::try_from(plan.scratch_textures).map_err(|_| {
-            GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage }
-        })?;
+        let textures = plan
+            .scratch_textures
+            .checked_mul(plan.scratch_extents)
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or(GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
         estimate.effects.checked_add(
             GpuVisualFrameActiveTextureDemand { bytes: plan.scratch_bytes, textures },
             stage,
@@ -1090,8 +1092,9 @@ fn estimate_visual_source(
         let stage_outputs = u64::try_from(plan.stages.len()).map_err(|_| {
             GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage }
         })?;
+        let output = plan.output_bounds.extent();
         estimate.effects.checked_add(
-            repeated_texture_demand(width, height, stage_outputs, stage)?,
+            repeated_texture_demand(output.width(), output.height(), stage_outputs, stage)?,
             stage,
         )?;
         for input in &spatial.auxiliary {
