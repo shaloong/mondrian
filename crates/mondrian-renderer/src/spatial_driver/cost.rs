@@ -398,6 +398,7 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "basic_3d" => 2.0,
         "camera_view" => 1.4,
         "channel_combiner_layer" => 1.2,
+        "displacement_map" => 2.4,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 1.4,
             _ => 3.6,
@@ -447,6 +448,7 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "stroke" => 6.0,
         "fill_matte" => 2.5,
         "channel_combiner_layer" => 3.0,
+        "displacement_map" => 6.0,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
         // Same sliding histogram as the median plus the deviation gate.

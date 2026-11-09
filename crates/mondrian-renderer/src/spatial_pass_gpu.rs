@@ -107,6 +107,7 @@ pub(crate) struct EffectSpatialGpu {
     bezier_warp: wgpu::RenderPipeline,
     fill_matte: wgpu::RenderPipeline,
     channel_combiner_layer: wgpu::RenderPipeline,
+    displacement_map: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -1324,6 +1325,10 @@ impl EffectSpatialGpu {
             "mondrian.effect-spatial.channel-combiner-layer",
             "fs_channel_combiner_layer",
         );
+        let displacement_map = auxiliary_pipeline(
+            "mondrian.effect-spatial.displacement-map",
+            "fs_displacement_map",
+        );
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
             layout: Some(&composite_layout),
@@ -2199,6 +2204,7 @@ impl EffectSpatialGpu {
             bezier_warp,
             fill_matte,
             channel_combiner_layer,
+            displacement_map,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -2806,6 +2812,11 @@ impl EffectSpatialGpu {
                     controls,
                 )
             }
+            EffectGpuSpatialPass::DisplacementMap { grade, sampling, .. } => {
+                let (controls, mut modes) = grade.gpu_controls();
+                modes[2] = f32::from(u8::from(grade.is_identity()));
+                (&self.displacement_map, sampling, modes, controls)
+            }
             _ => return Err(EffectSpatialGpuError::UnsupportedPass(pass.name())),
         };
         if primary.width() == 0
@@ -2976,7 +2987,8 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::LinearColorKey { .. } => Ok(1),
             EffectGpuSpatialPass::ColorOffset { .. } => Ok(1),
             EffectGpuSpatialPass::FillMatte { .. }
-            | EffectGpuSpatialPass::ChannelCombinerLayer { .. } => Ok(1),
+            | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
+            | EffectGpuSpatialPass::DisplacementMap { .. } => Ok(1),
         }
     }
 
@@ -3002,7 +3014,8 @@ impl EffectSpatialGpu {
         // Single-pass kernels write one texture and need no scratch pool.
         match pass {
             EffectGpuSpatialPass::FillMatte { .. }
-            | EffectGpuSpatialPass::ChannelCombinerLayer { .. } => {
+            | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
+            | EffectGpuSpatialPass::DisplacementMap { .. } => {
                 return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
             }
             EffectGpuSpatialPass::FindEdges { grade } => {
@@ -8785,10 +8798,11 @@ fn spatial_composite_shader_source() -> String {
         "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
          const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
          const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
-         {SPATIAL_COMPOSITE_SHADER}\n{}",
+         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}",
         mondrian_effects::PIXEL_CENTRE,
         f32::MAX.to_bits(),
         include_str!("channel_combiner.wgsl"),
+        include_str!("displacement_map.wgsl"),
     )
 }
 
@@ -8834,14 +8848,35 @@ fn frame_dims() -> vec2<i32> {
     return vec2<i32>(uniforms.size.xy);
 }
 
-fn auxiliary_texel(p: vec2<i32>, dims: vec2<i32>, transparent: bool) -> vec4<f32> {
+fn periodic_texel(p: vec2<i32>, dims: vec2<i32>) -> vec2<i32> {
+    return (p % dims + dims) % dims;
+}
+
+fn auxiliary_texel(
+    p: vec2<i32>, dims: vec2<i32>, transparent: bool, associated: bool, wrap: bool,
+) -> vec4<f32> {
+    if (wrap) {
+        let pixel = textureLoad(auxiliary_texture, periodic_texel(p, dims), 0);
+        return premultiply(pixel);
+    }
     if (transparent && (any(p < vec2<i32>(0)) || any(p >= dims))) {
         return vec4<f32>(0.0);
     }
-    return textureLoad(auxiliary_texture, clamp(p, vec2<i32>(0), dims - vec2<i32>(1)), 0);
+    let pixel = textureLoad(auxiliary_texture, clamp(p, vec2<i32>(0), dims - vec2<i32>(1)), 0);
+    if (associated) { return premultiply(pixel); }
+    return pixel;
 }
 
-fn sample_auxiliary(primary_uv: vec2<f32>) -> vec4<f32> {
+fn auxiliary_weights(weight: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(
+        (1.0 - weight.x) * (1.0 - weight.y),
+        weight.x * (1.0 - weight.y),
+        (1.0 - weight.x) * weight.y,
+        weight.x * weight.y,
+    );
+}
+
+fn sample_auxiliary(primary_uv: vec2<f32>, associated: bool, wrap: bool) -> vec4<f32> {
     let dims = vec2<i32>(textureDimensions(auxiliary_texture));
     let extent = vec2<f32>(dims);
     let transparent = uniforms.size.z != 0.0;
@@ -8855,7 +8890,9 @@ fn sample_auxiliary(primary_uv: vec2<f32>) -> vec4<f32> {
     if (any(uv != uv) || any(abs(uv) > vec2<f32>(bitcast<f32>(AUX_FINITE_MAX_BITS)))) {
         return vec4<f32>(0.0);
     }
-    if (transparent) {
+    if (wrap) {
+        uv = fract(uv);
+    } else if (transparent) {
         let border = vec2<f32>(AUX_PIXEL_CENTRE) / extent;
         if (any(uv < -border) || any(uv > vec2<f32>(1.0) + border)) {
             return vec4<f32>(0.0);
@@ -8865,22 +8902,16 @@ fn sample_auxiliary(primary_uv: vec2<f32>) -> vec4<f32> {
     }
     let texel = uv * extent;
     if (uniforms.params.w == 0.0) {
-        return auxiliary_texel(vec2<i32>(floor(texel)), dims, transparent);
+        return auxiliary_texel(vec2<i32>(floor(texel)), dims, transparent, associated, wrap);
     }
     let position = texel - vec2<f32>(AUX_PIXEL_CENTRE);
     let origin = floor(position);
-    let weight = position - origin;
-    let weights = vec4<f32>(
-        (1.0 - weight.x) * (1.0 - weight.y),
-        weight.x * (1.0 - weight.y),
-        (1.0 - weight.x) * weight.y,
-        weight.x * weight.y,
-    );
+    let weights = auxiliary_weights(position - origin);
     var result = vec4<f32>(0.0);
     for (var tap = 0u; tap < 4u; tap += 1u) {
         if (weights[tap] != 0.0) {
             result += weights[tap] * auxiliary_texel(
-                vec2<i32>(origin) + AUX_BILINEAR_TAPS[tap], dims, transparent,
+                vec2<i32>(origin) + AUX_BILINEAR_TAPS[tap], dims, transparent, associated, wrap,
             );
         }
     }
@@ -8900,7 +8931,7 @@ fn fs_fill_matte(input: VsOut) -> @location(0) vec4<f32> {
     let centre = index + vec2<f32>(AUX_PIXEL_CENTRE);
     let extent = uniforms.size.xy;
     let inset = min(centre, extent - centre);
-    let mask = clamp(sample_auxiliary(centre / extent).a, 0.0, 1.0);
+    let mask = clamp(sample_auxiliary(centre / extent, false, false).a, 0.0, 1.0);
     var coverage = mask * (fill_matte_axis(inset.x, uniforms.params.x)
         * fill_matte_axis(inset.y, uniforms.params.y));
     if (uniforms.params.z != 0.0) {
@@ -8927,7 +8958,7 @@ fn fs_channel_combiner_layer(input: VsOut) -> @location(0) vec4<f32> {
     let centre = index + vec2<f32>(AUX_PIXEL_CENTRE);
     let primary = textureLoad(original_texture, vec2<i32>(index), 0);
     let combined = channel_combiner_apply(
-        primary, sample_auxiliary(centre / uniforms.size.xy),
+        primary, sample_auxiliary(centre / uniforms.size.xy, false, false),
         u32(uniforms.params.x), u32(uniforms.params.y), uniforms.extra,
     );
     return vec4<f32>(combined.rgb, clamp(combined.a, 0.0, 1.0));

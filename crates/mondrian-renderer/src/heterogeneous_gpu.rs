@@ -1234,6 +1234,13 @@ fn record_gpu_suffix(
                         output,
                         pass,
                         ..
+                    }
+                    | PreparedHeterogeneousGpuDispatch::DisplacementMap {
+                        input,
+                        auxiliary: mask,
+                        output,
+                        pass,
+                        ..
                     },
                 ) => {
                     let input_handle = handles.get(input).ok_or(
@@ -2004,6 +2011,7 @@ fn gpu_recording_device_demand(
             | PreparedHeterogeneousGpuDispatch::Mask { .. }
             | PreparedHeterogeneousGpuDispatch::FillMatte { .. }
             | PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer { .. }
+            | PreparedHeterogeneousGpuDispatch::DisplacementMap { .. }
             | PreparedHeterogeneousGpuDispatch::MaskCombine { .. }
             | PreparedHeterogeneousGpuDispatch::MatteMix { .. } => 1,
         };
@@ -2430,6 +2438,15 @@ fn validate_gpu_suffix_schedule(
                     waits,
                     signal,
                     ..
+                }
+                | PreparedHeterogeneousGpuDispatch::DisplacementMap {
+                    node,
+                    input,
+                    auxiliary: mask,
+                    output,
+                    waits,
+                    signal,
+                    ..
                 },
             ) => {
                 require_plan(
@@ -2464,6 +2481,7 @@ fn validate_gpu_suffix_schedule(
                     step,
                     PreparedHeterogeneousGpuStep::Dispatch(
                         PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer { .. }
+                            | PreparedHeterogeneousGpuDispatch::DisplacementMap { .. }
                     )
                 ) {
                     EffectColorDomain::SceneLinearRgb
@@ -3985,11 +4003,6 @@ mod tests {
     async fn real_wgpu_channel_combiner_layer_joins_two_graph_values() {
         use mondrian_effects::{AuxiliaryRole, ChannelCombinerChannel, ChannelCombinerGrade};
 
-        let context = GpuContext::new().await.expect("real GPU adapter");
-        let mut builder = EffectGraphBuilderState::new();
-        let source = builder.source();
-        let auxiliary =
-            builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
         let grade = ChannelCombinerGrade::new(
             ChannelCombinerChannel::Green,
             ChannelCombinerChannel::Red,
@@ -3998,12 +4011,46 @@ mod tests {
             WORKING_SPACE.luminance_coefficients(),
         )
         .unwrap();
-        let output = builder.add_auxiliary_effect_with_role(
-            source,
-            auxiliary,
+        assert_graph_local_auxiliary_parity(
+            GpuContext::new().await.expect("real GPU adapter"),
             EffectRenderOp::ChannelCombiner { grade },
             AuxiliaryRole::Layer,
         );
+    }
+
+    #[tokio::test]
+    async fn real_wgpu_displacement_map_joins_two_graph_values() {
+        use mondrian_effects::{
+            AuxiliaryRole, DisplacementMapBehavior, DisplacementMapChannel, DisplacementMapGrade,
+        };
+        let grade = DisplacementMapGrade::new(
+            [1.25, -0.75],
+            [
+                DisplacementMapChannel::Luminance,
+                DisplacementMapChannel::Alpha,
+            ],
+            DisplacementMapBehavior::Stretch,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_graph_local_auxiliary_parity(
+            GpuContext::new().await.expect("real GPU adapter"),
+            EffectRenderOp::DisplacementMap { grade },
+            AuxiliaryRole::Map,
+        );
+    }
+
+    fn assert_graph_local_auxiliary_parity(
+        context: Arc<GpuContext>,
+        operation: EffectRenderOp,
+        role: mondrian_effects::AuxiliaryRole,
+    ) {
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let auxiliary =
+            builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let output = builder.add_auxiliary_effect_with_role(source, auxiliary, operation, role);
         builder.set_current_output(output);
         let graph = compile_reference_render_graph(builder.finish()).unwrap();
         let pixels = test_input();
@@ -4047,7 +4094,7 @@ mod tests {
                 (actual - expected).abs()
             })
             .fold(0.0f32, f32::max);
-        eprintln!("graph-local Channel Combiner maximum absolute error = {max_error:.9e}");
+        eprintln!("graph-local {role:?} maximum absolute error = {max_error:.9e}");
         assert!(max_error <= 1.0e-4);
     }
 

@@ -17235,6 +17235,48 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn spatial_chain_displacement_map_matches_float32_cpu() {
+        use mondrian_effects::{
+            AuxiliaryRole, DisplacementMapBehavior as Behavior, DisplacementMapChannel as Channel,
+            DisplacementMapGrade, EffectRenderOp,
+        };
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for displacement parity");
+        assert_auxiliary_texture_parity(&context, AuxiliaryRole::Map, |case| {
+            let (behavior, channels, wrap, amounts) = [
+                (
+                    Behavior::Center,
+                    [Channel::Red, Channel::Alpha],
+                    false,
+                    [1.75, -0.75],
+                ),
+                (
+                    Behavior::Stretch,
+                    [Channel::Hue, Channel::Saturation],
+                    true,
+                    [-1.5, 1.25],
+                ),
+                (
+                    Behavior::Tile,
+                    [Channel::Lightness, Channel::Full],
+                    true,
+                    [2.25, 1.125],
+                ),
+                (
+                    Behavior::Tile,
+                    [Channel::Luminance, Channel::Off],
+                    false,
+                    [2.5, 0.75],
+                ),
+            ][case];
+            let grade =
+                DisplacementMapGrade::new(amounts, channels, behavior, wrap, false).unwrap();
+            EffectRenderOp::DisplacementMap { grade }
+        });
+    }
+
     fn assert_auxiliary_texture_parity(
         context: &crate::GpuContext,
         role: mondrian_effects::AuxiliaryRole,
@@ -17258,10 +17300,10 @@ mod tests {
             .collect::<Vec<_>>();
         let matte = [
             [7.0, -1.0, 0.2, 0.0],
-            [-1.5, 0.0, 0.0, 0.2],
-            [0.25, 0.0, 0.0, 0.8],
+            [-1.5, 0.6, 0.1, 0.2],
+            [0.25, 0.4, 0.8, 0.8],
             [0.0, 0.0, 0.0, 1.0],
-            [1.75, 0.0, 0.0, 0.6],
+            [1.75, 0.15, -0.2, 0.6],
             [0.0, 0.0, 0.0, 0.0],
         ];
         let frame = |width, height, data| {
