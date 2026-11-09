@@ -295,6 +295,15 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Remap the primary raster from a separately sampled picture.
+    DisplacementMap {
+        /// Validated fixed-grid displacement controls.
+        grade: crate::DisplacementMapGrade,
+        /// Reconstruction and boundary behavior of the map.
+        sampling: crate::AuxiliarySampling,
+        /// Host slot for a linear chain, or a graph-local input if absent.
+        external_slot: Option<u32>,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -302,7 +311,8 @@ impl EffectGpuSpatialPass {
     pub const fn auxiliary_slot(self) -> Option<Option<u32>> {
         match self {
             Self::FillMatte { external_slot, .. }
-            | Self::ChannelCombinerLayer { external_slot, .. } => Some(external_slot),
+            | Self::ChannelCombinerLayer { external_slot, .. }
+            | Self::DisplacementMap { external_slot, .. } => Some(external_slot),
             _ => None,
         }
     }
@@ -364,6 +374,7 @@ impl EffectGpuSpatialPass {
             Self::BlankingFill { .. } => "blanking_fill",
             Self::FillMatte { .. } => "fill_matte",
             Self::ChannelCombinerLayer { .. } => "channel_combiner_layer",
+            Self::DisplacementMap { .. } => "displacement_map",
         }
     }
 
@@ -453,6 +464,7 @@ impl EffectGpuSpatialPass {
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
+            Self::DisplacementMap { .. } => u32::MAX,
         }
     }
 
@@ -528,6 +540,7 @@ impl EffectGpuSpatialPass {
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
+            Self::DisplacementMap { .. } => u32::MAX,
         }
     }
 }
@@ -548,6 +561,9 @@ pub(crate) fn lower_auxiliary_spatial_pass(
                 sampling,
                 external_slot,
             })
+        }
+        (EffectRenderOp::DisplacementMap { grade }, crate::AuxiliaryRole::Map) => {
+            Some(EffectGpuSpatialPass::DisplacementMap { grade: *grade, sampling, external_slot })
         }
         _ => None,
     }

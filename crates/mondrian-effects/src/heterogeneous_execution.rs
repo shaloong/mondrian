@@ -2105,6 +2105,23 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Native auxiliary spatial pass with a graph-local picture.
         pass: crate::EffectGpuSpatialPass,
     },
+    /// Remap the primary using a graph-local picture.
+    DisplacementMap {
+        /// Exact semantic auxiliary node.
+        node: EffectGraphNodeId,
+        /// Scene-linear input materialization.
+        input: EffectMaterializationId,
+        /// Independent scene-linear map materialization.
+        auxiliary: EffectMaterializationId,
+        /// New scene-linear materialization on the primary grid.
+        output: EffectMaterializationId,
+        /// Producer completions in primary/map order.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token for the spatial draw.
+        signal: EffectCompletionToken,
+        /// Fixed-grid native displacement pass.
+        pass: crate::EffectGpuSpatialPass,
+    },
     /// Combine two AlphaMask-domain materializations.
     MaskCombine {
         node: EffectGraphNodeId,
@@ -2140,6 +2157,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Mask { output, .. }
             | Self::FillMatte { output, .. }
             | Self::ChannelCombinerLayer { output, .. }
+            | Self::DisplacementMap { output, .. }
             | Self::MaskCombine { output, .. }
             | Self::MatteMix { output, .. } => *output,
         }
@@ -2157,6 +2175,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Mask { waits, .. }
             | Self::FillMatte { waits, .. }
             | Self::ChannelCombinerLayer { waits, .. }
+            | Self::DisplacementMap { waits, .. }
             | Self::MaskCombine { waits, .. }
             | Self::MatteMix { waits, .. } => waits,
         }
@@ -2174,6 +2193,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Mask { signal, .. }
             | Self::FillMatte { signal, .. }
             | Self::ChannelCombinerLayer { signal, .. }
+            | Self::DisplacementMap { signal, .. }
             | Self::MaskCombine { signal, .. }
             | Self::MatteMix { signal, .. } => *signal,
         }
@@ -2190,6 +2210,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Mask { node, .. }
             | Self::FillMatte { node, .. }
             | Self::ChannelCombinerLayer { node, .. }
+            | Self::DisplacementMap { node, .. }
             | Self::MaskCombine { node, .. }
             | Self::MatteMix { node, .. } => output.push(*node),
         }
@@ -2215,7 +2236,8 @@ impl PreparedHeterogeneousGpuDispatch {
             }
             Self::Mask { input, mask, .. }
             | Self::FillMatte { input, mask, .. }
-            | Self::ChannelCombinerLayer { input, auxiliary: mask, .. } => {
+            | Self::ChannelCombinerLayer { input, auxiliary: mask, .. }
+            | Self::DisplacementMap { input, auxiliary: mask, .. } => {
                 visit(*input)?;
                 visit(*mask)?;
             }
@@ -2743,6 +2765,12 @@ fn hash_effect_operation_shape(
         | EffectGraphNodeKind::AuxiliaryEffect {
             op: op @ EffectRenderOp::ChannelCombiner { .. },
             role: crate::AuxiliaryRole::Layer,
+            sampling,
+            ..
+        }
+        | EffectGraphNodeKind::AuxiliaryEffect {
+            op: op @ EffectRenderOp::DisplacementMap { .. },
+            role: crate::AuxiliaryRole::Map,
             sampling,
             ..
         } => {
@@ -3973,6 +4001,12 @@ fn execute_cpu_dag_prefix(
                 role: crate::AuxiliaryRole::Layer,
                 sampling,
                 ..
+            }
+            | EffectGraphNodeKind::AuxiliaryEffect {
+                op: op @ EffectRenderOp::DisplacementMap { .. },
+                role: crate::AuxiliaryRole::Map,
+                sampling,
+                ..
             } => {
                 let [primary, auxiliary]: [crate::EffectFloatFrame; 2] = inputs
                     .try_into()
@@ -4613,6 +4647,17 @@ fn prepare_gpu_suffix(
                                 }
                                 crate::EffectGpuSpatialPass::ChannelCombinerLayer { .. } => {
                                     PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer {
+                                        node: *node_id,
+                                        input: *input,
+                                        auxiliary: *auxiliary,
+                                        output: *output,
+                                        waits: Arc::clone(waits),
+                                        signal: *signal,
+                                        pass,
+                                    }
+                                }
+                                crate::EffectGpuSpatialPass::DisplacementMap { .. } => {
+                                    PreparedHeterogeneousGpuDispatch::DisplacementMap {
                                         node: *node_id,
                                         input: *input,
                                         auxiliary: *auxiliary,

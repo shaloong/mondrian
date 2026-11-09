@@ -713,7 +713,7 @@ mod tests {
         let (compiled, output) = procedural_graph();
         assert!(matches!(
             crate::lower_effect_graph_node_to_gpu_point_plan(&compiled, output),
-            Err(crate::EffectGpuPlanBlocker::NodeExecutionModeNotAdmitted { .. })
+            Err(crate::EffectGpuPlanBlocker::UnsupportedTopology { node_id, .. }) if node_id == output
         ));
     }
 

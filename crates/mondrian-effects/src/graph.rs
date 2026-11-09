@@ -3120,13 +3120,20 @@ fn auxiliary_effect_node_requirements(
     if crate::gpu_pipeline::lower_auxiliary_spatial_pass(op, role, sampling, None).is_some() {
         modes = modes.union(EffectExecutionModes::GPU_F32);
     }
+    let requirements = render_op_requirements(op);
+    let execution_modes = if matches!(op, EffectRenderOp::DisplacementMap { .. }) {
+        // The map-edge implementations are independent of unary admission.
+        modes
+    } else {
+        requirements.execution_modes.intersection(modes)
+    };
     EffectImplementationRequirements {
-        execution_modes: render_op_requirements(op).execution_modes.intersection(modes),
+        execution_modes,
         roi_from_effect_input: merge_roi(
-            render_op_requirements(op).roi_from_effect_input,
+            requirements.roi_from_effect_input,
             role.roi_requirement(),
         ),
-        ..render_op_requirements(op)
+        ..requirements
     }
 }
 
