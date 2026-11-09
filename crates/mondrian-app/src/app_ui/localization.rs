@@ -347,6 +347,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "裁切" => Some("parameter-group-crop"),
         "通道" => Some("parameter-group-channel"),
         "通道合成器" => Some("parameter-group-channel-combiner"),
+        "置换图" => Some("parameter-group-displacement-map"),
         "第二图层" => Some("parameter-group-second-layer"),
         "通道混合器" => Some("parameter-group-channel-mixer"),
         "移除颜色遮罩" => Some("parameter-group-remove-color-matting"),

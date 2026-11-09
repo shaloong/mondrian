@@ -352,8 +352,8 @@ pub use execution_planning::{
     EffectExecutionEnvironmentError, EffectExecutionLane, EffectExecutionLaneId,
     EffectExecutionModeObligation, EffectExecutionObligations, EffectExecutionTransfer,
     EffectFrameExtent, EffectInputRoi, EffectLinearStagePlacement, EffectLinearStagePlacementError,
-    EffectLinearStagePlacementStep, EffectPixelRoi, EffectRoiHalo, EffectTemporalBoundary,
-    EffectTemporalDirection, EffectTemporalWindow, EffectWorkingPrecisions,
+    EffectLinearStagePlacementStep, EffectPixelRoi, EffectRasterBounds, EffectRoiHalo,
+    EffectTemporalBoundary, EffectTemporalDirection, EffectTemporalWindow, EffectWorkingPrecisions,
 };
 pub use execution_session::{
     EffectExecutionSession, EffectExecutionSessionConfig, EffectExecutionSessionDiagnostics,

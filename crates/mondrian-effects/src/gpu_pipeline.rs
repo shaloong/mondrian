@@ -307,6 +307,14 @@ pub enum EffectGpuSpatialPass {
 }
 
 impl EffectGpuSpatialPass {
+    /// Growth in pixels on each side of the input along each axis.
+    pub fn output_outset(self) -> [u32; 2] {
+        match self {
+            Self::DisplacementMap { grade, .. } => grade.output_outset(),
+            _ => [0, 0],
+        }
+    }
+
     /// Auxiliary pass and its optional host slot, or no second texture.
     pub const fn auxiliary_slot(self) -> Option<Option<u32>> {
         match self {

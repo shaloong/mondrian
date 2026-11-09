@@ -1671,21 +1671,68 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     source.format().with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
                 );
                 let source_extent = source.extent();
-                let supported = crate::auxiliary::apply_auxiliary_effect_f32(
-                    source.allocation_mut(),
-                    source_extent.width(),
-                    source_extent.height(),
-                    op,
-                    raster,
-                    *sampling,
-                    &mut || scalar_checkpoint(control),
-                )?;
-                if !supported {
-                    return Err(unsupported_float_graph_node(
-                        node.id,
-                        "auxiliary_kernel_unavailable",
-                    ));
-                }
+                let source = if let EffectRenderOp::DisplacementMap { grade } = op
+                    && grade.output_outset() != [0, 0]
+                {
+                    let bounds = crate::EffectRasterBounds::from_extent(source_extent)
+                        .checked_outset(grade.output_outset())
+                        .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
+                    let out_extent = bounds.extent();
+                    let len = (out_extent.width() as usize)
+                        .checked_mul(out_extent.height() as usize)
+                        .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
+                    let bytes =
+                        len.checked_mul(16).ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
+                    let mut output = Vec::new();
+                    output.try_reserve_exact(len).map_err(|_| {
+                        crate::EffectFloatFrameError::AllocationUnavailable {
+                            required_bytes: bytes,
+                        }
+                    })?;
+                    while output.len() < len {
+                        scalar_checkpoint(control)?;
+                        output.resize(len.min(output.len() + 4096), [0.0; 4]);
+                    }
+                    crate::straight_alpha::premultiply_rgba_controlled(
+                        source.pixels_mut(),
+                        &mut || scalar_checkpoint(control),
+                    )?;
+                    crate::displacement_map::render_displacement(
+                        &mut output,
+                        source.pixels(),
+                        source_extent,
+                        bounds,
+                        raster,
+                        *sampling,
+                        *grade,
+                        &mut || scalar_checkpoint(control),
+                    )?;
+                    let result = crate::EffectFloatFrame::from_validated_parts(
+                        out_extent,
+                        source.format(),
+                        source.sampling(),
+                        output,
+                    );
+                    release_float_execution_buffer(&mut buffer_pool, source);
+                    result
+                } else {
+                    let supported = crate::auxiliary::apply_auxiliary_effect_f32(
+                        source.allocation_mut(),
+                        source_extent.width(),
+                        source_extent.height(),
+                        op,
+                        raster,
+                        *sampling,
+                        &mut || scalar_checkpoint(control),
+                    )?;
+                    if !supported {
+                        return Err(unsupported_float_graph_node(
+                            node.id,
+                            "auxiliary_kernel_unavailable",
+                        ));
+                    }
+                    source
+                };
                 source.validate()?;
                 if let Some(frame) = owned_auxiliary {
                     release_float_execution_buffer(&mut buffer_pool, frame);
@@ -2579,6 +2626,8 @@ impl EffectExecutionSession {
             return Ok(base);
         }
 
+        let base_extent = base.extent();
+        let bounds = compiled.output_raster_bounds(base_extent)?;
         let processed = self.apply_compiled_rgba_f32_with_auxiliary_and_domain_processor(
             base.view(),
             compiled,
@@ -2588,6 +2637,30 @@ impl EffectExecutionSession {
             processor,
             control,
         )?;
+        let processed = if bounds.origin() == [0, 0] {
+            processed
+        } else {
+            // An adjustment writes back to its accumulator's fixed canvas.
+            // Compact the original rectangle into the existing grown buffer.
+            if processed.extent() != bounds.extent() {
+                return Err(crate::EffectFloatFrameError::GridExtentMismatch {
+                    expected: bounds.extent(),
+                    actual: processed.extent(),
+                }
+                .into());
+            }
+            let (extent, format, sampling, mut pixels) = processed.into_parts();
+            let [left, top] = bounds.origin().map(|origin| origin.unsigned_abs() as usize);
+            let stride = extent.width() as usize;
+            let width = base_extent.width() as usize;
+            for row in 0..base_extent.height() as usize {
+                scalar_checkpoint(control)?;
+                let start = (top + row) * stride + left;
+                pixels.copy_within(start..start + width, row * width);
+            }
+            pixels.truncate(base.len());
+            crate::EffectFloatFrame::from_validated_parts(base_extent, format, sampling, pixels)
+        };
         let blend_result = match policy {
             crate::EffectPassBlendPolicy::Mix => crate::mix_float_frames_controlled(
                 &mut base,

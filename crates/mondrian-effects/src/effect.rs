@@ -3452,7 +3452,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 116] {
+fn builtin_effect_types() -> [EffectType; 117] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3565,6 +3565,7 @@ fn builtin_effect_types() -> [EffectType; 116] {
         EffectType::Colorama,
         EffectType::KeyCleaner,
         EffectType::ChannelCombiner,
+        EffectType::DisplacementMap,
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
         EffectType::Basic3D,
@@ -10835,6 +10836,106 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 );
             }
         }
+        EffectType::DisplacementMap => {
+            use crate::{DisplacementMapBehavior, DisplacementMapChannel};
+            let group = "置换图";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "map_source",
+                group,
+                "置换图层",
+                PropertyValue::VisualSource(mondrian_core::VisualSourceReference::Unbound),
+                None,
+                None,
+                None,
+            );
+            for (channel, channel_label, default, amount, amount_label) in [
+                (
+                    "horizontal_channel",
+                    "用于水平置换",
+                    DisplacementMapChannel::Red,
+                    "horizontal_amount",
+                    "最大水平置换",
+                ),
+                (
+                    "vertical_channel",
+                    "用于垂直置换",
+                    DisplacementMapChannel::Green,
+                    "vertical_amount",
+                    "最大垂直置换",
+                ),
+            ] {
+                let options = DisplacementMapChannel::ALL
+                    .into_iter()
+                    .map(|choice| {
+                        let key = choice.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            key,
+                            format!("mondrian.effect.displacement_map.{channel}.{key}"),
+                        )
+                    })
+                    .collect();
+                define_builtin_enum_property(
+                    &mut properties,
+                    &effect_type,
+                    channel,
+                    group,
+                    channel_label,
+                    default.as_key(),
+                    options,
+                );
+                let limit = f64::from(crate::DISPLACEMENT_MAP_MAX_PIXELS);
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    amount,
+                    group,
+                    amount_label,
+                    PropertyValue::Float(5.0),
+                    Some(-limit),
+                    Some(limit),
+                    Some(0.1),
+                );
+            }
+            let behavior = DisplacementMapBehavior::ALL
+                .into_iter()
+                .map(|choice| {
+                    let key = choice.as_key();
+                    ParameterEnumOption::new(
+                        key,
+                        key,
+                        format!("mondrian.effect.displacement_map.map_behavior.{key}"),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "map_behavior",
+                group,
+                "置换图特性",
+                DisplacementMapBehavior::Center.as_key(),
+                behavior,
+            );
+            for (key, label, default) in [
+                ("wrap", "环绕像素", false),
+                ("expand_output", "扩展输出", true),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    key,
+                    group,
+                    label,
+                    PropertyValue::Bool(default),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
         EffectType::ChannelCombiner => {
             define_builtin_property(
                 &mut properties,
@@ -12786,6 +12887,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::VrProject2D, "feather") => ParameterUnit::Percent,
         (EffectType::VrProject2D, _) => ParameterUnit::Unitless,
         (EffectType::PhotoFilter, "density") => ParameterUnit::Percent,
+        (EffectType::DisplacementMap, "horizontal_amount" | "vertical_amount") => {
+            ParameterUnit::Pixels
+        }
         (EffectType::Colorama, "phase_shift") => ParameterUnit::Degrees,
         (EffectType::Colorama, "blend_with_original") => ParameterUnit::Percent,
         (
@@ -12829,6 +12933,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::ChromaKey
                 | EffectType::Echo
                 | EffectType::ChannelCombiner
+                | EffectType::DisplacementMap
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -13089,6 +13194,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::ChannelCombiner => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Both inputs are sampled at the same output coordinate.
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::DisplacementMap => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
@@ -18807,6 +18918,72 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::DisplacementMap => {
+            use crate::{DisplacementMapBehavior, DisplacementMapChannel, DisplacementMapGrade};
+            let source = builtin_parameter_id(effect_type, "map_source");
+            let horizontal = builtin_parameter_id(effect_type, "horizontal_channel");
+            let vertical = builtin_parameter_id(effect_type, "vertical_channel");
+            let amount_x = builtin_parameter_id(effect_type, "horizontal_amount");
+            let amount_y = builtin_parameter_id(effect_type, "vertical_amount");
+            let behavior = builtin_parameter_id(effect_type, "map_behavior");
+            let wrap = builtin_parameter_id(effect_type, "wrap");
+            let expand = builtin_parameter_id(effect_type, "expand_output");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let channel = |id: &ParameterId| {
+                    effect
+                        .evaluate_enum_parameter(id, context.time)
+                        .as_deref()
+                        .and_then(DisplacementMapChannel::from_key)
+                        .ok_or_else(|| invalid(format!("invalid displacement channel {id}")))
+                };
+                let toggle = |id: &ParameterId| match effect.evaluate_parameter(id, context.time) {
+                    Some(PropertyValue::Bool(value)) => Ok(value),
+                    _ => Err(invalid(format!("invalid displacement toggle {id}"))),
+                };
+                let map_behavior = effect
+                    .evaluate_enum_parameter(&behavior, context.time)
+                    .as_deref()
+                    .and_then(DisplacementMapBehavior::from_key)
+                    .ok_or_else(|| invalid("invalid displacement map layout".into()))?;
+                let grade = DisplacementMapGrade::new(
+                    [
+                        effect.evaluate_f32_parameter(&amount_x, context.time, 5.0),
+                        effect.evaluate_f32_parameter(&amount_y, context.time, 5.0),
+                    ],
+                    [channel(&horizontal)?, channel(&vertical)?],
+                    map_behavior,
+                    toggle(&wrap)?,
+                    toggle(&expand)?,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    let auxiliary = graph.append_visual_source_input(
+                        effect,
+                        &source,
+                        crate::EffectValueFormat::new(
+                            crate::EffectWorkingPrecision::Float32,
+                            EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        EffectColorDomainContract::SCENE_LINEAR,
+                    )?;
+                    let output = graph.add_auxiliary_effect(
+                        graph.current_output(),
+                        auxiliary,
+                        EffectRenderOp::DisplacementMap { grade },
+                        crate::AuxiliaryRole::Map,
+                        crate::AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
+                    );
+                    graph.set_current_output(output);
+                }
+                Ok(())
+            }))
+        }
         EffectType::ChannelCombiner => {
             let use_second_layer_id = builtin_parameter_id(effect_type, "use_second_layer");
             let source_layer_id = builtin_parameter_id(effect_type, "source_layer");
@@ -20431,6 +20608,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::JpegDamage => "JPEG 损坏",
         EffectType::Colorama => "色光",
         EffectType::ChannelCombiner => "通道合成器",
+        EffectType::DisplacementMap => "置换图",
         EffectType::SmartBlur => "智能模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
         EffectType::Basic3D => "基本 3D",
@@ -21787,6 +21965,7 @@ mod tests {
             EffectType::Basic3D,
             EffectType::CameraView,
             EffectType::BlankingFill,
+            EffectType::DisplacementMap,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -30860,7 +31039,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 116);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 117);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -31388,7 +31567,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 116);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 117);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -34345,7 +34524,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 116);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 117);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -35481,7 +35660,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 116);
+        assert_eq!(builtin_effect_types().len(), 117);
     }
 
     #[test]

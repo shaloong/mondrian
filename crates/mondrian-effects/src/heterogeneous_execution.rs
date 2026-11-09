@@ -1213,6 +1213,11 @@ pub fn plan_effect_graph_value_execution(
     environment: &EffectExecutionEnvironment,
     request: EffectGraphExecutionRequest,
 ) -> Result<CompiledEffectValueExecutionPlan, EffectGraphExecutionPlanError> {
+    if compiled.has_raster_growth() {
+        return Err(EffectGraphExecutionPlanError::InvalidDerivedPlan {
+            reason: "heterogeneous_planner_requires_fixed_rasters",
+        });
+    }
     EffectGraphValuePlanner::new(compiled, environment, request)?.build()
 }
 

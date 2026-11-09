@@ -56,6 +56,7 @@ pub(crate) fn reservations(
     auxiliary: &[(u32, EffectFrameExtent)],
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<Vec<(usize, EffectFrameExtent)>, EffectFloatExecutionError> {
+    compiled.output_raster_bounds(primary_extent)?;
     let mut outputs = HashMap::<EffectGraphNodeId, Raster>::new();
     let mut remaining = compiled.node_use_counts().clone();
     let mut pool = Pool::default();
@@ -108,6 +109,14 @@ pub(crate) fn reservations(
                 taken.push(raster);
             }
         }
+        let outset = match &node.kind {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                op: crate::EffectRenderOp::DisplacementMap { grade },
+                ..
+            } if !primary_extent.is_empty() => grade.output_outset(),
+            _ => [0, 0],
+        };
+        let grows = outset != [0, 0];
         let (raster, scratch) = match &node.kind {
             EffectGraphNodeKind::Source => (
                 Raster {
@@ -160,6 +169,23 @@ pub(crate) fn reservations(
                 *taken.first().ok_or_else(|| missing(*id))?,
                 crate::adjustment::render_op_f32_scratch_frames(op),
             ),
+            EffectGraphNodeKind::AuxiliaryEffect { .. } if grows => {
+                let input = taken.first().ok_or_else(|| missing(*id))?;
+                let extent = crate::EffectRasterBounds::from_extent(input.extent)
+                    .checked_outset(outset)
+                    .ok_or(EffectFloatFrameError::ExtentOverflow)?
+                    .extent();
+                // Growth writes a disjoint output while borrowing the primary
+                // allocation as its premultiplied read plane.
+                (
+                    Raster {
+                        extent,
+                        capacity: pool.acquire(bytes(extent)?, false),
+                        borrowed: false,
+                    },
+                    0,
+                )
+            }
             EffectGraphNodeKind::AuxiliaryEffect { op, .. } => (
                 *taken.first().ok_or_else(|| missing(*id))?,
                 crate::adjustment::render_op_f32_scratch_frames(op),
@@ -201,7 +227,7 @@ pub(crate) fn reservations(
                 .saturating_add(mask_bytes),
             raster.extent,
         ));
-        for overlay in taken.into_iter().skip(1) {
+        for overlay in taken.into_iter().skip(usize::from(!grows)) {
             pool.release(overlay);
         }
         outputs.insert(*id, raster);

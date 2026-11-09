@@ -192,6 +192,7 @@ pub enum EffectType {
     /// channels, with an optional uniform RGB scale or shift for the derived
     /// luminance and lightness targets.
     ChannelCombiner,
+    DisplacementMap,
     /// Smart blur: a separable range-domain mean that only averages neighbours
     /// whose luminance stays within the authored threshold.
     SmartBlur,
@@ -320,6 +321,7 @@ impl EffectType {
             Self::VrProject2D => "builtin.vr_project_2d".to_string(),
             Self::KeyCleaner => "builtin.key_cleaner".to_string(),
             Self::ChannelCombiner => "builtin.channel_combiner".to_string(),
+            Self::DisplacementMap => "builtin.displacement_map".to_string(),
             Self::SmartBlur => "builtin.smart_blur".to_string(),
             Self::ChromaticAberrationRemoval => "builtin.chromatic_aberration_removal".to_string(),
             Self::Basic3D => "builtin.basic_3d".to_string(),
@@ -442,6 +444,7 @@ impl EffectType {
             "builtin.vr_project_2d" => Self::VrProject2D,
             "builtin.key_cleaner" => Self::KeyCleaner,
             "builtin.channel_combiner" => Self::ChannelCombiner,
+            "builtin.displacement_map" => Self::DisplacementMap,
             "builtin.smart_blur" => Self::SmartBlur,
             "builtin.chromatic_aberration_removal" => Self::ChromaticAberrationRemoval,
             "builtin.basic_3d" => Self::Basic3D,
@@ -564,6 +567,7 @@ impl EffectType {
             Self::VrProject2D => "VR 平面到球面",
             Self::KeyCleaner => "键控清理",
             Self::ChannelCombiner => "通道合成器",
+            Self::DisplacementMap => "置换图",
             Self::SmartBlur => "智能模糊",
             Self::ChromaticAberrationRemoval => "色差校正",
             Self::Basic3D => "基本 3D",
@@ -684,6 +688,7 @@ impl EffectType {
             Self::VrProject2D => vec!["变形"],
             Self::KeyCleaner => vec!["边缘修补"],
             Self::ChannelCombiner => vec!["通道"],
+            Self::DisplacementMap => vec!["变形"],
             Self::SmartBlur => vec!["模糊与锐化"],
             Self::ChromaticAberrationRemoval => vec!["修复"],
             Self::Basic3D => vec!["变换"],
@@ -806,6 +811,7 @@ impl EffectType {
             Self::VrProject2D => "vr_project_2d".to_string(),
             Self::KeyCleaner => "key_cleaner".to_string(),
             Self::ChannelCombiner => "channel_combiner".to_string(),
+            Self::DisplacementMap => "displacement_map".to_string(),
             Self::SmartBlur => "smart_blur".to_string(),
             Self::ChromaticAberrationRemoval => "chromatic_aberration_removal".to_string(),
             Self::Basic3D => "basic_3d".to_string(),
@@ -1245,6 +1251,7 @@ impl crate::AuthoringFootprint for EffectType {
             // painted region, so it has no authoring footprint.
             Self::KeyCleaner => Ok(()),
             Self::ChannelCombiner => Ok(()),
+            Self::DisplacementMap => Ok(()),
             // Range-domain blur: it samples and reweights existing pixels, so it
             // can never paint a region the source left empty.
             Self::SmartBlur | Self::ChromaticAberrationRemoval | Self::Basic3D => Ok(()),

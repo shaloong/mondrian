@@ -1,11 +1,8 @@
-//! Graph-local displacement map reference, with explicit auxiliary input.
-//!
-//! The grade describes pixel sampling only. Expanding a layer's output bounds
-//! requires the separate ROI-growth facility and is refused at construction.
+//! Displacement map reference, with an explicit auxiliary input.
 
 use crate::auxiliary::sample_auxiliary_color_f32;
 use crate::resample::sample_bilinear_wrapped;
-use crate::{AuxiliaryFloatFrame, AuxiliarySampling};
+use crate::{AuxiliaryFloatFrame, AuxiliarySampling, EffectFrameExtent, EffectRasterBounds};
 
 /// Maximum absolute authored displacement, in pixels.
 pub const DISPLACEMENT_MAP_MAX_PIXELS: f32 = 32_000.0;
@@ -131,8 +128,6 @@ pub enum DisplacementMapError {
     NonFiniteAmount,
     #[error("displacement amounts must be within [-32000, 32000] pixels")]
     AmountOutOfRange,
-    #[error("expanded displacement output requires ROI-growth support")]
-    RequiresRoiGrowth,
 }
 
 /// Validated displacement controls, independent of the auxiliary raster.
@@ -142,6 +137,7 @@ pub struct DisplacementMapGrade {
     channels: [DisplacementMapChannel; 2],
     behavior: DisplacementMapBehavior,
     wrap: bool,
+    expand_output: bool,
 }
 
 impl DisplacementMapGrade {
@@ -158,10 +154,7 @@ impl DisplacementMapGrade {
         if amounts.iter().any(|v| v.abs() > DISPLACEMENT_MAP_MAX_PIXELS) {
             return Err(DisplacementMapError::AmountOutOfRange);
         }
-        if expand_output {
-            return Err(DisplacementMapError::RequiresRoiGrowth);
-        }
-        Ok(Self { amounts, channels, behavior, wrap })
+        Ok(Self { amounts, channels, behavior, wrap, expand_output })
     }
     pub const fn amounts(self) -> [f32; 2] {
         self.amounts
@@ -175,6 +168,14 @@ impl DisplacementMapGrade {
     pub const fn wrap(self) -> bool {
         self.wrap
     }
+    /// Maximum growth on each side of the primary raster, in pixels.
+    pub fn output_outset(self) -> [u32; 2] {
+        if !self.expand_output || self.is_identity() {
+            return [0; 2];
+        }
+        self.amounts.map(|amount| amount.abs().ceil() as u32)
+    }
+
     pub fn is_identity(self) -> bool {
         self.amounts.iter().all(|v| v.abs() <= 1e-6)
             || self.channels.iter().all(|v| v.is_constant())
@@ -190,7 +191,7 @@ impl DisplacementMapGrade {
             [
                 self.behavior.as_menu() as f32,
                 u32::from(self.wrap) as f32,
-                0.0,
+                u32::from(self.expand_output) as f32,
                 0.0,
             ],
         )
@@ -214,6 +215,7 @@ pub fn apply_displacement_map_controlled<E>(
         || height == 0
         || extent.is_empty()
         || (width as usize).checked_mul(height as usize) != Some(primary.len())
+        || grade.output_outset() != [0, 0]
         || (extent.width() as usize).checked_mul(extent.height() as usize)
             != Some(map.frame.pixels().len())
     {
@@ -222,21 +224,62 @@ pub fn apply_displacement_map_controlled<E>(
     if grade.is_identity() {
         return Ok(true);
     }
+    let Some(source) = displacement_source(primary, checkpoint)? else {
+        return Ok(false);
+    };
+    let primary_extent = EffectFrameExtent::new(width, height);
+    render_displacement(
+        primary,
+        &source,
+        primary_extent,
+        EffectRasterBounds::from_extent(primary_extent),
+        map,
+        sampling,
+        *grade,
+        checkpoint,
+    )?;
+    Ok(true)
+}
+
+pub(crate) fn displacement_source<E>(
+    primary: &[[f32; 4]],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Vec<[f32; 4]>>, E> {
     let mut source = Vec::new();
     if source.try_reserve_exact(primary.len()).is_err() {
-        return Ok(false);
+        return Ok(None);
     }
     for chunk in primary.chunks(4096) {
         checkpoint()?;
         source.extend_from_slice(chunk);
     }
     crate::straight_alpha::premultiply_rgba_controlled(&mut source, checkpoint)?;
-    for (index, pixel) in primary.iter_mut().enumerate() {
+    Ok(Some(source))
+}
+
+/// Render into a disjoint output using the premultiplied primary raster.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_displacement<E>(
+    output: &mut [[f32; 4]],
+    source: &[[f32; 4]],
+    primary_extent: EffectFrameExtent,
+    bounds: EffectRasterBounds,
+    map: AuxiliaryFloatFrame<'_>,
+    sampling: AuxiliarySampling,
+    grade: DisplacementMapGrade,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let width = primary_extent.width();
+    let height = primary_extent.height();
+    let extent = map.frame.extent();
+    let output_width = bounds.extent().width() as usize;
+    let [origin_x, origin_y] = bounds.origin();
+    for (index, pixel) in output.iter_mut().enumerate() {
         if index % 4096 == 0 {
             checkpoint()?;
         }
-        let x = (index % width as usize) as f32;
-        let y = (index / width as usize) as f32;
+        let x = (index % output_width) as f32 + origin_x as f32;
+        let y = (index / output_width) as f32 + origin_y as f32;
         let uv = match grade.behavior {
             DisplacementMapBehavior::Center => [
                 (x + 0.5 + (extent.width() as f32 - width as f32) * 0.5) / extent.width() as f32,
@@ -260,19 +303,18 @@ pub fn apply_displacement_map_controlled<E>(
         let sy = y + grade.channels[1].offset(sampled) * grade.amounts[1];
         let sample = if grade.wrap {
             sample_bilinear_wrapped(
-                &source,
+                source,
                 width as usize,
                 height as usize,
                 sx as f64,
                 sy as f64,
             )
         } else {
-            sample_transparent(&source, width, height, sx, sy)
+            sample_transparent(source, width, height, sx, sy)
         };
         *pixel = crate::coverage::straight_rgba_from_premultiplied(sample);
     }
-    checkpoint()?;
-    Ok(true)
+    checkpoint()
 }
 
 /// Infallible convenience entry for the complete-frame reference kernel.
@@ -377,7 +419,7 @@ mod tests {
         assert!(DisplacementMapChannel::from_menu(12).is_none());
     }
     #[test]
-    fn invalid_amounts_and_expanded_output_fail_closed() {
+    fn invalid_amounts_and_in_place_growth_fail_closed() {
         let channels = [DisplacementMapChannel::Red; 2];
         for amount in [f32::NAN, f32::INFINITY, 32001.0, -32001.0] {
             assert!(DisplacementMapGrade::new(
@@ -389,17 +431,168 @@ mod tests {
             )
             .is_err());
         }
+        let expanded = DisplacementMapGrade::new(
+            [5.0; 2],
+            channels,
+            DisplacementMapBehavior::Center,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(expanded.output_outset(), [5, 5]);
+        let mut pixels = [[0.1, 0.3, 0.8, 1.0]];
+        assert!(!displacement_map_frame_f32(
+            &mut pixels,
+            1,
+            1,
+            map(&[[1.0; 4]], 1),
+            AuxiliarySampling::PRIMARY_GRID_NEAREST_CLAMP,
+            &expanded,
+        ));
+    }
+
+    #[test]
+    fn expanded_graph_keeps_the_source_coordinate_system_and_sizes_the_new_plane() {
+        use crate::{AuxiliaryFloatInput, AuxiliaryRole, EffectGraphBuilderState, EffectRenderOp};
+        let primary = [[0.4, 0.2, 0.1, 1.0], [0.2, 0.4, 0.8, 1.0]];
+        let control_map = [[1.0; 4]];
+        let primary_frame = map(&primary, 2).frame;
+        let control_map = map(&control_map, 1);
+        let mut builder = EffectGraphBuilderState::new();
+        let auxiliary = builder.append_external_input(
+            0,
+            control_map.frame.format(),
+            crate::EffectColorDomainContract::SCENE_LINEAR,
+        );
+        let grade = DisplacementMapGrade::new(
+            [1.0, 0.0],
+            [DisplacementMapChannel::Red; 2],
+            DisplacementMapBehavior::Stretch,
+            false,
+            true,
+        )
+        .unwrap();
+        let displaced = builder.add_auxiliary_effect_with_role(
+            builder.source(),
+            auxiliary,
+            EffectRenderOp::DisplacementMap { grade },
+            AuxiliaryRole::Map,
+        );
+        builder.set_current_output(displaced);
+        let graph = crate::compile_reference_render_graph(builder.finish()).unwrap();
+        let bounds = graph.output_raster_bounds(primary_frame.extent()).unwrap();
+        assert_eq!(bounds.extent(), EffectFrameExtent::new(4, 1));
+        assert_eq!(bounds.origin(), [-1, 0]);
         assert_eq!(
-            DisplacementMapGrade::new(
-                [5.0; 2],
-                channels,
-                DisplacementMapBehavior::Center,
-                false,
-                true
-            ),
-            Err(DisplacementMapError::RequiresRoiGrowth)
+            bounds.project_affine([0.0, -2.0, 6.0, 3.0, 0.0, 9.0]),
+            [0.0, -2.0, 6.0, 3.0, 0.0, 6.0],
+        );
+        let peak = crate::estimate_compiled_float_raster_working_bytes(
+            &graph,
+            primary_frame.extent(),
+            &[(0, control_map.frame.extent())],
+        )
+        .unwrap();
+        assert_eq!(peak, 16 * (2 + 4));
+        let binding = [AuxiliaryFloatInput { slot: 0, raster: control_map }];
+        let render = |budget| {
+            crate::EffectExecutionSession::new(crate::EffectExecutionSessionConfig::uncached(
+                budget,
+            ))
+            .apply_compiled_rgba_f32_with_auxiliary(
+                primary_frame,
+                &graph,
+                0,
+                &binding,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+        };
+        assert!(matches!(
+            render(peak - 1),
+            Err(crate::EffectFloatExecutionError::AuxiliaryInput(
+                crate::EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded { .. }
+            )),
+        ));
+        let output = render(peak).unwrap();
+        assert_eq!(output.extent(), bounds.extent());
+        assert_eq!(
+            output.pixels(),
+            &[primary[0], primary[1], [0.0; 4], [0.0; 4]]
+        );
+        let adjusted = crate::EffectExecutionSession::default()
+            .apply_compiled_pass_rgba_f32_owned_with_auxiliary_and_domain_processor(
+                primary_frame.to_owned().unwrap(),
+                &graph,
+                1.0,
+                crate::EffectPassBlendPolicy::Mix,
+                0,
+                &binding,
+                crate::EffectDomainProcessorCacheKey::from_complete_semantic_fingerprint([0; 32]),
+                |_, _| panic!("scene-linear graph must not convert color domains"),
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert_eq!(adjusted.extent(), primary_frame.extent());
+        assert_eq!(adjusted.pixels(), &[primary[1], [0.0; 4]]);
+    }
+    #[test]
+    fn authored_displacement_map_defaults_expand_and_freeze_the_selected_source() {
+        use mondrian_core::{
+            AssetId, PropertyValue, TimelineTime, VisualSourceReference, WorkingColorSpace,
+        };
+        let kind = crate::EffectType::DisplacementMap;
+        let mut effect = crate::instantiate_effect_node(kind.clone()).unwrap();
+        assert_eq!(effect.properties.iter().count(), 8);
+        let parameter = kind.parameter_id("map_source").unwrap();
+        let prepare = |effect: &crate::EffectNode| {
+            crate::PreparedEffectProgram::prepare(
+                std::slice::from_ref(effect),
+                &[],
+                WorkingColorSpace::LinearRec709,
+            )
+        };
+        assert!(matches!(
+            prepare(&effect),
+            Err(crate::EffectGraphBuildError::MissingAuxiliaryInput { .. }),
+        ));
+        let reference = VisualSourceReference::Asset {
+            asset_id: AssetId::new(),
+            retime: Default::default(),
+        };
+        effect
+            .set_static_value_by_parameter(&parameter, PropertyValue::VisualSource(reference))
+            .unwrap();
+        let expanded = prepare(&effect).unwrap().evaluate(TimelineTime::ZERO).unwrap();
+        let extent = EffectFrameExtent::new(16, 12);
+        let bounds = expanded.output_raster_bounds(extent).unwrap();
+        assert_eq!(bounds.extent(), EffectFrameExtent::new(26, 22));
+        assert_eq!(bounds.origin(), [-5, -5]);
+        assert_eq!(
+            expanded.auxiliary_source_binding(0).unwrap().reference(),
+            reference
+        );
+        assert_eq!(expanded.auxiliary_inputs()[0].role(), AuxiliaryRole::Map);
+        assert!(matches!(
+            crate::lower_effect_graph_to_gpu_pipeline(&expanded).unwrap().stages(),
+            [crate::EffectGpuStage::Spatial { pass, .. }] if pass.output_outset() == [5, 5]
+        ));
+        effect
+            .set_static_value_by_parameter(
+                &kind.parameter_id("expand_output").unwrap(),
+                PropertyValue::Bool(false),
+            )
+            .unwrap();
+        let fixed = prepare(&effect).unwrap().evaluate(TimelineTime::ZERO).unwrap();
+        assert_ne!(
+            expanded.semantic_fingerprint(),
+            fixed.semantic_fingerprint()
+        );
+        assert_eq!(
+            fixed.output_raster_bounds(extent).unwrap(),
+            EffectRasterBounds::from_extent(extent)
         );
     }
+
     #[test]
     fn black_white_and_middle_gray_produce_signed_full_displacement() {
         let original = ramp();

@@ -52,6 +52,53 @@ impl EffectFrameExtent {
     }
 }
 
+/// A raster extent and its pixel origin relative to the original layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectRasterBounds {
+    extent: EffectFrameExtent,
+    origin: [i32; 2],
+}
+
+impl EffectRasterBounds {
+    /// The original layer grid, before any effect grows it.
+    pub const fn from_extent(extent: EffectFrameExtent) -> Self {
+        Self { extent, origin: [0, 0] }
+    }
+
+    /// Dimensions of the addressable raster.
+    pub const fn extent(self) -> EffectFrameExtent {
+        self.extent
+    }
+
+    /// Layer coordinates of the raster's top-left pixel.
+    pub const fn origin(self) -> [i32; 2] {
+        self.origin
+    }
+
+    /// Grow symmetrically along both axes, preserving the original pixel positions.
+    pub fn checked_outset(self, [x, y]: [u32; 2]) -> Option<Self> {
+        let width = self.extent.width().checked_add(x.checked_mul(2)?)?;
+        let height = self.extent.height().checked_add(y.checked_mul(2)?)?;
+        let origin = [
+            self.origin[0].checked_sub(i32::try_from(x).ok()?)?,
+            self.origin[1].checked_sub(i32::try_from(y).ok()?)?,
+        ];
+        Some(Self {
+            extent: EffectFrameExtent::new(width, height),
+            origin,
+        })
+    }
+
+    /// Move the layer affine to the new origin without changing its linear part.
+    pub fn project_affine(self, [a, b, tx, c, d, ty]: [f32; 6]) -> [f32; 6] {
+        if self.origin == [0, 0] {
+            return [a, b, tx, c, d, ty];
+        }
+        let [x, y] = self.origin.map(|value| value as f32);
+        [a, b, tx + a * x + b * y, c, d, ty + c * x + d * y]
+    }
+}
+
 /// Half-open pixel region `[x, x + width) × [y, y + height)`.
 ///
 /// Construction accepts any `u32` values. Demand planning performs

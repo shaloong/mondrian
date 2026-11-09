@@ -1093,6 +1093,77 @@ impl CompiledEffectGraph {
         })
     }
 
+    /// Whether a reachable operation changes the primary raster extent.
+    pub fn has_raster_growth(&self) -> bool {
+        self.schedule.ordered_nodes.iter().any(|id| {
+            matches!(
+                self.graph.node(*id).map(|node| &node.kind),
+                Some(EffectGraphNodeKind::AuxiliaryEffect {
+                    op: EffectRenderOp::DisplacementMap { grade }, ..
+                }) if grade.output_outset() != [0, 0]
+            )
+        })
+    }
+
+    /// Resolve output dimensions and layer origin before allocating any pixels.
+    /// Growth is currently admitted on a primary chain with sampled host edges.
+    pub fn output_raster_bounds(
+        &self,
+        primary: crate::EffectFrameExtent,
+    ) -> Result<crate::EffectRasterBounds, crate::EffectFloatExecutionError> {
+        let mut bounds = crate::EffectRasterBounds::from_extent(primary);
+        if !self.has_raster_growth() || primary.is_empty() {
+            return Ok(bounds);
+        }
+        let mut previous = None;
+        for id in &self.schedule.ordered_nodes {
+            let node = self
+                .graph
+                .node(*id)
+                .ok_or(crate::EffectFloatExecutionError::MissingOutput { node_id: *id })?;
+            let outset = match &node.kind {
+                EffectGraphNodeKind::Source if previous.is_none() => [0, 0],
+                EffectGraphNodeKind::ExternalInput { .. }
+                    if self.external_auxiliary_is_read_only(*id) =>
+                {
+                    continue
+                }
+                EffectGraphNodeKind::UnaryEffect { input, op }
+                | EffectGraphNodeKind::DomainEffect { input, op, .. }
+                    if Some(*input) == previous && !matches!(op, EffectRenderOp::Custom { .. }) =>
+                {
+                    [0, 0]
+                }
+                EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, .. }
+                    if Some(*input) == previous
+                        && matches!(
+                            self.graph.node(*auxiliary).map(|node| &node.kind),
+                            Some(EffectGraphNodeKind::ExternalInput { .. })
+                        )
+                        && self.external_auxiliary_is_read_only(*auxiliary) =>
+                {
+                    match op {
+                        EffectRenderOp::DisplacementMap { grade } => grade.output_outset(),
+                        _ => [0, 0],
+                    }
+                }
+                _ => {
+                    return Err(crate::EffectFloatExecutionError::UnsupportedNode {
+                        node_id: *id,
+                        reason: crate::EffectFloatUnsupportedReason::UnsupportedGraphNode {
+                            kind: "raster_growth_requires_a_primary_chain",
+                        },
+                    })
+                }
+            };
+            bounds = bounds
+                .checked_outset(outset)
+                .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
+            previous = Some(*id);
+        }
+        Ok(bounds)
+    }
+
     /// Prove that an external producer is only sampled, with no owning use or conversion.
     pub(crate) fn external_auxiliary_is_read_only(&self, producer: EffectGraphNodeId) -> bool {
         self.graph.output != Some(producer)
