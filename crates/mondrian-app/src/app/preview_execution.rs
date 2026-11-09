@@ -314,6 +314,7 @@ pub(crate) struct PreviewGpuFrame {
     // these physical Frame Store leases only after exact GPU completion.
     _media_residency_guards: Vec<super::preview_media_residency::PreviewMediaResidencyGuard>,
     _working_resource: Option<mondrian_playback::ViewerFrameResourceLease>,
+    _auxiliary_work_reservation: Option<super::preview_auxiliary::PreviewAuxiliaryWorkReservation>,
     #[cfg_attr(not(test), allow(dead_code))]
     decode_execution: PreviewDecodeExecutionSummary,
 }
@@ -360,6 +361,7 @@ impl PreviewGpuFrame {
             heterogeneous_execution,
             _media_residency_guards: media_residency_guards,
             _working_resource: None,
+            _auxiliary_work_reservation: None,
             decode_execution,
         }
     }
@@ -380,6 +382,14 @@ impl PreviewGpuFrame {
         resource: Option<mondrian_playback::ViewerFrameResourceLease>,
     ) -> Self {
         self._working_resource = resource;
+        self
+    }
+
+    pub(crate) fn retain_auxiliary_work_reservation(
+        mut self,
+        reservation: Option<super::preview_auxiliary::PreviewAuxiliaryWorkReservation>,
+    ) -> Self {
+        self._auxiliary_work_reservation = reservation;
         self
     }
 

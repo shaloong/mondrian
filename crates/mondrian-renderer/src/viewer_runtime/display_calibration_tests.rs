@@ -91,6 +91,7 @@ fn record(
                 processor_input_plan: None,
             },
             effect_plan: plan,
+            spatial_plan: None,
         },
     ))];
     let space = lut.source_color_space();

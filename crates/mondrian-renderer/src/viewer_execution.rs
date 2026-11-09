@@ -7,9 +7,7 @@
 use std::sync::Arc;
 
 use mondrian_core::{types::BlendMode, ColorMatrixCoefficients, ColorSpace};
-use mondrian_effects::{
-    CompiledEffectGpuPipeline, CompiledEffectGpuPlan, PreparedHeterogeneousCpuCompletion,
-};
+use mondrian_effects::{CompiledEffectGpuPlan, PreparedHeterogeneousCpuCompletion};
 use mondrian_media::{
     CpuYuvFrame, DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
@@ -30,10 +28,11 @@ use crate::{
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportPlan,
     GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
     GpuNativeDecodedFrameVideoSampling, GpuNativeYuvDecoder, GpuVideoChromaLocation, GpuVideoRange,
-    HeterogeneousGpuContinuationRequest, NativeVideoImportCandidateTimingReceipt,
-    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
-    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
-    NativeVideoImportGpuTimingSample, RenderInputTransform, TimelineSolidColorLayer,
+    GpuVisualSpatialPlan, HeterogeneousGpuContinuationRequest,
+    NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
+    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample, RenderInputTransform,
+    TimelineSolidColorLayer,
 };
 
 /// One exact CPU-prefix completion consumed by a Viewer GPU continuation.
@@ -89,7 +88,7 @@ pub enum ViewerGpuSourceLayer {
         /// Exclusive with a non-identity `effect_plan`: the driver records the
         /// whole chain, including any point stages it lowered, so the compositor
         /// rejects a layer that carries both.
-        spatial_plan: Option<Arc<CompiledEffectGpuPipeline>>,
+        spatial_plan: Option<GpuVisualSpatialPlan>,
         /// Timeline seed for temporal effects.
         frame_seed: i64,
     },
@@ -99,6 +98,8 @@ pub enum ViewerGpuSourceLayer {
         layer: TimelineSolidColorLayer,
         /// Working-space GPU effect plan.
         effect_plan: Arc<CompiledEffectGpuPlan>,
+        /// Source-local spatial chain with an identity point plan.
+        spatial_plan: Option<GpuVisualSpatialPlan>,
     },
 }
 

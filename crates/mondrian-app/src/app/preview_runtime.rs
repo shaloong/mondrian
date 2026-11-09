@@ -1696,33 +1696,52 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let decode_execution = resolved_preview_decode_execution(&resolved.elements);
         let heterogeneous_decision = self.heterogeneous_effect_decision.get();
         let layer_preparation_started = Instant::now();
+        let mut auxiliary_work_reservation = None;
         let prepared_gpu_layers = {
             let mut scratch = self.scratch.borrow_mut();
             match owned_working.as_ref() {
                 Some(owned) => gpu_layer_for_cached_working((**owned).clone(), &mut scratch)
                     .map(|layer| PreparedPreviewViewerGpuLayers::Ordinary { layers: vec![layer] })
                     .map_err(|reason| (Some(reason), format!("cached working frame: {reason:?}"))),
-                None => prepare_gpu_composite_layers_with_heterogeneous_effects(
-                    &resolved.elements,
-                    resolved.color_context.working_color_space(),
-                    resolved.sampling,
-                    &mut scratch,
-                    heterogeneous_decision.cpu_prefix_grant(),
-                )
-                .map_err(|error| {
-                    let blocker = match &error {
-                        PreviewViewerGpuLayerPreparationError::Compositing { reason } => {
-                            Some(*reason)
-                        }
-                        _ => None,
+                None => (|| {
+                    use super::preview_auxiliary::{
+                        prepare_viewer_auxiliary_rasters, reserve_auxiliary_working_set,
+                        resolved_auxiliary_working_bytes,
                     };
-                    (blocker, error.to_string())
-                }),
+                    let requires_cpu = Some(GpuCompositingBlockerReason::EffectRequiresCpu);
+                    let required = resolved_auxiliary_working_bytes(&resolved.elements)
+                        .map_err(|error| (requires_cpu, error.to_string()))?;
+                    auxiliary_work_reservation =
+                        reserve_auxiliary_working_set(&mut self.frame_store.borrow_mut(), required)
+                            .map_err(|reason| (requires_cpu, reason.detail().to_owned()))?;
+                    let registered =
+                        prepare_viewer_auxiliary_rasters(&resolved.elements, &mut scratch)
+                            .map_err(|error| (requires_cpu, error.to_string()))?;
+                    prepare_gpu_composite_layers_with_heterogeneous_effects(
+                        &resolved.elements,
+                        resolved.color_context.working_color_space(),
+                        resolved.sampling,
+                        &mut scratch,
+                        heterogeneous_decision.cpu_prefix_grant(),
+                        &registered,
+                    )
+                    .map_err(|error| {
+                        let blocker = match &error {
+                            PreviewViewerGpuLayerPreparationError::Compositing { reason } => {
+                                Some(*reason)
+                            }
+                            _ => None,
+                        };
+                        (blocker, error.to_string())
+                    })
+                })(),
             }
         };
         let prepared_gpu_layers = match prepared_gpu_layers {
             Ok(prepared) => prepared,
-            Err((Some(GpuCompositingBlockerReason::EffectRequiresCpu), _)) => {
+            Err((Some(GpuCompositingBlockerReason::EffectRequiresCpu), detail)) => {
+                drop(auxiliary_work_reservation.take());
+                tracing::debug!(%detail, "Viewer GPU layer preparation selected CPU fallback");
                 let state = self.schedule_cpu_fallback(
                     snapshot,
                     &resolved,
@@ -2169,7 +2188,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 heterogeneous_execution,
                 media_residency_guards,
             )
-            .retain_working_resource(owned_working.as_ref().map(|owned| owned.resource().clone())),
+            .retain_working_resource(owned_working.as_ref().map(|owned| owned.resource().clone()))
+            .retain_auxiliary_work_reservation(auxiliary_work_reservation),
         ))
     }
 

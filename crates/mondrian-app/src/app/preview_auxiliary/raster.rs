@@ -37,6 +37,22 @@ impl PreparedAuxiliaryRasters<'_> {
             })
             .collect()
     }
+
+    pub(crate) fn gpu_inputs(&self) -> Vec<mondrian_renderer::GpuVisualAuxiliaryInput> {
+        self.frames
+            .iter()
+            .map(
+                |(slot, frame, policy)| mondrian_renderer::GpuVisualAuxiliaryInput {
+                    slot: *slot,
+                    picture: mondrian_renderer::GpuVisualAuxiliaryPicture::Cpu(
+                        std::sync::Arc::new(frame.clone()),
+                    ),
+                    policy: *policy,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                },
+            )
+            .collect()
+    }
 }
 
 fn overflow() -> PreviewCpuExecutionError {

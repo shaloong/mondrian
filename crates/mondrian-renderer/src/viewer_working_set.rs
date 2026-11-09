@@ -7,6 +7,7 @@
 //! any source upload, native import, effect, composite, spatial, output, scope,
 //! monitor, or calibration texture can be created.
 
+use crate::gpu_visual_frame::estimate_visual_spatial_plan;
 use crate::{
     product_gpu_working_bytes_per_pixel, GpuColorFrameTextureFormat,
     HeterogeneousGpuRecordingRequirements, ViewerGpuExecutionLayer, ViewerGpuExecutionRequest,
@@ -209,6 +210,9 @@ pub enum ViewerGpuActiveWorkingSetEstimateError {
         /// Stable invariant label.
         reason: &'static str,
     },
+    /// A source-local spatial chain could not be admitted.
+    #[error(transparent)]
+    SpatialPlan(#[from] crate::GpuVisualFrameActiveWorkingSetEstimateError),
     /// The capacity-one presentation owner exposed more than one live output.
     ///
     /// An unordered aggregate cannot prove which lease the next publication
@@ -577,10 +581,17 @@ fn estimate_source(
             cpu_yuv_source,
             heterogeneous_input,
             effect_plan,
+            spatial_plan,
             frame_seed,
             ..
         } => {
             let mut effect_extent = None::<(u32, u32, u64)>;
+            let mut spatial_demand = ViewerGpuActiveTextureDemand::default();
+            if spatial_plan.is_some() && (!effect_plan.is_identity() || *is_data_texture) {
+                return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                    reason: "media spatial chain requires an identity point plan and color input",
+                });
+            }
             if *is_data_texture
                 && (frame.is_none()
                     || gpu_source.is_some()
@@ -604,7 +615,7 @@ fn estimate_source(
                         },
                     );
                 }
-                if !effect_plan.is_identity() {
+                if !effect_plan.is_identity() || spatial_plan.is_some() {
                     return Err(
                         ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput {
                             reason: "heterogeneous media source retained a second Effect plan",
@@ -673,6 +684,16 @@ fn estimate_source(
                 return Ok(());
             }
 
+            let mut observe_extent = |width, height| {
+                observe_effect_extent(&mut effect_extent, width, height)?;
+                if let Some(plan) = spatial_plan {
+                    let demand = estimate_visual_spatial_plan(plan, width, height)?;
+                    // Source preparation can fall back between the retained grids.
+                    spatial_demand.bytes = spatial_demand.bytes.max(demand.bytes);
+                    spatial_demand.textures = spatial_demand.textures.max(demand.textures);
+                }
+                Ok::<_, ViewerGpuActiveWorkingSetEstimateError>(())
+            };
             if let Some(source) = cpu_yuv_source {
                 let working_bytes = checked_texture_bytes(
                     source.materialization_width,
@@ -706,11 +727,7 @@ fn estimate_source(
                     },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
-                observe_effect_extent(
-                    &mut effect_extent,
-                    source.materialization_width,
-                    source.materialization_height,
-                )?;
+                observe_extent(source.materialization_width, source.materialization_height)?;
             }
 
             if let Some(source) = native_source {
@@ -768,7 +785,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand { textures: 1, bytes },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
-                observe_effect_extent(&mut effect_extent, width, height)?;
+                observe_extent(width, height)?;
             }
             if let Some(source) = gpu_source {
                 let descriptor = source.source.descriptor();
@@ -792,7 +809,7 @@ fn estimate_source(
                     )?,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
-                observe_effect_extent(&mut effect_extent, descriptor.width, descriptor.height)?;
+                observe_extent(descriptor.width, descriptor.height)?;
             }
             if let Some(frame) = frame {
                 let descriptor = frame.descriptor();
@@ -805,14 +822,19 @@ fn estimate_source(
                     )?,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
-                observe_effect_extent(&mut effect_extent, descriptor.width, descriptor.height)?;
+                observe_extent(descriptor.width, descriptor.height)?;
             }
             let Some((effect_width, effect_height, _)) = effect_extent else {
                 return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
                     reason: "media layer has no GPU, native, heterogeneous, or CPU source",
                 });
             };
-            if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
+            estimate
+                .effects
+                .checked_add(spatial_demand, ViewerGpuActiveWorkingSetStage::Effects)?;
+            if spatial_plan.is_none()
+                && effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb
+            {
                 let effect_textures = if *is_data_texture {
                     // The typed numeric source must first cross the explicit
                     // compositor bypass; conservatively retain both working
@@ -834,8 +856,26 @@ fn estimate_source(
                 )?;
             }
         }
-        ViewerGpuSourceLayer::SolidColor { effect_plan, .. } => {
-            if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
+        ViewerGpuSourceLayer::SolidColor { effect_plan, spatial_plan, .. } => {
+            if let Some(plan) = spatial_plan {
+                if !effect_plan.is_identity() {
+                    return Err(crate::GpuVisualFrameActiveWorkingSetEstimateError::ConflictingSourceEffects.into());
+                }
+                estimate.source_preparation.checked_add(
+                    ViewerGpuActiveTextureDemand::checked_texture(
+                        request.width,
+                        request.height,
+                        working_bytes_per_pixel(),
+                        ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                    )?,
+                    ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                )?;
+                let demand = estimate_visual_spatial_plan(plan, request.width, request.height)?;
+                estimate.effects.checked_add(
+                    ViewerGpuActiveTextureDemand { bytes: demand.bytes, textures: demand.textures },
+                    ViewerGpuActiveWorkingSetStage::Effects,
+                )?;
+            } else if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
                 // Solid materialization, working→effect, point effect, effect→working.
                 estimate.source_preparation.checked_add(
                     ViewerGpuActiveTextureDemand::checked_texture(
@@ -1465,6 +1505,7 @@ mod tests {
                     processor_input_plan: None,
                 },
                 effect_plan: Arc::clone(&effect_plan),
+                spatial_plan: None,
             }))
         };
         let layers = [ViewerGpuExecutionLayer::CrossDissolve(Box::new(

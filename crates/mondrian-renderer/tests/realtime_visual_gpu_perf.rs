@@ -201,6 +201,7 @@ fn measure_scenario(
                     processor_input_plan: None,
                 },
                 effect_plan: Arc::clone(&effect_plan),
+                spatial_plan: None,
             }))
         })
         .collect::<Vec<_>>();

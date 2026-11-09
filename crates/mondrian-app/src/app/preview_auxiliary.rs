@@ -26,7 +26,7 @@ use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 mod raster;
 pub(crate) use raster::{
     plan_auxiliary_registration, preflight_auxiliary_composite, prepare_auxiliary_rasters,
-    visual_auxiliary_working_bytes,
+    visual_auxiliary_working_bytes, PreparedAuxiliaryRasters,
 };
 
 /// A temporary auxiliary preparation charge in the existing Viewer ledger.
@@ -98,6 +98,30 @@ pub(crate) fn collect_auxiliary_bindings<'a>(
         }
         collect_auxiliary_bindings(element, bindings);
     }
+}
+
+pub(crate) fn prepare_viewer_auxiliary_rasters<'a>(
+    elements: &'a [super::preview_viewer_plan::ResolvedPreviewElement],
+    scratch: &mut mondrian_renderer::TimelineCompositeScratch,
+) -> Result<Vec<PreparedAuxiliaryRasters<'a>>, super::preview_cpu_execution::PreviewCpuExecutionError>
+{
+    use super::preview_viewer_plan::ResolvedPreviewElement;
+    // Keep the actual occurrence, even when two consumers share registered
+    // storage. A graph and slot alone do not identify a transition endpoint.
+    let mut bindings = Vec::new();
+    for mut element in elements {
+        while let ResolvedPreviewElement::WithAuxiliary { element: inner, inputs } = element {
+            bindings.extend(inputs.iter().filter(|input| !input.sources.is_empty()));
+            element = inner;
+        }
+    }
+    prepare_auxiliary_rasters(
+        &bindings,
+        scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        &mut Vec::new(),
+        &mut mondrian_renderer::color::RenderColorStageDiagnostics::default(),
+    )
 }
 
 pub(crate) fn resolved_auxiliary_projection(

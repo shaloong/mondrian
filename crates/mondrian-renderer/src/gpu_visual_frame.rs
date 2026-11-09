@@ -763,43 +763,16 @@ impl GpuVisualFrameExecutor {
         if source.effect_plan.is_identity()
             || source.effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb
         {
-            let mut auxiliary = Vec::new();
-            if let Some(plan) = &source.spatial_plan {
-                for input in &plan.auxiliary {
-                    let frame = match &input.picture {
-                        GpuVisualAuxiliaryPicture::Gpu(frame) => frame.clone(),
-                        GpuVisualAuxiliaryPicture::Cpu(frame) => {
-                            let record = runtime
-                                .upload_wgpu_working_frame(device, queue, frame)
-                                .map_err(|error| {
-                                    GpuVisualFrameExecutionError::AuxiliaryUpload(Box::new(error))
-                                })?;
-                            color_stage_diagnostics.accumulate(record.stage_diagnostics);
-                            record.output
-                        }
-                        GpuVisualAuxiliaryPicture::Transparent { width, height } => {
-                            runtime
-                                .record_wgpu_solid_source(
-                                    &self.compositor,
-                                    device,
-                                    queue,
-                                    encoder,
-                                    *width,
-                                    *height,
-                                    request.working_color_space,
-                                    Color::TRANSPARENT,
-                                )?
-                                .output
-                        }
-                    };
-                    auxiliary.push(PreparedAuxiliaryInput {
-                        slot: input.slot,
-                        frame,
-                        policy: input.policy,
-                        transform: input.transform,
-                    });
-                }
-            }
+            let auxiliary = prepare_visual_auxiliary_inputs(
+                source.spatial_plan.as_ref(),
+                request.working_color_space,
+                &self.compositor,
+                runtime,
+                device,
+                queue,
+                encoder,
+                color_stage_diagnostics,
+            )?;
             return Ok(PreparedSourceLayer {
                 source: prepared_source,
                 opacity: source.opacity,
@@ -1065,51 +1038,10 @@ fn estimate_visual_source(
         if !source.effect_plan.is_identity() {
             return Err(GpuVisualFrameActiveWorkingSetEstimateError::ConflictingSourceEffects);
         }
-        if spatial.pipeline.processing_domain() != EffectColorDomain::SceneLinearRgb {
-            return Err(GpuVisualFrameActiveWorkingSetEstimateError::UnsupportedSpatialDomain);
-        }
-        let slots = spatial.auxiliary.iter().map(|input| input.slot).collect::<Vec<_>>();
-        let plan = crate::spatial_driver::gpu_spatial_chain_plan_with_auxiliary(
-            &spatial.pipeline,
-            width,
-            height,
-            &slots,
-        )
-        .map_err(
-            |_| GpuVisualFrameActiveWorkingSetEstimateError::InvalidSpatialChain { width, height },
-        )?;
         let stage = GpuVisualFrameActiveWorkingSetStage::Effects;
-        let textures = plan
-            .scratch_textures
-            .checked_mul(plan.scratch_extents)
-            .and_then(|count| u64::try_from(count).ok())
-            .ok_or(GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
-        estimate.effects.checked_add(
-            GpuVisualFrameActiveTextureDemand { bytes: plan.scratch_bytes, textures },
-            stage,
-        )?;
-        // Each stage copies its result into a distinct frame-table texture.
-        let stage_outputs = u64::try_from(plan.stages.len()).map_err(|_| {
-            GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage }
-        })?;
-        let output = plan.output_bounds.extent();
-        estimate.effects.checked_add(
-            repeated_texture_demand(output.width(), output.height(), stage_outputs, stage)?,
-            stage,
-        )?;
-        for input in &spatial.auxiliary {
-            let (width, height) = match &input.picture {
-                GpuVisualAuxiliaryPicture::Cpu(frame) => {
-                    let descriptor = frame.descriptor();
-                    (descriptor.width, descriptor.height)
-                }
-                GpuVisualAuxiliaryPicture::Transparent { width, height } => (*width, *height),
-                GpuVisualAuxiliaryPicture::Gpu(_) => continue,
-            };
-            estimate
-                .effects
-                .checked_add(repeated_texture_demand(width, height, 1, stage)?, stage)?;
-        }
+        estimate
+            .effects
+            .checked_add(estimate_visual_spatial_plan(spatial, width, height)?, stage)?;
     }
     let upload_textures = match source.source {
         GpuVisualFrameSource::ColorManaged { .. } | GpuVisualFrameSource::Native { .. } => 2,
@@ -1156,6 +1088,53 @@ fn estimate_visual_source(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn estimate_visual_spatial_plan(
+    spatial: &GpuVisualSpatialPlan,
+    width: u32,
+    height: u32,
+) -> Result<GpuVisualFrameActiveTextureDemand, GpuVisualFrameActiveWorkingSetEstimateError> {
+    if spatial.pipeline.processing_domain() != EffectColorDomain::SceneLinearRgb {
+        return Err(GpuVisualFrameActiveWorkingSetEstimateError::UnsupportedSpatialDomain);
+    }
+    let slots = spatial.auxiliary.iter().map(|input| input.slot).collect::<Vec<_>>();
+    let plan = crate::spatial_driver::gpu_spatial_chain_plan_with_auxiliary(
+        &spatial.pipeline,
+        width,
+        height,
+        &slots,
+    )
+    .map_err(
+        |_| GpuVisualFrameActiveWorkingSetEstimateError::InvalidSpatialChain { width, height },
+    )?;
+    let stage = GpuVisualFrameActiveWorkingSetStage::Effects;
+    let textures = plan
+        .scratch_textures
+        .checked_mul(plan.scratch_extents)
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or(GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
+    let mut demand = GpuVisualFrameActiveTextureDemand { bytes: plan.scratch_bytes, textures };
+    // Each stage copies its result into a distinct frame-table texture.
+    let stage_outputs = u64::try_from(plan.stages.len())
+        .map_err(|_| GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
+    let output = plan.output_bounds.extent();
+    demand.checked_add(
+        repeated_texture_demand(output.width(), output.height(), stage_outputs, stage)?,
+        stage,
+    )?;
+    for input in &spatial.auxiliary {
+        let (width, height) = match &input.picture {
+            GpuVisualAuxiliaryPicture::Cpu(frame) => {
+                let descriptor = frame.descriptor();
+                (descriptor.width, descriptor.height)
+            }
+            GpuVisualAuxiliaryPicture::Transparent { width, height } => (*width, *height),
+            GpuVisualAuxiliaryPicture::Gpu(_) => continue,
+        };
+        demand.checked_add(repeated_texture_demand(width, height, 1, stage)?, stage)?;
+    }
+    Ok(demand)
 }
 
 fn repeated_texture_demand(
@@ -1215,7 +1194,7 @@ struct PreparedSourceLayer {
     frame_seed: i64,
 }
 
-struct PreparedAuxiliaryInput {
+pub(crate) struct PreparedAuxiliaryInput {
     slot: u32,
     frame: GpuColorFrameHandle,
     policy: AuxiliaryPolicy,
@@ -1224,15 +1203,7 @@ struct PreparedAuxiliaryInput {
 
 impl PreparedSourceLayer {
     fn auxiliary_bindings(&self) -> Vec<GpuSpatialAuxiliaryRaster<'_>> {
-        self.auxiliary
-            .iter()
-            .map(|input| GpuSpatialAuxiliaryRaster {
-                slot: input.slot,
-                frame: &input.frame,
-                transform: input.transform,
-                policy: input.policy,
-            })
-            .collect()
+        visual_auxiliary_bindings(&self.auxiliary)
     }
     fn as_composite_layer(&self) -> GpuCompositeLayer<'_> {
         GpuCompositeLayer {
@@ -1256,4 +1227,69 @@ impl PreparedSourceLayer {
             frame_seed: self.frame_seed,
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_visual_auxiliary_inputs(
+    plan: Option<&GpuVisualSpatialPlan>,
+    working_color_space: WorkingColorSpace,
+    compositor: &GpuFrameCompositor,
+    runtime: &mut RenderGpuOutputBoundaryRuntime,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+    diagnostics: &mut RenderColorStageDiagnostics,
+) -> Result<Vec<PreparedAuxiliaryInput>, GpuVisualFrameExecutionError> {
+    let Some(plan) = plan else {
+        return Ok(Vec::new());
+    };
+    plan.auxiliary
+        .iter()
+        .map(|input| {
+            let frame = match &input.picture {
+                GpuVisualAuxiliaryPicture::Gpu(frame) => frame.clone(),
+                GpuVisualAuxiliaryPicture::Cpu(frame) => {
+                    let record = runtime.upload_wgpu_working_frame(device, queue, frame).map_err(
+                        |error| GpuVisualFrameExecutionError::AuxiliaryUpload(Box::new(error)),
+                    )?;
+                    diagnostics.accumulate(record.stage_diagnostics);
+                    record.output
+                }
+                GpuVisualAuxiliaryPicture::Transparent { width, height } => {
+                    runtime
+                        .record_wgpu_solid_source(
+                            compositor,
+                            device,
+                            queue,
+                            encoder,
+                            *width,
+                            *height,
+                            working_color_space,
+                            Color::TRANSPARENT,
+                        )?
+                        .output
+                }
+            };
+            Ok(PreparedAuxiliaryInput {
+                slot: input.slot,
+                frame,
+                policy: input.policy,
+                transform: input.transform,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn visual_auxiliary_bindings(
+    auxiliary: &[PreparedAuxiliaryInput],
+) -> Vec<GpuSpatialAuxiliaryRaster<'_>> {
+    auxiliary
+        .iter()
+        .map(|input| GpuSpatialAuxiliaryRaster {
+            slot: input.slot,
+            frame: &input.frame,
+            transform: input.transform,
+            policy: input.policy,
+        })
+        .collect()
 }

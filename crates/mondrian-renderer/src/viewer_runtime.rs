@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::gpu_visual_frame::{
+    prepare_visual_auxiliary_inputs, visual_auxiliary_bindings, PreparedAuxiliaryInput,
+};
 use crate::viewer_spatial::{GpuViewerSpatialRecord, GpuViewerSpatialRuntime};
 use crate::{
     estimate_viewer_gpu_active_working_set, native_source_texture_format_from_decoded,
@@ -1020,8 +1023,17 @@ impl ViewerGpuExecutionRuntime {
         )?;
         let (gpu_layers, gpu_spatial_plans) =
             composite_layers(&prepared_layers, &prepared.gpu_input_handles);
+        let auxiliary = prepared_layers
+            .iter()
+            .map(|layer| visual_auxiliary_bindings(&layer.auxiliary))
+            .collect::<Vec<_>>();
+        let auxiliary_slices = if auxiliary.iter().any(|bindings| !bindings.is_empty()) {
+            auxiliary.iter().map(Vec::as_slice).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let composite = color_output
-            .record_wgpu_composite_graph(
+            .record_wgpu_composite_graph_with_auxiliary(
                 &self.working_compositor,
                 device,
                 queue,
@@ -1033,6 +1045,7 @@ impl ViewerGpuExecutionRuntime {
                     layers: &gpu_layers,
                 },
                 &gpu_spatial_plans,
+                &auxiliary_slices,
                 request.program_output_boundary.engine().clone(),
                 RenderColorTransformGpuOptions::default(),
             )
@@ -2049,7 +2062,6 @@ struct PreparedComposite<'a> {
     fallback_reasons: Vec<String>,
 }
 
-#[derive(Clone, Copy)]
 struct PreparedCompositeLayer<'a> {
     source: PreparedCompositeLayerSource<'a>,
     opacity: f32,
@@ -2061,6 +2073,7 @@ struct PreparedCompositeLayer<'a> {
     /// Exclusive with a non-identity `effect_plan`; see
     /// [`crate::ViewerGpuSourceLayer::Media`].
     spatial_plan: Option<&'a mondrian_effects::CompiledEffectGpuPipeline>,
+    auxiliary: Vec<PreparedAuxiliaryInput>,
     frame_seed: i64,
 }
 
@@ -2144,6 +2157,7 @@ fn prepare_composite<'a>(
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     effect_plan: Some(effect_plan),
                     spatial_plan: None,
+                    auxiliary: Vec::new(),
                     frame_seed: *frame_seed,
                 }));
             }
@@ -2351,6 +2365,7 @@ fn prepare_source_layer<'a>(
                     transform: *transform,
                     effect_plan: None,
                     spatial_plan: None,
+                    auxiliary: Vec::new(),
                     frame_seed: *frame_seed,
                 });
             }
@@ -2479,20 +2494,10 @@ fn prepare_source_layer<'a>(
                     }
                 }
             };
-            // Admission already refused anything the compositor could not run,
-            // so a chain that is not a scene-linear chain with real stages is
-            // dropped here instead of being recorded unsupported.
-            let spatial_plan = spatial_plan
-                .as_deref()
-                .filter(|plan| !plan.is_identity())
-                .filter(|plan| plan.processing_domain() == EffectColorDomain::SceneLinearRgb)
-                // The numeric DataTexture bypass is a different pass entirely and
-                // the compositor refuses a chain on it.
-                .filter(|_| !*is_data_texture);
-            let (source, effect_plan, spatial_plan) = if let Some(spatial_plan) = spatial_plan {
+            let (source, effect_plan, pipeline) = if let Some(spatial_plan) = spatial_plan {
                 // The chain records the whole graph, including its point stages,
                 // so attaching a point plan as well would double-apply the graph.
-                (source, None, Some(spatial_plan))
+                (source, None, Some(spatial_plan.pipeline.as_ref()))
             } else if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb {
                 (source, Some(effect_plan.as_ref()), None)
             } else {
@@ -2566,30 +2571,37 @@ fn prepare_source_layer<'a>(
                 )?;
                 (PreparedCompositeLayerSource::GpuFrame(index), None, None)
             };
+            let auxiliary = prepare_visual_auxiliary_inputs(
+                spatial_plan.as_ref(),
+                request.working_color_space,
+                compositor,
+                runtime,
+                device,
+                queue,
+                encoder,
+                &mut prepared.input_stage_diagnostics,
+            )
+            .map_err(|error| ViewerGpuExecutionError::InputPreparation(error.to_string()))?;
             Ok(PreparedCompositeLayer {
                 source,
                 opacity: *opacity,
                 blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(*blend_mode),
                 transform: *transform,
                 effect_plan,
-                spatial_plan,
+                spatial_plan: pipeline,
+                auxiliary,
                 frame_seed: *frame_seed,
             })
         }
-        crate::ViewerGpuSourceLayer::SolidColor { layer, effect_plan } => {
+        crate::ViewerGpuSourceLayer::SolidColor { layer, effect_plan, spatial_plan } => {
             prepared.residency.procedural_layers =
                 prepared.residency.procedural_layers.saturating_add(1);
             let scene_linear = effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb;
-            if scene_linear {
-                Ok(PreparedCompositeLayer {
-                    source: PreparedCompositeLayerSource::SolidColor(layer.color),
-                    opacity: layer.opacity,
-                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(layer.blend_mode),
-                    transform: layer.transform,
-                    effect_plan: Some(effect_plan),
-                    spatial_plan: None,
-                    frame_seed: layer.frame_seed,
-                })
+            let (source, effect_plan) = if scene_linear && spatial_plan.is_none() {
+                (
+                    PreparedCompositeLayerSource::SolidColor(layer.color),
+                    Some(effect_plan.as_ref()),
+                )
             } else {
                 let materialized = runtime
                     .record_wgpu_solid_source(
@@ -2607,28 +2619,47 @@ fn prepare_source_layer<'a>(
                             "solid source materialization failed: {error:?}"
                         ))
                     })?;
-                let index = record_external_domain_effect(
-                    prepared,
-                    runtime,
-                    compositor,
-                    effect_plan,
-                    materialized.output,
-                    request.program_output_boundary.engine().clone(),
-                    layer.frame_seed,
-                    device,
-                    queue,
-                    encoder,
-                )?;
-                Ok(PreparedCompositeLayer {
-                    source: PreparedCompositeLayerSource::GpuFrame(index),
-                    opacity: layer.opacity,
-                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(layer.blend_mode),
-                    transform: layer.transform,
-                    effect_plan: None,
-                    spatial_plan: None,
-                    frame_seed: layer.frame_seed,
-                })
-            }
+                let index = if spatial_plan.is_some() {
+                    let index = prepared.gpu_input_handles.len();
+                    prepared.gpu_input_handles.push(materialized.output);
+                    index
+                } else {
+                    record_external_domain_effect(
+                        prepared,
+                        runtime,
+                        compositor,
+                        effect_plan,
+                        materialized.output,
+                        request.program_output_boundary.engine().clone(),
+                        layer.frame_seed,
+                        device,
+                        queue,
+                        encoder,
+                    )?
+                };
+                (PreparedCompositeLayerSource::GpuFrame(index), None)
+            };
+            let auxiliary = prepare_visual_auxiliary_inputs(
+                spatial_plan.as_ref(),
+                request.working_color_space,
+                compositor,
+                runtime,
+                device,
+                queue,
+                encoder,
+                &mut prepared.input_stage_diagnostics,
+            )
+            .map_err(|error| ViewerGpuExecutionError::InputPreparation(error.to_string()))?;
+            Ok(PreparedCompositeLayer {
+                source,
+                opacity: layer.opacity,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(layer.blend_mode),
+                transform: layer.transform,
+                effect_plan,
+                spatial_plan: spatial_plan.as_ref().map(|plan| plan.pipeline.as_ref()),
+                auxiliary,
+                frame_seed: layer.frame_seed,
+            })
         }
     }
 }
@@ -2828,8 +2859,10 @@ fn materialize_transition_source<'a>(
     // The endpoint keeps its chain: materializing the endpoint is that layer's
     // own composite, so dropping the plan here would drop the effect.
     let spatial_plans = [layer.spatial_plan];
+    let auxiliary = visual_auxiliary_bindings(&layer.auxiliary);
+    let auxiliary_slices = [auxiliary.as_slice()];
     let record = runtime
-        .record_wgpu_working_composite(
+        .record_wgpu_working_composite_with_auxiliary(
             compositor,
             device,
             queue,
@@ -2841,6 +2874,11 @@ fn materialize_transition_source<'a>(
                 layers: std::slice::from_ref(&gpu_layer),
             },
             &spatial_plans,
+            if auxiliary.is_empty() {
+                &[]
+            } else {
+                &auxiliary_slices
+            },
         )
         .map_err(|error| ViewerGpuExecutionError::Transition(Box::new(error)))?;
     diagnostics.accumulate(record.diagnostics);
@@ -2861,6 +2899,7 @@ fn push_prepared_gpu_layer<'a>(
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_plan: None,
         spatial_plan: None,
+        auxiliary: Vec::new(),
         frame_seed: 0,
     }
 }
@@ -3387,6 +3426,7 @@ mod tests {
                         processor_input_plan: None,
                     },
                     effect_plan: Arc::clone(&effect_plan),
+                    spatial_plan: None,
                 },
             ));
             let mut encoder =
@@ -4750,6 +4790,7 @@ mod tests {
                     processor_input_plan: None,
                 },
                 effect_plan,
+                spatial_plan: None,
             }));
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
@@ -4828,6 +4869,7 @@ mod tests {
                     processor_input_plan: None,
                 },
                 effect_plan,
+                spatial_plan: None,
             }));
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
@@ -4909,6 +4951,7 @@ mod tests {
                         processor_input_plan: None,
                     },
                     effect_plan: Arc::clone(&effect_plan),
+                    spatial_plan: None,
                 },
             ))
         };
@@ -4967,6 +5010,190 @@ mod tests {
         assert_eq!(record.residency.procedural_layers, 2);
         assert_eq!(record.residency.cpu_upload_layers, 0);
         assert_eq!(record.stage_diagnostics.readback_stages, 0);
+    }
+
+    #[tokio::test]
+    async fn viewer_spatial_auxiliary_displacement_keeps_transition_slots_separate() {
+        use crate::{GpuVisualAuxiliaryInput, GpuVisualAuxiliaryPicture, GpuVisualSpatialPlan};
+        use mondrian_effects::{
+            lower_effect_graph_to_gpu_pipeline, AuxiliaryPolicy, AuxiliaryResolution,
+            AuxiliaryRole, AuxiliarySampling, DisplacementMapBehavior, DisplacementMapChannel,
+            DisplacementMapGrade, EffectValueFormat, EffectWorkingPrecision,
+        };
+
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer auxiliary test: no GPU adapter available");
+            return;
+        };
+        let identity = compile_reference_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("valid scene-linear identity graph");
+        let effect_plan = Arc::new(lower_effect_graph_to_gpu_plan(&identity).unwrap());
+        let mut builder = EffectGraphBuilderState::new();
+        let primary = builder.current_output();
+        let map = builder.append_external_input(
+            0,
+            EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                ColorFrameAlpha::StraightCoverage,
+            ),
+            EffectColorDomainContract::SCENE_LINEAR,
+        );
+        let output = builder.add_auxiliary_effect(
+            primary,
+            map,
+            EffectRenderOp::DisplacementMap {
+                grade: DisplacementMapGrade::new(
+                    [1.0, 0.0],
+                    [DisplacementMapChannel::Alpha, DisplacementMapChannel::Green],
+                    DisplacementMapBehavior::Center,
+                    false,
+                    true,
+                )
+                .unwrap(),
+            },
+            AuxiliaryRole::Map,
+            AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
+        );
+        builder.set_current_output(output);
+        let graph = Arc::new(compile_reference_render_graph(builder.finish()).unwrap());
+        let pipeline = Arc::new(lower_effect_graph_to_gpu_pipeline(&graph).unwrap());
+        let source = |alpha, frame_seed| {
+            Box::new(crate::ViewerGpuSourceLayer::SolidColor {
+                layer: TimelineSolidColorLayer {
+                    color: Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_graph: Arc::clone(&graph),
+                    frame_seed,
+                    processor_input_plan: None,
+                },
+                effect_plan: Arc::clone(&effect_plan),
+                spatial_plan: Some(GpuVisualSpatialPlan {
+                    pipeline: Arc::clone(&pipeline),
+                    auxiliary: vec![GpuVisualAuxiliaryInput {
+                        slot: 0,
+                        picture: GpuVisualAuxiliaryPicture::Cpu(Arc::new(CpuColorFrame::working(
+                            WorkingRgbaF32Frame {
+                                width: 4,
+                                height: 2,
+                                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                                alpha: ColorFrameAlpha::StraightCoverage,
+                                color_space: WorkingColorSpace::LinearRec709,
+                                data: vec![[0.0, 0.0, 0.0, alpha]; 8],
+                            },
+                        ))),
+                        policy: AuxiliaryPolicy::new(AuxiliaryResolution::Authored),
+                        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    }],
+                }),
+            })
+        };
+        let transition = || {
+            ViewerGpuExecutionLayer::CrossDissolve(Box::new(crate::ViewerGpuCrossDissolveLayer {
+                left: crate::ViewerGpuTransitionInput::Source(source(0.25, 7)),
+                right: crate::ViewerGpuTransitionInput::Source(source(0.75, 8)),
+                progress: 0.25,
+            }))
+        };
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let monitor = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .unwrap();
+
+        for (layer, expected_alpha, spatial_passes, transitions) in [
+            (
+                ViewerGpuExecutionLayer::Source(source(0.25, 7)),
+                [0.5, 1.0, 1.0],
+                1,
+                0,
+            ),
+            (transition(), [0.625, 1.0, 0.875], 2, 1),
+        ] {
+            let request = ViewerGpuExecutionRequest {
+                sequence_id: SequenceId::new(),
+                timeline_frame: 0,
+                width: 3,
+                height: 1,
+                working_color_space: WorkingColorSpace::LinearRec709,
+                layers: std::slice::from_ref(&layer),
+                heterogeneous_inputs: Vec::new(),
+                program_output_boundary: &boundary,
+                monitor_adaptation: &monitor,
+                source_rect: ViewerSourceRect::FULL,
+                output_width: 3,
+                output_height: 1,
+                output_precision: ViewerGpuOutputPrecision::EncodedFloat16,
+                display_calibration: None,
+                program_scopes: None,
+                signal_monitoring: None,
+            };
+            let estimate = estimate_viewer_gpu_active_working_set(&request).unwrap();
+            // Every source chain retains the 4×2 Map and at least one 5×1 output.
+            assert!(estimate.effects.bytes >= spatial_passes * (4 * 2 + 5) * 16);
+            let mut runtime =
+                ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
+                    .unwrap();
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            let mut record = runtime
+                .record(&context.device, &context.queue, &mut encoder, request)
+                .expect("Viewer auxiliary composite");
+            assert_eq!(
+                record.compositing_diagnostics.spatial_effect_passes,
+                spatial_passes
+            );
+            assert_eq!(
+                record.compositing_diagnostics.gpu_cross_dissolve_passes,
+                transitions
+            );
+            assert_eq!(record.compositing_diagnostics.cpu_fallback_composites, 0);
+            let table = runtime.color_output.runtime().unwrap().frame_table();
+            let resource = table.get(&record.output).unwrap();
+            let plan = crate::GpuColorFrameReadbackPlan::encoded_rgba16float(record.output.clone())
+                .expect("binary-exact alpha reference through the presentation boundary");
+            let readback = crate::GpuColorFrameReadback::record_copy(
+                &context.device,
+                &mut encoder,
+                &plan,
+                resource,
+            )
+            .unwrap();
+            let submission = context.queue.submit([encoder.finish()]);
+            assert!(record.assert_adapter_submission(submission.clone()).is_empty());
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let slice = readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(Duration::from_secs(10)),
+                })
+                .unwrap();
+            receiver.recv().unwrap().unwrap();
+            let mapped = slice.get_mapped_range().unwrap();
+            let actual = plan.unpack_mapped_rgba16float(&mapped).unwrap();
+            let expected = expected_alpha.map(|alpha| [0.0, 0.0, 0.0, alpha]);
+            assert_eq!(actual.len(), 12);
+            let error = actual
+                .iter()
+                .zip(expected.as_flattened())
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0, f32::max);
+            eprintln!("Viewer auxiliary spatial passes={spatial_passes} max error={error:e}");
+            assert!(error <= 1.0e-4, "{actual:?} vs {expected:?}");
+        }
     }
 
     #[tokio::test]
@@ -5355,6 +5582,7 @@ mod tests {
                     processor_input_plan: None,
                 },
                 effect_plan: scene_plan,
+                spatial_plan: None,
             })),
             ViewerGpuExecutionLayer::Adjustment {
                 effect_plan: adjustment_plan,

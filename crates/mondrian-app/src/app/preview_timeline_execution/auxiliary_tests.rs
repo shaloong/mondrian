@@ -316,8 +316,19 @@ fn preview_channel_combiner_reads_the_selected_source_on_the_actual_grid() {
 
 #[test]
 fn preview_displacement_map_projects_the_expanded_output_to_the_original_layer() {
+    use crate::app::preview_auxiliary::prepare_viewer_auxiliary_rasters;
+    use crate::app::preview_viewer_plan::{
+        prepare_gpu_composite_layers_with_heterogeneous_effects, PreparedPreviewViewerGpuLayers,
+    };
     use mondrian_core::{PropertyValue, VisualSourceReference};
-    use mondrian_effects::{instantiate_effect_node, EffectType};
+    use mondrian_effects::{
+        instantiate_effect_node, EffectExecutionSessionConfig, EffectGraphExecutionBudget,
+        EffectType,
+    };
+    use mondrian_renderer::{
+        GpuVisualAuxiliaryPicture, HeterogeneousCpuPrefixBatchGrant, SpatialChainPreference,
+        ViewerGpuExecutionLayer, ViewerGpuSourceLayer,
+    };
 
     let (_root, asset) = asset_fixture(Some(Duration::from_secs(2)));
     let kind = EffectType::DisplacementMap;
@@ -355,6 +366,42 @@ fn preview_displacement_map_projects_the_expanded_output_to_the_original_layer()
     for (pixel, alpha) in pixels.iter().zip([0.5, 1.0, 1.0]) {
         assert!((pixel[3] - alpha).abs() < 1e-6, "{pixel:?}");
     }
+
+    let mut scratch = TimelineCompositeScratch::default();
+    scratch.set_spatial_chain_preference(SpatialChainPreference::ForceGpu);
+    let auxiliary = prepare_viewer_auxiliary_rasters(&resolved.plan.elements, &mut scratch)
+        .expect("register the same Asset for Viewer GPU");
+    let plan = prepare_gpu_composite_layers_with_heterogeneous_effects(
+        &resolved.plan.elements,
+        resolved.plan.color_context.working_color_space(),
+        resolved.plan.sampling,
+        &mut scratch,
+        HeterogeneousCpuPrefixBatchGrant::new(
+            EffectExecutionSessionConfig::uncached(0),
+            EffectGraphExecutionBudget::new(0, 0, 0, 0, 0),
+            0,
+            0,
+        ),
+        &auxiliary,
+    )
+    .expect("Viewer GPU spatial layer plan");
+    let PreparedPreviewViewerGpuLayers::Ordinary { layers } = plan else {
+        panic!("the frozen Asset requires a single GPU route");
+    };
+    let [ViewerGpuExecutionLayer::Source(source)] = layers.as_slice() else {
+        panic!("expected the source layer");
+    };
+    let ViewerGpuSourceLayer::SolidColor { spatial_plan: Some(plan), .. } = source.as_ref() else {
+        panic!("expected a solid with a spatial pass");
+    };
+    let [map] = plan.auxiliary.as_slice() else {
+        panic!("expected one Map slot");
+    };
+    let GpuVisualAuxiliaryPicture::Cpu(map) = &map.picture else {
+        panic!("expected actual Asset working pixels");
+    };
+    assert_eq!((map.descriptor().width, map.descriptor().height), (4, 2));
+    assert!(map.rgba_f32().data.iter().all(|pixel| pixel[3] == 0.25));
 }
 
 #[test]
