@@ -231,9 +231,7 @@ pub fn choose_spatial_chain(
     source_on_gpu: bool,
     preference: SpatialChainPreference,
 ) -> SpatialChainChoice {
-    let pixels = raster_pixels(width, height);
-    let gpu_ns = estimate_gpu_ns(plan, pixels, source_on_gpu);
-    let cpu_ns = estimate_cpu_ns(plan, pixels);
+    let (gpu_ns, cpu_ns) = estimate_ns(plan, width, height, source_on_gpu);
     if preference == SpatialChainPreference::Auto && plan.spatial_passes == 0 && source_on_gpu {
         // A point-only chain on a GPU-resident source is exactly the composite
         // the fused point path already records; there is no second candidate to
@@ -311,45 +309,43 @@ fn decide(gpu_ns: f64, cpu_ns: f64, preference: SpatialChainPreference) -> Spati
     }
 }
 
-/// Estimated GPU-candidate cost in nanoseconds.
-fn estimate_gpu_ns(plan: &GpuSpatialChainPlan, pixels: f64, source_on_gpu: bool) -> f64 {
-    let mut total = GPU_CHAIN_SETUP_NS;
+/// Candidate costs in nanoseconds, using the raster written by each stage.
+fn estimate_ns(
+    plan: &GpuSpatialChainPlan,
+    width: u32,
+    height: u32,
+    source_on_gpu: bool,
+) -> (f64, f64) {
+    let (mut width, mut height) = (f64::from(width), f64::from(height));
+    let source_pixels = width * height;
+    let mut pixels = source_pixels;
+    let mut gpu = GPU_CHAIN_SETUP_NS;
+    let mut cpu = CPU_CHAIN_SETUP_NS;
     for stage in &plan.stages {
         match stage {
             GpuSpatialStagePlan::Spatial { pass, scratch_textures, .. } => {
+                let [x, y] = pass.output_outset();
+                width += 2.0 * f64::from(x);
+                height += 2.0 * f64::from(y);
+                pixels = width * height;
                 let passes = f64::from(*scratch_textures);
-                total += passes * (pixels * gpu_ns_per_px(*pass) + GPU_PASS_OVERHEAD_NS);
-                total += copy_out_ns(pixels);
+                gpu += passes * (pixels * gpu_ns_per_px(*pass) + GPU_PASS_OVERHEAD_NS);
+                gpu += copy_out_ns(pixels);
+                // CPU rates include all internal passes of each spatial kernel.
+                cpu += pixels * cpu_ns_per_px(*pass);
             }
             GpuSpatialStagePlan::PointOps { operations } => {
-                total += point_stage_ns(pixels, operations.len());
+                gpu += point_stage_ns(pixels, operations.len());
             }
         }
     }
     if !source_on_gpu {
-        total += upload_ns(pixels);
+        gpu += upload_ns(source_pixels);
     }
-    total
-}
-
-/// Estimated whole-frame CPU fallback cost in nanoseconds.
-fn estimate_cpu_ns(plan: &GpuSpatialChainPlan, pixels: f64) -> f64 {
-    let mut total = CPU_CHAIN_SETUP_NS;
-    for stage in &plan.stages {
-        // One CPU kernel call per spatial stage: the kernel's own internal
-        // passes are already part of its measured per-pixel rate.
-        if let GpuSpatialStagePlan::Spatial { pass, .. } = stage {
-            total += pixels * cpu_ns_per_px(*pass);
-        }
-    }
-    total += pixels * CPU_COMPOSITE_NS_PER_PX;
-    total += cpu_upload_full_ns(pixels);
-    total
-}
-
-/// Raster pixels of one layer as a rate multiplier.
-fn raster_pixels(width: u32, height: u32) -> f64 {
-    f64::from(width) * f64::from(height)
+    // Keep the input raster as the proxy for the fixed composite canvas.
+    cpu += source_pixels * CPU_COMPOSITE_NS_PER_PX;
+    cpu += cpu_upload_full_ns(source_pixels);
+    (gpu, cpu)
 }
 
 /// Per-pixel GPU cost of one texture pass of this kernel.
@@ -585,6 +581,41 @@ mod tests {
         );
         assert_eq!(choice.reason, SpatialChainChoiceReason::GpuCheaper);
         assert!(choice.cpu_us > choice.gpu_us);
+    }
+
+    #[test]
+    fn cost_charges_expanded_stages_and_uploads_the_original_source() {
+        use mondrian_effects::GrowBoundsGrade;
+
+        let expansion =
+            EffectGpuSpatialPass::GrowBounds { grade: GrowBoundsGrade::new(4.0).unwrap() };
+        let later_expansion =
+            EffectGpuSpatialPass::GrowBounds { grade: GrowBoundsGrade::new(2.0).unwrap() };
+        let plan = chain_plan(vec![
+            spatial_stage(expansion, 1),
+            GpuSpatialStagePlan::PointOps {
+                operations: vec![EffectGpuPointOp::Grain { amount: 0.05 }],
+            },
+            spatial_stage(later_expansion, 1),
+        ]);
+        let (source_pixels, first_pixels, final_pixels) = (60.0, 252.0, 396.0);
+        let (gpu, cpu) = estimate_ns(&plan, 10, 6, false);
+        let expected_gpu = GPU_CHAIN_SETUP_NS
+            + first_pixels * gpu_ns_per_px(expansion)
+            + GPU_PASS_OVERHEAD_NS
+            + copy_out_ns(first_pixels)
+            + point_stage_ns(first_pixels, 1)
+            + final_pixels * gpu_ns_per_px(later_expansion)
+            + GPU_PASS_OVERHEAD_NS
+            + copy_out_ns(final_pixels)
+            + upload_ns(source_pixels);
+        let expected_cpu = CPU_CHAIN_SETUP_NS
+            + first_pixels * cpu_ns_per_px(expansion)
+            + final_pixels * cpu_ns_per_px(later_expansion)
+            + source_pixels * CPU_COMPOSITE_NS_PER_PX
+            + cpu_upload_full_ns(source_pixels);
+        assert!((gpu - expected_gpu).abs() < 1.0e-8);
+        assert!((cpu - expected_cpu).abs() < 1.0e-8);
     }
 
     #[test]

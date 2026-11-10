@@ -14714,6 +14714,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_channel_mixer_inverse_matches_float32_cpu() {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ChannelMixerGrade, EffectFloatFrameView,
+            EffectFrameExtent, EffectGraphBuilderState, EffectRenderOp, EffectValueFormat,
+            EffectWorkingPrecision,
+        };
+
+        let context = crate::GpuContext::new().await.expect("GPU for inverse matrix parity");
+        let forward = ChannelMixerGrade::new(
+            [
+                25.0, 50.0, 0.0, 25.0, 0.0, 100.0, 0.0, -50.0, 0.0, 0.0, 100.0, 0.0,
+            ],
+            false,
+        )
+        .unwrap();
+        let expected = [[-0.5, 2.0, 3.0, 0.5], [1.25, -0.5, 0.25, 1.0]];
+        let pixels = expected.map(|[r, g, b, alpha]| {
+            let [r, g, b] = forward.apply([r, g, b]);
+            [r, g, b, alpha]
+        });
+        let sampling = mondrian_core::ImageSampling::UNIT_SQUARE;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 2,
+            height: 1,
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: pixels.to_vec(),
+        });
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ChannelMixer { grade: forward.inverse().unwrap() });
+        let graph = compile_reference_render_graph(builder.finish()).unwrap();
+        let plan = lower_effect_graph_to_gpu_plan(&graph).unwrap();
+        let view = EffectFloatFrameView::new(
+            EffectFrameExtent::new(2, 1),
+            EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                ColorFrameAlpha::StraightCoverage,
+            ),
+            sampling,
+            &pixels,
+        );
+        let cpu = apply_compiled_effect_graph_rgba_f32(view, &graph, 0).unwrap();
+        let mut layer = spatial_test_layer(&frame);
+        layer.effect_plan = Some(&plan);
+        let (gpu, diagnostics) = readback_test_composite_with_diagnostics(
+            &context,
+            &[layer],
+            2,
+            1,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_spatial_chain_matches(&expected, &cpu);
+        assert_spatial_chain_matches(&cpu, &gpu);
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+        let error = max_spatial_float_error(&cpu, &gpu);
+        eprintln!("CMT-13 inverse matrix maximum absolute error {error:.9e}");
+    }
+
+    #[tokio::test]
     async fn gpu_channel_combiner_matches_the_cpu_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
             compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
