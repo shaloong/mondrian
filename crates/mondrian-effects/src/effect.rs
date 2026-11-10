@@ -8166,6 +8166,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
                 None,
             );
+            properties.define(EffectNode::channel_mixer_inverse_descriptor());
         }
         EffectType::DirectionalBlur => {
             define_builtin_property(
@@ -16872,30 +16873,30 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 0.0_f32, 0.0_f32, 100.0_f32, 0.0_f32,
             ];
             let monochrome_id = builtin_parameter_id(effect_type, "monochrome");
+            let inverse_id = builtin_parameter_id(effect_type, "inverse");
             Some(Arc::new(move |effect, context, graph| {
                 let mut authored = [0.0_f32; crate::CHANNEL_MIXER_WEIGHT_COUNT];
                 for (index, weight_id) in weights.iter().enumerate() {
                     authored[index] =
                         effect.evaluate_f32_parameter(weight_id, context.time, defaults[index]);
                 }
-                let monochrome = match effect.evaluate_parameter(&monochrome_id, context.time) {
-                    Some(PropertyValue::Bool(value)) => value,
-                    None => false,
-                    Some(_) => {
-                        return Err(EffectGraphBuildError::InvalidAuthorState {
-                            effect_key: effect.effect_type.key(),
-                            effect_id: effect.id,
-                            reason: "channel mixer monochrome must be a boolean".to_owned(),
-                        });
-                    }
+                let read_toggle = |id, name| match effect.evaluate_parameter(id, context.time) {
+                    Some(PropertyValue::Bool(value)) => Ok(value),
+                    None => Ok(false),
+                    Some(_) => Err(EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: format!("channel mixer {name} must be a boolean"),
+                    }),
                 };
-                let grade =
-                    crate::ChannelMixerGrade::new(authored, monochrome).map_err(|error| {
-                        EffectGraphBuildError::InvalidAuthorState {
-                            effect_key: effect.effect_type.key(),
-                            effect_id: effect.id,
-                            reason: error.to_string(),
-                        }
+                let monochrome = read_toggle(&monochrome_id, "monochrome")?;
+                let inverse = read_toggle(&inverse_id, "inverse")?;
+                let grade = crate::ChannelMixerGrade::new(authored, monochrome)
+                    .and_then(|grade| if inverse { grade.inverse() } else { Ok(grade) })
+                    .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: error.to_string(),
                     })?;
                 if !grade.is_identity() {
                     graph.append_unary(EffectRenderOp::ChannelMixer { grade });
@@ -21509,6 +21510,45 @@ mod tests {
             channel_mixer_op(&graph).is_none(),
             "the listed diagonal weights are the identity"
         );
+    }
+
+    #[test]
+    fn channel_mixer_inverts_an_authored_affine_matrix_and_migrates_old_nodes() {
+        let kind = EffectType::ChannelMixer;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        let inverse = kind.parameter_id("inverse").unwrap();
+        let inverse_path = kind.property_path("inverse");
+        assert!(effect.properties.remove_property(&inverse_path).is_some());
+        let wire = serde_json::to_string(&effect).unwrap();
+        let mut effect: EffectNode = serde_json::from_str(&wire).unwrap();
+        assert_eq!(
+            effect.evaluate_parameter(&inverse, tt(0)),
+            Some(PropertyValue::Bool(false))
+        );
+        for (key, value) in [
+            ("red_red", 25.0),
+            ("red_green", 50.0),
+            ("red_constant", 25.0),
+            ("green_constant", -50.0),
+        ] {
+            effect
+                .set_static_value_by_parameter(
+                    &kind.parameter_id(key).unwrap(),
+                    PropertyValue::Float(value),
+                )
+                .unwrap();
+        }
+        let forward =
+            build_effect_render_graph(&[effect.clone()], tt(0), TEST_WORKING_SPACE).unwrap();
+        let forward = channel_mixer_op(&forward).unwrap();
+        effect
+            .set_static_value_by_parameter(&inverse, PropertyValue::Bool(true))
+            .unwrap();
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE).unwrap();
+        let grade = channel_mixer_op(&graph).unwrap();
+        assert_eq!(&grade.weights()[..4], &[400.0, -200.0, 0.0, -200.0]);
+        let input = [-0.5, 2.0, 3.0];
+        assert_eq!(grade.apply(forward.apply(input)), input);
     }
 
     #[test]

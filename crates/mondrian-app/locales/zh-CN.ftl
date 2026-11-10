@@ -2416,6 +2416,7 @@ parameter-mondrian-effect-builtin-channel-mixer-green-constant-label = 绿 - 常
 parameter-mondrian-effect-builtin-channel-mixer-green-green-label = 绿 - 绿
 parameter-mondrian-effect-builtin-channel-mixer-green-red-label = 绿 - 红
 parameter-mondrian-effect-builtin-channel-mixer-monochrome-label = 单色
+parameter-mondrian-effect-builtin-channel-mixer-inverse-label = 反向矩阵
 parameter-mondrian-effect-builtin-channel-mixer-red-blue-label = 红 - 蓝
 parameter-mondrian-effect-builtin-channel-mixer-red-constant-label = 红 - 常量
 parameter-mondrian-effect-builtin-channel-mixer-red-green-label = 红 - 绿

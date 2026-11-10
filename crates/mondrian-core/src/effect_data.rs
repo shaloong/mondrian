@@ -870,9 +870,18 @@ impl<'de> Deserialize<'de> for EffectNode {
         let StoredEffectNode { id, effect_type, properties, params, is_enabled } =
             StoredEffectNode::deserialize(deserializer)?;
         let mut effect = Self { id, effect_type, properties, params, is_enabled };
-        if effect.effect_type == EffectType::ChannelCombiner {
-            let mut descriptor = Self::channel_combiner_second_layer_source_descriptor();
-            let legacy_path = effect.effect_type.property_path("source_layer");
+        let added_property = match effect.effect_type {
+            EffectType::ChannelCombiner => Some((
+                Self::channel_combiner_second_layer_source_descriptor(),
+                "source_layer",
+            )),
+            EffectType::ChannelMixer => {
+                Some((Self::channel_mixer_inverse_descriptor(), "monochrome"))
+            }
+            _ => None,
+        };
+        if let Some((mut descriptor, anchor)) = added_property {
+            let legacy_path = effect.effect_type.property_path(anchor);
             let namespaced_legacy = namespaced_effect_path(id, &legacy_path);
             if effect.properties.property(&namespaced_legacy).is_some() {
                 descriptor.path = namespaced_effect_path(id, &descriptor.path);
@@ -891,6 +900,20 @@ impl<'de> Deserialize<'de> for EffectNode {
 }
 
 impl EffectNode {
+    /// Inverse affine transform control shared by the definition and project loading.
+    pub fn channel_mixer_inverse_descriptor() -> PropertyDescriptor {
+        let effect_type = EffectType::ChannelMixer;
+        let mut descriptor = PropertyDescriptor::new(
+            effect_type.property_path("inverse"),
+            "反向",
+            PropertyValue::Bool(false),
+        )
+        .with_parameter_id(effect_type.parameter_id("inverse").expect("built-in parameter id"));
+        descriptor.ui_metadata.group_name = Some("通道混合器".to_owned());
+        descriptor.ui_metadata.display_order = Some(13);
+        descriptor
+    }
+
     /// Static source field shared by the definition and legacy Channel Combiner loading.
     pub fn channel_combiner_second_layer_source_descriptor() -> PropertyDescriptor {
         let effect_type = EffectType::ChannelCombiner;

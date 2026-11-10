@@ -2488,6 +2488,7 @@ parameter-mondrian-effect-builtin-channel-mixer-green-constant-label = Green - C
 parameter-mondrian-effect-builtin-channel-mixer-green-green-label = Green - Green
 parameter-mondrian-effect-builtin-channel-mixer-green-red-label = Green - Red
 parameter-mondrian-effect-builtin-channel-mixer-monochrome-label = Monochrome
+parameter-mondrian-effect-builtin-channel-mixer-inverse-label = Invert Matrix
 parameter-mondrian-effect-builtin-channel-mixer-red-blue-label = Red - Blue
 parameter-mondrian-effect-builtin-channel-mixer-red-constant-label = Red - Constant
 parameter-mondrian-effect-builtin-channel-mixer-red-green-label = Red - Green

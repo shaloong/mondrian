@@ -1,4 +1,4 @@
-//! Channel mixer (effect list COL-13).
+//! Channel mixer (COL-13) and inverse color matrix (CMT-13).
 //!
 //! Builds each output channel from a weighted sum of the three input channels plus a constant.
 //! The weights are authored as percentages, which is how the effect list describes them: `100`
@@ -15,7 +15,7 @@ pub const CHANNEL_MIXER_WEIGHT_MIN: f32 = -200.0;
 /// Authored weight bounds in percent.
 pub const CHANNEL_MIXER_WEIGHT_MAX: f32 = 200.0;
 
-/// One authored channel mixer setup.
+/// The resolved channel mixer transform.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChannelMixerGrade {
     /// Weights in percent, ordered red output (red, green, blue, constant), then green, then blue.
@@ -32,6 +32,12 @@ pub enum ChannelMixerError {
         /// Zero-based weight index.
         index: usize,
     },
+    /// Repeating a single output removes two independent color channels.
+    #[error("channel mixer cannot invert a monochrome output")]
+    MonochromeInverse,
+    /// The authored matrix has no stable Float32 inverse.
+    #[error("channel mixer matrix is singular or too ill-conditioned to invert in Float32")]
+    UnstableInverse,
 }
 
 impl ChannelMixerGrade {
@@ -50,7 +56,39 @@ impl ChannelMixerGrade {
         Ok(Self { weights, monochrome })
     }
 
-    /// Authored weights in percent.
+    /// Resolve the inverse of the authored affine transform before pixel execution.
+    pub fn inverse(self) -> Result<Self, ChannelMixerError> {
+        use glam::{DMat3, DVec3};
+
+        if self.monochrome {
+            return Err(ChannelMixerError::MonochromeInverse);
+        }
+        let w = self.weights.map(|weight| f64::from(weight) / 100.0);
+        let matrix =
+            DMat3::from_cols_array(&[w[0], w[4], w[8], w[1], w[5], w[9], w[2], w[6], w[10]]);
+        if matrix.determinant() == 0.0 {
+            return Err(ChannelMixerError::UnstableInverse);
+        }
+        let inverse = matrix.inverse();
+        let norm = |matrix: DMat3| {
+            (matrix.x_axis.abs() + matrix.y_axis.abs() + matrix.z_axis.abs()).max_element()
+        };
+        // The bound is scale-relative: uniformly small but well-conditioned
+        // transforms remain invertible. Reject unstable cancellation in Float32.
+        if norm(matrix) * norm(inverse) > 1.0e6 {
+            return Err(ChannelMixerError::UnstableInverse);
+        }
+        let offset = -(inverse * DVec3::new(w[3], w[7], w[11]));
+        let [a, b, c, d, e, f, g, h, i] = inverse.to_cols_array();
+        let weights = [a, d, g, offset.x, b, e, h, offset.y, c, f, i, offset.z]
+            .map(|value| (value * 100.0) as f32);
+        if weights.iter().any(|value| !value.is_finite()) {
+            return Err(ChannelMixerError::UnstableInverse);
+        }
+        Ok(Self { weights, monochrome: false })
+    }
+
+    /// Resolved weights in percent. An inverse may exceed the authoring bounds.
     pub const fn weights(self) -> [f32; CHANNEL_MIXER_WEIGHT_COUNT] {
         self.weights
     }
@@ -114,6 +152,26 @@ mod tests {
     fn identity_weights_are_the_identity() {
         assert!(grade(IDENTITY).is_identity());
         assert_eq!(grade(IDENTITY).apply([0.25, -0.5, 2.0]), [0.25, -0.5, 2.0]);
+    }
+
+    #[test]
+    fn inverse_rejects_unrecoverable_or_ill_conditioned_matrices() {
+        let mut weights = IDENTITY;
+        weights[10] = 0.0;
+        assert_eq!(
+            grade(weights).inverse(),
+            Err(ChannelMixerError::UnstableInverse)
+        );
+        weights[10] = 1.0e-6;
+        assert_eq!(
+            grade(weights).inverse(),
+            Err(ChannelMixerError::UnstableInverse)
+        );
+        let monochrome = ChannelMixerGrade::new(IDENTITY, true).unwrap();
+        assert_eq!(
+            monochrome.inverse(),
+            Err(ChannelMixerError::MonochromeInverse)
+        );
     }
 
     #[test]
