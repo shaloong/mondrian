@@ -429,7 +429,13 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
     working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<Vec<ViewerGpuExecutionLayer>, GpuCompositingBlockerReason> {
-    gpu_composite_layers_with_auxiliary(resolved, working_color_space, scratch, &[])
+    gpu_composite_layers_with_auxiliary(
+        resolved,
+        working_color_space,
+        scratch,
+        &[],
+        EffectFrameExtent::new(1, 1),
+    )
 }
 
 fn gpu_composite_layers_with_auxiliary(
@@ -437,6 +443,7 @@ fn gpu_composite_layers_with_auxiliary(
     working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
     registered: &[PreparedAuxiliaryRasters<'_>],
+    canvas_extent: EffectFrameExtent,
 ) -> Result<Vec<ViewerGpuExecutionLayer>, GpuCompositingBlockerReason> {
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
@@ -498,6 +505,7 @@ fn gpu_composite_layers_with_auxiliary(
                     layer,
                     scratch,
                     layer_auxiliary,
+                    canvas_extent,
                 )?)));
                 has_composited_layer |= layer.opacity.clamp(0.0, 1.0) > 0.0;
             }
@@ -532,12 +540,14 @@ fn gpu_composite_layers_with_auxiliary(
                             working_color_space,
                             scratch,
                             left_auxiliary,
+                            canvas_extent,
                         )?,
                         right: gpu_transition_input(
                             right,
                             working_color_space,
                             scratch,
                             right_auxiliary,
+                            canvas_extent,
                         )?,
                         progress,
                     },
@@ -595,8 +605,15 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
     scratch: &mut TimelineCompositeScratch,
     cpu_prefix_grant: HeterogeneousCpuPrefixBatchGrant,
     registered: &[PreparedAuxiliaryRasters<'_>],
+    canvas_extent: EffectFrameExtent,
 ) -> Result<PreparedPreviewViewerGpuLayers, PreviewViewerGpuLayerPreparationError> {
-    match gpu_composite_layers_with_auxiliary(resolved, working_color_space, scratch, registered) {
+    match gpu_composite_layers_with_auxiliary(
+        resolved,
+        working_color_space,
+        scratch,
+        registered,
+        canvas_extent,
+    ) {
         Ok(layers) => return Ok(PreparedPreviewViewerGpuLayers::Ordinary { layers }),
         Err(GpuCompositingBlockerReason::EffectRequiresCpu) => {}
         Err(reason) => {
@@ -604,7 +621,12 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
         }
     }
 
-    let mut builder = HeterogeneousPreviewLayerBuilder::new(working_color_space, sampling, scratch);
+    let mut builder = HeterogeneousPreviewLayerBuilder::new(
+        working_color_space,
+        sampling,
+        scratch,
+        canvas_extent,
+    );
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
     for element in resolved {
@@ -644,9 +666,9 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                     continue;
                 }
                 layers.push(ViewerGpuExecutionLayer::Source(Box::new(
-                    gpu_solid_source(layer, builder.scratch, None).map_err(|reason| {
-                        PreviewViewerGpuLayerPreparationError::Compositing { reason }
-                    })?,
+                    gpu_solid_source(layer, builder.scratch, None, canvas_extent).map_err(
+                        |reason| PreviewViewerGpuLayerPreparationError::Compositing { reason },
+                    )?,
                 )));
                 has_composited_layer = true;
             }
@@ -714,6 +736,7 @@ struct HeterogeneousPreviewLayerBuilder<'a> {
     working_color_space: WorkingColorSpace,
     sampling: mondrian_core::ImageSampling,
     scratch: &'a mut TimelineCompositeScratch,
+    canvas_extent: EffectFrameExtent,
     identity_effect_plan: Option<Arc<mondrian_effects::CompiledEffectGpuPlan>>,
     items: Vec<HeterogeneousCpuPrefixBatchItem>,
     continuations: Vec<PreviewHeterogeneousGpuContinuationMetadata>,
@@ -724,11 +747,13 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         working_color_space: WorkingColorSpace,
         sampling: mondrian_core::ImageSampling,
         scratch: &'a mut TimelineCompositeScratch,
+        canvas_extent: EffectFrameExtent,
     ) -> Self {
         Self {
             working_color_space,
             sampling,
             scratch,
+            canvas_extent,
             identity_effect_plan: None,
             items: Vec::new(),
             continuations: Vec::new(),
@@ -893,9 +918,9 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                 if !opacity_has_contribution(layer.opacity) {
                     return Ok(ViewerGpuTransitionInput::Transparent);
                 }
-                gpu_solid_source(layer, self.scratch, None).map_err(|reason| {
-                    PreviewViewerGpuLayerPreparationError::Compositing { reason }
-                })?
+                gpu_solid_source(layer, self.scratch, None, self.canvas_extent).map_err(
+                    |reason| PreviewViewerGpuLayerPreparationError::Compositing { reason },
+                )?
             }
             ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, prepared_route } => {
                 if !opacity_has_contribution(layer.opacity) {
@@ -1020,9 +1045,8 @@ fn gpu_media_source(
             (identity, Some(spatial))
         }
     };
-    let (native_source, transform) = if auxiliary.is_some() {
-        // Registered Mattes and pixel-unit maps must see the same primary grid
-        // used by CPU Preview. Keep a native surface at that grid for this chain.
+    let (native_source, transform) = if auxiliary.is_some() || effect_graph.has_raster_growth() {
+        // Registration and raster expansion use the exact CPU Preview grid.
         (frame.native_source(), transform)
     } else {
         native_source_for_projected_transform(frame, transform)
@@ -1120,32 +1144,34 @@ fn gpu_solid_source(
     layer: &TimelineSolidColorLayer,
     scratch: &mut TimelineCompositeScratch,
     auxiliary: Option<&PreparedAuxiliaryRasters<'_>>,
+    canvas_extent: EffectFrameExtent,
 ) -> Result<ViewerGpuSourceLayer, GpuCompositingBlockerReason> {
     if !is_preview_gpu_transform_supported(layer.transform) {
         return Err(GpuCompositingBlockerReason::UnsupportedTransform);
     }
-    let (effect_plan, spatial_plan) = if let Some(auxiliary) = auxiliary {
-        let GpuRoute::Spatial(pipeline) = scratch
-            .get_or_lower_effect_gpu_route(&layer.effect_graph)
-            .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?
-        else {
-            return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+    let (effect_plan, spatial_plan) =
+        if auxiliary.is_some() || layer.effect_graph.has_raster_growth() {
+            let GpuRoute::Spatial(pipeline) = scratch
+                .get_or_lower_effect_gpu_route(&layer.effect_graph)
+                .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?
+            else {
+                return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
+            };
+            let (identity, spatial) = gpu_spatial_source_plan(
+                pipeline,
+                &layer.effect_graph,
+                canvas_extent,
+                true,
+                auxiliary,
+                scratch,
+            )?;
+            (identity, Some(spatial))
+        } else {
+            let plan = scratch
+                .get_or_lower_effect_gpu_plan(&layer.effect_graph)
+                .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+            (plan, None)
         };
-        let (identity, spatial) = gpu_spatial_source_plan(
-            pipeline,
-            &layer.effect_graph,
-            auxiliary.binding.primary_extent,
-            true,
-            Some(auxiliary),
-            scratch,
-        )?;
-        (identity, Some(spatial))
-    } else {
-        let plan = scratch
-            .get_or_lower_effect_gpu_plan(&layer.effect_graph)
-            .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
-        (plan, None)
-    };
     Ok(ViewerGpuSourceLayer::SolidColor { layer: layer.clone(), effect_plan, spatial_plan })
 }
 
@@ -1154,6 +1180,7 @@ fn gpu_transition_input(
     working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
     auxiliary: Option<&PreparedAuxiliaryRasters<'_>>,
+    canvas_extent: EffectFrameExtent,
 ) -> Result<ViewerGpuTransitionInput, GpuCompositingBlockerReason> {
     let source = match input {
         ResolvedPreviewTransitionInput::Transparent => {
@@ -1164,7 +1191,7 @@ fn gpu_transition_input(
         }
         ResolvedPreviewTransitionInput::SolidColor(layer)
         | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, .. } => {
-            gpu_solid_source(layer, scratch, auxiliary)?
+            gpu_solid_source(layer, scratch, auxiliary, canvas_extent)?
         }
         ResolvedPreviewTransitionInput::Media {
             frame,
@@ -1364,6 +1391,7 @@ mod heterogeneous_tests {
                 &mut TimelineCompositeScratch::default(),
                 cpu_grant(),
                 &[],
+                EffectFrameExtent::new(1, 1),
             )
             .expect("same canonical Viewer preparation");
             let PreparedPreviewViewerGpuLayers::Ordinary { layers } = prepared else {
@@ -1562,6 +1590,7 @@ mod heterogeneous_tests {
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
             &[],
+            EffectFrameExtent::new(1, 1),
         )
         .expect("ordinary Viewer plan");
 
@@ -1621,6 +1650,7 @@ mod heterogeneous_tests {
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
             &[],
+            EffectFrameExtent::new(1, 1),
         )
         .expect("heterogeneous Viewer plan");
         let PreparedPreviewViewerGpuLayers::Heterogeneous { layers, cpu_prefix, continuations } =
@@ -1672,6 +1702,7 @@ mod heterogeneous_tests {
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
             &[],
+            EffectFrameExtent::new(1, 1),
         )
         .expect("heterogeneous Solid Color Viewer plan");
         let PreparedPreviewViewerGpuLayers::Heterogeneous { layers, cpu_prefix, continuations } =
@@ -1726,6 +1757,7 @@ mod heterogeneous_tests {
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
             &[],
+            EffectFrameExtent::new(1, 1),
         )
         .expect("procedural Solid Cross Dissolve endpoint");
         let PreparedPreviewViewerGpuLayers::Heterogeneous { layers, cpu_prefix, continuations } =
@@ -1796,6 +1828,7 @@ mod heterogeneous_tests {
             &mut TimelineCompositeScratch::default(),
             cpu_grant(),
             &[],
+            EffectFrameExtent::new(1, 1),
         )
         .expect("heterogeneous Cross Dissolve plan");
         let PreparedPreviewViewerGpuLayers::Heterogeneous { layers, cpu_prefix, continuations } =
@@ -1926,6 +1959,42 @@ mod heterogeneous_tests {
             "a fused point graph never lowers a chain"
         );
         assert!(scratch.spatial_chain_choice_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn a_grow_bounds_solid_uses_the_viewer_canvas_grid() {
+        let mut builder = mondrian_effects::EffectGraphBuilderState::new();
+        builder.append_unary(mondrian_effects::EffectRenderOp::GrowBounds {
+            grade: mondrian_effects::GrowBoundsGrade::new(2.5).unwrap(),
+        });
+        let graph = mondrian_effects::compile_reference_render_graph(builder.finish()).unwrap();
+        let extent = EffectFrameExtent::new(7, 5);
+        let mut scratch = TimelineCompositeScratch::default();
+        scratch.set_spatial_chain_preference(mondrian_renderer::SpatialChainPreference::ForceGpu);
+        let plan = prepare_gpu_composite_layers_with_heterogeneous_effects(
+            &[ordinary_solid(graph, 31)],
+            WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &mut scratch,
+            cpu_grant(),
+            &[],
+            extent,
+        )
+        .unwrap();
+        let PreparedPreviewViewerGpuLayers::Ordinary { layers } = plan else {
+            panic!("Grow Bounds has a whole-layer GPU pass");
+        };
+        let ViewerGpuSourceLayer::SolidColor { spatial_plan: Some(plan), .. } =
+            source_layer(&layers)
+        else {
+            panic!("the source carries a spatial plan");
+        };
+        let admitted = gpu_spatial_chain_plan_with_auxiliary(&plan.pipeline, 7, 5, &[]).unwrap();
+        assert_eq!(
+            admitted.output_bounds.extent(),
+            EffectFrameExtent::new(13, 11)
+        );
+        assert_eq!(admitted.output_bounds.origin(), [-3; 2]);
     }
 
     #[test]

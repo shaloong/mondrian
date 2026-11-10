@@ -173,7 +173,7 @@ fn processor_source_preplanned_production_acquire_preserves_gpu_only_layers_and_
     assert!(
         matches!(crate::app::preview_viewer_plan::prepare_gpu_composite_layers_with_heterogeneous_effects(
         &evaluation.elements,color.working_color_space(),evaluation.sampling,&mut runtime.scratch.borrow_mut(),
-        runtime.heterogeneous_effect_decision.get().cpu_prefix_grant(), &[]).unwrap(),
+        runtime.heterogeneous_effect_decision.get().cpu_prefix_grant(), &[], mondrian_effects::EffectFrameExtent::new(1, 1)).unwrap(),
         crate::app::preview_viewer_plan::PreparedPreviewViewerGpuLayers::Ordinary{layers} if layers.len()==2)
     );
     let FrameResolutionOutcome::Ready(reused) =
@@ -727,7 +727,7 @@ fn preplanned_real_media(source_width: u32, source_height: u32, modes: &[u8]) {
             }
             assert!(matches!(crate::app::preview_viewer_plan::prepare_gpu_composite_layers_with_heterogeneous_effects(
                 &output.plan.elements,color.working_color_space(),output.plan.sampling,&mut runtime.scratch.borrow_mut(),
-                runtime.heterogeneous_effect_decision.get().cpu_prefix_grant(), &[]).unwrap(),
+                runtime.heterogeneous_effect_decision.get().cpu_prefix_grant(), &[], mondrian_effects::EffectFrameExtent::new(1, 1)).unwrap(),
                 crate::app::preview_viewer_plan::PreparedPreviewViewerGpuLayers::Ordinary{..}));
             drop(output);
         }

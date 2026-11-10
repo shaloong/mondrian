@@ -18627,6 +18627,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spatial_chain_grow_bounds_matches_float32_cpu() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_pipeline,
+            EffectExecutionSession, EffectFloatFrameView, EffectFrameExtent,
+            EffectGraphBuilderState, EffectProcessorControl, EffectRenderOp, EffectValueFormat,
+            EffectWorkingPrecision, GrowBoundsGrade,
+        };
+
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for Grow Bounds parity");
+        let (width, height) = (7, 5);
+        let working_color_space = WorkingColorSpace::LinearRec709;
+        let sampling = mondrian_core::ImageSampling::UNIT_SQUARE;
+        let pixels = (0..width * height)
+            .map(|index| match index % 4 {
+                0 => [0.0; 4],
+                alpha => [index as f32 * 0.125 - 1.0, 0.5, 2.25, alpha as f32 * 0.25],
+            })
+            .collect::<Vec<_>>();
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width,
+            height,
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: working_color_space,
+            data: pixels.clone(),
+        });
+        let input = EffectFloatFrameView::new(
+            EffectFrameExtent::new(width, height),
+            EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                ColorFrameAlpha::StraightCoverage,
+            ),
+            sampling,
+            &pixels,
+        );
+        for paddings in [&[2.25][..], &[1.0, 2.25][..]] {
+            let mut builder = EffectGraphBuilderState::new();
+            for &padding in paddings {
+                builder.append_unary(EffectRenderOp::GrowBounds {
+                    grade: GrowBoundsGrade::new(padding).unwrap(),
+                });
+            }
+            let graph = compile_reference_render_graph(builder.finish()).unwrap();
+            let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            let bounds = graph.output_raster_bounds(input.extent()).unwrap();
+            let output = bounds.extent();
+            let [x, y] = bounds.origin();
+            let mut layer = spatial_test_layer(&frame);
+            layer.transform[2] = -x as f32;
+            layer.transform[5] = -y as f32;
+            let layers = [GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context,
+                &layers,
+                output.width(),
+                output.height(),
+                working_color_space,
+            );
+            let expected = EffectExecutionSession::default()
+                .apply_compiled_rgba_f32(
+                    input,
+                    &graph,
+                    0,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            assert_eq!(expected.extent(), output);
+            assert_eq!(diagnostics.spatial_effect_passes, paddings.len() as u64);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+            assert_eq!(actual[0], [0.0; 4]);
+            assert!(actual.iter().any(|pixel| pixel[0] < 0.0 && pixel[2] > 1.0));
+            let error = max_spatial_float_error(expected.pixels(), &actual);
+            eprintln!("Grow Bounds {bounds:?}, maximum absolute error {error:.9e}");
+            assert_spatial_chain_matches(expected.pixels(), &actual);
+        }
+    }
+
+    #[tokio::test]
     async fn spatial_chain_runs_on_a_single_layer_before_compositing() {
         use mondrian_effects::{EffectRenderOp, TwirlGrade};
 

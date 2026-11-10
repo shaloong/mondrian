@@ -1724,6 +1724,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         &mut scratch,
                         heterogeneous_decision.cpu_prefix_grant(),
                         &registered,
+                        mondrian_effects::EffectFrameExtent::new(width, height),
                     )
                     .map_err(|error| {
                         let blocker = match &error {

@@ -383,6 +383,7 @@ fn preview_displacement_map_projects_the_expanded_output_to_the_original_layer()
             0,
         ),
         &auxiliary,
+        mondrian_effects::EffectFrameExtent::new(3, 1),
     )
     .expect("Viewer GPU spatial layer plan");
     let PreparedPreviewViewerGpuLayers::Ordinary { layers } = plan else {

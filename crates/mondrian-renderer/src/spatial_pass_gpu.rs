@@ -69,6 +69,7 @@ pub(crate) struct EffectSpatialGpu {
     chromatic_aberration_removal: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
+    grow_bounds: wgpu::RenderPipeline,
     blanking_fill_horizontal: wgpu::RenderPipeline,
     blanking_fill_vertical: wgpu::RenderPipeline,
     blanking_fill_warp: wgpu::RenderPipeline,
@@ -1171,6 +1172,35 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let grow_bounds = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.grow-bounds"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_grow_bounds"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let split = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.split"),
             layout: Some(&layout),
@@ -2165,6 +2195,7 @@ impl EffectSpatialGpu {
             chromatic_aberration_removal,
             basic_3d,
             camera_view,
+            grow_bounds,
             blanking_fill_horizontal,
             blanking_fill_vertical,
             blanking_fill_warp,
@@ -2993,6 +3024,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::ChromaticAberrationRemoval { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
+            EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
             EffectGpuSpatialPass::BlankingFill { grade } => {
                 Ok(if grade.warps_top_layer() { 1 } else { 2 })
             }
@@ -3527,6 +3559,39 @@ impl EffectSpatialGpu {
             }
             EffectGpuSpatialPass::BlankingFill { grade } => {
                 return self.record_blanking_fill(device, encoder, *grade, source, scratch);
+            }
+            EffectGpuSpatialPass::GrowBounds { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let input_extent =
+                    mondrian_effects::EffectFrameExtent::new(source.width(), source.height());
+                let extent = mondrian_effects::EffectRasterBounds::from_extent(input_extent)
+                    .checked_outset(grade.output_outset())
+                    .map(mondrian_effects::EffectRasterBounds::extent);
+                if extent != Some(mondrian_effects::EffectFrameExtent::new(width, height))
+                    || (destination.width(), destination.height()) != (width, height)
+                {
+                    return Err(EffectSpatialGpuError::UnsupportedPass(
+                        "grow_bounds_output_geometry",
+                    ));
+                }
+                let uniforms = SpatialPassUniform {
+                    size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+                    params: grade.gpu_controls(),
+                    extra: [0.0; 4],
+                    aces: [0.0; 4],
+                    extra1: [0.0; 4],
+                };
+                let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+                let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.grow_bounds,
+                    &input_view,
+                    &output_view,
+                    &uniforms,
+                );
+                return Ok(destination.clone());
             }
             EffectGpuSpatialPass::Deband { grade } => {
                 return self.record_deband(device, encoder, *grade, source, scratch, width, height);
@@ -6087,6 +6152,12 @@ fn load_window(p: vec2<i32>, repeat_edge: bool) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     return load_clamped(p);
+}
+
+@fragment
+fn fs_grow_bounds(in: VsOut) -> @location(0) vec4<f32> {
+    let padding = vec2<i32>(i32(uniforms.params.x));
+    return load_window(vec2<i32>(in.position.xy) - padding, false);
 }
 
 fn premultiply(sample: vec4<f32>) -> vec4<f32> {
