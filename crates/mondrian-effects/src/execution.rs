@@ -188,8 +188,10 @@ pub enum EffectExecutionError {
         /// Stable machine-readable reason.
         reason: &'static str,
     },
-    /// Actual auxiliary extents and scalar scratch exceed the invocation grant.
-    #[error("auxiliary graph requires {required_bytes} working bytes; grant is {budget_bytes}")]
+    /// Actual auxiliary or expanded raster extents exceed the invocation grant.
+    #[error(
+        "effect raster graph requires {required_bytes} working bytes; grant is {budget_bytes}"
+    )]
     AuxiliaryWorkingSetBudgetExceeded {
         /// Cold raster and scratch peak, excluding borrowed host inputs.
         required_bytes: usize,
@@ -1108,21 +1110,23 @@ fn scalar_processor_reservations(
             | EffectGraphNodeKind::CustomSource { op: EffectRenderOp::Custom { processor: Some(binding), .. }, .. }
             if binding.float32_factory().is_some()))
     });
-    let auxiliary_reservations =
-        if compiled.auxiliary_inputs().is_empty() && !compiled.has_auxiliary_effects() {
-            None
-        } else {
-            Some(crate::float_working_set::reservations(
-                compiled,
-                crate::EffectFrameExtent::new(width, height),
-                &auxiliary
-                    .iter()
-                    .map(|input| (input.slot, input.raster.frame.extent()))
-                    .collect::<Vec<_>>(),
-                control,
-            )?)
-        };
-    if !has_factory && !has_resident_processors && auxiliary_reservations.is_none() {
+    let raster_reservations = if compiled.auxiliary_inputs().is_empty()
+        && !compiled.has_auxiliary_effects()
+        && !compiled.has_raster_growth()
+    {
+        None
+    } else {
+        Some(crate::float_working_set::reservations(
+            compiled,
+            crate::EffectFrameExtent::new(width, height),
+            &auxiliary
+                .iter()
+                .map(|input| (input.slot, input.raster.frame.extent()))
+                .collect::<Vec<_>>(),
+            control,
+        )?)
+    };
+    if !has_factory && !has_resident_processors && raster_reservations.is_none() {
         return Ok(None);
     }
     // The entire route is checked before its first stateful callback. Slot or
@@ -1172,7 +1176,7 @@ fn scalar_processor_reservations(
                 pooled = pooled.saturating_add(1);
             }
         }
-        let node_extent = auxiliary_reservations
+        let node_extent = raster_reservations
             .as_ref()
             .map_or(crate::EffectFrameExtent::new(width, height), |values| {
                 values[step].1
@@ -1254,10 +1258,10 @@ fn scalar_processor_reservations(
             .saturating_add(scratch_frames)
             .saturating_mul(frame_bytes)
             .saturating_add(mask_bytes);
-        let occupied = auxiliary_reservations.as_ref().map_or(occupied, |values| values[step].0);
+        let occupied = raster_reservations.as_ref().map_or(occupied, |values| values[step].0);
         let required =
             occupied.saturating_add(processor_bytes).saturating_add(feedback_route_bytes);
-        if auxiliary_reservations.is_some() && required > budget {
+        if raster_reservations.is_some() && required > budget {
             return Err(EffectFloatExecutionError::AuxiliaryInput(
                 EffectExecutionError::AuxiliaryWorkingSetBudgetExceeded {
                     required_bytes: required,
@@ -1829,6 +1833,16 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     source,
                     &mut processor,
                 )?;
+                if let EffectRenderOp::GrowBounds { grade } = op {
+                    if grade.output_outset() != [0, 0] {
+                        let expanded =
+                            crate::apply_grow_bounds_controlled(&source, *grade, control)?;
+                        release_float_execution_buffer(&mut buffer_pool, source);
+                        source = expanded;
+                    }
+                    outputs.insert(node.id, source);
+                    continue;
+                }
                 let supported = if matches!(op, EffectRenderOp::Custom { .. }) {
                     let caller_owned_bytes = outputs
                         .values()
@@ -3030,6 +3044,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CameraView { .. } => "camera_view",
         EffectRenderOp::BlankingFill { .. } => "blanking_fill",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
+        EffectRenderOp::GrowBounds { .. } => "grow_bounds",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

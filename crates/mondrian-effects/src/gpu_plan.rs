@@ -1097,6 +1097,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CameraView { .. } => "camera_view",
         EffectRenderOp::BlankingFill { .. } => "blanking_fill",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
+        EffectRenderOp::GrowBounds { .. } => "grow_bounds",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

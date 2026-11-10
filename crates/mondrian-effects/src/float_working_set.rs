@@ -109,12 +109,10 @@ pub(crate) fn reservations(
                 taken.push(raster);
             }
         }
-        let outset = match &node.kind {
-            EffectGraphNodeKind::AuxiliaryEffect {
-                op: crate::EffectRenderOp::DisplacementMap { grade },
-                ..
-            } if !primary_extent.is_empty() => grade.output_outset(),
-            _ => [0, 0],
+        let outset = if primary_extent.is_empty() {
+            [0, 0]
+        } else {
+            node.output_outset()
         };
         let grows = outset != [0, 0];
         let (raster, scratch) = match &node.kind {
@@ -164,19 +162,17 @@ pub(crate) fn reservations(
                 },
                 0,
             ),
-            EffectGraphNodeKind::UnaryEffect { op, .. }
-            | EffectGraphNodeKind::DomainEffect { op, .. } => (
-                *taken.first().ok_or_else(|| missing(*id))?,
-                crate::adjustment::render_op_f32_scratch_frames(op),
-            ),
-            EffectGraphNodeKind::AuxiliaryEffect { .. } if grows => {
+            EffectGraphNodeKind::UnaryEffect { .. }
+            | EffectGraphNodeKind::DomainEffect { .. }
+            | EffectGraphNodeKind::AuxiliaryEffect { .. }
+                if grows =>
+            {
                 let input = taken.first().ok_or_else(|| missing(*id))?;
                 let extent = crate::EffectRasterBounds::from_extent(input.extent)
                     .checked_outset(outset)
                     .ok_or(EffectFloatFrameError::ExtentOverflow)?
                     .extent();
-                // Growth writes a disjoint output while borrowing the primary
-                // allocation as its premultiplied read plane.
+                // Growth writes a disjoint output while the primary is still live.
                 (
                     Raster {
                         extent,
@@ -186,7 +182,9 @@ pub(crate) fn reservations(
                     0,
                 )
             }
-            EffectGraphNodeKind::AuxiliaryEffect { op, .. } => (
+            EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. }
+            | EffectGraphNodeKind::AuxiliaryEffect { op, .. } => (
                 *taken.first().ok_or_else(|| missing(*id))?,
                 crate::adjustment::render_op_f32_scratch_frames(op),
             ),

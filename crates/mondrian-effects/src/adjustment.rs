@@ -497,6 +497,12 @@ pub(crate) fn apply_render_op(
         EffectRenderOp::DisplacementMap { .. } => {
             return Err(EffectExecutionError::AuxiliaryRequiresFloat32);
         }
+        EffectRenderOp::GrowBounds { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "grow_bounds",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::SmartBlur { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "smart_blur",
@@ -1219,6 +1225,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
             }
         }
         EffectRenderOp::DisplacementMap { .. } => 1,
+        EffectRenderOp::GrowBounds { .. } => 0,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
         EffectRenderOp::Minimax { .. } => 4,
@@ -1792,6 +1799,7 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             Ok(true)
         }
         EffectRenderOp::DisplacementMap { .. } => Ok(false),
+        EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),
         EffectRenderOp::ChromaticAberrationRemoval { grade } => {
             crate::chromatic_aberration_removal::apply_chromatic_aberration_removal_f32_controlled(
                 working,

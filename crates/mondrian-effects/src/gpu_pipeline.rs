@@ -277,6 +277,11 @@ pub enum EffectGpuSpatialPass {
         /// Validated geometry and appearance.
         grade: crate::BlankingFillGrade,
     },
+    /// Preserve the source texels in a larger transparent raster.
+    GrowBounds {
+        /// Checked padding on each side.
+        grade: crate::GrowBoundsGrade,
+    },
     /// Fill composited through an independently sampled alpha matte.
     FillMatte {
         /// Authored feather, inversion, RGB and opacity.
@@ -311,6 +316,7 @@ impl EffectGpuSpatialPass {
     pub fn output_outset(self) -> [u32; 2] {
         match self {
             Self::DisplacementMap { grade, .. } => grade.output_outset(),
+            Self::GrowBounds { grade } => grade.output_outset(),
             _ => [0, 0],
         }
     }
@@ -383,6 +389,7 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. } => "fill_matte",
             Self::ChannelCombinerLayer { .. } => "channel_combiner_layer",
             Self::DisplacementMap { .. } => "displacement_map",
+            Self::GrowBounds { .. } => "grow_bounds",
         }
     }
 
@@ -473,6 +480,7 @@ impl EffectGpuSpatialPass {
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
+            Self::GrowBounds { grade } => grade.output_outset()[0],
         }
     }
 
@@ -549,6 +557,7 @@ impl EffectGpuSpatialPass {
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
+            Self::GrowBounds { grade } => grade.output_outset()[1],
         }
     }
 }
@@ -992,6 +1001,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::BlankingFill { grade } => {
             Some(EffectGpuSpatialPass::BlankingFill { grade: *grade })
+        }
+        EffectRenderOp::GrowBounds { grade } => {
+            Some(EffectGpuSpatialPass::GrowBounds { grade: *grade })
         }
         EffectRenderOp::DisplacementMap { .. } => None,
         _ => None,

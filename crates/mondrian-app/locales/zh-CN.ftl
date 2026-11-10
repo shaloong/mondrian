@@ -3421,6 +3421,11 @@ parameter-mondrian-effect-builtin-blanking-fill-stretch-split-tb-label = 上下�
 parameter-mondrian-effect-builtin-blanking-fill-stretch-top-label = 顶部边缘
 parameter-mondrian-effect-builtin-blanking-fill-stretch-bottom-label = 底部边缘
 
+## Grow Bounds 范围扩散
+effect-grow-bounds = 范围扩散
+parameter-group-grow-bounds = 范围扩散
+parameter-mondrian-effect-builtin-grow-bounds-pixels-label = 像素
+
 ## Displacement Map 置换图
 effect-displacement-map = 置换图
 parameter-group-displacement-map = 置换图

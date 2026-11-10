@@ -1273,6 +1273,11 @@ pub enum EffectRenderOp {
     DisplacementMap {
         grade: crate::DisplacementMapGrade,
     },
+    /// Grow the source raster symmetrically with transparent padding.
+    GrowBounds {
+        /// Exact whole-pixel padding on each side.
+        grade: crate::GrowBoundsGrade,
+    },
     /// Counter-shift red and blue around the green reference channel.
     ChromaticAberrationRemoval {
         grade: crate::ChromaticAberrationRemovalGrade,
@@ -1662,6 +1667,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::DisplacementMap { grade } => {
                 formatter.debug_struct("DisplacementMap").field("grade", grade).finish()
+            }
+            Self::GrowBounds { grade } => {
+                formatter.debug_struct("GrowBounds").field("grade", grade).finish()
             }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
@@ -2744,6 +2752,10 @@ impl EffectRenderOp {
                 117u8.hash(state);
                 grade.hash_controls(state);
             }
+            EffectRenderOp::GrowBounds { grade } => {
+                118u8.hash(state);
+                grade.hash(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2894,6 +2906,7 @@ impl EffectRenderOp {
             EffectRenderOp::Stroke { .. } => 5,
             EffectRenderOp::Fill { .. } => 1,
             EffectRenderOp::DisplacementMap { .. } => 5,
+            EffectRenderOp::GrowBounds { .. } => 2,
             EffectRenderOp::DustScratches { .. } => 4,
             // Three passes, four when the chatter softening is enabled.
             EffectRenderOp::KeyCleaner { grade } => grade.cost(),
@@ -3452,7 +3465,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 117] {
+fn builtin_effect_types() -> [EffectType; 118] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3566,6 +3579,7 @@ fn builtin_effect_types() -> [EffectType; 117] {
         EffectType::KeyCleaner,
         EffectType::ChannelCombiner,
         EffectType::DisplacementMap,
+        EffectType::GrowBounds,
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
         EffectType::Basic3D,
@@ -10836,6 +10850,17 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 );
             }
         }
+        EffectType::GrowBounds => define_builtin_property(
+            &mut properties,
+            &effect_type,
+            "pixels",
+            "范围扩散",
+            "像素",
+            PropertyValue::Float(10.0),
+            Some(0.0),
+            Some(f64::from(crate::GROW_BOUNDS_MAX_PIXELS)),
+            Some(1.0),
+        ),
         EffectType::DisplacementMap => {
             use crate::{DisplacementMapBehavior, DisplacementMapChannel};
             let group = "置换图";
@@ -12887,9 +12912,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::VrProject2D, "feather") => ParameterUnit::Percent,
         (EffectType::VrProject2D, _) => ParameterUnit::Unitless,
         (EffectType::PhotoFilter, "density") => ParameterUnit::Percent,
-        (EffectType::DisplacementMap, "horizontal_amount" | "vertical_amount") => {
-            ParameterUnit::Pixels
-        }
+        (EffectType::DisplacementMap, "horizontal_amount" | "vertical_amount")
+        | (EffectType::GrowBounds, "pixels") => ParameterUnit::Pixels,
         (EffectType::Colorama, "phase_shift") => ParameterUnit::Degrees,
         (EffectType::Colorama, "blend_with_original") => ParameterUnit::Percent,
         (
@@ -13309,13 +13333,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
-        EffectType::Basic3D | EffectType::CameraView | EffectType::BlankingFill => {
-            EffectExecutionContract {
-                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-                roi_propagation: EffectRoiPropagation::FullFrame,
-                ..cpu_linear
-            }
-        }
+        EffectType::Basic3D
+        | EffectType::CameraView
+        | EffectType::BlankingFill
+        | EffectType::GrowBounds => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
         EffectType::SelectiveColor => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The effect reads the whole sample to resolve ink, and the
@@ -18918,6 +18943,23 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::GrowBounds => {
+            let pixels = builtin_parameter_id(effect_type, "pixels");
+            Some(Arc::new(move |effect, context, graph| {
+                let value = effect.evaluate_f32_parameter(&pixels, context.time, 10.0);
+                let grade = crate::GrowBoundsGrade::new(value).map_err(|error| {
+                    EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: error.to_string(),
+                    }
+                })?;
+                if grade.output_outset() != [0, 0] {
+                    graph.append_unary(EffectRenderOp::GrowBounds { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::DisplacementMap => {
             use crate::{DisplacementMapBehavior, DisplacementMapChannel, DisplacementMapGrade};
             let source = builtin_parameter_id(effect_type, "map_source");
@@ -20609,6 +20651,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Colorama => "色光",
         EffectType::ChannelCombiner => "通道合成器",
         EffectType::DisplacementMap => "置换图",
+        EffectType::GrowBounds => "范围扩散",
         EffectType::SmartBlur => "智能模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
         EffectType::Basic3D => "基本 3D",
@@ -21966,6 +22009,7 @@ mod tests {
             EffectType::CameraView,
             EffectType::BlankingFill,
             EffectType::DisplacementMap,
+            EffectType::GrowBounds,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -31039,7 +31083,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 117);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 118);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -31567,7 +31611,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 117);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 118);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -34524,7 +34568,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 117);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 118);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -35660,7 +35704,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 117);
+        assert_eq!(builtin_effect_types().len(), 118);
     }
 
     #[test]

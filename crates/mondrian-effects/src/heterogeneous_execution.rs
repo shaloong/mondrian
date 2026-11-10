@@ -2888,6 +2888,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::Basic3D { .. } => 116,
         EffectRenderOp::CameraView { .. } => 117,
         EffectRenderOp::BlankingFill { .. } => 118,
+        EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::ColorBalance { .. } => 79,
@@ -5150,6 +5151,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Basic3D { .. }
             | crate::EffectRenderOp::CameraView { .. }
             | crate::EffectRenderOp::BlankingFill { .. }
+            | crate::EffectRenderOp::GrowBounds { .. }
             | crate::EffectRenderOp::DisplacementMap { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::Grid { .. }

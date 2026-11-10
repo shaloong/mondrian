@@ -428,6 +428,22 @@ pub struct EffectGraphNode {
 }
 
 impl EffectGraphNode {
+    pub(crate) fn output_outset(&self) -> [u32; 2] {
+        match &self.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::GrowBounds { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::GrowBounds { grade }, ..
+            } => grade.output_outset(),
+            EffectGraphNodeKind::AuxiliaryEffect {
+                op: EffectRenderOp::DisplacementMap { grade },
+                ..
+            } => grade.output_outset(),
+            _ => [0, 0],
+        }
+    }
+
     pub fn input_ids(&self) -> Vec<EffectGraphNodeId> {
         match self.kind {
             EffectGraphNodeKind::Source | EffectGraphNodeKind::CustomSource { .. } => Vec::new(),
@@ -1095,14 +1111,10 @@ impl CompiledEffectGraph {
 
     /// Whether a reachable operation changes the primary raster extent.
     pub fn has_raster_growth(&self) -> bool {
-        self.schedule.ordered_nodes.iter().any(|id| {
-            matches!(
-                self.graph.node(*id).map(|node| &node.kind),
-                Some(EffectGraphNodeKind::AuxiliaryEffect {
-                    op: EffectRenderOp::DisplacementMap { grade }, ..
-                }) if grade.output_outset() != [0, 0]
-            )
-        })
+        self.schedule
+            .ordered_nodes
+            .iter()
+            .any(|id| self.graph.node(*id).is_some_and(|node| node.output_outset() != [0, 0]))
     }
 
     /// Resolve output dimensions and layer origin before allocating any pixels.
@@ -1121,8 +1133,8 @@ impl CompiledEffectGraph {
                 .graph
                 .node(*id)
                 .ok_or(crate::EffectFloatExecutionError::MissingOutput { node_id: *id })?;
-            let outset = match &node.kind {
-                EffectGraphNodeKind::Source if previous.is_none() => [0, 0],
+            match &node.kind {
+                EffectGraphNodeKind::Source if previous.is_none() => {}
                 EffectGraphNodeKind::ExternalInput { .. }
                     if self.external_auxiliary_is_read_only(*id) =>
                 {
@@ -1130,23 +1142,15 @@ impl CompiledEffectGraph {
                 }
                 EffectGraphNodeKind::UnaryEffect { input, op }
                 | EffectGraphNodeKind::DomainEffect { input, op, .. }
-                    if Some(*input) == previous && !matches!(op, EffectRenderOp::Custom { .. }) =>
-                {
-                    [0, 0]
+                    if Some(*input) == previous && !matches!(op, EffectRenderOp::Custom { .. }) => {
                 }
-                EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, .. }
+                EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. }
                     if Some(*input) == previous
                         && matches!(
                             self.graph.node(*auxiliary).map(|node| &node.kind),
                             Some(EffectGraphNodeKind::ExternalInput { .. })
                         )
-                        && self.external_auxiliary_is_read_only(*auxiliary) =>
-                {
-                    match op {
-                        EffectRenderOp::DisplacementMap { grade } => grade.output_outset(),
-                        _ => [0, 0],
-                    }
-                }
+                        && self.external_auxiliary_is_read_only(*auxiliary) => {}
                 _ => {
                     return Err(crate::EffectFloatExecutionError::UnsupportedNode {
                         node_id: *id,
@@ -1155,9 +1159,9 @@ impl CompiledEffectGraph {
                         },
                     })
                 }
-            };
+            }
             bounds = bounds
-                .checked_outset(outset)
+                .checked_outset(node.output_outset())
                 .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
             previous = Some(*id);
         }
@@ -2920,7 +2924,8 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::ChromaticAberrationRemoval { .. }
         | EffectRenderOp::Basic3D { .. }
         | EffectRenderOp::CameraView { .. }
-        | EffectRenderOp::BlankingFill { .. } => EffectImplementationRequirements {
+        | EffectRenderOp::BlankingFill { .. }
+        | EffectRenderOp::GrowBounds { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
