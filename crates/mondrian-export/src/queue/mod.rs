@@ -17279,7 +17279,20 @@ mod tests {
     #[test]
     #[ignore = "real GPU Export Smear qualification; run independently"]
     fn export_smear_uses_non_square_owner_sampling_and_matches_cpu() {
+        export_mask_deformation_matches_cpu(mondrian_effects::EffectType::Smear);
+    }
+
+    #[test]
+    #[ignore = "real GPU Export Reshape qualification; run independently"]
+    fn export_reshape_uses_non_square_owner_sampling_and_matches_cpu() {
+        export_mask_deformation_matches_cpu(mondrian_effects::EffectType::Reshape);
+    }
+
+    fn export_mask_deformation_matches_cpu(kind: mondrian_effects::EffectType) {
         use mondrian_core::mask_data::MaskParticipation;
+        use mondrian_core::{
+            MaskCorrespondenceInterpolation, MaskCorrespondencePoint, MaskCorrespondencePoints,
+        };
         use mondrian_effects::{
             instantiate_effect_node, EffectType, MaskComponent, MaskEvaluation, MaskShape,
         };
@@ -17287,7 +17300,7 @@ mod tests {
 
         let _gpu_visual = GpuVisualExecutionGuard::activate();
         let raster = Resolution { width: 37, height: 23 };
-        let mut sequence = Sequence::new("Smear Export owner sampling");
+        let mut sequence = Sequence::new("Mask deformation Export owner sampling");
         sequence.settings.resolution = raster;
         sequence.settings.pixel_aspect_ratio =
             mondrian_core::timeline_data::PixelAspectRatio::Anamorphic2x;
@@ -17310,7 +17323,7 @@ mod tests {
         clip.add_effect_node(ramp);
         let mask = |x, width| {
             let mut mask = MaskComponent::new(
-                "Smear shape".into(),
+                "Deformation mask".into(),
                 MaskEvaluation {
                     shape: MaskShape::Rectangle {
                         x,
@@ -17327,21 +17340,44 @@ mod tests {
         };
         let source = clip.add_mask_component(mask(0.27, 0.46));
         let boundary = clip.add_mask_component(mask(0.05, 0.9));
-        let mut smear = instantiate_effect_node(EffectType::Smear).unwrap();
-        for (key, value) in [
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        let mut controls = vec![
             ("source_mask", PropertyValue::MaskReference(Some(source))),
             (
                 "boundary_mask",
                 PropertyValue::MaskReference(Some(boundary)),
             ),
-            ("mask_rotation", PropertyValue::Float(47.0)),
             ("percent", PropertyValue::Float(100.0)),
-        ] {
-            smear
-                .set_static_value_by_parameter(&EffectType::Smear.parameter_id(key).unwrap(), value)
+        ];
+        if kind == EffectType::Reshape {
+            let destination = clip.add_mask_component(mask(0.35, 0.49));
+            controls.extend([
+                (
+                    "destination_mask",
+                    PropertyValue::MaskReference(Some(destination)),
+                ),
+                (
+                    "correspondence_points",
+                    PropertyValue::MaskCorrespondencePoints(
+                        MaskCorrespondencePoints::new(vec![MaskCorrespondencePoint {
+                            id: 1,
+                            source: 0.125,
+                            destination: 0.2,
+                            interpolation: MaskCorrespondenceInterpolation::Smooth,
+                        }])
+                        .unwrap(),
+                    ),
+                ),
+            ]);
+        } else {
+            controls.push(("mask_rotation", PropertyValue::Float(47.0)));
+        }
+        for (key, value) in controls {
+            effect
+                .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
                 .unwrap();
         }
-        clip.add_effect_node(smear);
+        clip.add_effect_node(effect);
         sequence.video_tracks[0].add_clip(clip).unwrap();
         let mut timeline = TimelineExportSnapshot {
             sequence,
@@ -17399,7 +17435,10 @@ mod tests {
         assert_eq!(cpu.len(), (raster.width * raster.height * 4) as usize);
         assert_eq!(gpu.len(), cpu.len());
         let max_error = cpu.iter().zip(&gpu).map(|(cpu, gpu)| cpu.abs_diff(*gpu)).max().unwrap();
-        eprintln!("DST-17 production Export maximum error: {max_error} RGBA8 steps");
+        eprintln!(
+            "{} production Export maximum error: {max_error} RGBA8 steps",
+            kind.key()
+        );
         assert!(max_error <= 1);
     }
 

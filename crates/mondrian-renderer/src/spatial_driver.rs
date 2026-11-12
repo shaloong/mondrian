@@ -277,7 +277,9 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                     direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
                     direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.scratch_bytes);
                     0
-                } else if let EffectGpuSpatialPass::Smear { grade, sampling } = pass {
+                } else if let EffectGpuSpatialPass::Smear { grade, sampling }
+                | EffectGpuSpatialPass::Reshape { grade, sampling } = pass
+                {
                     if sampling.is_none() {
                         return Err(GpuSpatialChainBlocker::UnsupportedPass {
                             pass: pass.name(),

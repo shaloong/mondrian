@@ -43,7 +43,7 @@ pub(crate) enum EffectSpatialGpuError {
     #[error("spatial pass requires an auxiliary raster")]
     MissingAuxiliaryInput,
     /// The source adapter must bind the sampling of the selected grid.
-    #[error("Smear requires the actual source image sampling")]
+    #[error("mask deformation requires the actual source image sampling")]
     MissingImageSampling,
     /// Building the bounded inverse lattice failed.
     #[error("{0}")]
@@ -3049,7 +3049,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
-            EffectGpuSpatialPass::Smear { .. } => Ok(1),
+            EffectGpuSpatialPass::Smear { .. } | EffectGpuSpatialPass::Reshape { .. } => Ok(1),
             EffectGpuSpatialPass::BlankingFill { grade } => {
                 Ok(if grade.warps_top_layer() { 1 } else { 2 })
             }
@@ -3091,9 +3091,12 @@ impl EffectSpatialGpu {
                 self.record_bilateral(device, encoder, source, output, *grade)?;
                 return Ok(output.clone());
             }
-            EffectGpuSpatialPass::Smear { grade, sampling } => {
+            EffectGpuSpatialPass::Smear { grade, sampling }
+            | EffectGpuSpatialPass::Reshape { grade, sampling } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
-                return self.record_smear(device, encoder, source, output, grade, *sampling);
+                return self.record_mask_deformation_pass(
+                    device, encoder, source, output, grade, *sampling,
+                );
             }
             EffectGpuSpatialPass::SetMatte { sampling: None, .. } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
@@ -4267,7 +4270,7 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
     /// Prepare and record the shared field on the current stage's actual grid.
-    pub(crate) fn record_smear(
+    pub(crate) fn record_mask_deformation_pass(
         &self,
         device: &wgpu::Device,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,

@@ -400,7 +400,7 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "set_matte" => 1.2,
         "displacement_map" => 2.4,
         "grow_bounds" => 0.8,
-        "smear" => 2.4,
+        "smear" | "reshape" => 2.4,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 1.4,
             _ => 3.6,
@@ -432,7 +432,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,
-        "smear" => 24.0,
+        "smear" | "reshape" => 24.0,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 3.0,
             _ => 12.0,

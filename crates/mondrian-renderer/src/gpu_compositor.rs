@@ -5392,9 +5392,11 @@ impl GpuFrameCompositor {
                                 pass: spatial_failure_pass(&error),
                                 detail: error.to_string(),
                             })?;
-                    } else if let EffectGpuSpatialPass::Smear { grade, sampling } = pass {
+                    } else if let EffectGpuSpatialPass::Smear { grade, sampling }
+                    | EffectGpuSpatialPass::Reshape { grade, sampling } = pass
+                    {
                         self.spatial
-                            .record_smear(
+                            .record_mask_deformation_pass(
                                 device,
                                 encoder,
                                 &current_texture,
@@ -8248,8 +8250,12 @@ fn spatial_failure_pass(error: &crate::spatial_pass_gpu::EffectSpatialGpuError) 
         crate::spatial_pass_gpu::EffectSpatialGpuError::MissingAuxiliaryInput => {
             "spatial_auxiliary_missing"
         }
-        crate::spatial_pass_gpu::EffectSpatialGpuError::MissingImageSampling => "smear_sampling",
-        crate::spatial_pass_gpu::EffectSpatialGpuError::MaskDeformation(_) => "smear_preparation",
+        crate::spatial_pass_gpu::EffectSpatialGpuError::MissingImageSampling => {
+            "mask_deformation_sampling"
+        }
+        crate::spatial_pass_gpu::EffectSpatialGpuError::MaskDeformation(_) => {
+            "mask_deformation_preparation"
+        }
     }
 }
 
@@ -19134,6 +19140,122 @@ mod tests {
         let error = max_spatial_float_error(expected.pixels(), &actual);
         eprintln!(
             "DST-17 after Grow Bounds {bounds:?}, Float32 maximum absolute error {error:.9e}"
+        );
+        assert!(error <= 1.0e-4);
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_reshape_matches_cpu_after_grow_bounds() {
+        use mondrian_core::{
+            ImageSampling, MaskCorrespondenceInterpolation, MaskCorrespondencePoint,
+            MaskCorrespondencePoints, Rational, SampleAspectRatio,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_pipeline, mask_deformation::MaskDeformation, BezierPoint,
+            EffectFloatFrameView, EffectFrameExtent, EffectGraphBuilderState, EffectRenderOp,
+            EffectValueFormat, EffectWorkingPrecision, GrowBoundsGrade, MaskShape,
+        };
+
+        let (width, height) = (61, 43);
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let pixels = (0..width * height)
+            .map(|i| {
+                let alpha = (i % 8) as f32 / 7.0;
+                if alpha == 0.0 {
+                    [0.0; 4]
+                } else {
+                    [(i % 23) as f32 / 5.0, (i % 31) as f32 / -7.0, 2.0, alpha]
+                }
+            })
+            .collect::<Vec<_>>();
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width,
+            height,
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: space,
+            data: pixels.clone(),
+        });
+        let path = |positions: [[f32; 2]; 4]| MaskShape::Path {
+            points: positions
+                .into_iter()
+                .map(|position| BezierPoint::new(glam::Vec2::from_array(position)))
+                .collect(),
+            closed: true,
+        };
+        let grade = MaskDeformation::reshape(
+            &path([[0.21, 0.21], [0.51, 0.21], [0.51, 0.51], [0.21, 0.51]]),
+            &path([[0.35, 0.22], [0.34, 0.63], [0.67, 0.74], [0.78, 0.28]]),
+            Some(&path([
+                [0.08, 0.08],
+                [0.92, 0.08],
+                [0.92, 0.9],
+                [0.08, 0.9],
+            ])),
+            &MaskCorrespondencePoints::new(vec![MaskCorrespondencePoint {
+                id: 1,
+                source: 0.25,
+                destination: 0.375,
+                interpolation: MaskCorrespondenceInterpolation::Smooth,
+            }])
+            .unwrap(),
+            0.75,
+            3,
+            3,
+        )
+        .unwrap();
+        let mut builder = EffectGraphBuilderState::new();
+        builder
+            .append_unary(EffectRenderOp::GrowBounds { grade: GrowBoundsGrade::new(4.0).unwrap() });
+        builder.append_unary(EffectRenderOp::Reshape { grade: std::sync::Arc::new(grade) });
+        let graph = compile_reference_render_graph(builder.finish()).unwrap();
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+        assert!(crate::spatial_driver::gpu_spatial_chain_plan(&pipeline, width, height).is_err());
+        let pipeline = pipeline.with_image_sampling(sampling);
+        let bounds = graph.output_raster_bounds(extent).unwrap();
+        let [x, y] = bounds.origin();
+        let mut layer = spatial_test_layer(&frame);
+        layer.transform[2] = -x as f32;
+        layer.transform[5] = -y as f32;
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for Reshape parity");
+        let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+            &context,
+            &[GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }],
+            bounds.extent().width(),
+            bounds.extent().height(),
+            space,
+        );
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let cpu = |sampling| {
+            apply_compiled_effect_graph_rgba_f32(
+                EffectFloatFrameView::new(extent, format, sampling, &pixels),
+                &graph,
+                0,
+            )
+            .unwrap()
+        };
+        assert_eq!(diagnostics.spatial_effect_passes, 2);
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+        assert_eq!(actual[0], [0.0; 4]);
+        assert!(max_spatial_float_error(cpu(ImageSampling::UNIT_SQUARE).pixels(), &actual) > 0.01);
+        let expected = cpu(sampling);
+        assert_eq!(expected.extent(), bounds.extent());
+        let error = max_spatial_float_error(expected.pixels(), &actual);
+        eprintln!(
+            "DST-10 after Grow Bounds {bounds:?}, Float32 maximum absolute error {error:.9e}"
         );
         assert!(error <= 1.0e-4);
     }

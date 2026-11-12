@@ -2026,29 +2026,53 @@ mod heterogeneous_tests {
 
     #[test]
     fn a_smear_solid_binds_the_actual_viewer_canvas_sampling() {
+        assert_mask_deformation_solid_uses_viewer_sampling(EffectType::Smear);
+    }
+
+    #[test]
+    fn a_reshape_solid_binds_the_actual_viewer_canvas_sampling() {
+        assert_mask_deformation_solid_uses_viewer_sampling(EffectType::Reshape);
+    }
+
+    fn assert_mask_deformation_solid_uses_viewer_sampling(kind: EffectType) {
         use mondrian_core::{ImageSampling, Rational, SampleAspectRatio};
         use mondrian_effects::{
             mask_deformation::{MaskDeformation, MaskDeformationControls},
-            EffectGpuSpatialPass, EffectGpuStage, MaskShape,
+            EffectGpuSpatialPass, EffectGpuStage, EffectRenderOp, MaskShape,
         };
 
         let shape =
             |x, width| MaskShape::Rectangle { x, y: x, width, height: width, corner_radius: 0.0 };
-        let grade = MaskDeformation::new(
-            &shape(0.3, 0.4),
-            &shape(0.05, 0.9),
-            MaskDeformationControls {
-                target: [0.62, 0.43],
-                angle_degrees: 23.0,
-                scale: 1.0,
-                strength: 1.0,
-                elasticity: 1,
-                density: 2,
-            },
-        )
-        .unwrap();
+        let op = if kind == EffectType::Reshape {
+            let grade = MaskDeformation::reshape(
+                &shape(0.3, 0.4),
+                &shape(0.41, 0.44),
+                None,
+                &Default::default(),
+                1.0,
+                1,
+                2,
+            )
+            .unwrap();
+            EffectRenderOp::Reshape { grade: Arc::new(grade) }
+        } else {
+            let grade = MaskDeformation::new(
+                &shape(0.3, 0.4),
+                &shape(0.05, 0.9),
+                MaskDeformationControls {
+                    target: [0.62, 0.43],
+                    angle_degrees: 23.0,
+                    scale: 1.0,
+                    strength: 1.0,
+                    elasticity: 1,
+                    density: 2,
+                },
+            )
+            .unwrap();
+            EffectRenderOp::Smear { grade: Arc::new(grade) }
+        };
         let mut builder = mondrian_effects::EffectGraphBuilderState::new();
-        builder.append_unary(mondrian_effects::EffectRenderOp::Smear { grade: Arc::new(grade) });
+        builder.append_unary(op);
         let graph = mondrian_effects::compile_reference_render_graph(builder.finish()).unwrap();
         let extent = EffectFrameExtent::new(37, 23);
         let sampling = ImageSampling::new(
@@ -2070,15 +2094,16 @@ mod heterogeneous_tests {
             )
             .unwrap()
         else {
-            panic!("Smear needs an ordinary GPU spatial plan");
+            panic!("mask deformation needs an ordinary GPU spatial plan");
         };
         let ViewerGpuSourceLayer::SolidColor { spatial_plan: Some(plan), .. } =
             source_layer(&layers)
         else {
-            panic!("the solid must retain the Smear pass");
+            panic!("the solid must retain the mask deformation pass");
         };
         assert!(matches!(plan.pipeline.stages(), [EffectGpuStage::Spatial {
-            pass: EffectGpuSpatialPass::Smear { sampling: Some(bound), .. }, ..
+            pass: EffectGpuSpatialPass::Smear { sampling: Some(bound), .. }
+                | EffectGpuSpatialPass::Reshape { sampling: Some(bound), .. }, ..
         }] if *bound == sampling));
         let admitted = gpu_spatial_chain_plan_with_auxiliary(
             &plan.pipeline,
