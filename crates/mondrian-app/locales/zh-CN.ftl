@@ -1804,6 +1804,7 @@ parameter-mondrian-effect-builtin-levels-output-white-label = 输出白色
 effect-glow = 发光
 parameter-group-glow = 发光
 effect-category-light = 光
+parameter-mondrian-effect-builtin-glow-based-on-label = 发光基于
 parameter-mondrian-effect-builtin-glow-color-a-label = 颜色 A
 parameter-mondrian-effect-builtin-glow-color-b-label = 颜色 B
 parameter-mondrian-effect-builtin-glow-color-loops-label = 颜色循环
@@ -1816,6 +1817,8 @@ parameter-mondrian-effect-builtin-glow-operation-label = 发光操作
 parameter-mondrian-effect-builtin-glow-radius-label = 半径
 parameter-mondrian-effect-builtin-glow-strength-label = 强度
 parameter-mondrian-effect-builtin-glow-threshold-label = 阈值
+parameter-mondrian-effect-glow-based-on-alpha = Alpha 通道
+parameter-mondrian-effect-glow-based-on-color = 颜色通道
 
 ## Four-Color Gradient 四色渐变
 effect-four-color-gradient = 四色渐变

@@ -5,7 +5,7 @@
 //! effect data types without depending on the full effect evaluation engine.
 
 use crate::automation::{
-    ParameterResourceReference, PropertyBag, PropertyDescriptor, PropertyValue,
+    ParameterEnumOption, ParameterResourceReference, PropertyBag, PropertyDescriptor, PropertyValue,
 };
 use crate::types::EffectId;
 use crate::{ParameterId, ParameterIdError, TimelineTime};
@@ -95,7 +95,7 @@ pub enum EffectType {
     Deband,
     /// Ramp: a two-colour linear or radial gradient generator.
     Ramp,
-    /// Glow: blooms the bright parts of the frame with a threshold mask.
+    /// Glow: blooms bright colors or coverage edges with a threshold mask.
     Glow,
     /// Fractal noise: fills the frame with a fractal value-noise field.
     FractalNoise,
@@ -884,6 +884,7 @@ impl<'de> Deserialize<'de> for EffectNode {
             EffectType::ChannelMixer => {
                 Some((Self::channel_mixer_inverse_descriptor(), "monochrome"))
             }
+            EffectType::Glow => Some((Self::glow_based_on_descriptor(), "threshold")),
             _ => None,
         };
         if let Some((mut descriptor, anchor)) = added_property {
@@ -906,6 +907,26 @@ impl<'de> Deserialize<'de> for EffectNode {
 }
 
 impl EffectNode {
+    /// Glow input channel shared by the definition and legacy project loading.
+    pub fn glow_based_on_descriptor() -> PropertyDescriptor {
+        let effect_type = EffectType::Glow;
+        let parameter = "based_on";
+        let mut descriptor = PropertyDescriptor::new(
+            effect_type.property_path(parameter),
+            "发光基于",
+            PropertyValue::Enum("color".to_owned()),
+        )
+        .with_parameter_id(effect_type.parameter_id(parameter).expect("built-in parameter id"))
+        .with_enum_options(vec![
+            ParameterEnumOption::new("color", "颜色通道", "mondrian.effect.glow.based_on.color"),
+            ParameterEnumOption::new("alpha", "Alpha 通道", "mondrian.effect.glow.based_on.alpha"),
+        ])
+        .with_animatable(false);
+        descriptor.ui_metadata.group_name = Some("发光".to_owned());
+        descriptor.ui_metadata.display_order = Some(12);
+        descriptor
+    }
+
     /// Inverse affine transform control shared by the definition and project loading.
     pub fn channel_mixer_inverse_descriptor() -> PropertyDescriptor {
         let effect_type = EffectType::ChannelMixer;

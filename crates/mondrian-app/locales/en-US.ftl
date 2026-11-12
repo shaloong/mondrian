@@ -1876,6 +1876,7 @@ parameter-mondrian-effect-builtin-levels-output-white-label = Output White
 effect-glow = Glow
 parameter-group-glow = Glow
 effect-category-light = Light
+parameter-mondrian-effect-builtin-glow-based-on-label = Glow Based On
 parameter-mondrian-effect-builtin-glow-color-a-label = Color A
 parameter-mondrian-effect-builtin-glow-color-b-label = Color B
 parameter-mondrian-effect-builtin-glow-color-loops-label = Color Loops
@@ -1888,6 +1889,8 @@ parameter-mondrian-effect-builtin-glow-operation-label = Glow Operation
 parameter-mondrian-effect-builtin-glow-radius-label = Radius
 parameter-mondrian-effect-builtin-glow-strength-label = Strength
 parameter-mondrian-effect-builtin-glow-threshold-label = Threshold
+parameter-mondrian-effect-glow-based-on-alpha = Alpha Channel
+parameter-mondrian-effect-glow-based-on-color = Color Channels
 
 ## Four-Color Gradient 四色渐变
 effect-four-color-gradient = 4-Color Gradient

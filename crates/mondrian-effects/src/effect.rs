@@ -7111,6 +7111,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     None,
                 );
             }
+            properties.define(EffectNode::glow_based_on_descriptor());
         }
         EffectType::FractalNoise => {
             define_builtin_enum_property(
@@ -15926,6 +15927,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             }))
         }
         EffectType::Glow => {
+            let based_on_id = builtin_parameter_id(effect_type, "based_on");
             let threshold_id = builtin_parameter_id(effect_type, "threshold");
             let radius_id = builtin_parameter_id(effect_type, "radius");
             let strength_id = builtin_parameter_id(effect_type, "strength");
@@ -15939,6 +15941,17 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             let color_b_id = builtin_parameter_id(effect_type, "color_b");
             let dimensions_id = builtin_parameter_id(effect_type, "dimensions");
             Some(Arc::new(move |effect, context, graph| {
+                let based_on = match effect.evaluate_parameter(&based_on_id, context.time) {
+                    None => Some(crate::GlowBasedOn::Color),
+                    Some(PropertyValue::Enum(key)) => crate::GlowBasedOn::from_key(&key)
+                        .filter(|mode| *mode != crate::GlowBasedOn::ColorAndAlpha),
+                    Some(_) => None,
+                }
+                .ok_or_else(|| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: "glow based on must be color or alpha".to_owned(),
+                })?;
                 let menu = |parameter_id: &ParameterId, fallback: u32| -> u32 {
                     let value = effect.evaluate_f32_parameter(
                         parameter_id,
@@ -16002,9 +16015,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     }
                 };
                 let grade = crate::GlowGrade::for_space(
-                    // The checklist leaves `based-on` implicit, so the authored
-                    // surface always thresholds the source luminance.
-                    crate::GlowBasedOn::Color,
+                    based_on,
                     effect.evaluate_f32_parameter(
                         &threshold_id,
                         context.time,
@@ -28933,6 +28944,82 @@ mod tests {
             TEST_WORKING_SPACE.luminance_coefficients()
         );
         assert!(!grade.is_identity());
+    }
+
+    #[test]
+    fn legacy_glow_restores_the_color_menu_and_retains_authored_values() {
+        let kind = EffectType::Glow;
+        let based_on = kind.parameter_id("based_on").unwrap();
+        for on_clip in [false, true] {
+            let mut effect = author_glow(&[("threshold", PropertyValue::Float(90.0))]);
+            assert!(effect.properties.remove_property(&kind.property_path("based_on")).is_some());
+            if on_clip {
+                effect.instantiate_for_clip("发光".to_owned());
+            }
+            let wire = serde_json::to_string(&effect).unwrap();
+            let mut restored: EffectNode = serde_json::from_str(&wire).unwrap();
+            let graph = build_effect_render_graph(&[restored.clone()], tt(0), TEST_WORKING_SPACE)
+                .expect("legacy Glow still compiles");
+            let grade = glow_op(&graph).unwrap();
+            assert_eq!(grade.based_on(), crate::GlowBasedOn::Color);
+            assert_eq!(grade.threshold(), 90.0);
+            assert!(restored
+                .set_static_value_by_parameter(
+                    &based_on,
+                    PropertyValue::Enum("color_and_alpha".into())
+                )
+                .is_err());
+            restored
+                .set_static_value_by_parameter(&based_on, PropertyValue::Enum("alpha".into()))
+                .expect("the restored menu is editable");
+            let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE).unwrap();
+            assert_eq!(
+                glow_op(&graph).unwrap().based_on(),
+                crate::GlowBasedOn::Alpha
+            );
+        }
+    }
+
+    #[test]
+    fn authored_alpha_glow_lowers_and_creates_coverage_in_the_float_graph() {
+        let effect = author_glow(&[
+            ("based_on", PropertyValue::Enum("alpha".into())),
+            ("radius", PropertyValue::Float(2.0)),
+            ("strength", PropertyValue::Float(100.0)),
+        ]);
+        let compiled =
+            compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE).unwrap();
+        let pipeline = crate::lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+        let [crate::EffectGpuStage::Spatial {
+            pass: crate::EffectGpuSpatialPass::Glow { grade },
+            ..
+        }] = pipeline.stages()
+        else {
+            panic!("expected one Glow spatial stage");
+        };
+        assert_eq!(grade.based_on(), crate::GlowBasedOn::Alpha);
+        let mut pixels = [[0.9, 0.0, 0.0, 0.0]; 21];
+        pixels[5..16].fill([0.1, 0.2, 0.3, 1.0]);
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(21, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &pixels,
+            ),
+            &compiled,
+            0,
+        )
+        .unwrap();
+        assert_eq!(output.len(), pixels.len());
+        assert_eq!(&output[4][..3], &[1.0; 3]);
+        assert!(output[4][3] > 0.0);
+        assert_eq!(output[10], pixels[10]);
+        assert_eq!(output[0], pixels[0]);
     }
 
     #[test]

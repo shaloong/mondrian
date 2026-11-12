@@ -13,8 +13,8 @@
 //!    bit-comparable.
 //! 3. **Composite.** The blurred layer becomes
 //!    `contribution = glow.rgb * glow.a * intensity`, is combined with the
-//!    authored [`BlendMode`] operation, and is written back with the source
-//!    alpha untouched.
+//!    authored [`BlendMode`] operation. Alpha-driven glow compares the blurred
+//!    mask with the center mask and composites the edge as its own coverage.
 //!
 //! # Uniform packing
 //!
@@ -29,8 +29,8 @@
 //!
 //! and [`GlowGrade::composite_gpu_controls`] packs the merge:
 //!
-//! - `params = [intensity, blend_mode_index, composite_index, 0]`, the remaining
-//!   cells zero.
+//! - `params = [intensity, blend_mode_index, composite_index, 0]`
+//! - `extra = [1, threshold / 255, 0, 0]` for Alpha, zero otherwise.
 //!
 //! The indices are zero-based [`GlowBasedOn::as_index`], [`GlowColors::as_index`]
 //! and [`GlowComposite::as_index`] values; `blend_mode_index` replicates the
@@ -48,15 +48,11 @@
 //!   builder rounds an animated value to the nearest menu entry and lets
 //!   [`GlowOperation::from_menu`] (and its siblings) fail closed outside the
 //!   authored range.
-//! - The checklist lists `based_on` as implicit, so the authoring surface has no
-//!   property for it and the builder always mirrors luminance. [`GlowGrade`] and
-//!   the extract uniform still carry all three modes for callers that build a
-//!   grade directly.
 //! - `midpoint` is validated into `[0.009995, 0.99]` at construction, so the
 //!   midpoint ramp never divides by zero and the CPU and the shader both use the
 //!   stored value unclamped.
-//! - The composite leaves the source alpha untouched and does not clamp the
-//!   blended RGB: like every other spatial effect it preserves extended range.
+//! - The legacy colour composites preserve source alpha. All modes preserve
+//!   extended range in the blended RGB.
 //! - The kernel materialises one extract buffer and blurs it in place; the
 //!   declared peak scratch of two frames (`render_op_f32_scratch_frames`) is the
 //!   brief's conservative ordering bound.
@@ -104,7 +100,7 @@ pub const GLOW_BLUR_ITERATIONS: u32 = 2;
 pub enum GlowBasedOn {
     /// Threshold the luminance.
     Color,
-    /// Use the source coverage (alpha) directly.
+    /// Spread glow around transitions in thresholded coverage.
     Alpha,
     /// Take the stronger of the luminance threshold and the source coverage.
     ColorAndAlpha,
@@ -849,17 +845,15 @@ impl GlowGrade {
         if pixel[3] <= 0.0 {
             return [0.0; 4];
         }
-        let luminance = self.luminance_of(pixel);
-        let threshold = (self.threshold / GLOW_AUTHOR_MAX_THRESHOLD).clamp(0.0, 1.0);
-        let colour_weight = if threshold >= 1.0 {
-            0.0
+        let signal = if self.based_on == GlowBasedOn::Alpha {
+            pixel[3].clamp(0.0, 1.0)
         } else {
-            ((luminance - threshold) / (1.0 - threshold)).clamp(0.0, 1.0)
+            self.luminance_of(pixel)
         };
+        let threshold_weight = self.threshold_mask(signal);
         let weight = match self.based_on {
-            GlowBasedOn::Color => colour_weight,
-            GlowBasedOn::Alpha => pixel[3],
-            GlowBasedOn::ColorAndAlpha => colour_weight.max(pixel[3]),
+            GlowBasedOn::Color | GlowBasedOn::Alpha => threshold_weight,
+            GlowBasedOn::ColorAndAlpha => threshold_weight.max(pixel[3]),
         };
         let colour = match self.based_on {
             GlowBasedOn::Alpha => [1.0, 1.0, 1.0],
@@ -867,25 +861,34 @@ impl GlowGrade {
         };
         let tint = match self.colors {
             GlowColors::Original => colour,
-            GlowColors::AAndB => mix_rgb(self.color_a, self.color_b, self.ab_ramp(luminance)),
+            GlowColors::AAndB => mix_rgb(self.color_a, self.color_b, self.ab_ramp(signal)),
             GlowColors::Cycle => {
                 let phase = self.color_phase / GLOW_AUTHOR_MAX_COLOR_PHASE_DEGREES;
                 mix_rgb(
                     self.color_a,
                     self.color_b,
-                    fract(phase + luminance * self.color_loops),
+                    fract(phase + signal * self.color_loops),
                 )
             }
         };
         [tint[0], tint[1], tint[2], weight]
     }
 
+    fn threshold_mask(&self, signal: f32) -> f32 {
+        let threshold = (self.threshold / GLOW_AUTHOR_MAX_THRESHOLD).clamp(0.0, 1.0);
+        if threshold >= 1.0 {
+            0.0
+        } else {
+            ((signal - threshold) / (1.0 - threshold)).clamp(0.0, 1.0)
+        }
+    }
+
     /// Composites one extracted-and-blurred glow pixel back onto the source.
-    ///
-    /// The source alpha is preserved exactly, and a source pixel without
-    /// coverage is returned untouched.
     #[must_use]
     pub fn composite(&self, source: [f32; 4], glow: [f32; 4]) -> [f32; 4] {
+        if self.based_on == GlowBasedOn::Alpha {
+            return self.composite_alpha_glow(source, glow);
+        }
         if source[3] <= 0.0 {
             return source;
         }
@@ -910,6 +913,47 @@ impl GlowGrade {
             GlowComposite::None => contribution,
         };
         [blended[0], blended[1], blended[2], source[3]]
+    }
+
+    fn composite_alpha_glow(&self, source: [f32; 4], glow: [f32; 4]) -> [f32; 4] {
+        let source_alpha = source[3].clamp(0.0, 1.0);
+        let edge = (glow[3] - self.threshold_mask(source_alpha)).abs();
+        let intensity = self.intensity();
+        // Summed-area blur can leave a small residual in flat regions.
+        if edge <= 1.0e-6 || intensity == 0.0 {
+            return if self.composite_original == GlowComposite::None {
+                [0.0; 4]
+            } else {
+                source
+            };
+        }
+        let glow_alpha = edge.min(1.0) * intensity.min(1.0);
+        let gain = intensity.max(1.0);
+        let glow_rgb = [glow[0] * gain, glow[1] * gain, glow[2] * gain];
+        if self.composite_original == GlowComposite::None || source_alpha == 0.0 {
+            return [glow_rgb[0], glow_rgb[1], glow_rgb[2], glow_alpha];
+        }
+
+        let source_rgb = [source[0], source[1], source[2]];
+        let (base, base_alpha, front, front_alpha) = match self.composite_original {
+            GlowComposite::OnTop | GlowComposite::None => {
+                (source_rgb, source_alpha, glow_rgb, glow_alpha)
+            }
+            GlowComposite::Behind => (glow_rgb, glow_alpha, source_rgb, source_alpha),
+        };
+        let overlap_rgb =
+            crate::adjustment::blend_mode_rgb(self.operation.blend_mode(), base, front);
+        let base_only = base_alpha * (1.0 - front_alpha);
+        let front_only = front_alpha * (1.0 - base_alpha);
+        let overlap = base_alpha * front_alpha;
+        let alpha = front_alpha + base_only;
+        let rgb = std::array::from_fn::<_, 3, _>(|channel| {
+            (base[channel] * base_only
+                + front[channel] * front_only
+                + overlap_rgb[channel] * overlap)
+                / alpha
+        });
+        [rgb[0], rgb[1], rgb[2], alpha]
     }
 
     /// The uniform payload of the extract pass.
@@ -942,11 +986,14 @@ impl GlowGrade {
 
     /// The uniform payload of the composite pass.
     ///
-    /// `params = [intensity, blend_mode_index, composite_index, 0]`; the second
-    /// spare cell carries colour B for the extract pass, so the merge leaves it
-    /// zero.
+    /// The Alpha mode also passes the threshold to compare the center mask.
     #[must_use]
     pub fn composite_gpu_controls(&self) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+        let extra = if self.based_on == GlowBasedOn::Alpha {
+            [1.0, self.threshold / GLOW_AUTHOR_MAX_THRESHOLD, 0.0, 0.0]
+        } else {
+            [0.0; 4]
+        };
         (
             [
                 self.intensity(),
@@ -954,7 +1001,7 @@ impl GlowGrade {
                 self.composite_original.as_index() as f32,
                 0.0,
             ],
-            [0.0; 4],
+            extra,
             [0.0; 4],
             [0.0; 4],
         )
@@ -964,6 +1011,10 @@ impl GlowGrade {
     pub(crate) fn hash_state<H: std::hash::Hasher>(&self, state: &mut H) {
         use std::hash::Hash as _;
         self.based_on.as_index().hash(state);
+        if self.based_on == GlowBasedOn::Alpha {
+            // The original internal Alpha grade emitted no coverage outside the source.
+            "alpha_edges".hash(state);
+        }
         self.threshold.to_bits().hash(state);
         self.radius.to_bits().hash(state);
         self.strength.to_bits().hash(state);
@@ -1306,8 +1357,70 @@ mod tests {
             [0.0; 3],
             GlowDimensions::Both,
         );
-        assert_eq!(grade.extract([0.3, 0.4, 0.5, 0.25]), [1.0, 1.0, 1.0, 0.25]);
+        assert_eq!(grade.extract([0.3, 0.4, 0.5, 0.25]), [1.0, 1.0, 1.0, 0.0]);
+        let edge = grade.extract([0.3, 0.4, 0.5, 0.8]);
+        assert_eq!(&edge[..3], &[1.0; 3]);
+        assert!((edge[3] - 0.5).abs() < 1.0e-6);
         assert_eq!(grade.extract([0.3, 0.4, 0.5, 0.0]), [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn alpha_glow_spreads_into_transparency_and_leaves_flat_interiors_unchanged() {
+        let mut grade = default_grade();
+        grade.based_on = GlowBasedOn::Alpha;
+        grade.radius = 2.0;
+        grade.strength = 100.0;
+        grade.dimensions = GlowDimensions::Horizontal;
+        let opaque = [0.1, 0.2, 0.3, 1.0];
+        let transparent = [0.9, 0.0, 0.0, 0.0];
+        let before = frame(21, 1, |x, _| {
+            if (5..=15).contains(&x) {
+                opaque
+            } else {
+                transparent
+            }
+        });
+        for composite in [
+            GlowComposite::OnTop,
+            GlowComposite::Behind,
+            GlowComposite::None,
+        ] {
+            grade.composite_original = composite;
+            let mut after = before.clone();
+            assert!(glow_frame_f32(&mut after, 21, 1, &grade));
+            assert!(after[4][3] > 0.0, "{composite:?}: {:?}", after[4]);
+            assert_eq!(&after[4][..3], &[1.0; 3]);
+            let expected_interior = if composite == GlowComposite::None {
+                [0.0; 4]
+            } else {
+                opaque
+            };
+            assert_eq!(after[10], expected_interior);
+            assert_eq!(after[0][3], 0.0);
+        }
+    }
+
+    #[test]
+    fn alpha_glow_composites_the_edge_once_in_straight_alpha() {
+        let mut grade = default_grade();
+        grade.based_on = GlowBasedOn::Alpha;
+        grade.strength = 50.0;
+        grade.threshold = 0.0;
+        grade.operation = GlowOperation::Normal;
+        let source = [0.0, 0.0, 0.0, 0.5];
+        let blurred = [1.0, 1.0, 1.0, 0.25];
+        assert_eq!(
+            grade.composite(source, blurred),
+            [2.0 / 9.0, 2.0 / 9.0, 2.0 / 9.0, 0.5625]
+        );
+        grade.composite_original = GlowComposite::Behind;
+        assert_eq!(
+            grade.composite(source, blurred),
+            [1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 0.5625]
+        );
+        grade.composite_original = GlowComposite::None;
+        grade.strength = 200.0;
+        assert_eq!(grade.composite(source, blurred), [2.0, 2.0, 2.0, 0.25]);
     }
 
     #[test]
