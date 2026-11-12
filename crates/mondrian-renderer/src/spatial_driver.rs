@@ -277,6 +277,17 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                     direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
                     direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.scratch_bytes);
                     0
+                } else if let EffectGpuSpatialPass::Smear { grade, sampling } = pass {
+                    if sampling.is_none() {
+                        return Err(GpuSpatialChainBlocker::UnsupportedPass {
+                            pass: pass.name(),
+                            detail: "actual source image sampling was not bound".into(),
+                        });
+                    }
+                    let bytes = grade.gpu_payload_byte_limit(output);
+                    direct_working_bytes = direct_working_bytes.saturating_add(bytes);
+                    direct_scratch_bytes = direct_scratch_bytes.saturating_add(bytes);
+                    0
                 } else {
                     scratch_extents.insert(output);
                     match EffectSpatialGpu::texture_pass_count(pass) {
@@ -298,7 +309,7 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                 spatial_passes = spatial_passes.saturating_add(passes.max(1));
                 largest_pass_count = largest_pass_count.max(passes);
                 stages.push(GpuSpatialStagePlan::Spatial {
-                    pass: *pass,
+                    pass: pass.clone(),
                     scratch_textures: passes,
                     horizontal_halo: pass.horizontal_halo(),
                     vertical_halo: pass.vertical_halo(),

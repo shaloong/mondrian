@@ -4162,6 +4162,16 @@ enum DecodedVideoLayerPixels {
 }
 
 impl DecodedVideoLayer {
+    fn image_sampling(&self) -> Option<mondrian_core::ImageSampling> {
+        match &self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { frame, .. } => Some(frame.rgba_f32().sampling),
+            DecodedVideoLayerPixels::GpuInput(source) => Some(source.sampling()),
+            DecodedVideoLayerPixels::GpuNative { .. } | DecodedVideoLayerPixels::GpuYuv { .. } => {
+                self.picture_geometry.image_sampling(self.extent()).ok()
+            }
+        }
+    }
+
     fn route(&self) -> ExportDecodedSourceRoute {
         match self.pixels {
             DecodedVideoLayerPixels::CpuWorking { .. } => ExportDecodedSourceRoute::CpuWorking,
@@ -8745,6 +8755,7 @@ fn render_prepared_visual_node_gpu(
                     &media.effect_graph,
                     media.placement,
                     &source,
+                    decoded.image_sampling(),
                     resolution,
                     &mut decode_cache,
                 )?;
@@ -8769,6 +8780,7 @@ fn render_prepared_visual_node_gpu(
                     &title.effect_graph,
                     title.placement,
                     &source,
+                    Some(resolved.frame.rgba_f32().sampling),
                     resolution,
                     &mut decode_cache,
                 )?;
@@ -8792,13 +8804,14 @@ fn render_prepared_visual_node_gpu(
                     nested.placement,
                     PreparedVisualNestedSample::Current,
                 )?;
-                let source_resolution =
-                    export_visual_node(inputs.closure(), child_id)?.author_resolution();
+                let child = export_visual_node(inputs.closure(), child_id)?;
+                let source_resolution = child.author_resolution();
                 let descriptor = frame.descriptor();
+                let sampled = Resolution { width: descriptor.width, height: descriptor.height };
                 let transform = project_export_affine(
                     nested.transform,
                     source_resolution,
-                    Resolution { width: descriptor.width, height: descriptor.height },
+                    sampled,
                     author_resolution,
                     resolution,
                     "GPU nested Sequence",
@@ -8810,6 +8823,7 @@ fn render_prepared_visual_node_gpu(
                     &nested.effect_graph,
                     nested.placement,
                     &source,
+                    child.materialization_contract().image_sampling(sampled).ok(),
                     resolution,
                     &mut decode_cache,
                 )?;
@@ -8839,6 +8853,7 @@ fn render_prepared_visual_node_gpu(
                     &solid.effect_graph,
                     solid.placement,
                     &source,
+                    materialization.image_sampling(resolution).ok(),
                     resolution,
                     &mut decode_cache,
                 )?;
@@ -9019,12 +9034,14 @@ struct ExportGpuSourceEffect {
     spatial: Option<GpuVisualSpatialPlan>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_export_gpu_source_effect(
     context: &mut ExportFrameRenderContext<'_>,
     inputs: &ExportNodeInputs<'_>,
     graph: &Arc<mondrian_effects::CompiledEffectGraph>,
     placement: TimelineClipExecutionRef,
     source: &GpuVisualFrameSource,
+    source_sampling: Option<mondrian_core::ImageSampling>,
     canvas: Resolution,
     cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
 ) -> Result<ExportGpuSourceEffect, ExportPreparedVisualError> {
@@ -9035,6 +9052,12 @@ fn lower_export_gpu_source_effect(
     let pipeline = match route {
         GpuRoute::Point(point) => return Ok(ExportGpuSourceEffect { point, spatial: None }),
         GpuRoute::Spatial(pipeline) => pipeline,
+    };
+    let pipeline = match source_sampling {
+        Some(sampling) if pipeline.requires_image_sampling() => {
+            Arc::new(pipeline.with_image_sampling(sampling))
+        }
+        _ => pipeline,
     };
     let (width, height) = source.extent(canvas.width, canvas.height);
     let slots = graph.auxiliary_inputs().iter().map(|input| input.slot()).collect::<Vec<_>>();
@@ -9117,6 +9140,7 @@ fn lower_export_gpu_transition_input(
                 &media.effect_graph,
                 media.placement,
                 &source,
+                decoded.image_sampling(),
                 resolution,
                 decode_cache,
             )?;
@@ -9146,6 +9170,7 @@ fn lower_export_gpu_transition_input(
                 &title.effect_graph,
                 title.placement,
                 &source,
+                Some(resolved.frame.rgba_f32().sampling),
                 resolution,
                 decode_cache,
             )?;
@@ -9171,13 +9196,14 @@ fn lower_export_gpu_transition_input(
                 nested.placement,
                 PreparedVisualNestedSample::Current,
             )?;
-            let source_resolution =
-                export_visual_node(inputs.closure(), child_id)?.author_resolution();
+            let child = export_visual_node(inputs.closure(), child_id)?;
+            let source_resolution = child.author_resolution();
             let descriptor = frame.descriptor();
+            let sampled = Resolution { width: descriptor.width, height: descriptor.height };
             let transform = project_export_affine(
                 nested.transform,
                 source_resolution,
-                Resolution { width: descriptor.width, height: descriptor.height },
+                sampled,
                 author_resolution,
                 resolution,
                 "GPU Transition nested Sequence",
@@ -9189,6 +9215,7 @@ fn lower_export_gpu_transition_input(
                 &nested.effect_graph,
                 nested.placement,
                 &source,
+                child.materialization_contract().image_sampling(sampled).ok(),
                 resolution,
                 decode_cache,
             )?;
@@ -9218,6 +9245,7 @@ fn lower_export_gpu_transition_input(
                 &solid.effect_graph,
                 solid.placement,
                 &source,
+                materialization.image_sampling(resolution).ok(),
                 resolution,
                 decode_cache,
             )?;
@@ -17246,6 +17274,133 @@ mod tests {
         assert!(diagnostics.gpu_visual_peak_active_textures >= 3);
         assert_eq!(canvas.len(), 4 * 2 * 4);
         assert!(canvas.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    #[ignore = "real GPU Export Smear qualification; run independently"]
+    fn export_smear_uses_non_square_owner_sampling_and_matches_cpu() {
+        use mondrian_core::mask_data::MaskParticipation;
+        use mondrian_effects::{
+            instantiate_effect_node, EffectType, MaskComponent, MaskEvaluation, MaskShape,
+        };
+        use mondrian_renderer::SpatialChainPreference;
+
+        let _gpu_visual = GpuVisualExecutionGuard::activate();
+        let raster = Resolution { width: 37, height: 23 };
+        let mut sequence = Sequence::new("Smear Export owner sampling");
+        sequence.settings.resolution = raster;
+        sequence.settings.pixel_aspect_ratio =
+            mondrian_core::timeline_data::PixelAspectRatio::Anamorphic2x;
+        let time_base = sequence.time_base();
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::BLACK,
+            tt(0, time_base),
+            tt(1, time_base),
+        )
+        .unwrap();
+        let mut ramp = instantiate_effect_node(EffectType::Ramp).unwrap();
+        for (key, point) in [("start", [0.0_f32, 0.0]), ("end", [37.0, 0.0])] {
+            ramp.set_static_value_by_parameter(
+                &EffectType::Ramp.parameter_id(key).unwrap(),
+                PropertyValue::Vec2(point.into()),
+            )
+            .unwrap();
+        }
+        clip.add_effect_node(ramp);
+        let mask = |x, width| {
+            let mut mask = MaskComponent::new(
+                "Smear shape".into(),
+                MaskEvaluation {
+                    shape: MaskShape::Rectangle {
+                        x,
+                        y: x,
+                        width,
+                        height: width,
+                        corner_radius: 0.0,
+                    },
+                    ..MaskEvaluation::default()
+                },
+            );
+            mask.participation = MaskParticipation::EffectOnly;
+            mask
+        };
+        let source = clip.add_mask_component(mask(0.27, 0.46));
+        let boundary = clip.add_mask_component(mask(0.05, 0.9));
+        let mut smear = instantiate_effect_node(EffectType::Smear).unwrap();
+        for (key, value) in [
+            ("source_mask", PropertyValue::MaskReference(Some(source))),
+            (
+                "boundary_mask",
+                PropertyValue::MaskReference(Some(boundary)),
+            ),
+            ("mask_rotation", PropertyValue::Float(47.0)),
+            ("percent", PropertyValue::Float(100.0)),
+        ] {
+            smear
+                .set_static_value_by_parameter(&EffectType::Smear.parameter_id(key).unwrap(), value)
+                .unwrap();
+        }
+        clip.add_effect_node(smear);
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: vec![],
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::EntireSequence,
+        };
+        let mut session = captured_visual_session_for_test(&mut timeline);
+        let color_context = timeline
+            .sequence
+            .settings
+            .root_program_color_context(&timeline.color_environment)
+            .unwrap();
+        let cancellation = ExecutionCancellationToken::new();
+        let render = |session: &mut ExportVisualRenderSession, allow_gpu| {
+            session.resource_policy.opportunistic_gpu_acceleration = allow_gpu;
+            session
+                .composite_scratch
+                .set_spatial_chain_preference(SpatialChainPreference::ForceGpu);
+            let mut output = Vec::new();
+            let mut context = ExportFrameRenderContext {
+                media: &timeline.media,
+                color_environment: &timeline.color_environment,
+                alpha_mode: ExportAlphaMode::Preserve,
+                delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                    ExportFrameContract::EncodedRgba8Unorm,
+                ),
+                input_color_counts: None,
+                stage_diagnostics: None,
+                composite_diagnostics: None,
+                export_diagnostics: None,
+                visual_session: session,
+                cancellation: &cancellation,
+            };
+            render_sequence_frame_into(
+                &timeline,
+                &mut context,
+                &timeline.sequence,
+                0,
+                raster,
+                color_context.clone(),
+                SequenceRenderTarget::Deliverable(&mut output),
+            )
+            .unwrap();
+            output
+        };
+        let cpu = render(&mut session, false);
+        let gpu = render(&mut session, true);
+        let diagnostics = session.visual_diagnostics();
+        assert_eq!(diagnostics.gpu_visual_spatial_effect_layers, 1);
+        assert_eq!(diagnostics.gpu_visual_output_readbacks, 1);
+        assert_eq!(diagnostics.gpu_visual_spatial_cpu_retries, 0);
+        assert_eq!(cpu.len(), (raster.width * raster.height * 4) as usize);
+        assert_eq!(gpu.len(), cpu.len());
+        let max_error = cpu.iter().zip(&gpu).map(|(cpu, gpu)| cpu.abs_diff(*gpu)).max().unwrap();
+        eprintln!("DST-17 production Export maximum error: {max_error} RGBA8 steps");
+        assert!(max_error <= 1);
     }
 
     #[test]

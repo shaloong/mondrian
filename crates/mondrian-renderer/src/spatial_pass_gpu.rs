@@ -42,11 +42,18 @@ pub(crate) enum EffectSpatialGpuError {
     /// This kernel requires a second raster supplied by its caller.
     #[error("spatial pass requires an auxiliary raster")]
     MissingAuxiliaryInput,
+    /// The source adapter must bind the sampling of the selected grid.
+    #[error("Smear requires the actual source image sampling")]
+    MissingImageSampling,
+    /// Building the bounded inverse lattice failed.
+    #[error("{0}")]
+    MaskDeformation(#[from] mondrian_effects::mask_deformation::MaskDeformationError),
 }
 
 /// Reusable pipelines for GPU spatial effect passes.
 pub(crate) struct EffectSpatialGpu {
     bilateral: std::sync::OnceLock<crate::bilateral_gpu::BilateralGpu>,
+    mask_deformation: std::sync::OnceLock<crate::mask_deformation_gpu::MaskDeformationGpu>,
     box_blur: wgpu::RenderPipeline,
     find_edges: wgpu::RenderPipeline,
     emboss: wgpu::RenderPipeline,
@@ -2230,6 +2237,7 @@ impl EffectSpatialGpu {
             key_cleaner_composite,
             smart_blur,
             bilateral: std::sync::OnceLock::new(),
+            mask_deformation: std::sync::OnceLock::new(),
             minimax,
             channel_blur,
             median,
@@ -3041,6 +3049,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
+            EffectGpuSpatialPass::Smear { .. } => Ok(1),
             EffectGpuSpatialPass::BlankingFill { grade } => {
                 Ok(if grade.warps_top_layer() { 1 } else { 2 })
             }
@@ -3081,6 +3090,10 @@ impl EffectSpatialGpu {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 self.record_bilateral(device, encoder, source, output, *grade)?;
                 return Ok(output.clone());
+            }
+            EffectGpuSpatialPass::Smear { grade, sampling } => {
+                let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_smear(device, encoder, source, output, grade, *sampling);
             }
             EffectGpuSpatialPass::SetMatte { sampling: None, .. } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
@@ -4253,6 +4266,40 @@ impl EffectSpatialGpu {
         );
         Ok(destination.clone())
     }
+    /// Prepare and record the shared field on the current stage's actual grid.
+    pub(crate) fn record_smear(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        grade: &mondrian_effects::mask_deformation::MaskDeformation,
+        sampling: Option<mondrian_core::ImageSampling>,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        let sampling = sampling.ok_or(EffectSpatialGpuError::MissingImageSampling)?;
+        let extent = mondrian_effects::EffectFrameExtent::new(source.width(), source.height());
+        let field = grade.prepare(
+            extent,
+            sampling,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )?;
+        self.record_mask_deformation(device, encoder, source, destination, &field)
+    }
+
+    /// Record a prepared mask deformation using the shared lattice and spans.
+    pub(crate) fn record_mask_deformation(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        field: &mondrian_effects::mask_deformation::MaskDeformationRaster,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        self.mask_deformation
+            .get_or_init(|| crate::mask_deformation_gpu::MaskDeformationGpu::new(device))
+            .record(device, encoder, source, destination, field)
+    }
+
     /// Records wire removal: clones pixels from a parallel displacement across
     /// the authored line.
     #[allow(clippy::too_many_arguments)]
@@ -16220,6 +16267,104 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             }
         }
     }
+    #[test]
+    fn gpu_mask_deformation_uses_shared_field_and_preserves_concave_exterior() {
+        use mondrian_effects::mask_deformation::{MaskDeformation, MaskDeformationControls};
+        use mondrian_effects::{BezierPoint, EffectFrameExtent, EffectProcessorControl, MaskShape};
+        let context = block_on(crate::GpuContext::new()).expect("GPU adapter for mask deformation");
+        let source_shape = MaskShape::Ellipse {
+            center: glam::Vec2::new(0.25, 0.25),
+            radii: glam::Vec2::new(0.1, 0.09),
+        };
+        let boundary = MaskShape::Path {
+            points: [
+                [0.1, 0.1],
+                [0.9, 0.1],
+                [0.9, 0.45],
+                [0.48, 0.45],
+                [0.48, 0.9],
+                [0.1, 0.9],
+            ]
+            .into_iter()
+            .map(|xy| BezierPoint::new(glam::Vec2::from_array(xy)))
+            .collect(),
+            closed: true,
+        };
+        let grade = MaskDeformation::new(
+            &source_shape,
+            &boundary,
+            MaskDeformationControls {
+                target: [0.36, 0.3],
+                angle_degrees: 55.0,
+                scale: 0.85,
+                strength: 0.9,
+                elasticity: 7,
+                density: 3,
+            },
+        )
+        .unwrap();
+        let sampling = mondrian_core::ImageSampling::new(
+            mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+            [mondrian_core::Rational::new(1, 1); 2],
+        )
+        .unwrap();
+        let executor = EffectSpatialGpu::new(&context.device);
+        for (width, height) in [(101, 73), (2049, 1153)] {
+            let extent = EffectFrameExtent::new(width, height);
+            let field = grade
+                .prepare(extent, sampling, &mut EffectProcessorControl::uncancelled())
+                .unwrap();
+            let pixels: Vec<[f32; 4]> = (0..height)
+                .flat_map(|y| {
+                    (0..width).map(move |x| {
+                        [
+                            2.0 * (x % 17) as f32 / 17.0,
+                            -0.3 + y as f32 / height as f32,
+                            2.5 + (x & 1) as f32 * 0.75,
+                            if (x + y) % 11 == 0 { 0.0 } else { 0.7 },
+                        ]
+                    })
+                })
+                .collect();
+            let mut cpu = vec![[0.0; 4]; pixels.len()];
+            field
+                .apply_f32(
+                    &pixels,
+                    &mut cpu,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            let source = upload(&context, &pixels, width, height);
+            let scratch = scratch(&context, width, height, 1);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.mask-deformation.parity"),
+                });
+            let output = executor
+                .record_mask_deformation(
+                    &context.device,
+                    &mut encoder,
+                    &source,
+                    &scratch[0],
+                    &field,
+                )
+                .unwrap();
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &output, width, height);
+            assert!(gpu.iter().flatten().all(|channel| channel.is_finite()));
+            let max = cpu
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(a, b)| a.iter().zip(b).map(|(a, b)| (a - b).abs()))
+                .fold(0.0_f32, f32::max);
+            eprintln!("mask deformation {width}x{height} Float32 max absolute error = {max:.9e}");
+            assert!(max <= 1e-4);
+            let notch = ((height * 3 / 4) * width + width * 2 / 3) as usize;
+            assert_eq!(gpu[notch], pixels[notch]);
+            assert_ne!(cpu, pixels);
+        }
+    }
+
     #[test]
     fn gpu_grid_warp_matches_the_cpu_kernel() {
         let Ok(context) = block_on(crate::GpuContext::new()) else {

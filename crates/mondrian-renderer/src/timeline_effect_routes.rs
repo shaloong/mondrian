@@ -15,7 +15,7 @@ use mondrian_core::timeline_data::TimelineClipExecutionRef;
 use mondrian_effects::{CompiledEffectGraph, EffectFrameExtent, EffectGraphExecutionBudget};
 
 use crate::{
-    admit_timeline_render_plan_for_cpu_compositor, PreparedHeterogeneousEffectRoute,
+    admit_timeline_render_plan_for_cpu_compositor, GpuRoute, PreparedHeterogeneousEffectRoute,
     TimelineCompositeScratch, TimelineRenderPlan, TimelineRenderPlanElement,
     TimelineTransitionInputPlan,
 };
@@ -165,7 +165,11 @@ impl PreparedTimelinePreviewEffectRoutes {
                 // heterogeneous ledger is sized to that canvas, so keep the complete
                 // graph on the existing source-before-composite CPU route.
                 PreparedTimelinePreviewEffectRoute::Cpu { processor_input: None }
-            } else if scratch.get_or_lower_effect_gpu_plan(graph).is_ok() {
+            } else if scratch.get_or_lower_effect_gpu_plan(graph).is_ok()
+                || (source != TimelinePreviewEffectSource::CompositedAccumulator
+                    && matches!(scratch.get_or_lower_effect_gpu_route(graph),
+                        Ok(GpuRoute::Spatial(pipeline)) if pipeline.requires_image_sampling()))
+            {
                 PreparedTimelinePreviewEffectRoute::Gpu
             } else if let Some(extent) =
                 source.cpu_prefix_extent(placement, node_extent, &mut nested_extent)?
@@ -416,6 +420,55 @@ fn visit_transition_graph(
 mod source_materialization_tests {
     use super::*;
     use crate::timeline_composite::source_materialization_tests::{source_graph, source_plan};
+
+    #[test]
+    fn preview_smear_route_does_not_require_cpu_prefix_allocation() {
+        use mondrian_effects::{
+            compile_reference_render_graph,
+            mask_deformation::{MaskDeformation, MaskDeformationControls},
+            EffectGraphBuilderState, EffectRenderOp, MaskShape,
+        };
+
+        let rect = |x, size| MaskShape::Rectangle {
+            x,
+            y: x,
+            width: size,
+            height: size,
+            corner_radius: 0.0,
+        };
+        let grade = MaskDeformation::new(
+            &rect(0.3, 0.4),
+            &rect(0.05, 0.9),
+            MaskDeformationControls {
+                target: [0.56, 0.5],
+                angle_degrees: 30.0,
+                scale: 1.0,
+                strength: 1.0,
+                elasticity: 1,
+                density: 2,
+            },
+        )
+        .unwrap();
+        let mut graph = EffectGraphBuilderState::new();
+        graph.append_unary(EffectRenderOp::Smear { grade: Arc::new(grade) });
+        let plan = source_plan(compile_reference_render_graph(graph.finish()).unwrap());
+        let mut scratch = TimelineCompositeScratch::default();
+        let routes = PreparedTimelinePreviewEffectRoutes::prepare(
+            &plan,
+            EffectFrameExtent::new(37, 23),
+            EffectGraphExecutionBudget::new(0, 0, 0, 0, 0),
+            &mut scratch,
+            |_| None,
+        )
+        .unwrap();
+        let crate::TimelineRenderPlanElement::SolidColor(layer) = &plan.elements[0] else {
+            panic!("solid source plan")
+        };
+        let route = routes.route_for(layer.placement, &layer.effect_graph).unwrap();
+        assert!(matches!(route, PreparedTimelinePreviewEffectRoute::Gpu));
+        assert!(!route.requires_cpu_working_frame());
+    }
+
     #[test]
     fn preview_root_and_nested_routes_admit_no_image_sources_without_advancing_them() {
         let (graph, probe) = source_graph();

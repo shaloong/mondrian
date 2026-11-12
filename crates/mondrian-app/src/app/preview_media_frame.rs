@@ -343,6 +343,14 @@ impl MediaPreviewFrame {
         self.logical_resolution
     }
 
+    /// Sampling of the exact picture grid materialized for spatial effects.
+    pub(crate) fn spatial_image_sampling(&self) -> Option<mondrian_core::ImageSampling> {
+        if let Some((_, sampling)) = self.cpu_image_domain() {
+            return Some(sampling);
+        }
+        self.source_key()?.picture_geometry.image_sampling(self.sampled_resolution).ok()
+    }
+
     /// Complete semantic identity of the decoded or generated source frame.
     pub(crate) fn identity(&self) -> PreviewSemanticIdentity {
         self.identity
@@ -740,6 +748,7 @@ mod sampling_tests {
             PreviewDecodeExecutionSummary::default(),
         )
         .with_picture_geometry(geometry);
+        assert_eq!(frame.spatial_image_sampling(), Some(sampling));
         let first = frame.working_frame().unwrap();
         let cached = frame.working_frame().unwrap();
         assert_eq!(

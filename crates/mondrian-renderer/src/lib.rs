@@ -24,6 +24,7 @@ mod creative_lut_gpu;
 pub mod cross_application_qualification;
 pub mod display_calibration;
 mod display_matte;
+mod mask_deformation_gpu;
 pub mod spatial_driver;
 mod spatial_pass_gpu;
 pub use display_matte::GpuDisplayCalibrationBackdrop;

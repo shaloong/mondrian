@@ -329,12 +329,12 @@ fn estimate_ns(
                 height += 2.0 * f64::from(y);
                 pixels = width * height;
                 let passes = f64::from((*scratch_textures).max(1));
-                gpu += passes * (pixels * gpu_ns_per_px(*pass) + GPU_PASS_OVERHEAD_NS);
+                gpu += passes * (pixels * gpu_ns_per_px(pass) + GPU_PASS_OVERHEAD_NS);
                 if *scratch_textures > 0 {
                     gpu += copy_out_ns(pixels);
                 }
                 // CPU rates include all internal passes of each spatial kernel.
-                cpu += pixels * cpu_ns_per_px(*pass);
+                cpu += pixels * cpu_ns_per_px(pass);
             }
             GpuSpatialStagePlan::PointOps { operations } => {
                 gpu += point_stage_ns(pixels, operations.len());
@@ -351,7 +351,7 @@ fn estimate_ns(
 }
 
 /// Per-pixel GPU cost of one texture pass of this kernel.
-fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
+fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
     match pass.name() {
         // Separable blurs and multi-pass morphology stay close to the two
         // texture reads and one write that bound every pass.
@@ -400,6 +400,7 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "set_matte" => 1.2,
         "displacement_map" => 2.4,
         "grow_bounds" => 0.8,
+        "smear" => 2.4,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 1.4,
             _ => 3.6,
@@ -421,7 +422,7 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
 ///
 /// Rates are effective multi-core rates, so they already include the row-band
 /// parallelism `throughput.rs` reports.
-fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
+fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
     match pass.name() {
         "box_blur" | "offset" | "mirror" | "flip" | "split" => 1.0,
         "channel_blur" => 3.0,
@@ -431,6 +432,7 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,
+        "smear" => 24.0,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 3.0,
             _ => 12.0,
@@ -509,10 +511,10 @@ mod tests {
 
     fn spatial_stage(pass: EffectGpuSpatialPass, passes: u32) -> GpuSpatialStagePlan {
         GpuSpatialStagePlan::Spatial {
-            pass,
             scratch_textures: passes,
             horizontal_halo: pass.horizontal_halo(),
             vertical_halo: pass.vertical_halo(),
+            pass,
         }
     }
 
@@ -598,26 +600,26 @@ mod tests {
         let later_expansion =
             EffectGpuSpatialPass::GrowBounds { grade: GrowBoundsGrade::new(2.0).unwrap() };
         let plan = chain_plan(vec![
-            spatial_stage(expansion, 1),
+            spatial_stage(expansion.clone(), 1),
             GpuSpatialStagePlan::PointOps {
                 operations: vec![EffectGpuPointOp::Grain { amount: 0.05 }],
             },
-            spatial_stage(later_expansion, 1),
+            spatial_stage(later_expansion.clone(), 1),
         ]);
         let (source_pixels, first_pixels, final_pixels) = (60.0, 252.0, 396.0);
         let (gpu, cpu) = estimate_ns(&plan, 10, 6, false);
         let expected_gpu = GPU_CHAIN_SETUP_NS
-            + first_pixels * gpu_ns_per_px(expansion)
+            + first_pixels * gpu_ns_per_px(&expansion)
             + GPU_PASS_OVERHEAD_NS
             + copy_out_ns(first_pixels)
             + point_stage_ns(first_pixels, 1)
-            + final_pixels * gpu_ns_per_px(later_expansion)
+            + final_pixels * gpu_ns_per_px(&later_expansion)
             + GPU_PASS_OVERHEAD_NS
             + copy_out_ns(final_pixels)
             + upload_ns(source_pixels);
         let expected_cpu = CPU_CHAIN_SETUP_NS
-            + first_pixels * cpu_ns_per_px(expansion)
-            + final_pixels * cpu_ns_per_px(later_expansion)
+            + first_pixels * cpu_ns_per_px(&expansion)
+            + final_pixels * cpu_ns_per_px(&later_expansion)
             + source_pixels * CPU_COMPOSITE_NS_PER_PX
             + cpu_upload_full_ns(source_pixels);
         assert!((gpu - expected_gpu).abs() < 1.0e-8);
