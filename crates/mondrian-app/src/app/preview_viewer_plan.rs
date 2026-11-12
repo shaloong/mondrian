@@ -2025,6 +2025,44 @@ mod heterogeneous_tests {
     }
 
     #[test]
+    fn a_detail_preserving_upscale_solid_keeps_its_enlarged_grid_on_the_gpu() {
+        let graph = single_effect_graph(EffectType::DetailPreservingUpscale, &[("scale", 150.0)]);
+        let extent = EffectFrameExtent::new(37, 23);
+        let mut scratch = TimelineCompositeScratch::default();
+        scratch.set_spatial_chain_preference(mondrian_renderer::SpatialChainPreference::ForceGpu);
+        let plan = prepare_gpu_composite_layers_with_heterogeneous_effects(
+            &[ordinary_solid(graph, 31)],
+            WORKING_SPACE,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            &mut scratch,
+            cpu_grant(),
+            &[],
+            extent,
+        )
+        .unwrap();
+        let PreparedPreviewViewerGpuLayers::Ordinary { layers } = plan else {
+            panic!("upscale has a whole-layer GPU pass");
+        };
+        let ViewerGpuSourceLayer::SolidColor { spatial_plan: Some(plan), .. } =
+            source_layer(&layers)
+        else {
+            panic!("the solid carries its spatial plan");
+        };
+        let admitted = gpu_spatial_chain_plan_with_auxiliary(
+            &plan.pipeline,
+            extent.width(),
+            extent.height(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            admitted.output_bounds.extent(),
+            EffectFrameExtent::new(56, 35)
+        );
+        assert_eq!(admitted.output_bounds.origin_half_pixels(), [-19, -12]);
+    }
+
+    #[test]
     fn a_smear_solid_binds_the_actual_viewer_canvas_sampling() {
         assert_mask_deformation_solid_uses_viewer_sampling(EffectType::Smear);
     }

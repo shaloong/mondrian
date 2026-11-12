@@ -316,25 +316,34 @@ fn estimate_ns(
     height: u32,
     source_on_gpu: bool,
 ) -> (f64, f64) {
-    let (mut width, mut height) = (f64::from(width), f64::from(height));
-    let source_pixels = width * height;
+    let source_pixels = f64::from(width) * f64::from(height);
     let mut pixels = source_pixels;
     let mut gpu = GPU_CHAIN_SETUP_NS;
     let mut cpu = CPU_CHAIN_SETUP_NS;
     for stage in &plan.stages {
         match stage {
-            GpuSpatialStagePlan::Spatial { pass, scratch_textures, .. } => {
-                let [x, y] = pass.output_outset();
-                width += 2.0 * f64::from(x);
-                height += 2.0 * f64::from(y);
-                pixels = width * height;
-                let passes = f64::from((*scratch_textures).max(1));
-                gpu += passes * (pixels * gpu_ns_per_px(pass) + GPU_PASS_OVERHEAD_NS);
+            GpuSpatialStagePlan::Spatial {
+                pass,
+                output_extent,
+                scratch_textures,
+                draw_passes,
+                draw_pixels,
+                ..
+            } => {
+                pixels = f64::from(output_extent.width()) * f64::from(output_extent.height());
+                let passes = f64::from(*draw_passes);
+                gpu += *draw_pixels as f64 * gpu_ns_per_px(pass) + passes * GPU_PASS_OVERHEAD_NS;
                 if *scratch_textures > 0 {
                     gpu += copy_out_ns(pixels);
                 }
                 // CPU rates include all internal passes of each spatial kernel.
-                cpu += pixels * cpu_ns_per_px(pass);
+                let cpu_pixels =
+                    if matches!(pass, EffectGpuSpatialPass::DetailPreservingUpscale { .. }) {
+                        *draw_pixels as f64
+                    } else {
+                        pixels
+                    };
+                cpu += cpu_pixels * cpu_ns_per_px(pass);
             }
             GpuSpatialStagePlan::PointOps { operations } => {
                 gpu += point_stage_ns(pixels, operations.len());
@@ -401,6 +410,7 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "displacement_map" => 2.4,
         "grow_bounds" => 0.8,
         "smear" | "reshape" => 2.4,
+        "detail_preserving_upscale" => 28.0,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 1.4,
             _ => 3.6,
@@ -433,6 +443,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,
         "smear" | "reshape" => 24.0,
+        "detail_preserving_upscale" => 110.0,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 3.0,
             _ => 12.0,
@@ -505,15 +516,34 @@ fn cpu_upload_full_ns(pixels: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use mondrian_effects::{ChannelBlurDirection, ChannelBlurGrade, EffectGpuPointOp, TwirlGrade};
+    use mondrian_effects::{
+        ChannelBlurDirection, ChannelBlurGrade, EffectFrameExtent, EffectGpuPointOp,
+        EffectRasterBounds, TwirlGrade,
+    };
 
     use super::*;
 
-    fn spatial_stage(pass: EffectGpuSpatialPass, passes: u32) -> GpuSpatialStagePlan {
+    fn spatial_stage(
+        pass: EffectGpuSpatialPass,
+        passes: u32,
+        width: u32,
+        height: u32,
+    ) -> GpuSpatialStagePlan {
+        let input_extent = EffectFrameExtent::new(width, height);
+        let output_extent = EffectRasterBounds::from_extent(input_extent)
+            .checked_apply(pass.raster_change())
+            .unwrap()
+            .extent();
         GpuSpatialStagePlan::Spatial {
             scratch_textures: passes,
+            draw_passes: passes.max(1),
+            draw_pixels: u64::from(passes.max(1))
+                * u64::from(output_extent.width())
+                * u64::from(output_extent.height()),
             horizontal_halo: pass.horizontal_halo(),
             vertical_halo: pass.vertical_halo(),
+            input_extent,
+            output_extent,
             pass,
         }
     }
@@ -554,6 +584,8 @@ mod tests {
         chain_plan(vec![spatial_stage(
             EffectGpuSpatialPass::Twirl { grade },
             1,
+            width,
+            height,
         )])
     }
 
@@ -580,6 +612,8 @@ mod tests {
         let plan = chain_plan(vec![spatial_stage(
             EffectGpuSpatialPass::ChannelBlur { grade },
             2,
+            3840,
+            2160,
         )]);
         let choice = choose_spatial_chain(&plan, 3840, 2160, true, SpatialChainPreference::Auto);
 
@@ -600,11 +634,11 @@ mod tests {
         let later_expansion =
             EffectGpuSpatialPass::GrowBounds { grade: GrowBoundsGrade::new(2.0).unwrap() };
         let plan = chain_plan(vec![
-            spatial_stage(expansion.clone(), 1),
+            spatial_stage(expansion.clone(), 1, 10, 6),
             GpuSpatialStagePlan::PointOps {
                 operations: vec![EffectGpuPointOp::Grain { amount: 0.05 }],
             },
-            spatial_stage(later_expansion.clone(), 1),
+            spatial_stage(later_expansion.clone(), 1, 18, 14),
         ]);
         let (source_pixels, first_pixels, final_pixels) = (60.0, 252.0, 396.0);
         let (gpu, cpu) = estimate_ns(&plan, 10, 6, false);

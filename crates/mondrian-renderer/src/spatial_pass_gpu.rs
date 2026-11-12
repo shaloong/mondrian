@@ -54,6 +54,8 @@ pub(crate) enum EffectSpatialGpuError {
 pub(crate) struct EffectSpatialGpu {
     bilateral: std::sync::OnceLock<crate::bilateral_gpu::BilateralGpu>,
     mask_deformation: std::sync::OnceLock<crate::mask_deformation_gpu::MaskDeformationGpu>,
+    detail_preserving_upscale:
+        std::sync::OnceLock<crate::detail_preserving_upscale_gpu::DetailPreservingUpscaleGpu>,
     box_blur: wgpu::RenderPipeline,
     find_edges: wgpu::RenderPipeline,
     emboss: wgpu::RenderPipeline,
@@ -2238,6 +2240,7 @@ impl EffectSpatialGpu {
             smart_blur,
             bilateral: std::sync::OnceLock::new(),
             mask_deformation: std::sync::OnceLock::new(),
+            detail_preserving_upscale: std::sync::OnceLock::new(),
             minimax,
             channel_blur,
             median,
@@ -2890,7 +2893,7 @@ impl EffectSpatialGpu {
         let input_extent =
             mondrian_effects::EffectFrameExtent::new(primary.width(), primary.height());
         let bounds = mondrian_effects::EffectRasterBounds::from_extent(input_extent)
-            .checked_outset(pass.output_outset())
+            .checked_apply(pass.raster_change())
             .ok_or(EffectSpatialGpuError::UnsupportedPass(
                 "auxiliary_output_extent",
             ))?;
@@ -3050,6 +3053,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
             EffectGpuSpatialPass::Smear { .. } | EffectGpuSpatialPass::Reshape { .. } => Ok(1),
+            EffectGpuSpatialPass::DetailPreservingUpscale { .. } => Ok(1),
             EffectGpuSpatialPass::BlankingFill { grade } => {
                 Ok(if grade.warps_top_layer() { 1 } else { 2 })
             }
@@ -3097,6 +3101,11 @@ impl EffectSpatialGpu {
                 return self.record_mask_deformation_pass(
                     device, encoder, source, output, grade, *sampling,
                 );
+            }
+            EffectGpuSpatialPass::DetailPreservingUpscale { grade } => {
+                let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                self.record_detail_preserving_upscale(device, encoder, source, output, *grade)?;
+                return Ok(output.clone());
             }
             EffectGpuSpatialPass::SetMatte { sampling: None, .. } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
@@ -4270,6 +4279,25 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
     /// Prepare and record the shared field on the current stage's actual grid.
+    pub(crate) fn record_detail_preserving_upscale(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        grade: mondrian_effects::DetailPreservingUpscaleGrade,
+    ) -> Result<(), EffectSpatialGpuError> {
+        let extent = mondrian_effects::EffectFrameExtent::new(source.width(), source.height());
+        let plan = crate::detail_preserving_upscale_gpu::UpscaleGpuPlan::new(grade, extent).ok_or(
+            EffectSpatialGpuError::UnsupportedPass("detail_preserving_upscale_raster"),
+        )?;
+        self.detail_preserving_upscale
+            .get_or_init(|| {
+                crate::detail_preserving_upscale_gpu::DetailPreservingUpscaleGpu::new(device)
+            })
+            .record(device, encoder, source, destination, &plan)
+    }
+
     pub(crate) fn record_mask_deformation_pass(
         &self,
         device: &wgpu::Device,

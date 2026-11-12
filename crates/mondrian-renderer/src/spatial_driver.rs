@@ -53,8 +53,16 @@ pub enum GpuSpatialStagePlan {
     Spatial {
         /// Kernel to record.
         pass: EffectGpuSpatialPass,
+        /// Grid read by the stage.
+        input_extent: EffectFrameExtent,
+        /// Grid written by the stage.
+        output_extent: EffectFrameExtent,
         /// Texture passes the kernel's pass table needs from the scratch pool.
         scratch_textures: u32,
+        /// Render passes executed, including direct-output stages.
+        draw_passes: u32,
+        /// Sum of the pixel areas written by the render passes.
+        draw_pixels: u64,
         /// Horizontal halo the kernel may read outside its output texel.
         ///
         /// `u32::MAX` marks a kernel that may read any pixel of the frame; this
@@ -242,8 +250,9 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                         return Err(GpuSpatialChainBlocker::MissingAuxiliaryInput { slot });
                     }
                 }
+                let input_extent = output_bounds.extent();
                 output_bounds =
-                    output_bounds.checked_outset(pass.output_outset()).ok_or_else(|| {
+                    output_bounds.checked_apply(pass.raster_change()).ok_or_else(|| {
                         GpuSpatialChainBlocker::UnsupportedPass {
                             pass: pass.name(),
                             detail: "output raster geometry overflow".into(),
@@ -259,7 +268,26 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                         limit: GPU_SPATIAL_MAX_RASTER_DIMENSION,
                     });
                 }
-                let passes = if let EffectGpuSpatialPass::BilateralBlur { grade } = pass {
+                let mut minimum_draw_passes = 1;
+                let mut exact_draw_pixels = None;
+                let passes = if let EffectGpuSpatialPass::DetailPreservingUpscale { grade } = pass {
+                    let plan = crate::detail_preserving_upscale_gpu::UpscaleGpuPlan::new(
+                        *grade,
+                        input_extent,
+                    )
+                    .filter(|plan| plan.fits(&wgpu::Limits::default()))
+                    .ok_or_else(|| {
+                        GpuSpatialChainBlocker::UnsupportedPass {
+                            pass: pass.name(),
+                            detail: "upscale pyramid exceeds the texture or binding limits".into(),
+                        }
+                    })?;
+                    minimum_draw_passes = plan.passes;
+                    exact_draw_pixels = Some(plan.draw_pixels);
+                    direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
+                    direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.scratch_bytes);
+                    0
+                } else if let EffectGpuSpatialPass::BilateralBlur { grade } = pass {
                     let plan = crate::bilateral_gpu::BilateralGpuPlan::new(
                         *grade,
                         output.width(),
@@ -308,11 +336,19 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                         }
                     }
                 };
-                spatial_passes = spatial_passes.saturating_add(passes.max(1));
+                let draw_passes = passes.max(minimum_draw_passes);
+                let draw_pixels = exact_draw_pixels.unwrap_or_else(|| {
+                    u64::from(output.width()) * u64::from(output.height()) * u64::from(draw_passes)
+                });
+                spatial_passes = spatial_passes.saturating_add(draw_passes);
                 largest_pass_count = largest_pass_count.max(passes);
                 stages.push(GpuSpatialStagePlan::Spatial {
                     pass: pass.clone(),
+                    input_extent,
+                    output_extent: output,
                     scratch_textures: passes,
+                    draw_passes,
+                    draw_pixels,
                     horizontal_halo: pass.horizontal_halo(),
                     vertical_halo: pass.vertical_halo(),
                 });
@@ -575,6 +611,40 @@ mod tests {
     }
 
     #[test]
+    fn spatial_chain_detail_preserving_upscale_checks_extent_and_working_bytes() {
+        use mondrian_effects::{DetailPreservingUpscaleGrade, UpscaleAlpha};
+
+        let make_pipeline = |scale| {
+            let mut graph = EffectGraphBuilderState::new();
+            graph.append_unary(EffectRenderOp::DetailPreservingUpscale {
+                grade: DetailPreservingUpscaleGrade::new(scale, 0.0, 50.0, UpscaleAlpha::Bicubic)
+                    .unwrap(),
+            });
+            lower_effect_graph_to_gpu_pipeline(
+                &compile_reference_render_graph(graph.finish()).unwrap(),
+            )
+            .unwrap()
+        };
+        let pipeline = make_pipeline(200.0);
+        let admitted = gpu_spatial_chain_plan(&pipeline, 2048, 1080).unwrap();
+        assert_eq!(
+            admitted.output_bounds.extent(),
+            EffectFrameExtent::new(4096, 2160)
+        );
+        assert_eq!(admitted.spatial_passes, 1);
+        assert_eq!(admitted.scratch_textures, 0);
+        assert_eq!(admitted.scratch_bytes, 16 + 8 * (4096 + 2160));
+        assert!(matches!(
+            gpu_spatial_chain_plan(&pipeline, 4096, 2160),
+            Err(GpuSpatialChainBlocker::ScratchBudgetExceeded { .. })
+        ));
+        assert!(matches!(
+            gpu_spatial_chain_plan(&make_pipeline(30_000.0), 1920, 1080),
+            Err(GpuSpatialChainBlocker::ExtentExceedsDeviceLimit { .. })
+        ));
+    }
+
+    #[test]
     fn spatial_chain_chromatic_aberration_removal_checks_device_extent_first() {
         let error = gpu_spatial_chain_plan(&chromatic_aberration_removal_pipeline(), 8193, 2160)
             .unwrap_err();
@@ -599,7 +669,11 @@ mod tests {
                 scratch_textures: 1,
                 horizontal_halo: 16,
                 vertical_halo: 16,
-            }]
+                input_extent,
+                output_extent,
+                ..
+            }] if *input_extent == EffectFrameExtent::new(4096, 2160)
+                && output_extent == input_extent
         ));
     }
 
@@ -622,6 +696,7 @@ mod tests {
                 scratch_textures: 1,
                 horizontal_halo: u32::MAX,
                 vertical_halo: u32::MAX,
+                ..
             }]
         ));
     }
@@ -653,6 +728,7 @@ mod tests {
                 scratch_textures: 1,
                 horizontal_halo: u32::MAX,
                 vertical_halo: u32::MAX,
+                ..
             }]
         ));
     }
@@ -686,6 +762,7 @@ mod tests {
                     scratch_textures,
                     horizontal_halo: u32::MAX,
                     vertical_halo: u32::MAX,
+                    ..
                 }] if *scratch_textures == passes
             ));
         }

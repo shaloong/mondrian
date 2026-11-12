@@ -572,6 +572,26 @@ fn sample_layer(src_center: vec2<f32>) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     let src_size = uniforms.geometry.zw;
+    // Resized spatial output uses the CPU compositor's bilinear projection.
+    // The working texture may be unfilterable, so load and clamp each tap.
+    if (uniforms.inv_transform1.z != 0.0) {
+        let index = src_center - vec2<f32>(0.5);
+        let base = vec2<i32>(floor(index));
+        let fraction = index - vec2<f32>(base);
+        let last = vec2<i32>(src_size) - vec2<i32>(1);
+        let p0 = clamp(base, vec2<i32>(0), last);
+        let tl = textureLoad(layer_tex, p0, 0);
+        if (all(fraction == vec2<f32>(0.0))) {
+            return tl;
+        }
+        let p1 = clamp(base + vec2<i32>(1), vec2<i32>(0), last);
+        let tr = textureLoad(layer_tex, vec2<i32>(p1.x, p0.y), 0);
+        let bl = textureLoad(layer_tex, vec2<i32>(p0.x, p1.y), 0);
+        let br = textureLoad(layer_tex, p1, 0);
+        let top = tl + (tr - tl) * fraction.x;
+        let bottom = bl + (br - bl) * fraction.x;
+        return top + (bottom - top) * fraction.y;
+    }
     return textureSample(layer_tex, linear_sampler, src_center / src_size);
 }
 
@@ -4460,6 +4480,7 @@ struct GpuCompositeUniforms {
     mask_controls: [u32; 2],
     solid_color: [f32; 4],
     inv_transform0: [f32; 4],
+    // Inverse affine tail, then a bilinear spatial output flag and padding.
     inv_transform1: [f32; 4],
     geometry: [f32; 4],
     effects: [GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS],
@@ -5085,6 +5106,7 @@ impl GpuFrameCompositor {
                 ),
             };
             let mut transform = layer.transform;
+            let mut sample_resized_output = false;
             if let Some(chain) = spatial_chain_at(index) {
                 let source_descriptor = layer_source_descriptor(layer.source).ok_or(
                     GpuCompositeError::SpatialPlanOnUnsupportedSource {
@@ -5126,6 +5148,13 @@ impl GpuFrameCompositor {
                 let extent = chain.output_bounds.extent();
                 source_size = [extent.width() as f32, extent.height() as f32];
                 transform = chain.output_bounds.project_affine(transform);
+                sample_resized_output = chain.stages.iter().any(|stage| {
+                    matches!(
+                        stage.spatial_pass(),
+                        Some(EffectGpuSpatialPass::DetailPreservingUpscale { grade })
+                            if !grade.scale().is_identity()
+                    )
+                });
                 spatial_effect_layers = spatial_effect_layers.saturating_add(1);
                 spatial_chain_gpu_choices = spatial_chain_gpu_choices.saturating_add(1);
                 spatial_effect_passes =
@@ -5223,7 +5252,12 @@ impl GpuFrameCompositor {
                         inv_transform[2],
                         inv_transform[3],
                     ],
-                    inv_transform1: [inv_transform[4], inv_transform[5], 0.0, 0.0],
+                    inv_transform1: [
+                        inv_transform[4],
+                        inv_transform[5],
+                        f32::from(sample_resized_output),
+                        0.0,
+                    ],
                     geometry: [width as f32, height as f32, source_size[0], source_size[1]],
                     effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
                 },
@@ -5359,19 +5393,25 @@ impl GpuFrameCompositor {
                         .clone();
                     current_handle = Some(handle);
                 }
-                GpuSpatialStagePlan::Spatial { pass, scratch_textures, .. } => {
-                    let bounds = mondrian_effects::EffectRasterBounds::from_extent(
-                        mondrian_effects::EffectFrameExtent::new(width, height),
-                    )
-                    .checked_outset(pass.output_outset())
-                    .ok_or_else(|| GpuCompositeError::SpatialChainFailed {
-                        pass: pass.name(),
-                        detail: "output raster geometry overflow".into(),
-                    })?;
-                    let extent = bounds.extent();
-                    working_descriptor.width = extent.width();
-                    working_descriptor.height = extent.height();
-                    let (width, height) = (extent.width(), extent.height());
+                GpuSpatialStagePlan::Spatial {
+                    pass,
+                    input_extent,
+                    output_extent,
+                    scratch_textures,
+                    ..
+                } => {
+                    if (width, height) != (input_extent.width(), input_extent.height()) {
+                        return Err(GpuCompositeError::SpatialChainFailed {
+                            pass: pass.name(),
+                            detail: format!(
+                                "planned {}×{} input differs from the current {width}×{height} raster",
+                                input_extent.width(), input_extent.height(),
+                            ),
+                        });
+                    }
+                    let (width, height) = (output_extent.width(), output_extent.height());
+                    working_descriptor.width = width;
+                    working_descriptor.height = height;
                     let output = create_working_resource(
                         device,
                         ids,
@@ -5379,7 +5419,20 @@ impl GpuFrameCompositor {
                         "gpu-spatial-pass",
                         resource_pool,
                     )?;
-                    if let EffectGpuSpatialPass::BilateralBlur { grade } = pass {
+                    if let EffectGpuSpatialPass::DetailPreservingUpscale { grade } = pass {
+                        self.spatial
+                            .record_detail_preserving_upscale(
+                                device,
+                                encoder,
+                                &current_texture,
+                                &output.resource().texture,
+                                *grade,
+                            )
+                            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                                pass: spatial_failure_pass(&error),
+                                detail: error.to_string(),
+                            })?;
+                    } else if let EffectGpuSpatialPass::BilateralBlur { grade } = pass {
                         self.spatial
                             .record_bilateral(
                                 device,
@@ -19258,6 +19311,92 @@ mod tests {
             "DST-10 after Grow Bounds {bounds:?}, Float32 maximum absolute error {error:.9e}"
         );
         assert!(error <= 1.0e-4);
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_detail_preserving_upscale_matches_cpu_on_fractional_grids() {
+        use mondrian_core::{ImageSampling, Rational, SampleAspectRatio};
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_pipeline, DetailPreservingUpscaleGrade, EffectFloatFrameView,
+            EffectFrameExtent, EffectGraphBuilderState, EffectRenderOp, EffectValueFormat,
+            EffectWorkingPrecision, GrowBoundsGrade, UpscaleAlpha,
+        };
+
+        let extent = EffectFrameExtent::new(11, 7);
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let space = WorkingColorSpace::LinearRec709;
+        let pixels = (0..extent.width() * extent.height())
+            .map(|i| {
+                [
+                    (i % 13) as f32 / 3.0,
+                    (i % 17) as f32 / -4.0,
+                    2.0,
+                    (i % 7) as f32 / 6.0,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: extent.width(),
+            height: extent.height(),
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: space,
+            data: pixels.clone(),
+        });
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for upscale parity");
+        for (scale, noise, detail, alpha, output_size, draws) in [
+            (125.0, 0.0, 67.0, UpscaleAlpha::Bilinear, (19, 14), 2),
+            (350.0, 70.0, 92.0, UpscaleAlpha::Bicubic, (53, 39), 4),
+        ] {
+            let mut graph = EffectGraphBuilderState::new();
+            graph.append_unary(EffectRenderOp::GrowBounds {
+                grade: GrowBoundsGrade::new(2.0).unwrap(),
+            });
+            graph.append_unary(EffectRenderOp::DetailPreservingUpscale {
+                grade: DetailPreservingUpscaleGrade::new(scale, noise, detail, alpha).unwrap(),
+            });
+            let graph = compile_reference_render_graph(graph.finish()).unwrap();
+            let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            let bounds = graph.output_raster_bounds(extent).unwrap();
+            assert_eq!(
+                (bounds.extent().width(), bounds.extent().height()),
+                output_size
+            );
+            let [x, y] = bounds.origin_half_pixels();
+            let mut layer = spatial_test_layer(&frame);
+            layer.transform[2] = -0.5 * x as f32;
+            layer.transform[5] = -0.5 * y as f32;
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context,
+                &[GpuCompositeSpatialLayer { layer, spatial_plan: Some(&pipeline) }],
+                output_size.0,
+                output_size.1,
+                space,
+            );
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                EffectFloatFrameView::new(extent, format, sampling, &pixels),
+                &graph,
+                0,
+            )
+            .unwrap();
+            assert_eq!(diagnostics.spatial_effect_passes, draws);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+            let error = max_spatial_float_error(expected.pixels(), &actual);
+            eprintln!("RES-09 {scale}% noise={noise}, {output_size:?}, Float32 maximum absolute error {error:.9e}");
+            assert!(error <= 1e-4);
+        }
     }
 
     #[tokio::test]

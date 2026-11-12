@@ -22,6 +22,7 @@ mod cpu_visual_execution;
 mod cpu_yuv;
 mod creative_lut_gpu;
 pub mod cross_application_qualification;
+mod detail_preserving_upscale_gpu;
 pub mod display_calibration;
 mod display_matte;
 mod mask_deformation_gpu;

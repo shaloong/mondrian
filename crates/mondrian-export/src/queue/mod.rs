@@ -17279,16 +17279,22 @@ mod tests {
     #[test]
     #[ignore = "real GPU Export Smear qualification; run independently"]
     fn export_smear_uses_non_square_owner_sampling_and_matches_cpu() {
-        export_mask_deformation_matches_cpu(mondrian_effects::EffectType::Smear);
+        export_spatial_effect_matches_cpu(mondrian_effects::EffectType::Smear);
     }
 
     #[test]
     #[ignore = "real GPU Export Reshape qualification; run independently"]
     fn export_reshape_uses_non_square_owner_sampling_and_matches_cpu() {
-        export_mask_deformation_matches_cpu(mondrian_effects::EffectType::Reshape);
+        export_spatial_effect_matches_cpu(mondrian_effects::EffectType::Reshape);
     }
 
-    fn export_mask_deformation_matches_cpu(kind: mondrian_effects::EffectType) {
+    #[test]
+    #[ignore = "real GPU Export upscale qualification; run independently"]
+    fn export_detail_preserving_upscale_keeps_delivery_extent_and_matches_cpu() {
+        export_spatial_effect_matches_cpu(mondrian_effects::EffectType::DetailPreservingUpscale);
+    }
+
+    fn export_spatial_effect_matches_cpu(kind: mondrian_effects::EffectType) {
         use mondrian_core::mask_data::MaskParticipation;
         use mondrian_core::{
             MaskCorrespondenceInterpolation, MaskCorrespondencePoint, MaskCorrespondencePoints,
@@ -17300,7 +17306,7 @@ mod tests {
 
         let _gpu_visual = GpuVisualExecutionGuard::activate();
         let raster = Resolution { width: 37, height: 23 };
-        let mut sequence = Sequence::new("Mask deformation Export owner sampling");
+        let mut sequence = Sequence::new("Spatial effect Export owner sampling");
         sequence.settings.resolution = raster;
         sequence.settings.pixel_aspect_ratio =
             mondrian_core::timeline_data::PixelAspectRatio::Anamorphic2x;
@@ -17338,17 +17344,25 @@ mod tests {
             mask.participation = MaskParticipation::EffectOnly;
             mask
         };
-        let source = clip.add_mask_component(mask(0.27, 0.46));
-        let boundary = clip.add_mask_component(mask(0.05, 0.9));
         let mut effect = instantiate_effect_node(kind.clone()).unwrap();
-        let mut controls = vec![
-            ("source_mask", PropertyValue::MaskReference(Some(source))),
-            (
-                "boundary_mask",
-                PropertyValue::MaskReference(Some(boundary)),
-            ),
-            ("percent", PropertyValue::Float(100.0)),
-        ];
+        let mut controls = if kind == EffectType::DetailPreservingUpscale {
+            vec![
+                ("scale", PropertyValue::Float(150.0)),
+                ("reduce_noise", PropertyValue::Float(35.0)),
+                ("detail", PropertyValue::Float(80.0)),
+            ]
+        } else {
+            let source = clip.add_mask_component(mask(0.27, 0.46));
+            let boundary = clip.add_mask_component(mask(0.05, 0.9));
+            vec![
+                ("source_mask", PropertyValue::MaskReference(Some(source))),
+                (
+                    "boundary_mask",
+                    PropertyValue::MaskReference(Some(boundary)),
+                ),
+                ("percent", PropertyValue::Float(100.0)),
+            ]
+        };
         if kind == EffectType::Reshape {
             let destination = clip.add_mask_component(mask(0.35, 0.49));
             controls.extend([
@@ -17369,7 +17383,7 @@ mod tests {
                     ),
                 ),
             ]);
-        } else {
+        } else if kind == EffectType::Smear {
             controls.push(("mask_rotation", PropertyValue::Float(47.0)));
         }
         for (key, value) in controls {
