@@ -7,7 +7,7 @@
 use crate::automation::{
     ParameterEnumOption, ParameterResourceReference, PropertyBag, PropertyDescriptor, PropertyValue,
 };
-use crate::types::EffectId;
+use crate::types::{EffectId, MaskId};
 use crate::{ParameterId, ParameterIdError, TimelineTime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -1135,6 +1135,20 @@ impl EffectNode {
         property.validate().ok()?;
         match property.static_value() {
             PropertyValue::VisualSource(reference) => Some(*reference),
+            _ => None,
+        }
+    }
+
+    /// Read a static clip-local mask reference by stable parameter identity.
+    /// `Some(None)` denotes an explicitly unbound property.
+    pub fn evaluate_mask_reference_parameter(
+        &self,
+        parameter_id: &ParameterId,
+    ) -> Option<Option<MaskId>> {
+        let (_, property) = self.unique_parameter_property(parameter_id)?;
+        property.validate().ok()?;
+        match property.static_value() {
+            PropertyValue::MaskReference(reference) => Some(*reference),
             _ => None,
         }
     }

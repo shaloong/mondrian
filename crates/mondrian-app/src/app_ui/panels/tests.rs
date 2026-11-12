@@ -204,6 +204,7 @@ fn parameter_reset_inspector_routes_localized_keyboard_and_disables_default_or_l
                         can_edit,
                         Some(selection),
                         target.clone(),
+                        &[],
                     );
                     let mut panel = PropertyPanel::new("Inspector")
                         .with_section(PropertySection::new("Parameter").with_row(row));
@@ -989,6 +990,7 @@ fn inspector_vendor_choice_caption_keeps_canonical_dispatch_across_locales() {
                 true,
                 Some(selection),
                 InspectorPropertyTarget::Clip { parameter: model.address.clone() },
+                &[],
             );
             assert_eq!(
                 widget.accessibility().expect("choice").name.as_deref(),
@@ -1047,6 +1049,111 @@ fn inspector_vendor_choice_caption_keeps_canonical_dispatch_across_locales() {
             assert_eq!(translated.enum_labels["vendor:43"], "Écho / 回声");
         }
     }
+}
+
+#[test]
+fn inspector_mask_reference_lists_available_masks_and_writes_stable_identity() {
+    use crate::app::product_action::VisualEffectSetParameterValuePayload;
+    use mondrian_core::automation::{AnimatedProperty, PropertyDescriptor};
+
+    let make_mask = |label: &str, enabled| InspectorMaskModel {
+        mask_id: MaskId::new(),
+        label: label.to_owned(),
+        enabled,
+        locked: false,
+        shape_animation_enabled: false,
+        shape_kind: InspectorMaskShapeKind::Rectangle,
+        tracking_status: None,
+        has_tracking_recipe: false,
+        properties: Vec::new(),
+    };
+    let enabled = make_mask("Geometry", true);
+    let disabled = make_mask("Disabled", false);
+    let duplicate = make_mask("Duplicate", true);
+    let mut property = AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+        "fixture.geometry",
+        "Geometry",
+        PropertyValue::MaskReference(None),
+    ));
+    property
+        .set_static_value(PropertyValue::MaskReference(Some(disabled.mask_id)))
+        .unwrap();
+    let localizer = Localizer::new(AppUiLocale::EnUs).unwrap();
+    let model = inspector_property_model(
+        "fixture.geometry",
+        &property,
+        TimelineTime::ZERO,
+        &localizer,
+    );
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    let effect_id = EffectId::new();
+    let mut widget = inspector_property_value_widget(
+        &localizer,
+        &model,
+        true,
+        Some(selection),
+        InspectorPropertyTarget::Effect { effect_id, parameter: model.address.clone() },
+        &[disabled, duplicate.clone(), enabled.clone(), duplicate],
+    );
+    assert_eq!(
+        widget.accessibility().unwrap().name,
+        Some(localizer.text("mask-reference-unavailable"))
+    );
+    widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+    widget.event(
+        &UiEvent::MouseDown {
+            position: Point::new(20.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        },
+        &mut ctx,
+    );
+    let choices = widget.accessibility_virtual_children();
+    assert_eq!(
+        choices.iter().map(|choice| choice.name.as_str()).collect::<Vec<_>>(),
+        ["No mask", "Geometry"]
+    );
+    let position = Point::new(choices[1].bounds.x + 5.0, choices[1].bounds.y + 5.0);
+    widget.event(
+        &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
+    widget.event(
+        &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+        &mut ctx,
+    );
+    let actions = actions.borrow();
+    let [Action::Custom { payload, .. }] = actions.as_slice() else {
+        panic!("one effect parameter write expected");
+    };
+    let write: VisualEffectSetParameterValuePayload =
+        serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(write.clip_id, selection.clip_id);
+    assert_eq!(write.effect_id, effect_id);
+    assert_eq!(
+        write.write,
+        ParameterValueWrite::Value {
+            parameter: model.address,
+            value: PropertyValue::MaskReference(Some(enabled.mask_id)),
+        }
+    );
 }
 
 #[test]
@@ -1115,6 +1222,7 @@ fn inspector_parameter_locale_preserves_title_author_keys_and_history() {
         true,
         Some(selection),
         InspectorPropertyTarget::Clip { parameter: property.address.clone() },
+        &[],
     );
     assert_eq!(
         widget.accessibility().expect("dropdown").name.as_deref(),
@@ -7665,6 +7773,7 @@ fn effect_long_text_controls_confirm_or_cancel_without_partial_author_writes() {
                         true,
                         Some(selection),
                         effect_id,
+                        &[],
                     ))
                     .with_row(PropertyRow::new(
                         "After text",

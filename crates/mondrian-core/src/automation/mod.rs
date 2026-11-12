@@ -121,6 +121,8 @@ pub enum PropertyValue {
     /// A picture source address with static, exact retiming; resolved by the host.
     VisualSource(crate::VisualSourceReference),
     Text(String),
+    /// A stable reference to a mask owned by the same clip, or an unbound field.
+    MaskReference(Option<crate::MaskId>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +153,7 @@ pub enum PropertyValueType {
     Resource,
     VisualSource,
     Text,
+    MaskReference,
 }
 
 /// Maximum authored control points in one normalized transfer curve.
@@ -704,6 +707,7 @@ impl ParameterSchema {
                 | PropertyValueType::Enum
                 | PropertyValueType::Resource
                 | PropertyValueType::VisualSource
+                | PropertyValueType::MaskReference
                 | PropertyValueType::Text
         ) {
             vec![ParameterInterpolation::Hold]
@@ -729,7 +733,10 @@ impl ParameterSchema {
             resource: (value_type == PropertyValueType::Resource)
                 .then(ParameterResourceContract::all_bindings),
             enum_options: Vec::new(),
-            cache_impact: if value_type == PropertyValueType::VisualSource {
+            cache_impact: if matches!(
+                value_type,
+                PropertyValueType::VisualSource | PropertyValueType::MaskReference
+            ) {
                 ParameterCacheImpact::Topology
             } else {
                 ParameterCacheImpact::Value
@@ -840,6 +847,7 @@ impl ParameterSchema {
                 | PropertyValueType::Enum
                 | PropertyValueType::Resource
                 | PropertyValueType::VisualSource
+                | PropertyValueType::MaskReference
                 | PropertyValueType::Text
         ) && self.allowed_interpolations != [ParameterInterpolation::Hold]
         {
@@ -854,6 +862,7 @@ impl ParameterSchema {
                     | PropertyValueType::Enum
                     | PropertyValueType::Resource
                     | PropertyValueType::VisualSource
+                    | PropertyValueType::MaskReference
                     | PropertyValueType::Text
             ) {
                 return Err(ParameterSchemaError::NumericContractTypeMismatch);
@@ -945,7 +954,15 @@ impl ParameterSchema {
         {
             return Err(ParameterSchemaError::VisualSourceCacheImpactRequired);
         }
+        if self.value_type == PropertyValueType::MaskReference
+            && self.cache_impact != ParameterCacheImpact::Topology
+        {
+            return Err(ParameterSchemaError::MaskReferenceCacheImpactRequired);
+        }
         match &self.default_value {
+            PropertyValue::MaskReference(Some(_)) => {
+                return Err(ParameterSchemaError::BoundMaskReferenceDefaultValue);
+            }
             PropertyValue::Curve(curve) if curve.validate().is_err() => {
                 return Err(ParameterSchemaError::InvalidCurveDefaultValue);
             }
@@ -1423,6 +1440,10 @@ pub enum ParameterSchemaError {
     /// Bound/unbound source selection can change a graph's input requirements.
     #[error("visual source parameters must declare topology cache impact")]
     VisualSourceCacheImpactRequired,
+    #[error("mask reference parameters must declare topology cache impact")]
+    MaskReferenceCacheImpactRequired,
+    #[error("mask reference parameters must have an unbound definition default")]
+    BoundMaskReferenceDefaultValue,
     #[error("curve parameter default must be a valid normalized curve")]
     InvalidCurveDefaultValue,
     #[error("qualifier-samples parameter default must be a valid bounded sample set")]
@@ -1473,6 +1494,7 @@ impl PropertyValue {
             Self::Enum(_) => "enum",
             Self::Resource(_) => "resource",
             Self::VisualSource(_) => "visual_source",
+            Self::MaskReference(_) => "mask_reference",
             Self::Text(_) => "text",
         }
     }
@@ -1498,6 +1520,7 @@ impl PropertyValue {
             Self::Enum(_) => PropertyValueType::Enum,
             Self::Resource(_) => PropertyValueType::Resource,
             Self::VisualSource(_) => PropertyValueType::VisualSource,
+            Self::MaskReference(_) => PropertyValueType::MaskReference,
             Self::Text(_) => PropertyValueType::Text,
         }
     }
@@ -1581,6 +1604,7 @@ impl PropertyValue {
             | Self::Enum(_)
             | Self::Resource(_)
             | Self::VisualSource(_)
+            | Self::MaskReference(_)
             | Self::Text(_) => vec![],
         }
     }
@@ -1647,6 +1671,7 @@ impl PropertyValue {
             | PropertyValueType::Enum
             | PropertyValueType::Resource
             | PropertyValueType::VisualSource
+            | PropertyValueType::MaskReference
             | PropertyValueType::Text => fallback.clone(),
         }
     }
@@ -1671,6 +1696,7 @@ impl PropertyValueType {
             | Self::QualifierSamples
             | Self::Resource
             | Self::VisualSource
+            | Self::MaskReference
             | Self::Text => 0,
         }
     }
@@ -1678,7 +1704,12 @@ impl PropertyValueType {
     pub fn supports_animation(self) -> bool {
         !matches!(
             self,
-            Self::Curve | Self::QualifierSamples | Self::Resource | Self::VisualSource | Self::Text
+            Self::Curve
+                | Self::QualifierSamples
+                | Self::Resource
+                | Self::VisualSource
+                | Self::MaskReference
+                | Self::Text
         )
     }
 
@@ -1691,6 +1722,7 @@ impl PropertyValueType {
             | Self::Enum
             | Self::Resource
             | Self::VisualSource
+            | Self::MaskReference
             | Self::Text => InterpolationType::Hold,
             _ => interpolation,
         }
@@ -4290,6 +4322,20 @@ impl PropertyBag {
         }
     }
 
+    /// Remap bound mask references when the owning clip forks its mask identities.
+    pub fn remap_mask_references(
+        &mut self,
+        mut remap: impl FnMut(crate::MaskId) -> Option<crate::MaskId>,
+    ) {
+        for property in self.properties.values_mut() {
+            if let PropertyValue::MaskReference(Some(mask_id)) = &mut property.static_value
+                && let Some(replacement) = remap(*mask_id)
+            {
+                *mask_id = replacement;
+            }
+        }
+    }
+
     /// Validate every property before accepting deserialized author state.
     pub fn validate(&self) -> Result<()> {
         let mut track_ids = HashSet::with_capacity(self.properties.len());
@@ -5171,6 +5217,7 @@ impl crate::AuthoringFootprint for PropertyValueType {
             | Self::Enum
             | Self::Resource
             | Self::VisualSource
+            | Self::MaskReference
             | Self::Text => Ok(()),
         }
     }
@@ -5268,6 +5315,7 @@ impl crate::AuthoringFootprint for PropertyValue {
             | Self::Vec2(_)
             | Self::Vec3(_)
             | Self::Color(_)
+            | Self::MaskReference(_)
             | Self::Vec4(_) => Ok(()),
         }
     }
@@ -5468,6 +5516,49 @@ impl crate::AuthoringFootprint for PropertyBag {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clip_mask_reference_round_trips_as_a_static_topology_parameter() {
+        let descriptor =
+            PropertyDescriptor::new("test.mask", "Mask", PropertyValue::MaskReference(None));
+        let bound = PropertyValue::MaskReference(Some(crate::MaskId::new()));
+        let mut property = AnimatedProperty::from_descriptor(descriptor.clone());
+        assert!(!descriptor.schema.is_animatable);
+        assert_eq!(
+            descriptor.schema.cache_impact,
+            ParameterCacheImpact::Topology
+        );
+        assert_eq!(
+            descriptor.schema.allowed_interpolations,
+            [ParameterInterpolation::Hold]
+        );
+        property.set_static_value(bound.clone()).unwrap();
+        assert!(property
+            .set_exact_keyframe(Keyframe::linear(TimelineTime::ZERO, bound.clone()))
+            .is_err());
+
+        let bytes = serde_json::to_vec(&property).unwrap();
+        let restored: AnimatedProperty = serde_json::from_slice(&bytes).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored.static_value(), &bound);
+        assert_eq!(
+            restored.descriptor.schema.default_value,
+            PropertyValue::MaskReference(None)
+        );
+
+        let mut invalid = descriptor.schema;
+        invalid.cache_impact = ParameterCacheImpact::Value;
+        assert!(matches!(
+            invalid.validate(),
+            Err(ParameterSchemaError::MaskReferenceCacheImpactRequired)
+        ));
+        invalid.cache_impact = ParameterCacheImpact::Topology;
+        invalid.default_value = bound;
+        assert!(matches!(
+            invalid.validate(),
+            Err(ParameterSchemaError::BoundMaskReferenceDefaultValue)
+        ));
+    }
+
     #[test]
     fn combined_complete_key_transform_moves_all_channels_and_preserves_other_values() {
         let contract =

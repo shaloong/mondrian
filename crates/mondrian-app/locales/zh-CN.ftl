@@ -1375,6 +1375,8 @@ inspector-qualifier-add-include = + 包含
 inspector-qualifier-add-exclude = + 排除
 
 resource-unbound = 无资源
+mask-reference-unbound = 无蒙版
+mask-reference-unavailable = 所选蒙版不可用
 resource-file = 外部文件或文件夹
 resource-file-only = 外部文件
 resource-folder-only = 外部文件夹

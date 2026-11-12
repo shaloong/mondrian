@@ -15,8 +15,8 @@ use crate::{
     EffectStateModel, EffectTemporalInputExtent, LutPreparationCache,
 };
 use mondrian_core::{
-    effect_data::EffectNode, EffectId, GradeGraph, GradeGraphNodeId, GradeGraphNodeKind,
-    TimelineTime, WorkingColorSpace,
+    automation::PropertyValue, effect_data::EffectNode, EffectId, GradeGraph, GradeGraphNodeId,
+    GradeGraphNodeKind, TimelineTime, WorkingColorSpace,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -261,7 +261,16 @@ impl PreparedEffectStack {
         let instances: Arc<[PreparedEffectInstance]> = instances.into();
         // Ordinary stacks retain no duplicate mask payload; only effects that
         // explicitly sample masks need their original, unfiltered author list.
-        let masks = if instances.iter().any(|instance| fill_may_use_masks(&instance.effect)) {
+        let masks = if !masks.is_empty()
+            && instances.iter().any(|instance| {
+                fill_may_use_masks(&instance.effect)
+                    || instance.effect.properties.iter().any(|(_, property)| {
+                        matches!(
+                            property.static_value(),
+                            PropertyValue::MaskReference(Some(_))
+                        )
+                    })
+            }) {
             masks
         } else {
             &[]
@@ -594,13 +603,7 @@ fn evaluate_instances(
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     let mut builder = EffectGraphBuilderState::new();
     builder.set_auxiliary_preview_sources(auxiliary.preview, Arc::clone(&auxiliary.unavailable));
-    builder.set_auxiliary_masks(
-        masks
-            .iter()
-            .map(|mask| mask.enabled.then(|| mask.evaluate_at(time)))
-            .collect::<Vec<_>>()
-            .into(),
-    );
+    builder.set_auxiliary_masks(masks, time);
     let mut stage_bindings = Vec::with_capacity(instances.len());
     for (stage_index, instance) in instances.iter().enumerate() {
         stage_bindings.push(

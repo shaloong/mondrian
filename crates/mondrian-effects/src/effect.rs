@@ -18644,12 +18644,10 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 .map_err(|error| invalid(error.to_string()))?;
                 if fill_mask > 0.0 || all_masks >= 0.5 {
                     let selected = if all_masks >= 0.5 {
-                        graph.auxiliary_masks().iter().flatten().cloned().collect::<Vec<_>>()
+                        graph.active_auxiliary_masks().cloned().collect::<Vec<_>>()
                     } else {
                         graph
-                            .auxiliary_masks()
-                            .get(fill_mask as usize - 1)
-                            .and_then(Option::as_ref)
+                            .auxiliary_mask_at(fill_mask as usize - 1)
                             .cloned()
                             .into_iter()
                             .collect::<Vec<_>>()

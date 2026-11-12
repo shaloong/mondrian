@@ -2618,6 +2618,9 @@ mod tests {
                     }
                 })
             }
+            PropertyValue::MaskReference(reference) => {
+                PropertyValue::MaskReference(reference.is_none().then(mondrian_core::MaskId::new))
+            }
             PropertyValue::Text(value) => PropertyValue::Text(format!("{value} edited")),
         }
     }

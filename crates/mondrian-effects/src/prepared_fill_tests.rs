@@ -66,6 +66,130 @@ fn stack_graph(
 }
 
 #[test]
+fn effect_mask_reference_survives_rename_and_reorder_and_evaluates_at_graph_time() {
+    use crate::{EffectColorDomainContract, EffectDefinition, EffectMaskReferenceError, FillGrade};
+    use mondrian_core::automation::{PropertyBag, PropertyDescriptor};
+    use mondrian_core::mask_data::{MaskShapeInterpolation, MaskShapeKeyframe};
+
+    let mut selected = rectangle(0.0, 0.25, crate::MaskOp::Add);
+    let other = rectangle(0.25, 0.25, crate::MaskOp::Add);
+    let end = TimelineTime::new(2, 1).unwrap();
+    let midpoint = TimelineTime::new(1, 1).unwrap();
+    selected.shape_animation_enabled = true;
+    selected.shape_keyframes_mut()[0].interpolation = MaskShapeInterpolation::Linear;
+    selected.shape_keyframes_mut().push(MaskShapeKeyframe::new(
+        end,
+        MaskShape::Rectangle {
+            x: 0.5,
+            y: 0.0,
+            width: 0.25,
+            height: 1.0,
+            corner_radius: 0.0,
+        },
+        MaskShapeInterpolation::Hold,
+    ));
+
+    let kind = EffectType::External("fixture.effect_mask_reference".to_owned());
+    let parameter = kind.parameter_id("geometry").unwrap();
+    let mut properties = PropertyBag::default();
+    properties.define(
+        PropertyDescriptor::new("geometry", "Geometry", PropertyValue::MaskReference(None))
+            .with_parameter_id(parameter.clone()),
+    );
+    let builder_parameter = parameter.clone();
+    crate::register_effect_definition(
+        EffectDefinition::new(
+            kind.key(),
+            "Mask reference fixture",
+            properties,
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            topology: EffectGraphTopology::GeneralDag,
+            ..EffectExecutionContract::IDENTITY
+        })
+        .with_branching_graph_builder(Arc::new(move |effect, _, graph| {
+            let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                reason,
+            };
+            let id = effect
+                .evaluate_mask_reference_parameter(&builder_parameter)
+                .flatten()
+                .ok_or_else(|| invalid("mask is unbound".to_owned()))?;
+            let mask = graph.resolve_effect_mask(id).map_err(|error| invalid(error.to_string()))?;
+            let matte = graph.add_mask_source(
+                mask.shape.clone(),
+                mask.feather,
+                mask.expansion,
+                mask.opacity,
+            );
+            let grade = FillGrade::new(0.0, 0.0, false, [1.0, 0.0, 0.0], 1.0).unwrap();
+            let output = graph.add_auxiliary_effect_with_role(
+                graph.current_output(),
+                matte,
+                EffectRenderOp::Fill { grade },
+                crate::AuxiliaryRole::Matte,
+            );
+            graph.set_current_output(output);
+            Ok(())
+        })),
+    )
+    .unwrap();
+    let mut effect = instantiate_effect_node(kind).unwrap();
+    effect
+        .set_static_value_by_parameter(&parameter, PropertyValue::MaskReference(Some(selected.id)))
+        .unwrap();
+
+    let prepare = |masks: &[MaskComponent]| {
+        PreparedEffectStack::prepare_with_masks(
+            std::slice::from_ref(&effect),
+            masks,
+            WorkingColorSpace::LinearRec709,
+        )
+    };
+    let original = prepare(&[selected.clone(), other.clone()]).unwrap();
+    selected.name = "Renamed".to_owned();
+    let reordered = prepare(&[other.clone(), selected.clone()]).unwrap();
+    let evaluate = |stack: &PreparedEffectStack, time| {
+        crate::compile_reference_render_graph(stack.evaluate_graph(time).unwrap()).unwrap()
+    };
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let blue = [0.0, 0.0, 2.0, 1.0];
+    let first = evaluate(&reordered, TimelineTime::ZERO);
+    assert_eq!(
+        first.identity(),
+        evaluate(&original, TimelineTime::ZERO).identity()
+    );
+    assert_eq!(execute(&first), [red, blue, blue, blue]);
+    assert_eq!(
+        execute(&evaluate(&reordered, midpoint)),
+        [blue, red, blue, blue]
+    );
+    assert_eq!(execute(&evaluate(&reordered, end)), [blue, blue, red, blue]);
+
+    let mut disabled = selected.clone();
+    disabled.enabled = false;
+    for (masks, expected) in [
+        (vec![other], EffectMaskReferenceError::Missing(selected.id)),
+        (
+            vec![disabled.clone()],
+            EffectMaskReferenceError::Disabled(selected.id),
+        ),
+        (
+            vec![selected.clone(), disabled],
+            EffectMaskReferenceError::Ambiguous(selected.id),
+        ),
+    ] {
+        assert!(
+            matches!(prepare(&masks), Err(EffectGraphBuildError::InvalidAuthorState { reason, .. }) if reason == expected.to_string())
+        );
+    }
+}
+
+#[test]
 fn authored_fill_mask_paints_only_the_selected_shape() {
     let mask = rectangle(0.0, 0.5, crate::MaskOp::Add);
     let (stack, graph) = stack_graph(fill(1.0, 0.0, false), &[mask]);

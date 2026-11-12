@@ -416,8 +416,8 @@ pub use graph::{
     AuxiliaryRole, AuxiliarySampling, AuxiliarySourceBinding, CompiledEffectDomainPlan,
     CompiledEffectGraph, CompiledEffectStageBinding, EffectDomainBlocker, EffectDomainBlockerKind,
     EffectDomainTransition, EffectGraphBuilderState, EffectGraphError, EffectGraphNode,
-    EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph, EffectStageOrigin,
-    PreparedEffectGraphTopology, UNBOUND_AUXILIARY_SLOT,
+    EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectMaskReferenceError,
+    EffectRenderGraph, EffectStageOrigin, PreparedEffectGraphTopology, UNBOUND_AUXILIARY_SLOT,
 };
 pub use grid::{
     grid_frame_f32, grid_pixel, GridControls, GridError, GridGrade, GridSizeFrom,

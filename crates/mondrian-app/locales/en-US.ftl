@@ -1444,6 +1444,8 @@ inspector-qualifier-add-include = + Include
 inspector-qualifier-add-exclude = + Exclude
 
 resource-unbound = No resource
+mask-reference-unbound = No mask
+mask-reference-unavailable = Selected mask is unavailable
 resource-file = External file or folder
 resource-file-only = External file
 resource-folder-only = External folder

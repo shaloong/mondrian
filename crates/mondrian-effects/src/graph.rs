@@ -6,7 +6,7 @@ use crate::{
     EffectLinearStagePlacementError, EffectPixelRoi, EffectRenderOp, EffectRenderPlan,
     EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
 };
-use mondrian_core::{types::BlendMode, TimelineTime};
+use mondrian_core::{mask_data::MaskComponent, types::BlendMode, MaskId, TimelineTime};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1676,12 +1676,29 @@ pub struct EffectGraphBuilderState {
     current_output: EffectGraphNodeId,
     next_id: u32,
     active_domain_contract: EffectColorDomainContract,
-    auxiliary_masks: Arc<[Option<crate::MaskEvaluation>]>,
+    auxiliary_masks: Arc<[EvaluatedEffectMask]>,
     auxiliary_sources: Vec<AuxiliarySourceBinding>,
     unavailable_auxiliary_sources: Arc<[mondrian_core::VisualSourceReference]>,
     missing_auxiliary_preview_request:
         Option<crate::auxiliary_preview::MissingAuxiliaryPreviewRequest>,
     auxiliary_preview_enabled: bool,
+}
+
+#[derive(Debug)]
+struct EvaluatedEffectMask {
+    id: MaskId,
+    evaluation: Option<crate::MaskEvaluation>,
+}
+
+/// Why a clip-local mask reference could not be resolved at graph evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EffectMaskReferenceError {
+    #[error("mask {0} is missing from the clip")]
+    Missing(MaskId),
+    #[error("mask {0} is disabled")]
+    Disabled(MaskId),
+    #[error("mask {0} has duplicate identities in the clip")]
+    Ambiguous(MaskId),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2025,12 +2042,36 @@ impl EffectGraphBuilderState {
     ) -> Option<&crate::auxiliary_preview::MissingAuxiliaryPreviewRequest> {
         self.missing_auxiliary_preview_request.as_ref()
     }
-    pub(crate) fn set_auxiliary_masks(&mut self, masks: Arc<[Option<crate::MaskEvaluation>]>) {
-        self.auxiliary_masks = masks;
+    pub(crate) fn set_auxiliary_masks(&mut self, masks: &[MaskComponent], time: TimelineTime) {
+        self.auxiliary_masks = masks
+            .iter()
+            .map(|mask| EvaluatedEffectMask {
+                id: mask.id,
+                evaluation: mask.enabled.then(|| mask.evaluate_at(time)),
+            })
+            .collect();
     }
 
-    pub(crate) fn auxiliary_masks(&self) -> &[Option<crate::MaskEvaluation>] {
-        &self.auxiliary_masks
+    pub(crate) fn active_auxiliary_masks(&self) -> impl Iterator<Item = &crate::MaskEvaluation> {
+        self.auxiliary_masks.iter().filter_map(|mask| mask.evaluation.as_ref())
+    }
+
+    pub(crate) fn auxiliary_mask_at(&self, index: usize) -> Option<&crate::MaskEvaluation> {
+        self.auxiliary_masks.get(index)?.evaluation.as_ref()
+    }
+
+    /// Resolve an enabled clip-local mask at the exact time of this graph.
+    /// Duplicate IDs fail before considering the enabled state of either mask.
+    pub fn resolve_effect_mask(
+        &self,
+        id: MaskId,
+    ) -> Result<&crate::MaskEvaluation, EffectMaskReferenceError> {
+        let mut matches = self.auxiliary_masks.iter().filter(|mask| mask.id == id);
+        let mask = matches.next().ok_or(EffectMaskReferenceError::Missing(id))?;
+        if matches.next().is_some() {
+            return Err(EffectMaskReferenceError::Ambiguous(id));
+        }
+        mask.evaluation.as_ref().ok_or(EffectMaskReferenceError::Disabled(id))
     }
 
     pub fn new() -> Self {

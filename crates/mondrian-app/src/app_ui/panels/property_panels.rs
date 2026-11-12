@@ -1454,6 +1454,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     can_edit,
                     selected_clip,
                     effect_id,
+                    &model.masks,
                 ));
                 if let Some(curve) = property.numeric_curve.as_ref()
                     && curve.curve.keys.iter().any(|key| key.keyframe_id.is_some())
@@ -3804,6 +3805,7 @@ pub(super) fn effect_property_row(
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     effect_id: EffectId,
+    masks: &[InspectorMaskModel],
 ) -> PropertyRow {
     inspector_property_row(
         localizer,
@@ -3811,6 +3813,7 @@ pub(super) fn effect_property_row(
         can_edit,
         selection,
         InspectorPropertyTarget::Effect { effect_id, parameter: property.address.clone() },
+        masks,
     )
 }
 
@@ -3827,6 +3830,7 @@ pub(super) fn mask_property_row(
         can_edit,
         selection,
         InspectorPropertyTarget::Mask { mask_id, parameter: property.address.clone() },
+        &[],
     )
 }
 
@@ -3842,6 +3846,7 @@ pub(super) fn clip_property_row(
         can_edit,
         selection,
         InspectorPropertyTarget::Clip { parameter: property.address.clone() },
+        &[],
     )
 }
 
@@ -3851,9 +3856,16 @@ pub(super) fn inspector_property_row(
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
+    masks: &[InspectorMaskModel],
 ) -> PropertyRow {
-    let value =
-        inspector_property_value_widget(localizer, property, can_edit, selection, target.clone());
+    let value = inspector_property_value_widget(
+        localizer,
+        property,
+        can_edit,
+        selection,
+        target.clone(),
+        masks,
+    );
     let value: Box<dyn Widget> =
         if let (InspectorPropertyTarget::Effect { effect_id, .. }, Some(curve), Some(selection)) =
             (&target, &property.numeric_curve, selection)
@@ -3964,6 +3976,7 @@ pub(super) fn effect_property_value_widget(
         can_edit,
         selection,
         InspectorPropertyTarget::Effect { effect_id, parameter: property.address.clone() },
+        &[],
     )
 }
 
@@ -3973,6 +3986,7 @@ pub(super) fn inspector_property_value_widget(
     can_edit: bool,
     selection: Option<SelectedClipRef>,
     target: InspectorPropertyTarget,
+    masks: &[InspectorMaskModel],
 ) -> Box<dyn Widget> {
     match &property.value {
         PropertyValue::Bool(value) => {
@@ -4145,6 +4159,41 @@ pub(super) fn inspector_property_value_widget(
                 )
                 .enabled(can_edit),
             )
+        }
+        PropertyValue::MaskReference(reference) => {
+            let mut occurrences = HashMap::with_capacity(masks.len());
+            for mask in masks {
+                *occurrences.entry(mask.mask_id).or_insert(0) += 1;
+            }
+            let unbound = localizer.text("mask-reference-unbound");
+            let action = |id| {
+                inspector_property_action(
+                    selection,
+                    target.clone(),
+                    PropertyValue::MaskReference(id),
+                )
+            };
+            let mut items =
+                vec![MenuItem::new(unbound.clone(), action(None)).checked(reference.is_none())];
+            let mut selected_label = None;
+            for mask in masks {
+                if !mask.enabled || occurrences[&mask.mask_id] != 1 {
+                    continue;
+                }
+                let id = Some(mask.mask_id);
+                if id == *reference {
+                    selected_label = Some(mask.label.clone());
+                }
+                items.push(MenuItem::new(mask.label.clone(), action(id)).checked(id == *reference));
+            }
+            let label = selected_label.unwrap_or_else(|| {
+                if reference.is_some() {
+                    localizer.text("mask-reference-unavailable")
+                } else {
+                    unbound
+                }
+            });
+            Box::new(Dropdown::new(label, items).enabled(can_edit && selection.is_some()))
         }
         PropertyValue::VisualSource(reference) => {
             let label = match reference {

@@ -15,6 +15,7 @@ use mondrian_core::{
     MondrianError, ParameterId, Result, TimeScale, TimelineTime,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 裁剪边缘
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -936,12 +937,14 @@ impl Clip {
         self.id = ClipId::new();
         self.content.fork_author_identities();
         self.transform.fork_author_identities();
-        for effect in &mut self.effects {
-            effect.id = EffectId::new();
-            effect.properties.fork_author_identities();
-        }
+        let mut mask_identities = HashMap::with_capacity(self.masks.len());
         for mask in &mut self.masks {
+            let original_id = mask.id;
             mask.id = MaskId::new();
+            mask_identities
+                .entry(original_id)
+                .and_modify(|id| *id = None)
+                .or_insert(Some(mask.id));
             if let Some(tracking) = &mut mask.tracking {
                 tracking.id = mondrian_core::TrackingId::new();
             }
@@ -949,6 +952,13 @@ impl Clip {
                 shape_key.id = mondrian_core::KeyframeId::new();
             }
             mask.properties.fork_author_identities();
+        }
+        for effect in &mut self.effects {
+            effect.id = EffectId::new();
+            effect.properties.fork_author_identities();
+            effect
+                .properties
+                .remap_mask_references(|id| mask_identities.get(&id).copied().flatten());
         }
     }
 
@@ -2040,6 +2050,57 @@ mod tests {
                 .expect("original opacity")
                 .track_id,
         );
+    }
+
+    #[test]
+    fn copied_clip_rebinds_only_unambiguous_local_effect_mask_references() {
+        let mut original = Clip::new(AssetId::new(), tt(0), tt(10)).unwrap();
+        let mut mask = MaskComponent::new("Geometry".to_owned(), MaskEvaluation::default());
+        let selected = mask.id;
+        original.masks.push(mask.clone());
+        mask.id = MaskId::new();
+        let duplicate = mask.id;
+        original.masks.extend([mask.clone(), mask]);
+        let missing = MaskId::new();
+        let mut effect = EffectNode::new(EffectType::External("test.clip_mask_reference".into()));
+        let authored = [
+            ("geometry", Some(selected)),
+            ("missing", Some(missing)),
+            ("duplicate", Some(duplicate)),
+            ("unbound", None),
+        ];
+        for (name, id) in authored {
+            let parameter = effect.effect_type.parameter_id(name).unwrap();
+            effect.properties.define(
+                PropertyDescriptor::new(name, name, PropertyValue::MaskReference(None))
+                    .with_parameter_id(parameter.clone()),
+            );
+            effect
+                .set_static_value_by_parameter(&parameter, PropertyValue::MaskReference(id))
+                .unwrap();
+        }
+        original.add_effect_node(effect);
+
+        let mut copied = original.clone();
+        copied.fork_visual_placement_identities();
+        assert_ne!(copied.masks[0].id, selected);
+        assert_ne!(copied.masks[1].id, copied.masks[2].id);
+        for (name, original_id) in authored {
+            let parameter = original.effects[0].effect_type.parameter_id(name).unwrap();
+            let copied_id = if name == "geometry" {
+                Some(copied.masks[0].id)
+            } else {
+                original_id
+            };
+            assert_eq!(
+                original.effects[0].evaluate_mask_reference_parameter(&parameter),
+                Some(original_id)
+            );
+            assert_eq!(
+                copied.effects[0].evaluate_mask_reference_parameter(&parameter),
+                Some(copied_id)
+            );
+        }
     }
 
     #[test]
