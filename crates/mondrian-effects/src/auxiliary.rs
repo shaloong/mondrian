@@ -139,7 +139,18 @@ pub(crate) fn sample_auxiliary_color_f32(
     sampling: AuxiliarySampling,
     wrap: bool,
 ) -> [f32; 4] {
-    sample_auxiliary_float_impl(frame, uv, sampling, true, wrap)
+    crate::coverage::straight_rgba_from_premultiplied(sample_auxiliary_float_impl(
+        frame, uv, sampling, true, wrap,
+    ))
+}
+
+/// Sample associated RGB and coverage, keeping the filtered color premultiplied.
+pub(crate) fn sample_auxiliary_associated_f32(
+    frame: AuxiliaryFloatFrame<'_>,
+    uv: [f32; 2],
+    sampling: AuxiliarySampling,
+) -> [f32; 4] {
+    sample_auxiliary_float_impl(frame, uv, sampling, true, false)
 }
 
 fn sample_auxiliary_float_impl(
@@ -165,7 +176,7 @@ fn sample_auxiliary_float_impl(
         }
         uv = uv.map(|value| value.rem_euclid(1.0));
     }
-    let result = sample_raster(extent, frame.transform, uv, sampling, |x, y, policy| {
+    sample_raster(extent, frame.transform, uv, sampling, |x, y, policy| {
         let position = if wrap {
             Some((
                 x.rem_euclid(extent.width() as i32),
@@ -192,12 +203,7 @@ fn sample_auxiliary_float_impl(
             pixel = [pixel[0] * scale, pixel[1] * scale, pixel[2] * scale, alpha];
         }
         pixel
-    });
-    if associated {
-        crate::coverage::straight_rgba_from_premultiplied(result)
-    } else {
-        result
-    }
+    })
 }
 
 impl<'a> AuxiliaryFrame<'a> {
@@ -392,6 +398,7 @@ pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
         EffectRenderOp::Fill { .. }
             | EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::ChannelCombiner { .. }
+            | EffectRenderOp::SetMatte { .. }
     )
 }
 
@@ -405,6 +412,11 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
     sampling: AuxiliarySampling,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<bool, E> {
+    if let EffectRenderOp::SetMatte { grade } = op {
+        return crate::set_matte::apply_set_matte_auxiliary_controlled(
+            primary, width, height, frame, *grade, sampling, checkpoint,
+        );
+    }
     if let EffectRenderOp::DisplacementMap { grade } = op {
         return crate::apply_displacement_map_controlled(
             primary, width, height, frame, sampling, grade, checkpoint,

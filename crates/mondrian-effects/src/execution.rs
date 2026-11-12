@@ -3048,6 +3048,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Basic3D { .. } => "basic_3d",
         EffectRenderOp::CameraView { .. } => "camera_view",
         EffectRenderOp::BlankingFill { .. } => "blanking_fill",
+        EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",

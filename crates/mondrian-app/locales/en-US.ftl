@@ -3509,6 +3509,24 @@ parameter-group-grow-bounds = Grow Bounds
 parameter-mondrian-effect-builtin-grow-bounds-pixels-label = Pixels
 
 ## Displacement Map 置换图
+effect-set-matte = Set Matte
+parameter-mondrian-effect-builtin-set-matte-matte-source-label = Take Matte From Layer
+parameter-mondrian-effect-builtin-set-matte-channel-label = Use For Matte
+parameter-mondrian-effect-builtin-set-matte-invert-label = Invert Matte
+parameter-mondrian-effect-builtin-set-matte-stretch-label = Stretch Matte To Fit
+parameter-mondrian-effect-builtin-set-matte-combine-label = Composite Matte With Original
+parameter-mondrian-effect-builtin-set-matte-premultiply-label = Premultiply Matte Layer
+parameter-mondrian-effect-set-matte-channel-red = Red
+parameter-mondrian-effect-set-matte-channel-green = Green
+parameter-mondrian-effect-set-matte-channel-blue = Blue
+parameter-mondrian-effect-set-matte-channel-alpha = Alpha
+parameter-mondrian-effect-set-matte-channel-luminance = Luminance
+parameter-mondrian-effect-set-matte-channel-hue = Hue
+parameter-mondrian-effect-set-matte-channel-lightness = Lightness
+parameter-mondrian-effect-set-matte-channel-saturation = Saturation
+parameter-mondrian-effect-set-matte-channel-full-on = Full On
+parameter-mondrian-effect-set-matte-channel-full-off = Full Off
+
 effect-displacement-map = Displacement Map
 parameter-group-displacement-map = Displacement Map
 parameter-mondrian-effect-builtin-displacement-map-map-source-label = Displacement Map Layer

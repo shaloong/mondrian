@@ -305,6 +305,15 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Change primary coverage using a channel from this stage or a second raster.
+    SetMatte {
+        /// Channel extraction and coverage composition.
+        grade: crate::SetMatteGrade,
+        /// Sampling for a separate matte, or none for the primary raster.
+        sampling: Option<crate::AuxiliarySampling>,
+        /// Host slot for a bound matte, or none for a graph-local value.
+        external_slot: Option<u32>,
+    },
     /// Remap the primary raster from a separately sampled picture.
     DisplacementMap {
         /// Validated fixed-grid displacement controls.
@@ -331,6 +340,7 @@ impl EffectGpuSpatialPass {
         match self {
             Self::FillMatte { external_slot, .. }
             | Self::ChannelCombinerLayer { external_slot, .. }
+            | Self::SetMatte { sampling: Some(_), external_slot, .. }
             | Self::DisplacementMap { external_slot, .. } => Some(external_slot),
             _ => None,
         }
@@ -394,6 +404,7 @@ impl EffectGpuSpatialPass {
             Self::BlankingFill { .. } => "blanking_fill",
             Self::FillMatte { .. } => "fill_matte",
             Self::ChannelCombinerLayer { .. } => "channel_combiner_layer",
+            Self::SetMatte { .. } => "set_matte",
             Self::DisplacementMap { .. } => "displacement_map",
             Self::GrowBounds { .. } => "grow_bounds",
         }
@@ -485,7 +496,7 @@ impl EffectGpuSpatialPass {
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
-            Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
+            Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[0],
         }
@@ -563,7 +574,7 @@ impl EffectGpuSpatialPass {
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
-            Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
+            Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[1],
         }
@@ -584,6 +595,13 @@ pub(crate) fn lower_auxiliary_spatial_pass(
             Some(EffectGpuSpatialPass::ChannelCombinerLayer {
                 grade: *grade,
                 sampling,
+                external_slot,
+            })
+        }
+        (EffectRenderOp::SetMatte { grade }, crate::AuxiliaryRole::Layer) => {
+            Some(EffectGpuSpatialPass::SetMatte {
+                grade: *grade,
+                sampling: Some(sampling),
                 external_slot,
             })
         }
@@ -1016,6 +1034,11 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::GrowBounds { grade } => {
             Some(EffectGpuSpatialPass::GrowBounds { grade: *grade })
         }
+        EffectRenderOp::SetMatte { grade } => Some(EffectGpuSpatialPass::SetMatte {
+            grade: *grade,
+            sampling: None,
+            external_slot: None,
+        }),
         EffectRenderOp::DisplacementMap { .. } => None,
         _ => None,
     }

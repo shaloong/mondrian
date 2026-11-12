@@ -1274,6 +1274,10 @@ pub enum EffectRenderOp {
         /// Authored radius, luminance threshold and output mode.
         grade: crate::SmartBlurGrade,
     },
+    /// Write primary coverage from a matte channel.
+    SetMatte {
+        grade: crate::SetMatteGrade,
+    },
     /// Resample the primary image using a separate graph-local or host map.
     DisplacementMap {
         grade: crate::DisplacementMapGrade,
@@ -1672,6 +1676,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::BlankingFill { grade } => {
                 formatter.debug_struct("BlankingFill").field("grade", grade).finish()
+            }
+            Self::SetMatte { grade } => {
+                formatter.debug_struct("SetMatte").field("grade", grade).finish()
             }
             Self::DisplacementMap { grade } => {
                 formatter.debug_struct("DisplacementMap").field("grade", grade).finish()
@@ -2739,6 +2746,10 @@ impl EffectRenderOp {
                 // they are hashed as raw bits rather than as a rounded packing.
                 grade.hash_state(state);
             }
+            EffectRenderOp::SetMatte { grade } => {
+                120u8.hash(state);
+                grade.hash(state);
+            }
             EffectRenderOp::DisplacementMap { grade } => {
                 113u8.hash(state);
                 let (params, extra) = grade.gpu_controls();
@@ -2917,6 +2928,7 @@ impl EffectRenderOp {
             EffectRenderOp::CircleEllipse { .. } => 1,
             EffectRenderOp::Stroke { .. } => 5,
             EffectRenderOp::Fill { .. } => 1,
+            EffectRenderOp::SetMatte { .. } => 2,
             EffectRenderOp::DisplacementMap { .. } => 5,
             EffectRenderOp::GrowBounds { .. } => 2,
             EffectRenderOp::DustScratches { .. } => 4,
@@ -3478,7 +3490,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 119] {
+fn builtin_effect_types() -> [EffectType; 120] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3591,6 +3603,7 @@ fn builtin_effect_types() -> [EffectType; 119] {
         EffectType::Colorama,
         EffectType::KeyCleaner,
         EffectType::ChannelCombiner,
+        EffectType::SetMatte,
         EffectType::DisplacementMap,
         EffectType::GrowBounds,
         EffectType::BilateralBlur,
@@ -10877,6 +10890,56 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             Some(f64::from(crate::GROW_BOUNDS_MAX_PIXELS)),
             Some(1.0),
         ),
+        EffectType::SetMatte => {
+            let group = "通道";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "matte_source",
+                group,
+                "从图层获取遮罩",
+                PropertyValue::VisualSource(mondrian_core::VisualSourceReference::Unbound),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "channel",
+                group,
+                "用于遮罩",
+                "alpha",
+                crate::SetMatteChannel::OPTIONS
+                    .iter()
+                    .map(|(key, label, _)| {
+                        ParameterEnumOption::new(
+                            *key,
+                            *label,
+                            format!("mondrian.effect.set_matte.channel.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            for (key, label, default) in [
+                ("invert", "反转遮罩", false),
+                ("stretch", "拉伸遮罩以适合", true),
+                ("combine", "将遮罩与原始图像合成", true),
+                ("premultiply", "预乘遮罩图层", true),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    key,
+                    group,
+                    label,
+                    PropertyValue::Bool(default),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
         EffectType::DisplacementMap => {
             use crate::{DisplacementMapBehavior, DisplacementMapChannel};
             let group = "置换图";
@@ -13002,6 +13065,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::ChromaKey
                 | EffectType::Echo
                 | EffectType::ChannelCombiner
+                | EffectType::SetMatte
                 | EffectType::DisplacementMap
         ) {
             definition.with_branching_graph_builder(graph_builder)
@@ -13260,7 +13324,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // all read the current sample only, so the ROI stays pixel-local.
             ..cpu_linear
         },
-        EffectType::ChannelCombiner => EffectExecutionContract {
+        EffectType::ChannelCombiner | EffectType::SetMatte => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Both inputs are sampled at the same output coordinate.
             topology: EffectGraphTopology::GeneralDag,
@@ -19020,6 +19084,64 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::SetMatte => {
+            let source = builtin_parameter_id(effect_type, "matte_source");
+            let channel = builtin_parameter_id(effect_type, "channel");
+            let invert = builtin_parameter_id(effect_type, "invert");
+            let stretch = builtin_parameter_id(effect_type, "stretch");
+            let combine = builtin_parameter_id(effect_type, "combine");
+            let premultiply = builtin_parameter_id(effect_type, "premultiply");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let toggle = |id: &ParameterId| match effect.evaluate_parameter(id, context.time) {
+                    Some(PropertyValue::Bool(value)) => Ok(value),
+                    _ => Err(invalid(format!("invalid Set Matte toggle {id}"))),
+                };
+                let grade = crate::SetMatteGrade {
+                    channel: effect
+                        .evaluate_enum_parameter(&channel, context.time)
+                        .as_deref()
+                        .and_then(crate::SetMatteChannel::from_key)
+                        .ok_or_else(|| invalid("invalid Set Matte channel".to_owned()))?,
+                    invert: toggle(&invert)?,
+                    stretch: toggle(&stretch)?,
+                    combine: toggle(&combine)?,
+                    premultiply: toggle(&premultiply)?,
+                };
+                let op = EffectRenderOp::SetMatte { grade };
+                match effect.evaluate_visual_source_parameter(&source) {
+                    Some(mondrian_core::VisualSourceReference::Unbound) => {
+                        graph.append_unary(op);
+                    }
+                    Some(_) => {
+                        let auxiliary = graph.append_visual_source_input(
+                            effect,
+                            &source,
+                            crate::EffectValueFormat::new(
+                                crate::EffectWorkingPrecision::Float32,
+                                EffectColorDomain::SceneLinearRgb,
+                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                            ),
+                            EffectColorDomainContract::SCENE_LINEAR,
+                        )?;
+                        let output = graph.add_auxiliary_effect(
+                            graph.current_output(),
+                            auxiliary,
+                            op,
+                            crate::AuxiliaryRole::Layer,
+                            grade.sampling(),
+                        );
+                        graph.set_current_output(output);
+                    }
+                    None => return Err(invalid("invalid Set Matte source".to_owned())),
+                }
+                Ok(())
+            }))
+        }
         EffectType::DisplacementMap => {
             use crate::{DisplacementMapBehavior, DisplacementMapChannel, DisplacementMapGrade};
             let source = builtin_parameter_id(effect_type, "map_source");
@@ -20740,6 +20862,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::JpegDamage => "JPEG 损坏",
         EffectType::Colorama => "色光",
         EffectType::ChannelCombiner => "通道合成器",
+        EffectType::SetMatte => "设置遮罩",
         EffectType::DisplacementMap => "置换图",
         EffectType::GrowBounds => "范围扩散",
         EffectType::SmartBlur => "智能模糊",
@@ -22139,6 +22262,7 @@ mod tests {
             EffectType::Basic3D,
             EffectType::CameraView,
             EffectType::BlankingFill,
+            EffectType::SetMatte,
             EffectType::DisplacementMap,
             EffectType::GrowBounds,
         ]
@@ -31290,7 +31414,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 119);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 120);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -31818,7 +31942,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 119);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 120);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -34775,7 +34899,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 119);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 120);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -35911,7 +36035,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 119);
+        assert_eq!(builtin_effect_types().len(), 120);
     }
 
     #[test]

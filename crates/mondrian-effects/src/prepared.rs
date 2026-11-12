@@ -214,7 +214,7 @@ impl PreparedEffectStack {
                 &definition,
                 frame_context.map(|context| context.project_geometry()),
             )?;
-            let definition = specialize_masked_fill_definition(effect, definition);
+            let definition = specialize_builtin_definition(effect, definition);
             let contract = definition.execution_contract();
             contract.validate().map_err(|error| {
                 EffectGraphBuildError::InvalidExecutionContract {
@@ -549,19 +549,39 @@ fn fill_may_use_masks(effect: &EffectNode) -> bool {
     })
 }
 
-fn specialize_masked_fill_definition(
+fn specialize_builtin_definition(
     effect: &EffectNode,
     definition: Arc<EffectDefinition>,
 ) -> Arc<EffectDefinition> {
-    if !fill_may_use_masks(effect) {
+    let contract = definition.execution_contract();
+    let specialized = match effect.effect_type {
+        crate::EffectType::Fill if fill_may_use_masks(effect) => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            topology: EffectGraphTopology::GeneralDag,
+            ..contract
+        },
+        crate::EffectType::SetMatte => {
+            let source =
+                effect.effect_type.parameter_id("matte_source").expect("builtin matte source");
+            let Some(retime) = effect
+                .evaluate_visual_source_parameter(&source)
+                .and_then(mondrian_core::VisualSourceReference::retime)
+            else {
+                return definition;
+            };
+            EffectExecutionContract {
+                temporal_input: crate::graph::temporal_input_extent_for_sample_offset(
+                    retime.time_offset,
+                ),
+                ..contract
+            }
+        }
+        _ => return definition,
+    };
+    if specialized == contract {
         return definition;
     }
-    let contract = EffectExecutionContract {
-        execution_modes: EffectExecutionModes::CPU_F32,
-        topology: EffectGraphTopology::GeneralDag,
-        ..definition.execution_contract()
-    };
-    Arc::new(definition.as_ref().clone().with_execution_contract(contract))
+    Arc::new(definition.as_ref().clone().with_execution_contract(specialized))
 }
 
 fn evaluate_instances(

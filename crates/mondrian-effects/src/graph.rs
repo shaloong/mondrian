@@ -2866,10 +2866,12 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float
         },
-        EffectRenderOp::ChannelCombiner { .. } => EffectImplementationRequirements {
-            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-            ..cpu_float
-        },
+        EffectRenderOp::ChannelCombiner { .. } | EffectRenderOp::SetMatte { .. } => {
+            EffectImplementationRequirements {
+                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+                ..cpu_float
+            }
+        }
         EffectRenderOp::Grid { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float
@@ -3132,7 +3134,7 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
     }
 }
 
-fn temporal_input_extent_for_sample_offset(
+pub(crate) fn temporal_input_extent_for_sample_offset(
     sample_offset: TimelineTime,
 ) -> EffectTemporalInputExtent {
     if sample_offset.is_zero() {

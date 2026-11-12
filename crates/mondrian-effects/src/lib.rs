@@ -4,6 +4,8 @@
 
 pub mod adjustment;
 pub mod auxiliary;
+pub mod set_matte;
+pub use set_matte::{set_matte_frame_f32, SetMatteChannel, SetMatteGrade};
 mod auxiliary_preview;
 pub use auxiliary_preview::{AuxiliaryPreviewFallback, AuxiliaryPreviewFallbackCause};
 pub mod displacement_map;

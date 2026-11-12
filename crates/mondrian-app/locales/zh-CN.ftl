@@ -3437,6 +3437,24 @@ parameter-group-grow-bounds = 范围扩散
 parameter-mondrian-effect-builtin-grow-bounds-pixels-label = 像素
 
 ## Displacement Map 置换图
+effect-set-matte = 设置遮罩
+parameter-mondrian-effect-builtin-set-matte-matte-source-label = 从图层获取遮罩
+parameter-mondrian-effect-builtin-set-matte-channel-label = 用于遮罩
+parameter-mondrian-effect-builtin-set-matte-invert-label = 反转遮罩
+parameter-mondrian-effect-builtin-set-matte-stretch-label = 拉伸遮罩以适合
+parameter-mondrian-effect-builtin-set-matte-combine-label = 将遮罩与原始图像合成
+parameter-mondrian-effect-builtin-set-matte-premultiply-label = 预乘遮罩图层
+parameter-mondrian-effect-set-matte-channel-red = 红色
+parameter-mondrian-effect-set-matte-channel-green = 绿色
+parameter-mondrian-effect-set-matte-channel-blue = 蓝色
+parameter-mondrian-effect-set-matte-channel-alpha = Alpha
+parameter-mondrian-effect-set-matte-channel-luminance = 亮度
+parameter-mondrian-effect-set-matte-channel-hue = 色相
+parameter-mondrian-effect-set-matte-channel-lightness = 明度
+parameter-mondrian-effect-set-matte-channel-saturation = 饱和度
+parameter-mondrian-effect-set-matte-channel-full-on = 全开
+parameter-mondrian-effect-set-matte-channel-full-off = 全关
+
 effect-displacement-map = 置换图
 parameter-group-displacement-map = 置换图
 parameter-mondrian-effect-builtin-displacement-map-map-source-label = 置换图层

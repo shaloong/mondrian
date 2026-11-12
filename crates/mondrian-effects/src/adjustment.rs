@@ -494,6 +494,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::SetMatte { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "set_matte",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::DisplacementMap { .. } => {
             return Err(EffectExecutionError::AuxiliaryRequiresFloat32);
         }
@@ -1242,6 +1248,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
                 2
             }
         }
+        EffectRenderOp::SetMatte { .. } => 0,
         EffectRenderOp::DisplacementMap { .. } => 1,
         EffectRenderOp::GrowBounds { .. } => 0,
         // One intermediate per pass plus the final destination: the design
@@ -1815,6 +1822,9 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 checkpoint,
             )?;
             Ok(true)
+        }
+        EffectRenderOp::SetMatte { grade } => {
+            crate::set_matte::apply_set_matte_self_controlled(working, *grade, checkpoint)
         }
         EffectRenderOp::DisplacementMap { .. } => Ok(false),
         EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),
