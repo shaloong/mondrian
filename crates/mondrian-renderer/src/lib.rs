@@ -8,6 +8,7 @@
 //! - `GpuFrameCompositor`：类型化工作域合成
 //! - `ViewerGpuExecutionRuntime`：有界 Viewer GPU 执行
 
+mod bilateral_gpu;
 pub mod color;
 pub mod color_accuracy;
 pub mod color_frame;

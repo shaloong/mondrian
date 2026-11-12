@@ -5372,61 +5372,6 @@ impl GpuFrameCompositor {
                     working_descriptor.width = extent.width();
                     working_descriptor.height = extent.height();
                     let (width, height) = (extent.width(), extent.height());
-                    // The pool holds `max(pass count) + 1` textures so no
-                    // stage's destination aliases its own source; the guard
-                    // here proves the kernel's declared pass count fits.
-                    let scratch = {
-                        let mut pool = self.spatial_scratch.lock();
-                        pool.acquire(device, width, height, chain.scratch_texture_request())
-                    };
-                    if scratch.len() < usize::try_from(*scratch_textures).unwrap_or(usize::MAX) {
-                        return Err(GpuCompositeError::SpatialChainFailed {
-                            pass: "spatial_scratch_geometry",
-                            detail: format!(
-                                "stage needs {scratch_textures} scratch texture(s) but the pool \
-                                 supplied {}",
-                                scratch.len()
-                            ),
-                        });
-                    }
-                    let produced = if let Some(external_slot) = pass.auxiliary_slot() {
-                        let binding = auxiliary_rasters
-                            .iter()
-                            .find(|binding| Some(binding.slot) == external_slot)
-                            .ok_or_else(|| GpuCompositeError::SpatialChainFailed {
-                                pass: "spatial_auxiliary_missing",
-                                detail: format!(
-                                    "auxiliary slot {external_slot:?} lost its binding"
-                                ),
-                            })?;
-                        let resource =
-                            table.get(binding.frame).map_err(GpuCompositeError::ResourceTable)?;
-                        self.spatial.record_auxiliary(
-                            device,
-                            encoder,
-                            pass,
-                            &current_texture,
-                            &resource.resource().texture,
-                            &scratch[0],
-                            binding.transform,
-                        )
-                    } else {
-                        self.spatial.record(
-                            device,
-                            encoder,
-                            pass,
-                            &current_texture,
-                            &scratch,
-                            width,
-                            height,
-                        )
-                    }
-                    .map_err(|error| {
-                        GpuCompositeError::SpatialChainFailed {
-                            pass: spatial_failure_pass(&error),
-                            detail: error.to_string(),
-                        }
-                    })?;
                     let output = create_working_resource(
                         device,
                         ids,
@@ -5434,25 +5379,97 @@ impl GpuFrameCompositor {
                         "gpu-spatial-pass",
                         resource_pool,
                     )?;
-                    // `record` returns one of the rotating scratch textures,
-                    // whose identity depends on the kernel's pass table; copy
-                    // it out so every stage hands a table resource to the next
-                    // one and to the layer draw.
-                    encoder.copy_texture_to_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &produced,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &output.resource().texture,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                    );
+                    if let EffectGpuSpatialPass::BilateralBlur { grade } = pass {
+                        self.spatial
+                            .record_bilateral(
+                                device,
+                                encoder,
+                                &current_texture,
+                                &output.resource().texture,
+                                *grade,
+                            )
+                            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                                pass: spatial_failure_pass(&error),
+                                detail: error.to_string(),
+                            })?;
+                    } else {
+                        // The pool holds `max(pass count) + 1` textures so no
+                        // stage's destination aliases its own source; the guard
+                        // here proves the kernel's declared pass count fits.
+                        let scratch = {
+                            let mut pool = self.spatial_scratch.lock();
+                            pool.acquire(device, width, height, chain.scratch_texture_request())
+                        };
+                        if scratch.len() < usize::try_from(*scratch_textures).unwrap_or(usize::MAX)
+                        {
+                            return Err(GpuCompositeError::SpatialChainFailed {
+                                pass: "spatial_scratch_geometry",
+                                detail: format!(
+                                "stage needs {scratch_textures} scratch texture(s) but the pool \
+                                 supplied {}",
+                                scratch.len()
+                            ),
+                            });
+                        }
+                        let produced = if let Some(external_slot) = pass.auxiliary_slot() {
+                            let binding = auxiliary_rasters
+                                .iter()
+                                .find(|binding| Some(binding.slot) == external_slot)
+                                .ok_or_else(|| GpuCompositeError::SpatialChainFailed {
+                                    pass: "spatial_auxiliary_missing",
+                                    detail: format!(
+                                        "auxiliary slot {external_slot:?} lost its binding"
+                                    ),
+                                })?;
+                            let resource = table
+                                .get(binding.frame)
+                                .map_err(GpuCompositeError::ResourceTable)?;
+                            self.spatial.record_auxiliary(
+                                device,
+                                encoder,
+                                pass,
+                                &current_texture,
+                                &resource.resource().texture,
+                                &scratch[0],
+                                binding.transform,
+                            )
+                        } else {
+                            self.spatial.record(
+                                device,
+                                encoder,
+                                pass,
+                                &current_texture,
+                                &scratch,
+                                width,
+                                height,
+                            )
+                        }
+                        .map_err(|error| {
+                            GpuCompositeError::SpatialChainFailed {
+                                pass: spatial_failure_pass(&error),
+                                detail: error.to_string(),
+                            }
+                        })?;
+                        // `record` returns one of the rotating scratch textures,
+                        // whose identity depends on the kernel's pass table; copy
+                        // it out so every stage hands a table resource to the next
+                        // one and to the layer draw.
+                        encoder.copy_texture_to_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &produced,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &output.resource().texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                        );
+                    }
                     let handle = output.handle().clone();
                     table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
                     current_texture = table
@@ -18177,6 +18194,137 @@ mod tests {
             .unwrap();
         context.queue.submit(Some(encoder.finish()));
         key_cleaner_readback(context, &output, width, height)
+    }
+
+    #[test]
+    fn bilateral_blur_admits_default_4k_and_refuses_oversized_working_sets() {
+        use mondrian_effects::{BilateralBlurGrade, EffectRenderOp};
+
+        let pipeline = |threshold| {
+            spatial_test_pipeline(EffectRenderOp::BilateralBlur {
+                grade: BilateralBlurGrade::new(
+                    25.0,
+                    threshold,
+                    true,
+                    WorkingColorSpace::LinearRec709,
+                )
+                .unwrap(),
+            })
+        };
+        let normal = pipeline(3.0);
+        let plan = crate::spatial_driver::gpu_spatial_chain_plan(&normal, 4096, 2160).unwrap();
+        assert_eq!(plan.scratch_texture_request(), 0);
+        assert_eq!(plan.spatial_passes, 1);
+        assert!(plan.scratch_bytes > 200_000_000);
+        assert!(crate::spatial_driver::gpu_spatial_chain_plan(&pipeline(0.1), 4096, 2160).is_err());
+        assert!(crate::spatial_driver::gpu_spatial_chain_plan(&normal, 7680, 4320).is_err());
+        eprintln!(
+            "BLR-11 DCI 4K scratch={} total_with_input_output={}",
+            plan.scratch_bytes,
+            plan.scratch_bytes + 4096 * 2160 * 32
+        );
+    }
+
+    #[tokio::test]
+    async fn bilateral_blur_raw_matches_float32_cpu_on_dx12() {
+        use mondrian_effects::{bilateral_blur_frame_f32, BilateralBlurGrade};
+
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("GPU for bilateral grid parity");
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let (width, height) = (53, 31);
+        let pixels: Vec<_> = (0..width * height)
+            .map(|i| {
+                [
+                    (i % 67) as f32 / 17.0 - 1.0,
+                    (i % 53) as f32 / 29.0 - 0.75,
+                    (i % 97) as f32 / 21.0 - 2.25,
+                    if i % 11 == 0 {
+                        0.0
+                    } else {
+                        (1 + i % 7) as f32 / 7.0
+                    },
+                ]
+            })
+            .collect();
+        for (radius, threshold, colorize, space) in [
+            (25.0, 3.0, true, WorkingColorSpace::LinearRec709),
+            (1.5, 0.1, false, WorkingColorSpace::AcesCg),
+            (30_000.0, 3.0, false, WorkingColorSpace::LinearRec2020),
+            (0.0, 3.0, false, WorkingColorSpace::LinearRec709),
+        ] {
+            let grade = BilateralBlurGrade::new(radius, threshold, colorize, space).unwrap();
+            let mut cpu = pixels.clone();
+            assert!(bilateral_blur_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                &grade
+            ));
+            let gpu = readback_spatial_stage(
+                &context,
+                &executor,
+                &pixels,
+                width,
+                height,
+                EffectGpuSpatialPass::BilateralBlur { grade },
+                1,
+            );
+            let error = max_spatial_float_error(&cpu, &gpu);
+            eprintln!("BLR-11 raw radius={radius} threshold={threshold} colorize={colorize} error={error:.9e}");
+            assert!(error <= 1.0e-4);
+            for (actual, before) in gpu.iter().zip(&pixels) {
+                assert_eq!(actual[3].to_bits(), before[3].to_bits());
+                if before[3] == 0.0 {
+                    assert_eq!(actual.map(f32::to_bits), before.map(f32::to_bits));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_bilateral_blur_packs_directly_into_the_layer_output() {
+        use mondrian_effects::{bilateral_blur_frame_f32, BilateralBlurGrade, EffectRenderOp};
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("GPU for bilateral layer parity");
+        let space = WorkingColorSpace::LinearRec709;
+        let grade = BilateralBlurGrade::new(25.0, 30.0, true, space).unwrap();
+        let (width, height) = (13, 9);
+        let pixels: Vec<_> = (0..width * height)
+            .map(|i| [0.2 + (i % 7) as f32 / 37.0, -0.25, 1.5, 1.0])
+            .collect();
+        let mut cpu = pixels.clone();
+        assert!(bilateral_blur_frame_f32(
+            &mut cpu,
+            width as usize,
+            height as usize,
+            &grade
+        ));
+        assert!(max_spatial_float_error(&pixels, &cpu) > 0.01);
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width,
+            height,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: space,
+            data: pixels,
+        });
+        let pipeline = spatial_test_pipeline(EffectRenderOp::BilateralBlur { grade });
+        let layers = [GpuCompositeSpatialLayer {
+            layer: spatial_test_layer(&frame),
+            spatial_plan: Some(&pipeline),
+        }];
+        let (gpu, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+            &context, &layers, width, height, space,
+        );
+        let error = max_spatial_float_error(&cpu, &gpu);
+        eprintln!("BLR-11 compositor error={error:.9e}");
+        assert!(error <= 1.0e-4);
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+        assert_eq!(diagnostics.spatial_effect_passes, 1);
+        assert_eq!(diagnostics.spatial_scratch_textures_peak, 0);
     }
 
     #[tokio::test]

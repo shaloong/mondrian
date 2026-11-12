@@ -207,6 +207,8 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
     let mut spatial_passes = 0_u32;
     let mut point_stages = 0_u32;
     let mut largest_pass_count = 0_u32;
+    let mut direct_working_bytes = 0_u64;
+    let mut direct_scratch_bytes = 0_u64;
     let mut output_bounds = EffectRasterBounds::from_extent(EffectFrameExtent::new(width, height));
     let mut scratch_extents = std::collections::HashSet::new();
     for stage in pipeline.stages() {
@@ -248,7 +250,6 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                         }
                     })?;
                 let output = output_bounds.extent();
-                scratch_extents.insert(output);
                 if output.width() > GPU_SPATIAL_MAX_RASTER_DIMENSION
                     || output.height() > GPU_SPATIAL_MAX_RASTER_DIMENSION
                 {
@@ -258,22 +259,43 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                         limit: GPU_SPATIAL_MAX_RASTER_DIMENSION,
                     });
                 }
-                let passes = match EffectSpatialGpu::texture_pass_count(pass) {
-                    Ok(passes) => passes,
-                    Err(EffectSpatialGpuError::UnsupportedPass(name)) => {
-                        return Err(GpuSpatialChainBlocker::UnsupportedPass {
-                            pass: name,
-                            detail: format!("spatial pass `{name}` has no GPU implementation"),
-                        });
-                    }
-                    Err(error) => {
-                        return Err(GpuSpatialChainBlocker::UnsupportedPass {
-                            pass: "spatial_pass",
-                            detail: error.to_string(),
-                        });
+                let passes = if let EffectGpuSpatialPass::BilateralBlur { grade } = pass {
+                    let plan = crate::bilateral_gpu::BilateralGpuPlan::new(
+                        *grade,
+                        output.width(),
+                        output.height(),
+                    )
+                    .filter(|plan| {
+                        plan.fits(wgpu::Limits::default().max_storage_buffer_binding_size)
+                    })
+                    .ok_or_else(|| {
+                        GpuSpatialChainBlocker::UnsupportedPass {
+                            pass: pass.name(),
+                            detail: "bilateral grid exceeds the storage binding limit".into(),
+                        }
+                    })?;
+                    direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
+                    direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.scratch_bytes);
+                    0
+                } else {
+                    scratch_extents.insert(output);
+                    match EffectSpatialGpu::texture_pass_count(pass) {
+                        Ok(passes) => passes,
+                        Err(EffectSpatialGpuError::UnsupportedPass(name)) => {
+                            return Err(GpuSpatialChainBlocker::UnsupportedPass {
+                                pass: name,
+                                detail: format!("spatial pass `{name}` has no GPU implementation"),
+                            });
+                        }
+                        Err(error) => {
+                            return Err(GpuSpatialChainBlocker::UnsupportedPass {
+                                pass: "spatial_pass",
+                                detail: error.to_string(),
+                            });
+                        }
                     }
                 };
-                spatial_passes = spatial_passes.saturating_add(passes);
+                spatial_passes = spatial_passes.saturating_add(passes.max(1));
                 largest_pass_count = largest_pass_count.max(passes);
                 stages.push(GpuSpatialStagePlan::Spatial {
                     pass: *pass,
@@ -290,9 +312,12 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
 
     // The pool always holds one more texture than the largest pass count needs,
     // so no stage's destination can alias the source it samples.
-    let scratch_textures =
-        usize::try_from(largest_pass_count).unwrap_or(usize::MAX).saturating_add(1);
-    if scratch_extents.is_empty() {
+    let scratch_textures = if direct_working_bytes > 0 && largest_pass_count == 0 {
+        0
+    } else {
+        usize::try_from(largest_pass_count).unwrap_or(usize::MAX).saturating_add(1)
+    };
+    if scratch_extents.is_empty() && scratch_textures != 0 {
         scratch_extents.insert(output_bounds.extent());
     }
     let pixels = scratch_extents.iter().fold(0u64, |pixels, extent| {
@@ -302,9 +327,10 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
         .unwrap_or(u64::MAX)
         .saturating_mul(pixels)
         .saturating_mul(GPU_SPATIAL_BYTES_PER_PIXEL);
-    if scratch_bytes > GPU_SPATIAL_SCRATCH_BUDGET_BYTES {
+    let working_bytes = scratch_bytes.saturating_add(direct_working_bytes);
+    if working_bytes > GPU_SPATIAL_SCRATCH_BUDGET_BYTES {
         return Err(GpuSpatialChainBlocker::ScratchBudgetExceeded {
-            required_bytes: scratch_bytes,
+            required_bytes: working_bytes,
             budget_bytes: GPU_SPATIAL_SCRATCH_BUDGET_BYTES,
         });
     }
@@ -314,7 +340,7 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
         spatial_passes,
         point_stages,
         scratch_textures,
-        scratch_bytes,
+        scratch_bytes: scratch_bytes.saturating_add(direct_scratch_bytes),
         scratch_extents: scratch_extents.len(),
         output_bounds,
     })

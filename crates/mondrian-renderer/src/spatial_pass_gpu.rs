@@ -46,6 +46,7 @@ pub(crate) enum EffectSpatialGpuError {
 
 /// Reusable pipelines for GPU spatial effect passes.
 pub(crate) struct EffectSpatialGpu {
+    bilateral: std::sync::OnceLock<crate::bilateral_gpu::BilateralGpu>,
     box_blur: wgpu::RenderPipeline,
     find_edges: wgpu::RenderPipeline,
     emboss: wgpu::RenderPipeline,
@@ -2226,6 +2227,7 @@ impl EffectSpatialGpu {
             choker_composite,
             key_cleaner_composite,
             smart_blur,
+            bilateral: std::sync::OnceLock::new(),
             minimax,
             channel_blur,
             median,
@@ -2983,6 +2985,7 @@ impl EffectSpatialGpu {
             // 512 MiB spatial scratch budget while a three-pass declaration
             // would not.
             EffectGpuSpatialPass::SmartBlur { .. } => Ok(2),
+            EffectGpuSpatialPass::BilateralBlur { .. } => Ok(1),
             // The chain is one pass per operation step and axis: 1, 2 or 4.
             // `record_minimax` executes exactly the same table.
             EffectGpuSpatialPass::Minimax { grade } => Ok(grade.pass_count()),
@@ -3060,6 +3063,11 @@ impl EffectSpatialGpu {
         }
         // Single-pass kernels write one texture and need no scratch pool.
         match pass {
+            EffectGpuSpatialPass::BilateralBlur { grade } => {
+                let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                self.record_bilateral(device, encoder, source, output, *grade)?;
+                return Ok(output.clone());
+            }
             EffectGpuSpatialPass::FillMatte { .. }
             | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
             | EffectGpuSpatialPass::DisplacementMap { .. } => {
@@ -5552,6 +5560,32 @@ impl EffectSpatialGpu {
     /// again on the horizontal draw, the horizontal plane on the vertical one.
     /// The mode composite folds into the vertical draw, exactly like the CPU
     /// kernel, so the intermediate plane stays a plain premultiplied mean.
+    pub(crate) fn record_bilateral(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source: &wgpu::Texture,
+        output: &wgpu::Texture,
+        grade: mondrian_effects::BilateralBlurGrade,
+    ) -> Result<(), EffectSpatialGpuError> {
+        let limits = device.limits();
+        let binding_limit = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+        let plan =
+            crate::bilateral_gpu::BilateralGpuPlan::new(grade, source.width(), source.height())
+                .filter(|plan| {
+                    plan.fits(binding_limit)
+                        && plan.working_bytes
+                            <= crate::spatial_driver::GPU_SPATIAL_SCRATCH_BUDGET_BYTES
+                })
+                .ok_or(EffectSpatialGpuError::UnsupportedPass(
+                    "bilateral_blur_working_set",
+                ))?;
+        self.bilateral
+            .get_or_init(|| crate::bilateral_gpu::BilateralGpu::new(device, output.format()))
+            .record(device, encoder, source, output, grade, plan);
+        Ok(())
+    }
+
     fn record_smart_blur(
         &self,
         device: &wgpu::Device,

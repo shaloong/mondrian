@@ -328,9 +328,11 @@ fn estimate_ns(
                 width += 2.0 * f64::from(x);
                 height += 2.0 * f64::from(y);
                 pixels = width * height;
-                let passes = f64::from(*scratch_textures);
+                let passes = f64::from((*scratch_textures).max(1));
                 gpu += passes * (pixels * gpu_ns_per_px(*pass) + GPU_PASS_OVERHEAD_NS);
-                gpu += copy_out_ns(pixels);
+                if *scratch_textures > 0 {
+                    gpu += copy_out_ns(pixels);
+                }
                 // CPU rates include all internal passes of each spatial kernel.
                 cpu += pixels * cpu_ns_per_px(*pass);
             }
@@ -363,6 +365,7 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // the gate usually short-circuits the sum; the average tap is cheaper
         // than a convolution tap because there is no tap table to read.
         "smart_blur" => 1.4,
+        "bilateral_blur" => 70.0,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
         // Magnify adds the blend-mode branch on top of the same bilinear read.
@@ -470,6 +473,7 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         // Two separable passes with a luma gate per tap: the same tap count as a
         // box blur, plus the dot product and the comparison.
         "smart_blur" => 4.0,
+        "bilateral_blur" => 200.0,
         _ => 2.0,
     }
 }
