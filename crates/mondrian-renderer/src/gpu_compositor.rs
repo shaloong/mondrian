@@ -17393,16 +17393,121 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn spatial_chain_set_matte_matches_float32_cpu_on_an_independent_grid() {
+        use mondrian_effects::{AuxiliaryRole, EffectRenderOp, SetMatteChannel, SetMatteGrade};
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for Set Matte parity");
+        let cases =
+            SetMatteChannel::OPTIONS
+                .into_iter()
+                .enumerate()
+                .map(|(index, (_, _, channel))| {
+                    let grade = SetMatteGrade {
+                        channel,
+                        invert: index % 3 == 0,
+                        stretch: index % 2 == 0,
+                        combine: index % 3 == 1,
+                        premultiply: index % 3 != 2,
+                    };
+                    (
+                        EffectRenderOp::SetMatte { grade },
+                        grade.sampling(),
+                        mondrian_effects::IDENTITY_AFFINE,
+                    )
+                });
+        assert_auxiliary_texture_cases(&context, AuxiliaryRole::Layer, cases);
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_set_matte_uses_the_primary_when_unbound() {
+        use mondrian_core::TimelineTime;
+        use mondrian_effects::EffectType;
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for Set Matte parity");
+        let space = WorkingColorSpace::LinearRec709;
+        let primary = vec![[1.25, -0.125, 0.75, 0.5], [0.4, 0.8, 0.3, 0.25]];
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 2,
+            height: 1,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: space,
+            data: primary,
+        });
+        let effect = mondrian_effects::instantiate_effect_node(EffectType::SetMatte).unwrap();
+        let compiled =
+            mondrian_effects::compile_clip_effect_graph(&[effect], &[], TimelineTime::ZERO, space)
+                .unwrap();
+        let pipeline = mondrian_effects::lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+        let layers = [GpuCompositeSpatialLayer {
+            layer: spatial_test_layer(&frame),
+            spatial_plan: Some(&pipeline),
+        }];
+        let (actual, diagnostics) =
+            readback_spatial_test_composite_with_diagnostics(&context, &layers, 2, 1, space);
+        assert_spatial_chain_matches(
+            &[[1.25, -0.125, 0.75, 0.25], [0.4, 0.8, 0.3, 0.0625]],
+            &actual,
+        );
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+        assert_eq!(diagnostics.spatial_effect_passes, 1);
+    }
+
     fn assert_auxiliary_texture_parity(
         context: &crate::GpuContext,
         role: mondrian_effects::AuxiliaryRole,
         operation: impl Fn(usize) -> mondrian_effects::EffectRenderOp,
     ) {
+        use mondrian_effects::{
+            AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryOutOfBounds, AuxiliarySampling,
+            IDENTITY_AFFINE,
+        };
+        let cases = [
+            (
+                AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
+                IDENTITY_AFFINE,
+            ),
+            (
+                AuxiliarySampling::new(
+                    AuxiliaryCoordinateMapping::FrameTransform,
+                    AuxiliaryFilter::Linear,
+                    AuxiliaryOutOfBounds::Transparent,
+                ),
+                [1.0, 0.0, -0.3, 0.0, 1.0, 0.15],
+            ),
+            (
+                AuxiliarySampling::PRIMARY_GRID_NEAREST_CLAMP,
+                IDENTITY_AFFINE,
+            ),
+            (
+                AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
+                IDENTITY_AFFINE,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(case, (sampling, transform))| (operation(case), sampling, transform));
+        assert_auxiliary_texture_cases(context, role, cases);
+    }
+
+    fn assert_auxiliary_texture_cases(
+        context: &crate::GpuContext,
+        role: mondrian_effects::AuxiliaryRole,
+        cases: impl IntoIterator<
+            Item = (
+                mondrian_effects::EffectRenderOp,
+                mondrian_effects::AuxiliarySampling,
+                [f32; 6],
+            ),
+        >,
+    ) {
         use mondrian_core::{ImageSampling, WorkingRgbaF32Frame};
         use mondrian_effects::{
             compile_reference_render_graph, lower_effect_graph_to_gpu_pipeline,
-            AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryFloatFrame, AuxiliaryFloatInput,
-            AuxiliaryOutOfBounds, AuxiliarySampling, EffectColorDomainContract,
+            AuxiliaryFloatFrame, AuxiliaryFloatInput, EffectColorDomainContract,
             EffectExecutionSession, EffectFloatFrameView, EffectFrameExtent,
             EffectGraphBuilderState, EffectProcessorControl, EffectValueFormat,
             EffectWorkingPrecision,
@@ -17452,27 +17557,10 @@ mod tests {
             EffectColorDomain::SceneLinearRgb,
             ColorFrameAlpha::StraightCoverage,
         );
-        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        for (case, (sampling, transform)) in [
-            (AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP, identity),
-            (
-                AuxiliarySampling::new(
-                    AuxiliaryCoordinateMapping::FrameTransform,
-                    AuxiliaryFilter::Linear,
-                    AuxiliaryOutOfBounds::Transparent,
-                ),
-                [1.0, 0.0, -0.3, 0.0, 1.0, 0.15],
-            ),
-            (AuxiliarySampling::PRIMARY_GRID_NEAREST_CLAMP, identity),
-            (AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP, identity),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (op, sampling, transform) in cases {
             let mut builder = EffectGraphBuilderState::new();
             let aux =
                 builder.append_external_input(9, format, EffectColorDomainContract::SCENE_LINEAR);
-            let op = operation(case);
             let grows = matches!(op, mondrian_effects::EffectRenderOp::DisplacementMap { grade }
                 if grade.output_outset() != [0, 0]);
             let output = builder.add_auxiliary_effect(builder.source(), aux, op, role, sampling);

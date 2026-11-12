@@ -1235,6 +1235,13 @@ fn record_gpu_suffix(
                         pass,
                         ..
                     }
+                    | PreparedHeterogeneousGpuDispatch::SetMatte {
+                        input,
+                        auxiliary: mask,
+                        output,
+                        pass,
+                        ..
+                    }
                     | PreparedHeterogeneousGpuDispatch::DisplacementMap {
                         input,
                         auxiliary: mask,
@@ -2011,6 +2018,7 @@ fn gpu_recording_device_demand(
             | PreparedHeterogeneousGpuDispatch::Mask { .. }
             | PreparedHeterogeneousGpuDispatch::FillMatte { .. }
             | PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer { .. }
+            | PreparedHeterogeneousGpuDispatch::SetMatte { .. }
             | PreparedHeterogeneousGpuDispatch::DisplacementMap { .. }
             | PreparedHeterogeneousGpuDispatch::MaskCombine { .. }
             | PreparedHeterogeneousGpuDispatch::MatteMix { .. } => 1,
@@ -2439,6 +2447,15 @@ fn validate_gpu_suffix_schedule(
                     signal,
                     ..
                 }
+                | PreparedHeterogeneousGpuDispatch::SetMatte {
+                    node,
+                    input,
+                    auxiliary: mask,
+                    output,
+                    waits,
+                    signal,
+                    ..
+                }
                 | PreparedHeterogeneousGpuDispatch::DisplacementMap {
                     node,
                     input,
@@ -2481,6 +2498,7 @@ fn validate_gpu_suffix_schedule(
                     step,
                     PreparedHeterogeneousGpuStep::Dispatch(
                         PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer { .. }
+                            | PreparedHeterogeneousGpuDispatch::SetMatte { .. }
                             | PreparedHeterogeneousGpuDispatch::DisplacementMap { .. }
                     )
                 ) {
@@ -4019,6 +4037,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_wgpu_set_matte_joins_two_graph_values() {
+        use mondrian_effects::{AuxiliaryRole, SetMatteChannel, SetMatteGrade};
+        let grade = SetMatteGrade {
+            channel: SetMatteChannel::Luminance,
+            invert: true,
+            combine: false,
+            ..Default::default()
+        };
+        assert_graph_local_auxiliary_parity(
+            GpuContext::new().await.expect("real GPU adapter"),
+            EffectRenderOp::SetMatte { grade },
+            AuxiliaryRole::Layer,
+        );
+    }
+
+    #[tokio::test]
     async fn real_wgpu_displacement_map_joins_two_graph_values() {
         use mondrian_effects::{
             AuxiliaryRole, DisplacementMapBehavior, DisplacementMapChannel, DisplacementMapGrade,
@@ -4050,7 +4084,11 @@ mod tests {
         let source = builder.source();
         let auxiliary =
             builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
-        let output = builder.add_auxiliary_effect_with_role(source, auxiliary, operation, role);
+        let sampling = match &operation {
+            EffectRenderOp::SetMatte { grade } => grade.sampling(),
+            _ => role.default_sampling(),
+        };
+        let output = builder.add_auxiliary_effect(source, auxiliary, operation, role, sampling);
         builder.set_current_output(output);
         let graph = compile_reference_render_graph(builder.finish()).unwrap();
         let pixels = test_input();

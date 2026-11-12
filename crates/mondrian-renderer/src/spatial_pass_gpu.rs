@@ -109,6 +109,7 @@ pub(crate) struct EffectSpatialGpu {
     bezier_warp: wgpu::RenderPipeline,
     fill_matte: wgpu::RenderPipeline,
     channel_combiner_layer: wgpu::RenderPipeline,
+    set_matte: wgpu::RenderPipeline,
     displacement_map: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
@@ -1356,6 +1357,7 @@ impl EffectSpatialGpu {
             "mondrian.effect-spatial.channel-combiner-layer",
             "fs_channel_combiner_layer",
         );
+        let set_matte = auxiliary_pipeline("mondrian.effect-spatial.set-matte", "fs_set_matte");
         let displacement_map = auxiliary_pipeline(
             "mondrian.effect-spatial.displacement-map",
             "fs_displacement_map",
@@ -2237,6 +2239,7 @@ impl EffectSpatialGpu {
             bezier_warp,
             fill_matte,
             channel_combiner_layer,
+            set_matte,
             displacement_map,
             bindings,
             composite_bindings,
@@ -2845,6 +2848,16 @@ impl EffectSpatialGpu {
                     controls,
                 )
             }
+            EffectGpuSpatialPass::SetMatte { grade, sampling, .. } => {
+                let (params, mut extra) = grade.gpu_controls();
+                extra[2] = f32::from(u8::from(sampling.is_none()));
+                (
+                    &self.set_matte,
+                    sampling.unwrap_or_else(|| grade.sampling()),
+                    params,
+                    extra,
+                )
+            }
             EffectGpuSpatialPass::DisplacementMap { grade, sampling, .. } => {
                 let (controls, mut modes) = grade.gpu_controls();
                 modes[2] = f32::from(u8::from(grade.is_identity()));
@@ -3038,6 +3051,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::ColorOffset { .. } => Ok(1),
             EffectGpuSpatialPass::FillMatte { .. }
             | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
+            | EffectGpuSpatialPass::SetMatte { .. }
             | EffectGpuSpatialPass::DisplacementMap { .. } => Ok(1),
         }
     }
@@ -3068,8 +3082,21 @@ impl EffectSpatialGpu {
                 self.record_bilateral(device, encoder, source, output, *grade)?;
                 return Ok(output.clone());
             }
+            EffectGpuSpatialPass::SetMatte { sampling: None, .. } => {
+                let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_auxiliary(
+                    device,
+                    encoder,
+                    pass,
+                    source,
+                    source,
+                    output,
+                    mondrian_effects::IDENTITY_AFFINE,
+                );
+            }
             EffectGpuSpatialPass::FillMatte { .. }
             | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
+            | EffectGpuSpatialPass::SetMatte { sampling: Some(_), .. }
             | EffectGpuSpatialPass::DisplacementMap { .. } => {
                 return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
             }
@@ -9084,6 +9111,52 @@ fn fs_channel_combiner_layer(input: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(combined.rgb, clamp(combined.a, 0.0, 1.0));
 }
 
+fn set_matte_channel(pixel: vec4<f32>, channel: u32) -> f32 {
+    if (channel < 4u) { return pixel[channel]; }
+    if (channel == 4u) { return dot(pixel.rgb, vec3<f32>(0.299, 0.587, 0.114)); }
+    if (channel >= 9u) { return 0.0; }
+    if (channel == 8u) { return 1.0; }
+    let high = max(max(pixel.r, pixel.g), pixel.b);
+    let low = min(min(pixel.r, pixel.g), pixel.b);
+    let chroma = high - low;
+    let sum = high + low;
+    if (channel == 5u) {
+        if (chroma <= 0.0) { return 0.0; }
+        if (chroma > bitcast<f32>(AUX_FINITE_MAX_BITS)) {
+            let scale = max(abs(high), abs(low));
+            return invert_hue_of(pixel.rgb / scale, high / scale, high / scale - low / scale);
+        }
+        return invert_hue_of(pixel.rgb, high, chroma);
+    }
+    if (channel == 6u) { return sum * 0.5; }
+    if (sum <= 0.0 || sum >= 2.0) { return 0.0; }
+    return chroma * (1.0 - abs(1.0 - sum));
+}
+
+@fragment
+fn fs_set_matte(input: VsOut) -> @location(0) vec4<f32> {
+    let index = vec2<i32>(floor(input.position.xy));
+    let primary = textureLoad(original_texture, index, 0);
+    let associated = uniforms.extra.y != 0.0;
+    var matte: vec4<f32>;
+    if (uniforms.extra.z != 0.0) {
+        matte = primary;
+        if (associated) { matte = premultiply(matte); }
+    } else if (uniforms.extra.x != 0.0) {
+        let centre = vec2<f32>(index) + vec2<f32>(AUX_PIXEL_CENTRE);
+        matte = sample_auxiliary(centre / uniforms.size.xy, true, false);
+        if (!associated) { matte = unpremultiply(matte); }
+    } else {
+        let dims = vec2<i32>(textureDimensions(auxiliary_texture));
+        let offset = vec2<i32>(ceil(vec2<f32>(frame_dims() - dims) * 0.5));
+        matte = auxiliary_texel(index - offset, dims, true, associated, false);
+    }
+    var coverage = clamp(set_matte_channel(matte, u32(uniforms.params.x)), 0.0, 1.0);
+    if (uniforms.params.y != 0.0) { coverage = 1.0 - coverage; }
+    if (uniforms.params.z != 0.0) { coverage *= clamp(primary.a, 0.0, 1.0); }
+    return vec4<f32>(primary.rgb, coverage);
+}
+
 // The auxiliary texture is read through its own binding, so the clamped load
 // has to take the texture as an argument instead of closing over `src`.
 fn load_clamped_from(texture: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
@@ -12683,6 +12756,55 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gpu_set_matte_preserves_hidden_hdr_rgb_in_the_raw_spatial_stage() {
+        use mondrian_effects::{SetMatteChannel, SetMatteGrade, IDENTITY_AFFINE};
+        let context = block_on(crate::GpuContext::new()).expect("real GPU adapter for Set Matte");
+        let primary_pixels = [[1.25, -0.125, 0.75, 0.0]; 4];
+        let matte_pixels = [[0.8, 0.25, 0.1, 0.5]];
+        let primary = upload(&context, &primary_pixels, 4, 1);
+        let matte = upload(&context, &matte_pixels, 1, 1);
+        let pool = scratch(&context, 4, 1, 1);
+        let executor = EffectSpatialGpu::new(&context.device);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("set-matte-raw-parity"),
+        });
+        let grade = SetMatteGrade {
+            channel: SetMatteChannel::Red,
+            combine: false,
+            stretch: false,
+            ..Default::default()
+        };
+        let pass = EffectGpuSpatialPass::SetMatte {
+            grade,
+            sampling: Some(grade.sampling()),
+            external_slot: Some(0),
+        };
+        let texture = executor
+            .record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &pass,
+                &primary,
+                &matte,
+                &pool[0],
+                IDENTITY_AFFINE,
+            )
+            .unwrap();
+        context.queue.submit(Some(encoder.finish()));
+        let actual = readback(&context, &texture, 4, 1);
+        assert_eq!(
+            actual,
+            [
+                primary_pixels[0],
+                primary_pixels[0],
+                [1.25, -0.125, 0.75, 0.4],
+                primary_pixels[0]
+            ]
+        );
+        eprintln!("CHN-11 raw centered error=0");
     }
 
     #[test]

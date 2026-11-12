@@ -397,6 +397,7 @@ fn gpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "basic_3d" => 2.0,
         "camera_view" => 1.4,
         "channel_combiner_layer" => 1.2,
+        "set_matte" => 1.2,
         "displacement_map" => 2.4,
         "grow_bounds" => 0.8,
         "blanking_fill" => match pass {
@@ -449,6 +450,7 @@ fn cpu_ns_per_px(pass: EffectGpuSpatialPass) -> f64 {
         "stroke" => 6.0,
         "fill_matte" => 2.5,
         "channel_combiner_layer" => 3.0,
+        "set_matte" => 3.0,
         "displacement_map" => 6.0,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
