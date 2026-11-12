@@ -6,8 +6,8 @@
 
 use mondrian_core::automation::ParameterValueWrite;
 use mondrian_core::mask_data::{
-    MaskComponent, MaskShape, MaskShapeInterpolation, MaskTrackingDirection, MaskTrackingModel,
-    MaskTrackingSettings,
+    MaskComponent, MaskParticipation, MaskShape, MaskShapeInterpolation, MaskTrackingDirection,
+    MaskTrackingModel, MaskTrackingSettings,
 };
 use mondrian_core::{ClipId, MaskId};
 use mondrian_timeline::{clip::Clip, sequence::Sequence, MaskRelativePlacement};
@@ -24,6 +24,8 @@ pub const VISUAL_MASK_ADD_TO_CLIP: &str = "add_to_clip";
 pub const VISUAL_MASK_SELECT: &str = "select";
 /// External action name for changing one Mask's execution-enabled state.
 pub const VISUAL_MASK_SET_ENABLED: &str = "set_enabled";
+/// External action name for changing how an enabled Mask participates in rendering.
+pub const VISUAL_MASK_SET_PARTICIPATION: &str = "set_participation";
 /// External action name for changing one Mask's author-edit lock.
 pub const VISUAL_MASK_SET_LOCKED: &str = "set_locked";
 /// External action name for removing one Mask instance.
@@ -52,6 +54,8 @@ pub enum VisualMaskProductAction {
     Select(VisualMaskTargetPayload),
     /// Change whether one Mask participates in picture execution.
     SetEnabled(VisualMaskSetEnabledPayload),
+    /// Change where one unlocked Mask participates in picture execution.
+    SetParticipation(VisualMaskSetParticipationPayload),
     /// Change whether one Mask accepts geometry and parameter edits.
     SetLocked(VisualMaskSetLockedPayload),
     /// Remove one unlocked Mask.
@@ -102,6 +106,18 @@ pub struct VisualMaskSetEnabledPayload {
     pub mask_id: MaskId,
     /// Whether the Mask participates in prepared visual execution.
     pub enabled: bool,
+}
+
+/// Change where one Mask participates in rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualMaskSetParticipationPayload {
+    /// Canonical Clip identity.
+    pub clip_id: ClipId,
+    /// Stable Mask identity.
+    pub mask_id: MaskId,
+    /// Which parts of the render graph may use this enabled Mask.
+    pub participation: MaskParticipation,
 }
 
 /// Change one Mask's author-edit lock.
@@ -207,6 +223,13 @@ pub(super) fn visual_mask_action_available(
         VisualMaskProductAction::SetLocked(payload) => {
             visual_mask_target(sequence, payload.clip_id, payload.mask_id)
                 .is_some_and(|target| target.track_unlocked && target.mask.locked != payload.locked)
+        }
+        VisualMaskProductAction::SetParticipation(payload) => {
+            visual_mask_target(sequence, payload.clip_id, payload.mask_id).is_some_and(|target| {
+                target.track_unlocked
+                    && !target.mask.locked
+                    && target.mask.participation != payload.participation
+            })
         }
         VisualMaskProductAction::Remove(payload) => {
             visual_mask_target(sequence, payload.clip_id, payload.mask_id)

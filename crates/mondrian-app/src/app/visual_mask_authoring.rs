@@ -40,6 +40,20 @@ impl AppState {
                     },
                 )
             }
+            VisualMaskProductAction::SetParticipation(payload) => {
+                let step = "visual_mask_set_participation";
+                let context =
+                    self.visual_mask_context(step, payload.clip_id, Some(payload.mask_id))?;
+                ensure_track_unlocked(step, context)?;
+                self.commit_sequence_edit(context.sequence_id, "修改蒙版用途", |sequence| {
+                    require_changed(
+                        video_clip_mut(sequence, payload.clip_id)?
+                            .set_mask_participation(payload.mask_id, payload.participation)?,
+                        step,
+                        "Mask already has the requested participation mode",
+                    )
+                })
+            }
             VisualMaskProductAction::SetLocked(payload) => {
                 let context = self.visual_mask_context(
                     "visual_mask_set_locked",
@@ -520,6 +534,60 @@ mod tests {
             .expect("reset archive")
             .author_state_eq_ignoring_revision(&edited));
         assert!(!reopened.can_undo_action() && !reopened.can_redo_action());
+    }
+
+    #[test]
+    fn mask_participation_uses_stable_identity_locks_and_undo_redo() {
+        use mondrian_core::mask_data::MaskParticipation;
+        let (mut state, clip_id, _) = mask_test_state();
+        dispatch(
+            &mut state,
+            VisualMaskProductAction::AddToClip(VisualMaskAddToClipPayload {
+                clip_id,
+                shape: MaskShape::default(),
+            }),
+        )
+        .unwrap();
+        let mask_id = state.selection.selected_mask.unwrap().0;
+        let action = VisualMaskProductAction::SetParticipation(VisualMaskSetParticipationPayload {
+            clip_id,
+            mask_id,
+            participation: MaskParticipation::EffectOnly,
+        });
+        let original = mask(&state, clip_id, mask_id).clone();
+        dispatch(&mut state, action.clone()).unwrap();
+        let changed = mask(&state, clip_id, mask_id).clone();
+        assert_eq!(changed.participation, MaskParticipation::EffectOnly);
+        assert!(changed.enabled);
+        assert_eq!(changed.shape_keyframes, original.shape_keyframes);
+        assert!(dispatch(&mut state, action).is_err());
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(mask(&state, clip_id, mask_id), &original);
+        assert!(state.redo_timeline().unwrap());
+        assert_eq!(mask(&state, clip_id, mask_id), &changed);
+
+        dispatch(
+            &mut state,
+            VisualMaskProductAction::SetLocked(VisualMaskSetLockedPayload {
+                clip_id,
+                mask_id,
+                locked: true,
+            }),
+        )
+        .unwrap();
+        assert!(dispatch(
+            &mut state,
+            VisualMaskProductAction::SetParticipation(VisualMaskSetParticipationPayload {
+                clip_id,
+                mask_id,
+                participation: MaskParticipation::ClipCoverage,
+            })
+        )
+        .is_err());
+        assert_eq!(
+            mask(&state, clip_id, mask_id).participation,
+            MaskParticipation::EffectOnly
+        );
     }
 
     #[test]

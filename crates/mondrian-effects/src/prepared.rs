@@ -1417,7 +1417,11 @@ impl PreparedEffectProgram {
             masks,
             auxiliary_preview,
         )?;
-        let masks = masks.iter().filter(|mask| mask.enabled).cloned().collect::<Vec<_>>();
+        let masks = masks
+            .iter()
+            .filter(|mask| mask.applies_clip_coverage())
+            .cloned()
+            .collect::<Vec<_>>();
         let grade_before: Arc<[PreparedGradeGraph]> = grade_before.to_vec().into();
         let grade_after: Arc<[PreparedGradeGraph]> = grade_after.to_vec().into();
         let zero_evaluation = evaluate_effect_pipeline(

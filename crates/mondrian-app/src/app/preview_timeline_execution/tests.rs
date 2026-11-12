@@ -1755,6 +1755,54 @@ fn temporal_preview_cache_identity_is_generation_and_source_complete() {
 }
 
 #[test]
+fn preview_effect_only_mask_without_consumer_keeps_the_same_solid_route_and_pixels() {
+    use mondrian_core::mask_data::{MaskComponent, MaskEvaluation, MaskParticipation};
+
+    ensure_mondrian_default_ocio_loaded().unwrap();
+    let target = Resolution { width: 7, height: 5 };
+    let mut sequence = solid_sequence("Geometry only", Color::from_rgba8(64, 128, 255, 255));
+    sequence.settings.resolution = target;
+    let render = |sequence: &Sequence| {
+        let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline(
+            sequence,
+            &[],
+            0,
+            target,
+            PreviewResolutionScale::Full,
+            color_context(sequence),
+            &mut |_| panic!("solid must not request media"),
+            &mut |_| panic!("solid must not request titles"),
+        ) else {
+            panic!("solid must resolve");
+        };
+        assert!(matches!(
+            resolved.plan.elements.as_slice(),
+            [ResolvedPreviewElement::SolidColor(_)]
+        ));
+        composite_resolved_preview_working(
+            target.width,
+            target.height,
+            &resolved.plan.elements,
+            &resolved.plan.color_context,
+            resolved.plan.sampling,
+            &mut TimelineCompositeScratch::default(),
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+        .unwrap()
+        .frame
+    };
+    let baseline = render(&sequence);
+    let mut mask = MaskComponent::new("Geometry".into(), MaskEvaluation::default());
+    mask.participation = MaskParticipation::EffectOnly;
+    sequence.video_tracks[0].clips[0].add_mask_component(mask);
+    let candidate = render(&sequence);
+    assert_eq!(candidate.descriptor(), baseline.descriptor());
+    assert_eq!(candidate.rgba_f32().sampling, baseline.rgba_f32().sampling);
+    assert_eq!(candidate.rgba_f32().data, baseline.rgba_f32().data);
+    assert!(candidate.rgba_f32().data.iter().all(|pixel| pixel[2] > 0.0 && pixel[3] == 1.0));
+}
+
+#[test]
 fn preview_executes_cross_dissolve_through_shared_working_compositor() {
     ensure_mondrian_default_ocio_loaded().expect("default OCIO");
     let mut sequence = Sequence::new("preview Cross Dissolve");

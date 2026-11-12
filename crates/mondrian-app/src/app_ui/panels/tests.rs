@@ -269,6 +269,7 @@ fn mask_shape_and_tracking_status_follow_locale_without_label_based_branching() 
         mask_id: MaskId::new(),
         label: "Mask 1".to_owned(),
         enabled: true,
+        participation: MaskParticipation::ClipCoverage,
         locked: false,
         shape_animation_enabled: true,
         shape_kind: InspectorMaskShapeKind::Path,
@@ -1060,6 +1061,7 @@ fn inspector_mask_reference_lists_available_masks_and_writes_stable_identity() {
         mask_id: MaskId::new(),
         label: label.to_owned(),
         enabled,
+        participation: MaskParticipation::ClipCoverage,
         locked: false,
         shape_animation_enabled: false,
         shape_kind: InspectorMaskShapeKind::Rectangle,
@@ -11285,6 +11287,11 @@ fn inspector_panel_locked_target_controls_do_not_dispatch() {
 
 #[test]
 fn inspector_projects_mask_identity_and_emits_closed_product_actions() {
+    use crate::app::product_action::{
+        ProductAction, VisualMaskProductAction, VisualMaskSetParticipationPayload,
+    };
+    use mondrian_ui_core::tree::WidgetTreeView;
+    use mondrian_ui_events::EventRouter;
     let mut sequence = Sequence::new("Inspector Mask");
     sequence.add_video_track();
     let track_id = sequence.video_tracks[0].id;
@@ -11312,6 +11319,47 @@ fn inspector_projects_mask_identity_and_emits_closed_product_actions() {
     assert_eq!(model.masks.len(), 1);
     assert_eq!(model.masks[0].mask_id, mask_id);
     assert_eq!(model.masks[0].properties.len(), 5);
+    assert_eq!(
+        model.masks[0].participation,
+        MaskParticipation::ClipCoverage
+    );
+
+    let english = Localizer::new(AppUiLocale::EnUs).unwrap();
+    for (localizer, label) in [
+        (&english, "Clip coverage"),
+        (&chinese_localizer(), "剪辑覆盖"),
+    ] {
+        let mut control =
+            mask_participation_control(localizer, &model.masks[0], model.selected_clip, true);
+        assert_eq!(
+            control.accessibility().unwrap().name.as_deref(),
+            Some(label)
+        );
+        control.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
+        let mut router = EventRouter::new(control.id());
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut tree = WidgetTreeView::new(&mut control);
+        for key in [KeyCode::Tab, KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+            router.route(
+                UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+                &mut tree,
+                &dispatch,
+            );
+        }
+        let actions = actions.into_inner();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            ProductAction::decode_external(&actions[0]).unwrap(),
+            Some(ProductAction::VisualMask(
+                VisualMaskProductAction::SetParticipation(VisualMaskSetParticipationPayload {
+                    clip_id,
+                    mask_id,
+                    participation: MaskParticipation::EffectOnly,
+                })
+            ))
+        );
+    }
 
     let action = inspector_mask_shape_animation_action(model.selected_clip, mask_id, true)
         .expect("Mask animation action");

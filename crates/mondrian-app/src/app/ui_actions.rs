@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub use super::exporting::TimelineExportRequest;
+use super::product_action::VisualMaskSetParticipationPayload;
 pub use super::product_action::{
     AssetAudioComponentRebindPayload, AssetCreateFolderPayload, AssetCreateGeneratedPayload,
     AssetImportFilesPayload, AssetLibraryMovePayload, AssetLibrarySelectionPayload,
@@ -927,6 +928,12 @@ pub fn visual_mask_select_action(payload: VisualMaskTargetPayload) -> Action {
 /// Build an action that changes one Mask's execution-enabled state.
 pub fn visual_mask_set_enabled_action(payload: VisualMaskSetEnabledPayload) -> Action {
     ProductAction::VisualMask(VisualMaskProductAction::SetEnabled(payload)).into_external_action()
+}
+
+/// Build an action that changes where one Mask participates in rendering.
+pub fn visual_mask_set_participation_action(payload: VisualMaskSetParticipationPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::SetParticipation(payload))
+        .into_external_action()
 }
 
 /// Build an action that changes one Mask's author-edit lock.

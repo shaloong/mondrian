@@ -349,6 +349,23 @@ pub const MASK_PROP_INVERT: &str = "invert";
 pub const MASK_PROP_MASK_OP: &str = "mask_op";
 pub const MASK_PROP_SHAPE: &str = "shape";
 
+/// How an enabled clip mask participates in the render graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskParticipation {
+    /// Available to effects and included in the clip's coverage stack.
+    #[default]
+    ClipCoverage,
+    /// Available to effects by author identity, outside the clip's coverage stack.
+    EffectOnly,
+}
+
+impl MaskParticipation {
+    fn is_clip_coverage(&self) -> bool {
+        *self == Self::ClipCoverage
+    }
+}
+
 /// A single mask component on a clip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -361,6 +378,9 @@ pub struct MaskComponent {
     /// Scalar animatable properties (feather, opacity, expansion, invert, mask_op).
     pub properties: PropertyBag,
     pub enabled: bool,
+    /// Which parts of the render graph may use this enabled mask.
+    #[serde(default, skip_serializing_if = "MaskParticipation::is_clip_coverage")]
+    pub participation: MaskParticipation,
     pub locked: bool,
     pub shape_animation_enabled: bool,
     /// Last completed recomputable tracking lineage, when shape keys were
@@ -376,6 +396,7 @@ impl PartialEq for MaskComponent {
             && self.shape_keyframes == other.shape_keyframes
             && self.properties == other.properties
             && self.enabled == other.enabled
+            && self.participation == other.participation
             && self.locked == other.locked
             && self.shape_animation_enabled == other.shape_animation_enabled
             && self.tracking == other.tracking
@@ -482,10 +503,16 @@ impl MaskComponent {
             .into(),
             properties,
             enabled: true,
+            participation: MaskParticipation::ClipCoverage,
             locked: false,
             shape_animation_enabled: false,
             tracking: None,
         }
+    }
+
+    /// Whether this mask contributes to the clip's final picture coverage.
+    pub fn applies_clip_coverage(&self) -> bool {
+        self.enabled && self.participation == MaskParticipation::ClipCoverage
     }
 
     pub fn shape_keyframes(&self) -> &[MaskShapeKeyframe] {
@@ -1010,6 +1037,7 @@ impl crate::AuthoringFootprint for MaskComponent {
             shape_keyframes,
             properties,
             enabled: _,
+            participation: _,
             locked: _,
             shape_animation_enabled: _,
             tracking,
@@ -1198,6 +1226,30 @@ mod tests {
         let mid = mc.evaluate_at(tt(50));
         assert!((mid.feather - 5.0).abs() < 1e-5);
         assert!((mid.opacity - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn mask_participation_preserves_legacy_json_and_round_trips_effect_only() {
+        let legacy = MaskComponent::new("Window".into(), MaskEvaluation::default());
+        let legacy_json = serde_json::to_value(&legacy).unwrap();
+        assert!(legacy_json.get("participation").is_none());
+        let decoded: MaskComponent = serde_json::from_value(legacy_json.clone()).unwrap();
+        assert_eq!(decoded, legacy);
+        assert!(decoded.applies_clip_coverage());
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), legacy_json);
+
+        let mut geometry = legacy.clone();
+        geometry.participation = MaskParticipation::EffectOnly;
+        let json = serde_json::to_value(&geometry).unwrap();
+        assert_eq!(json["participation"], "effect_only");
+        let decoded: MaskComponent = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, geometry);
+        assert_ne!(decoded, legacy);
+        assert!(!decoded.applies_clip_coverage());
+        assert_eq!(
+            decoded.evaluate_at(TimelineTime::ZERO),
+            legacy.evaluate_at(TimelineTime::ZERO)
+        );
     }
 
     #[test]

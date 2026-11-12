@@ -717,7 +717,7 @@ impl PreparedVisualProgram {
                         }
                     };
                 let has_processing = clip.effects.iter().any(|effect| effect.is_enabled)
-                    || clip.masks.iter().any(|mask| mask.enabled)
+                    || clip.masks.iter().any(|mask| mask.applies_clip_coverage())
                     || !grade_before.is_empty()
                     || !grade_after.is_empty();
                 let frame_context = if has_processing {
@@ -2700,6 +2700,48 @@ pub(crate) mod tests {
             }
         }
         panic!("Effect registry did not stabilize during cache test")
+    }
+
+    #[test]
+    fn effect_only_mask_uses_identity_without_consumers_and_prepares_masked_fill() {
+        use mondrian_core::mask_data::{MaskComponent, MaskEvaluation, MaskParticipation};
+
+        let mut sequence = single_solid_sequence(None);
+        let mut mask = MaskComponent::new("Geometry".into(), MaskEvaluation::default());
+        mask.participation = MaskParticipation::EffectOnly;
+        let clip = &mut sequence.video_tracks[0].clips[0];
+        let clip_id = clip.id;
+        clip.add_mask_component(mask);
+
+        let prepared = prepare_stable(&sequence);
+        let PreparedClipEffects::Ready { program, .. } = &prepared.clip_effects[&clip_id] else {
+            panic!("geometry alone must admit the clip");
+        };
+        assert!(program.frame_context().is_none());
+        assert_eq!(
+            program.evaluate(TimelineTime::ZERO).unwrap().graph().nodes.len(),
+            1
+        );
+
+        let mut fill: EffectNode = EffectNodeExt::with_defaults(EffectType::Fill);
+        let parameter = EffectType::Fill.parameter_id("fill_mask").unwrap();
+        fill.set_static_value_by_parameter(&parameter, PropertyValue::Float(1.0))
+            .unwrap();
+        sequence.video_tracks[0].clips[0].add_effect_node(fill);
+        let prepared = prepare_stable(&sequence);
+        let PreparedClipEffects::Ready { program, .. } = &prepared.clip_effects[&clip_id] else {
+            panic!("Fill must read the geometry-only mask");
+        };
+        assert!(program.frame_context().is_some());
+        let graph = program.evaluate(TimelineTime::ZERO).unwrap();
+        assert!(graph.graph().nodes.iter().any(|node| matches!(
+            node.kind,
+            mondrian_effects::EffectGraphNodeKind::MaskSource { .. }
+        )));
+        assert!(!graph.graph().nodes.iter().any(|node| matches!(
+            node.kind,
+            mondrian_effects::EffectGraphNodeKind::MatteMix { .. }
+        )));
     }
 
     #[test]

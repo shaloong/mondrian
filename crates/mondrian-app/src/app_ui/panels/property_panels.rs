@@ -7,6 +7,8 @@ use super::*;
 use crate::app::parameter_gesture::{
     ParameterCurveGestureTarget, ParameterGestureAction, ParameterGestureEdit,
 };
+use crate::app::product_action::VisualMaskSetParticipationPayload;
+use crate::app::ui_actions::visual_mask_set_participation_action;
 use crate::app_ui::localization::keyframe_interpolation_message_id;
 use mondrian_core::automation::AnimationChannelValue;
 use mondrian_ui_widgets::CurveGestureEvent;
@@ -1139,6 +1141,15 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                             inspector_mask_locked_action(selected_clip, mask_id, locked)
                         }),
                 ),
+            ))
+            .with_row(PropertyRow::new(
+                localizer.text("mask-participation"),
+                Box::new(mask_participation_control(
+                    localizer,
+                    mask,
+                    selected_clip,
+                    mask_can_edit,
+                )),
             ))
             .with_row(PropertyRow::new(
                 localizer.text("mask-shape"),
@@ -3074,6 +3085,37 @@ pub(super) fn inspector_mask_enabled_action(
             enabled,
         })
     })
+}
+
+pub(super) fn mask_participation_control(
+    localizer: &Localizer,
+    mask: &InspectorMaskModel,
+    selection: Option<SelectedClipRef>,
+    can_edit: bool,
+) -> Dropdown {
+    let message_id = |participation| match participation {
+        MaskParticipation::ClipCoverage => "mask-participation-clip-coverage",
+        MaskParticipation::EffectOnly => "mask-participation-effect-only",
+    };
+    let items = [
+        MaskParticipation::ClipCoverage,
+        MaskParticipation::EffectOnly,
+    ]
+    .into_iter()
+    .map(|participation| {
+        let selected = participation == mask.participation;
+        let action = selection.filter(|_| !selected).map(|selection| {
+            visual_mask_set_participation_action(VisualMaskSetParticipationPayload {
+                clip_id: selection.clip_id,
+                mask_id: mask.mask_id,
+                participation,
+            })
+        });
+        MenuItem::new(localizer.text(message_id(participation)), action).checked(selected)
+    })
+    .collect();
+    Dropdown::new(localizer.text(message_id(mask.participation)), items)
+        .enabled(can_edit && selection.is_some())
 }
 
 pub(super) fn inspector_mask_locked_action(

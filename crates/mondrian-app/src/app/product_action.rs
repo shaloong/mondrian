@@ -1121,6 +1121,11 @@ impl ProductAction {
                 VISUAL_MASK_SET_ENABLED => Ok(Some(Self::VisualMask(
                     VisualMaskProductAction::SetEnabled(decode_payload(namespace, name, payload)?),
                 ))),
+                VISUAL_MASK_SET_PARTICIPATION => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::SetParticipation(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 VISUAL_MASK_SET_LOCKED => Ok(Some(Self::VisualMask(
                     VisualMaskProductAction::SetLocked(decode_payload(namespace, name, payload)?),
                 ))),
@@ -1680,6 +1685,11 @@ impl ProductAction {
             Self::VisualMask(VisualMaskProductAction::SetEnabled(payload)) => (
                 VISUAL_MASK_NAMESPACE,
                 VISUAL_MASK_SET_ENABLED,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::SetParticipation(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_SET_PARTICIPATION,
                 serde_json::json!(payload),
             ),
             Self::VisualMask(VisualMaskProductAction::SetLocked(payload)) => (
@@ -4429,6 +4439,13 @@ mod tests {
             })),
             ProductAction::VisualMask(VisualMaskProductAction::SetEnabled(
                 VisualMaskSetEnabledPayload { clip_id, mask_id, enabled: false },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::SetParticipation(
+                VisualMaskSetParticipationPayload {
+                    clip_id,
+                    mask_id,
+                    participation: mondrian_core::mask_data::MaskParticipation::EffectOnly,
+                },
             )),
             ProductAction::VisualMask(VisualMaskProductAction::SetLocked(
                 VisualMaskSetLockedPayload { clip_id, mask_id, locked: true },

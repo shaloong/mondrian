@@ -9,7 +9,7 @@ use mondrian_core::{
         PropertyDescriptor, PropertyHost, PropertyMutation, PropertyValue,
     },
     effect_data::{EffectNode, EffectType},
-    mask_data::{MaskComponent, MaskShape, MaskShapeInterpolation},
+    mask_data::{MaskComponent, MaskParticipation, MaskShape, MaskShapeInterpolation},
     types::*,
     AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
     MondrianError, ParameterId, Result, TimeScale, TimelineTime,
@@ -1148,6 +1148,23 @@ impl Clip {
         Ok(true)
     }
 
+    /// Change where an unlocked Mask is used by the render graph.
+    pub fn set_mask_participation(
+        &mut self,
+        mask_id: MaskId,
+        participation: MaskParticipation,
+    ) -> Result<bool> {
+        let mask = self.mask_mut(mask_id)?;
+        if mask.locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        if mask.participation == participation {
+            return Ok(false);
+        }
+        mask.participation = participation;
+        Ok(true)
+    }
+
     /// Change a Mask's author-edit lock state.
     pub fn set_mask_locked(&mut self, mask_id: MaskId, locked: bool) -> Result<bool> {
         let mask = self.mask_mut(mask_id)?;
@@ -2056,6 +2073,7 @@ mod tests {
     fn copied_clip_rebinds_only_unambiguous_local_effect_mask_references() {
         let mut original = Clip::new(AssetId::new(), tt(0), tt(10)).unwrap();
         let mut mask = MaskComponent::new("Geometry".to_owned(), MaskEvaluation::default());
+        mask.participation = MaskParticipation::EffectOnly;
         let selected = mask.id;
         original.masks.push(mask.clone());
         mask.id = MaskId::new();
@@ -2084,6 +2102,7 @@ mod tests {
         let mut copied = original.clone();
         copied.fork_visual_placement_identities();
         assert_ne!(copied.masks[0].id, selected);
+        assert_eq!(copied.masks[0].participation, MaskParticipation::EffectOnly);
         assert_ne!(copied.masks[1].id, copied.masks[2].id);
         for (name, original_id) in authored {
             let parameter = original.effects[0].effect_type.parameter_id(name).unwrap();

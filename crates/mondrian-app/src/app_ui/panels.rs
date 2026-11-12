@@ -21,7 +21,9 @@ use mondrian_core::automation::{
 };
 use mondrian_core::display_labels::{color_space_label, frame_rate_label};
 use mondrian_core::effect_data::EffectType;
-use mondrian_core::mask_data::{MaskTrackingDirection, MaskTrackingModel, MaskTrackingSettings};
+use mondrian_core::mask_data::{
+    MaskParticipation, MaskTrackingDirection, MaskTrackingModel, MaskTrackingSettings,
+};
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, BlendMode, ClipId, ClipLinkGroupId,
     ColorSpace, EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId,
@@ -2604,6 +2606,8 @@ pub struct InspectorMaskModel {
     pub label: String,
     /// Whether the Mask participates in picture execution.
     pub enabled: bool,
+    /// Which parts of the render graph may use this enabled Mask.
+    pub participation: MaskParticipation,
     /// Whether geometry, parameters, order, and removal are locked.
     pub locked: bool,
     /// Whether complete geometry is stored as exact Clip-local shape keys.
@@ -3032,6 +3036,7 @@ impl InspectorPanelModel {
                         mask_id: mask.id,
                         label: mask.name.clone(),
                         enabled: mask.enabled,
+                        participation: mask.participation,
                         locked: mask.locked,
                         shape_animation_enabled: mask.shape_animation_enabled,
                         shape_kind,

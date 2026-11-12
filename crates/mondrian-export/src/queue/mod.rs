@@ -16939,6 +16939,79 @@ mod tests {
     }
 
     #[test]
+    fn export_effect_only_mask_without_consumer_keeps_the_same_route_and_pixels() {
+        use mondrian_core::mask_data::{MaskComponent, MaskEvaluation, MaskParticipation};
+
+        let target = Resolution { width: 7, height: 5 };
+        let mut sequence = Sequence::new("Export geometry only");
+        sequence.settings.resolution = target;
+        let time_base = sequence.time_base();
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(64, 128, 255, 255),
+                    tt(0, time_base),
+                    tt(24, time_base),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let render = |sequence: Sequence| {
+            let color_environment = mondrian_core::ProjectColorEnvironment::default();
+            let color_context =
+                sequence.settings.root_program_color_context(&color_environment).unwrap();
+            let mut timeline = TimelineExportSnapshot {
+                sequence,
+                sequences: Vec::new(),
+                media: HashMap::new(),
+                color_environment,
+                prepared_execution: None,
+                range: TimelineExportRange::SequenceInOut,
+            };
+            let mut output = None;
+            let mut diagnostics = TimelineCompositeDiagnostics::default();
+            let mut visual_session = captured_visual_session_for_test(&mut timeline);
+            let cancellation = ExecutionCancellationToken::new();
+            let mut render_context = ExportFrameRenderContext {
+                media: &timeline.media,
+                color_environment: &timeline.color_environment,
+                alpha_mode: ExportAlphaMode::Preserve,
+                delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                    ExportFrameContract::EncodedRgba8Unorm,
+                ),
+                input_color_counts: None,
+                stage_diagnostics: None,
+                composite_diagnostics: Some(&mut diagnostics),
+                export_diagnostics: None,
+                visual_session: &mut visual_session,
+                cancellation: &cancellation,
+            };
+            render_sequence_frame_into(
+                &timeline,
+                &mut render_context,
+                &timeline.sequence,
+                0,
+                target,
+                color_context,
+                SequenceRenderTarget::Working(&mut output),
+            )
+            .unwrap();
+            (output.unwrap(), diagnostics)
+        };
+        let (baseline, baseline_diagnostics) = render(sequence.clone());
+        let mut mask = MaskComponent::new("Geometry".into(), MaskEvaluation::default());
+        mask.participation = MaskParticipation::EffectOnly;
+        sequence.video_tracks[0].clips[0].add_mask_component(mask);
+        let (candidate, candidate_diagnostics) = render(sequence);
+        assert_eq!(candidate_diagnostics, baseline_diagnostics);
+        assert_eq!(candidate_diagnostics.float_linear_composites, 1);
+        assert_eq!(candidate.descriptor(), baseline.descriptor());
+        assert_eq!(candidate.rgba_f32().sampling, baseline.rgba_f32().sampling);
+        assert_eq!(candidate.rgba_f32().data, baseline.rgba_f32().data);
+    }
+
+    #[test]
     fn export_executes_basic_title_through_shared_working_compositor() {
         let mut sequence = Sequence::new("export Basic Title");
         sequence.settings.resolution = mondrian_core::Resolution { width: 320, height: 180 };

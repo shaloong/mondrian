@@ -584,8 +584,7 @@ impl PreparedVisualSchedule {
     ///
     /// The proof fails closed for gaps, overlaps, Transitions, generated or
     /// nested content, retiming, interpretation overrides, non-identity
-    /// Transform/Opacity/Blend state, and enabled Effects or Masks. Disabled
-    /// author state is ignored exactly as it is by ordinary visual execution.
+    /// Transform/Opacity/Blend state, enabled Effects, and active clip coverage.
     pub fn source_identity(
         &self,
         range: TimelineTimeRange,
@@ -640,7 +639,7 @@ impl PreparedVisualSchedule {
             || track.track.opacity.static_value()
                 != &mondrian_core::automation::PropertyValue::Float(1.0)
             || track.clip_effects[clip_index].iter().any(|effect| effect.is_enabled)
-            || track.clip_masks[clip_index].iter().any(|mask| mask.enabled)
+            || track.clip_masks[clip_index].iter().any(|mask| mask.applies_clip_coverage())
         {
             return Ok(None);
         }
@@ -2137,6 +2136,30 @@ mod tests {
                 source_range: TimelineTimeRange::new(tt(10), tt(40)).expect("source range"),
             })
         );
+    }
+
+    #[test]
+    fn source_identity_allows_effect_only_mask_geometry_without_a_consumer() {
+        use mondrian_core::mask_data::MaskParticipation;
+        let (mut sequence, _) = source_identity_sequence();
+        let range = TimelineTimeRange::new(tt(20), tt(40)).unwrap();
+        let identity = |sequence: &Sequence| {
+            PreparedVisualSchedule::compile(sequence)
+                .unwrap()
+                .source_identity(range)
+                .unwrap()
+        };
+        let unprocessed = identity(&sequence).expect("source identity");
+        let mut mask = MaskComponent::new("Geometry".into(), MaskEvaluation::default());
+        mask.participation = MaskParticipation::EffectOnly;
+        let mask_id = sequence.video_tracks[0].clips[0].add_mask_component(mask);
+        assert_eq!(identity(&sequence), Some(unprocessed));
+
+        let clip = &mut sequence.video_tracks[0].clips[0];
+        assert!(clip.set_mask_participation(mask_id, MaskParticipation::ClipCoverage).unwrap());
+        assert_eq!(identity(&sequence), None);
+        sequence.video_tracks[0].clips[0].set_mask_enabled(mask_id, false).unwrap();
+        assert_eq!(identity(&sequence), Some(unprocessed));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use super::*;
 use crate::{instantiate_effect_node, EffectRenderOp, EffectType, MaskEvaluation, MaskShape};
 use mondrian_core::automation::{Keyframe, PropertyMutation, PropertyValue};
+use mondrian_core::mask_data::MaskParticipation;
 use mondrian_core::PropertyHost;
 
 fn fill(index: f32, all: f32, invert: bool) -> EffectNode {
@@ -72,6 +73,7 @@ fn effect_mask_reference_survives_rename_and_reorder_and_evaluates_at_graph_time
     use mondrian_core::mask_data::{MaskShapeInterpolation, MaskShapeKeyframe};
 
     let mut selected = rectangle(0.0, 0.25, crate::MaskOp::Add);
+    selected.participation = MaskParticipation::EffectOnly;
     let other = rectangle(0.25, 0.25, crate::MaskOp::Add);
     let end = TimelineTime::new(2, 1).unwrap();
     let midpoint = TimelineTime::new(1, 1).unwrap();
@@ -170,6 +172,29 @@ fn effect_mask_reference_survives_rename_and_reorder_and_evaluates_at_graph_time
     );
     assert_eq!(execute(&evaluate(&reordered, end)), [blue, blue, red, blue]);
 
+    let mixed = PreparedEffectProgram::prepare(
+        std::slice::from_ref(&effect),
+        &[selected.clone(), other.clone()],
+        WorkingColorSpace::LinearRec709,
+    )
+    .unwrap();
+    let mixed_at_start = mixed.evaluate(TimelineTime::ZERO).unwrap();
+    assert!(mixed_at_start
+        .graph()
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, EffectGraphNodeKind::MatteMix { .. })));
+    assert!(!mixed_at_start
+        .graph()
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, EffectGraphNodeKind::MaskCombine { .. })));
+    assert_eq!(execute(&mixed_at_start), [blue; 4]);
+    assert_eq!(
+        execute(&mixed.evaluate(midpoint).unwrap()),
+        [blue, red, blue, blue]
+    );
+
     let mut disabled = selected.clone();
     disabled.enabled = false;
     for (masks, expected) in [
@@ -191,7 +216,8 @@ fn effect_mask_reference_survives_rename_and_reorder_and_evaluates_at_graph_time
 
 #[test]
 fn authored_fill_mask_paints_only_the_selected_shape() {
-    let mask = rectangle(0.0, 0.5, crate::MaskOp::Add);
+    let mut mask = rectangle(0.0, 0.5, crate::MaskOp::Add);
+    mask.participation = MaskParticipation::EffectOnly;
     let (stack, graph) = stack_graph(fill(1.0, 0.0, false), &[mask]);
     assert_eq!(
         stack.execution_contract().execution_modes,
@@ -240,10 +266,11 @@ fn unmasked_fill_retains_its_gpu_contract_and_default_pixels() {
 
 #[test]
 fn fill_all_masks_honours_authored_algebra_and_overrides_the_index() {
-    let masks = [
+    let mut masks = [
         rectangle(0.0, 1.0, crate::MaskOp::Add),
         rectangle(0.75, 0.25, crate::MaskOp::Subtract),
     ];
+    masks[1].participation = MaskParticipation::EffectOnly;
     let (_, graph) = stack_graph(fill(99.0, 1.0, false), &masks);
     assert!(graph
         .graph()
