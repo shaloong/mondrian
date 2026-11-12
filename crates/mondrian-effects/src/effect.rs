@@ -1287,6 +1287,11 @@ pub enum EffectRenderOp {
         /// Exact whole-pixel padding on each side.
         grade: crate::GrowBoundsGrade,
     },
+    /// Remap a picture inside its resolved clip-local boundary mask.
+    Smear {
+        /// Source and boundary geometry evaluated at this graph's time.
+        grade: Arc<crate::mask_deformation::MaskDeformation>,
+    },
     /// Counter-shift red and blue around the green reference channel.
     ChromaticAberrationRemoval {
         grade: crate::ChromaticAberrationRemovalGrade,
@@ -1686,6 +1691,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::GrowBounds { grade } => {
                 formatter.debug_struct("GrowBounds").field("grade", grade).finish()
             }
+            Self::Smear { grade } => formatter.debug_struct("Smear").field("grade", grade).finish(),
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
                 .field("semantic_fingerprint", lut.semantic_fingerprint())
@@ -2779,6 +2785,10 @@ impl EffectRenderOp {
                 118u8.hash(state);
                 grade.hash(state);
             }
+            EffectRenderOp::Smear { grade } => {
+                121u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2931,6 +2941,7 @@ impl EffectRenderOp {
             EffectRenderOp::SetMatte { .. } => 2,
             EffectRenderOp::DisplacementMap { .. } => 5,
             EffectRenderOp::GrowBounds { .. } => 2,
+            EffectRenderOp::Smear { .. } => 48,
             EffectRenderOp::DustScratches { .. } => 4,
             // Three passes, four when the chatter softening is enabled.
             EffectRenderOp::KeyCleaner { grade } => grade.cost(),
@@ -3490,7 +3501,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 120] {
+fn builtin_effect_types() -> [EffectType; 121] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3606,6 +3617,7 @@ fn builtin_effect_types() -> [EffectType; 120] {
         EffectType::SetMatte,
         EffectType::DisplacementMap,
         EffectType::GrowBounds,
+        EffectType::Smear,
         EffectType::BilateralBlur,
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
@@ -10890,6 +10902,70 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             Some(f64::from(crate::GROW_BOUNDS_MAX_PIXELS)),
             Some(1.0),
         ),
+        EffectType::Smear => {
+            let group = "漩涡条纹";
+            for (key, label, default, range) in [
+                (
+                    "source_mask",
+                    "源蒙版",
+                    PropertyValue::MaskReference(None),
+                    None,
+                ),
+                (
+                    "boundary_mask",
+                    "边界蒙版",
+                    PropertyValue::MaskReference(None),
+                    None,
+                ),
+                (
+                    "mask_offset",
+                    "蒙版位移",
+                    PropertyValue::Vec2(glam::Vec2::new(0.55, 0.5)),
+                    None,
+                ),
+                ("mask_rotation", "蒙版旋转", PropertyValue::Float(0.0), None),
+                (
+                    "mask_scale",
+                    "蒙版缩放",
+                    PropertyValue::Float(1.0),
+                    Some((f64::from(0.1_f32), 2.0, 0.01)),
+                ),
+                (
+                    "percent",
+                    "百分比",
+                    PropertyValue::Float(0.0),
+                    Some((0.0, 100.0, 1.0)),
+                ),
+                (
+                    "elasticity",
+                    "弹性",
+                    PropertyValue::Int(1),
+                    Some((1.0, 9.0, 1.0)),
+                ),
+                (
+                    "calculation_density",
+                    "计算密度",
+                    PropertyValue::Int(2),
+                    Some((1.0, 3.0, 1.0)),
+                ),
+            ] {
+                let (minimum, maximum, step) = range
+                    .map_or((None, None, None), |(min, max, step)| {
+                        (Some(min), Some(max), Some(step))
+                    });
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    key,
+                    group,
+                    label,
+                    default,
+                    minimum,
+                    maximum,
+                    step,
+                );
+            }
+        }
         EffectType::SetMatte => {
             let group = "通道";
             define_builtin_property(
@@ -13022,6 +13098,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::PhotoFilter, "density") => ParameterUnit::Percent,
         (EffectType::DisplacementMap, "horizontal_amount" | "vertical_amount")
         | (EffectType::GrowBounds, "pixels") => ParameterUnit::Pixels,
+        (EffectType::Smear, "mask_offset") => ParameterUnit::Normalized,
+        (EffectType::Smear, "mask_rotation") => ParameterUnit::Degrees,
+        (EffectType::Smear, "percent") => ParameterUnit::Percent,
         (EffectType::Colorama, "phase_shift") => ParameterUnit::Degrees,
         (EffectType::Colorama, "blend_with_original") => ParameterUnit::Percent,
         (
@@ -13450,7 +13529,8 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::Basic3D
         | EffectType::CameraView
         | EffectType::BlankingFill
-        | EffectType::GrowBounds => EffectExecutionContract {
+        | EffectType::GrowBounds
+        | EffectType::Smear => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -19082,6 +19162,71 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Smear => {
+            let [source, boundary, offset, rotation, scale, percent, elasticity, density] = [
+                "source_mask",
+                "boundary_mask",
+                "mask_offset",
+                "mask_rotation",
+                "mask_scale",
+                "percent",
+                "elasticity",
+                "calculation_density",
+            ]
+            .map(|key| builtin_parameter_id(effect_type, key));
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let strength = effect.evaluate_f32_parameter(&percent, context.time, 0.0);
+                if strength == 0.0 {
+                    return Ok(());
+                }
+                let (Some(source), Some(boundary)) = (
+                    effect.evaluate_mask_reference_parameter(&source).flatten(),
+                    effect.evaluate_mask_reference_parameter(&boundary).flatten(),
+                ) else {
+                    return Ok(());
+                };
+                let source =
+                    graph.resolve_effect_mask(source).map_err(|e| invalid(e.to_string()))?;
+                let boundary =
+                    graph.resolve_effect_mask(boundary).map_err(|e| invalid(e.to_string()))?;
+                let target = match effect.evaluate_parameter(&offset, context.time) {
+                    Some(PropertyValue::Vec2(value)) => value.to_array().map(f64::from),
+                    None => [f64::from(0.55_f32), 0.5],
+                    _ => return Err(invalid("mask offset must be a point".into())),
+                };
+                let integer = |id, default| match effect.evaluate_parameter(id, context.time) {
+                    Some(PropertyValue::Int(value)) => u32::try_from(value).unwrap_or(0),
+                    None => default,
+                    _ => 0,
+                };
+                let grade = crate::mask_deformation::MaskDeformation::new(
+                    &source.shape,
+                    &boundary.shape,
+                    crate::mask_deformation::MaskDeformationControls {
+                        target,
+                        angle_degrees: f64::from(effect.evaluate_f32_parameter(
+                            &rotation,
+                            context.time,
+                            0.0,
+                        )),
+                        scale: f64::from(effect.evaluate_f32_parameter(&scale, context.time, 1.0)),
+                        strength: f64::from(strength) / 100.0,
+                        elasticity: integer(&elasticity, 1),
+                        density: integer(&density, 2),
+                    },
+                )
+                .map_err(|e| invalid(e.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Smear { grade: Arc::new(grade) });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SetMatte => {
             let source = builtin_parameter_id(effect_type, "matte_source");
             let channel = builtin_parameter_id(effect_type, "channel");
@@ -20863,6 +21008,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::SetMatte => "设置遮罩",
         EffectType::DisplacementMap => "置换图",
         EffectType::GrowBounds => "范围扩散",
+        EffectType::Smear => "漩涡条纹",
         EffectType::SmartBlur => "智能模糊",
         EffectType::BilateralBlur => "双向模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
@@ -22263,6 +22409,7 @@ mod tests {
             EffectType::SetMatte,
             EffectType::DisplacementMap,
             EffectType::GrowBounds,
+            EffectType::Smear,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -31412,7 +31559,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 120);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 121);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -31940,7 +32087,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 120);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 121);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -34671,6 +34818,7 @@ mod tests {
         let supported = crate::adjustment::apply_render_op_f32_region_controlled(
             pixels,
             crate::adjustment::EffectRasterRegion::full_frame(width, height),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             op,
             0,
             &mut || Ok::<(), std::convert::Infallible>(()),
@@ -34796,6 +34944,7 @@ mod tests {
         let supported = crate::adjustment::apply_render_op_f32_region_controlled(
             &mut cropped,
             crate::adjustment::EffectRasterRegion::new(width, height, 0, 6, width, 6),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &op,
             0,
             &mut || Ok::<(), std::convert::Infallible>(()),
@@ -34897,7 +35046,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 120);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 121);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -36033,7 +36182,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 120);
+        assert_eq!(builtin_effect_types().len(), 121);
     }
 
     #[test]

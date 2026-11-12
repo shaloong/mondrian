@@ -6,6 +6,7 @@
 
 mod path;
 
+pub(crate) use self::path::cubic_bezier;
 use self::path::PreparedPath;
 use super::mask::{MaskShape, MAX_MASK_PATH_POINTS};
 use crate::{

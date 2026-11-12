@@ -2906,6 +2906,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::CameraView { .. } => 117,
         EffectRenderOp::BlankingFill { .. } => 118,
         EffectRenderOp::GrowBounds { .. } => 119,
+        EffectRenderOp::Smear { .. } => 122,
         EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::ColorBalance { .. } => 79,
@@ -3802,10 +3803,12 @@ fn execute_cpu_dag_prefix(
                         crate::EffectAlphaConsumer::StraightCoverageOperation,
                         &mut || heterogeneous_processor_checkpoint(control, generation),
                     )?;
+                    let sampling = output.sampling();
                     apply_render_op_f32_controlled(
                         output.allocation_mut(),
                         extent.width(),
                         extent.height(),
+                        sampling,
                         &op,
                         frame_seed,
                         &mut || heterogeneous_processor_checkpoint(control, generation),
@@ -5191,6 +5194,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::CameraView { .. }
             | crate::EffectRenderOp::BlankingFill { .. }
             | crate::EffectRenderOp::GrowBounds { .. }
+            | crate::EffectRenderOp::Smear { .. }
             | crate::EffectRenderOp::DisplacementMap { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::SetMatte { .. }

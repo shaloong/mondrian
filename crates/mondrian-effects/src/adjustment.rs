@@ -509,6 +509,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Smear { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "smear",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::BilateralBlur { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "bilateral_blur",
@@ -1168,9 +1174,15 @@ pub(crate) fn apply_render_op_f32(
     op: &EffectRenderOp,
     frame_seed: i64,
 ) -> bool {
-    match apply_render_op_f32_controlled(working, width, height, op, frame_seed, &mut || {
-        Ok::<(), Infallible>(())
-    }) {
+    match apply_render_op_f32_controlled(
+        working,
+        width,
+        height,
+        mondrian_core::ImageSampling::UNIT_SQUARE,
+        op,
+        frame_seed,
+        &mut || Ok::<(), Infallible>(()),
+    ) {
         Ok(supported) => supported,
         Err(never) => match never {},
     }
@@ -1180,6 +1192,9 @@ pub(crate) fn apply_render_op_f32(
 pub(crate) fn render_op_tile_scratch_bytes(op: &EffectRenderOp, width: u32, height: u32) -> usize {
     match op {
         EffectRenderOp::BilateralBlur { grade } => grade.tile_scratch_bytes(width, height),
+        EffectRenderOp::Smear { grade } => {
+            grade.preparation_scratch_bytes(crate::EffectFrameExtent::new(width, height))
+        }
         _ => 0,
     }
 }
@@ -1251,6 +1266,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::SetMatte { .. } => 0,
         EffectRenderOp::DisplacementMap { .. } => 1,
         EffectRenderOp::GrowBounds { .. } => 0,
+        EffectRenderOp::Smear { .. } => 1,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
         EffectRenderOp::Minimax { .. } => 4,
@@ -1431,6 +1447,7 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
     working: &mut Vec<[f32; 4]>,
     width: u32,
     height: u32,
+    sampling: mondrian_core::ImageSampling,
     op: &EffectRenderOp,
     frame_seed: i64,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
@@ -1438,6 +1455,7 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
     apply_render_op_f32_region_controlled(
         working,
         EffectRasterRegion::full_frame(width, height),
+        sampling,
         op,
         frame_seed,
         checkpoint,
@@ -1454,6 +1472,7 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
 pub(crate) fn apply_render_op_f32_region_controlled<E>(
     working: &mut Vec<[f32; 4]>,
     region: EffectRasterRegion,
+    sampling: mondrian_core::ImageSampling,
     op: &EffectRenderOp,
     frame_seed: i64,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
@@ -1828,6 +1847,17 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::DisplacementMap { .. } => Ok(false),
         EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),
+        EffectRenderOp::Smear { grade } => {
+            if !region.is_full_frame() {
+                return Ok(false);
+            }
+            grade.apply_controlled(
+                working,
+                crate::EffectFrameExtent::new(width, height),
+                sampling,
+                checkpoint,
+            )
+        }
         EffectRenderOp::ChromaticAberrationRemoval { grade } => {
             crate::chromatic_aberration_removal::apply_chromatic_aberration_removal_f32_controlled(
                 working,
@@ -4551,6 +4581,7 @@ mod tests {
         let supported = apply_render_op_f32_region_controlled(
             &mut region_pixels,
             EffectRasterRegion::new(4, 4, 2, 1, 2, 2),
+            mondrian_core::ImageSampling::UNIT_SQUARE,
             &EffectRenderOp::Crop { left: 0.25, top: 0.25, right: 0.25, bottom: 0.25 },
             0,
             &mut || Ok::<(), Infallible>(()),

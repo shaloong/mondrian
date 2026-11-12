@@ -2172,6 +2172,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     apply_render_op_f32_region_controlled(
                                         &mut output,
                                         self.raster_region,
+                                        self.request.sampling,
                                         &op,
                                         frame_seed,
                                         &mut || processor_input_checkpoint(self.request, control),
@@ -2881,6 +2882,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::SetMatte { .. } => "set_matte",
         crate::EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         crate::EffectRenderOp::GrowBounds { .. } => "grow_bounds",
+        crate::EffectRenderOp::Smear { .. } => "smear",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",

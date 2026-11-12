@@ -332,7 +332,7 @@ fn subdivide_bezier(a: BezierPoint, b: BezierPoint, output: &mut Vec<PathSegment
     }
 }
 
-fn cubic_bezier(a: BezierPoint, b: BezierPoint, t: f32) -> Vec2 {
+pub(crate) fn cubic_bezier(a: BezierPoint, b: BezierPoint, t: f32) -> Vec2 {
     let t2 = t * t;
     let t3 = t2 * t;
     let inverse = 1.0 - t;

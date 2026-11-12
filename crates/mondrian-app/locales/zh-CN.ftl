@@ -3441,6 +3441,17 @@ effect-grow-bounds = 范围扩散
 parameter-group-grow-bounds = 范围扩散
 parameter-mondrian-effect-builtin-grow-bounds-pixels-label = 像素
 
+effect-smear = 漩涡条纹
+parameter-group-smear = 漩涡条纹
+parameter-mondrian-effect-builtin-smear-source-mask-label = 源蒙版
+parameter-mondrian-effect-builtin-smear-boundary-mask-label = 边界蒙版
+parameter-mondrian-effect-builtin-smear-mask-offset-label = 蒙版位移
+parameter-mondrian-effect-builtin-smear-mask-rotation-label = 蒙版旋转
+parameter-mondrian-effect-builtin-smear-mask-scale-label = 蒙版缩放
+parameter-mondrian-effect-builtin-smear-percent-label = 百分比
+parameter-mondrian-effect-builtin-smear-elasticity-label = 弹性
+parameter-mondrian-effect-builtin-smear-calculation-density-label = 计算密度
+
 ## Displacement Map 置换图
 effect-set-matte = 设置遮罩
 parameter-mondrian-effect-builtin-set-matte-matte-source-label = 从图层获取遮罩

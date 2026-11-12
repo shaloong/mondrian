@@ -211,6 +211,8 @@ pub enum EffectType {
     External(String),
     /// Replace or intersect coverage with a channel from a matte layer.
     SetMatte,
+    /// Deform a source mask inside an independent boundary mask.
+    Smear,
 }
 
 impl EffectType {
@@ -328,6 +330,7 @@ impl EffectType {
             Self::KeyCleaner => "builtin.key_cleaner".to_string(),
             Self::ChannelCombiner => "builtin.channel_combiner".to_string(),
             Self::SetMatte => "builtin.set_matte".to_string(),
+            Self::Smear => "builtin.smear".to_string(),
             Self::DisplacementMap => "builtin.displacement_map".to_string(),
             Self::GrowBounds => "builtin.grow_bounds".to_string(),
             Self::SmartBlur => "builtin.smart_blur".to_string(),
@@ -454,6 +457,7 @@ impl EffectType {
             "builtin.key_cleaner" => Self::KeyCleaner,
             "builtin.channel_combiner" => Self::ChannelCombiner,
             "builtin.set_matte" => Self::SetMatte,
+            "builtin.smear" => Self::Smear,
             "builtin.displacement_map" => Self::DisplacementMap,
             "builtin.grow_bounds" => Self::GrowBounds,
             "builtin.smart_blur" => Self::SmartBlur,
@@ -580,6 +584,7 @@ impl EffectType {
             Self::KeyCleaner => "键控清理",
             Self::ChannelCombiner => "通道合成器",
             Self::SetMatte => "设置遮罩",
+            Self::Smear => "漩涡条纹",
             Self::DisplacementMap => "置换图",
             Self::GrowBounds => "范围扩散",
             Self::SmartBlur => "智能模糊",
@@ -704,6 +709,7 @@ impl EffectType {
             Self::KeyCleaner => vec!["边缘修补"],
             Self::ChannelCombiner => vec!["通道"],
             Self::SetMatte => vec!["通道"],
+            Self::Smear => vec!["变形"],
             Self::DisplacementMap => vec!["变形"],
             Self::GrowBounds => vec!["通道"],
             Self::SmartBlur | Self::BilateralBlur => vec!["模糊与锐化"],
@@ -829,6 +835,7 @@ impl EffectType {
             Self::KeyCleaner => "key_cleaner".to_string(),
             Self::ChannelCombiner => "channel_combiner".to_string(),
             Self::SetMatte => "set_matte".to_string(),
+            Self::Smear => "smear".to_string(),
             Self::DisplacementMap => "displacement_map".to_string(),
             Self::GrowBounds => "grow_bounds".to_string(),
             Self::SmartBlur => "smart_blur".to_string(),
@@ -1330,6 +1337,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::KeyCleaner => Ok(()),
             Self::ChannelCombiner => Ok(()),
             Self::SetMatte => Ok(()),
+            Self::Smear => Ok(()),
             Self::DisplacementMap => Ok(()),
             Self::GrowBounds => Ok(()),
             // Range-domain blur: it samples and reweights existing pixels, so it

@@ -32,7 +32,7 @@ use crate::{BoxBlurDirection, EffectExecutionModes};
 ///
 /// The variants carry exactly the CPU kernel's authored parameters, so the GPU
 /// and CPU paths evaluate the same math for the same graph.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EffectGpuSpatialPass {
     /// Separable box blur; `iterations` passes per blurred axis.
     BoxBlur {
@@ -323,12 +323,19 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Remap a source picture inside an evaluated mask boundary.
+    Smear {
+        /// Geometry and controls resolved for the current graph evaluation.
+        grade: Arc<crate::mask_deformation::MaskDeformation>,
+        /// Proven sampling of the source grid selected by the host.
+        sampling: Option<mondrian_core::ImageSampling>,
+    },
 }
 
 impl EffectGpuSpatialPass {
     /// Growth in pixels on each side of the input along each axis.
-    pub fn output_outset(self) -> [u32; 2] {
-        match self {
+    pub fn output_outset(&self) -> [u32; 2] {
+        match *self {
             Self::DisplacementMap { grade, .. } => grade.output_outset(),
             Self::GrowBounds { grade } => grade.output_outset(),
             _ => [0, 0],
@@ -336,8 +343,8 @@ impl EffectGpuSpatialPass {
     }
 
     /// Auxiliary pass and its optional host slot, or no second texture.
-    pub const fn auxiliary_slot(self) -> Option<Option<u32>> {
-        match self {
+    pub const fn auxiliary_slot(&self) -> Option<Option<u32>> {
+        match *self {
             Self::FillMatte { external_slot, .. }
             | Self::ChannelCombinerLayer { external_slot, .. }
             | Self::SetMatte { sampling: Some(_), external_slot, .. }
@@ -347,7 +354,7 @@ impl EffectGpuSpatialPass {
     }
 
     /// Stable name used by diagnostics and renderer dispatch.
-    pub const fn name(self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::BoxBlur { .. } => "box_blur",
             Self::DirectionalBlur { .. } => "directional_blur",
@@ -407,6 +414,7 @@ impl EffectGpuSpatialPass {
             Self::SetMatte { .. } => "set_matte",
             Self::DisplacementMap { .. } => "displacement_map",
             Self::GrowBounds { .. } => "grow_bounds",
+            Self::Smear { .. } => "smear",
         }
     }
 
@@ -415,8 +423,8 @@ impl EffectGpuSpatialPass {
     /// The renderer sizes its intermediate rasters from this: a spatial stage
     /// reads nothing beyond the halo, so a full-frame layer raster is always
     /// sufficient.
-    pub fn horizontal_halo(self) -> u32 {
-        match self {
+    pub fn horizontal_halo(&self) -> u32 {
+        match *self {
             Self::BoxBlur { radius, iterations, direction, .. } => {
                 crate::box_blur::box_blur_axis_halo(radius, iterations, direction)
                     .map(|(horizontal, _)| horizontal)
@@ -499,12 +507,13 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[0],
+            Self::Smear { .. } => u32::MAX,
         }
     }
 
     /// Vertical reach of the kernel in source pixels.
-    pub fn vertical_halo(self) -> u32 {
-        match self {
+    pub fn vertical_halo(&self) -> u32 {
+        match *self {
             Self::BoxBlur { radius, iterations, direction, .. } => {
                 crate::box_blur::box_blur_axis_halo(radius, iterations, direction)
                     .map(|(_, vertical)| vertical)
@@ -577,6 +586,7 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[1],
+            Self::Smear { .. } => u32::MAX,
         }
     }
 }
@@ -692,6 +702,32 @@ pub struct CompiledEffectGpuPipeline {
 }
 
 impl CompiledEffectGpuPipeline {
+    /// Whether recording requires the selected source's image sampling.
+    pub fn requires_image_sampling(&self) -> bool {
+        self.stages.iter().any(|stage| {
+            matches!(
+                stage,
+                EffectGpuStage::Spatial { pass: EffectGpuSpatialPass::Smear { .. }, .. }
+            )
+        })
+    }
+
+    /// Bind sampling to source-dependent kernels for this one materialization.
+    /// The cached lowering remains reusable across source grids.
+    pub fn with_image_sampling(&self, sampling: mondrian_core::ImageSampling) -> Self {
+        let mut pipeline = self.clone();
+        for stage in &mut pipeline.stages {
+            if let EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::Smear { sampling: value, .. },
+                ..
+            } = stage
+            {
+                *value = Some(sampling);
+            }
+        }
+        pipeline
+    }
+
     /// Stages in execution order.
     pub fn stages(&self) -> &[EffectGpuStage] {
         &self.stages
@@ -1033,6 +1069,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::GrowBounds { grade } => {
             Some(EffectGpuSpatialPass::GrowBounds { grade: *grade })
+        }
+        EffectRenderOp::Smear { grade } => {
+            Some(EffectGpuSpatialPass::Smear { grade: Arc::clone(grade), sampling: None })
         }
         EffectRenderOp::SetMatte { grade } => Some(EffectGpuSpatialPass::SetMatte {
             grade: *grade,
@@ -1390,7 +1429,7 @@ mod tests {
             .stages()
             .iter()
             .find_map(|stage| match stage {
-                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::Spatial { pass, .. } => Some(pass.clone()),
                 EffectGpuStage::PointOps { .. } => None,
             })
             .expect("choker emits a spatial stage");
@@ -1422,7 +1461,7 @@ mod tests {
             .stages()
             .iter()
             .find_map(|stage| match stage {
-                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::Spatial { pass, .. } => Some(pass.clone()),
                 EffectGpuStage::PointOps { .. } => None,
             })
             .expect("minimax emits a spatial stage");
@@ -1455,7 +1494,7 @@ mod tests {
             .stages()
             .iter()
             .find_map(|stage| match stage {
-                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::Spatial { pass, .. } => Some(pass.clone()),
                 EffectGpuStage::PointOps { .. } => None,
             })
             .expect("channel blur emits a spatial stage");
@@ -1487,7 +1526,7 @@ mod tests {
             .stages()
             .iter()
             .find_map(|stage| match stage {
-                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::Spatial { pass, .. } => Some(pass.clone()),
                 EffectGpuStage::PointOps { .. } => None,
             })
             .expect("dent emits a spatial stage");
@@ -1519,7 +1558,7 @@ mod tests {
             .stages()
             .iter()
             .find_map(|stage| match stage {
-                EffectGpuStage::Spatial { pass, .. } => Some(*pass),
+                EffectGpuStage::Spatial { pass, .. } => Some(pass.clone()),
                 EffectGpuStage::PointOps { .. } => None,
             })
             .expect("warp emits a spatial stage");

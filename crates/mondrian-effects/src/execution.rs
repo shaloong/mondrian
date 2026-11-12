@@ -1789,10 +1789,12 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         scalar_checkpoint(control)?;
                         chunk.fill([0.0, 0.0, 0.0, 1.0]);
                     }
+                    let sampling = output.sampling();
                     let supported = crate::adjustment::apply_render_op_f32_controlled(
                         output.allocation_mut(),
                         width,
                         height,
+                        sampling,
                         op,
                         frame_seed,
                         &mut || scalar_checkpoint(control),
@@ -1885,10 +1887,12 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                             .with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
                     );
                     let source_extent = source.extent();
+                    let sampling = source.sampling();
                     crate::adjustment::apply_render_op_f32_controlled(
                         source.allocation_mut(),
                         source_extent.width(),
                         source_extent.height(),
+                        sampling,
                         op,
                         frame_seed,
                         &mut || scalar_checkpoint(control),
@@ -3051,6 +3055,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",
+        EffectRenderOp::Smear { .. } => "smear",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

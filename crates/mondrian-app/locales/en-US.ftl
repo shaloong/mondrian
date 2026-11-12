@@ -3513,6 +3513,17 @@ effect-grow-bounds = Grow Bounds
 parameter-group-grow-bounds = Grow Bounds
 parameter-mondrian-effect-builtin-grow-bounds-pixels-label = Pixels
 
+effect-smear = Smear
+parameter-group-smear = Smear
+parameter-mondrian-effect-builtin-smear-source-mask-label = Source Mask
+parameter-mondrian-effect-builtin-smear-boundary-mask-label = Boundary Mask
+parameter-mondrian-effect-builtin-smear-mask-offset-label = Mask Offset
+parameter-mondrian-effect-builtin-smear-mask-rotation-label = Mask Rotation
+parameter-mondrian-effect-builtin-smear-mask-scale-label = Mask Scale
+parameter-mondrian-effect-builtin-smear-percent-label = Percent
+parameter-mondrian-effect-builtin-smear-elasticity-label = Elasticity
+parameter-mondrian-effect-builtin-smear-calculation-density-label = Calculation Density
+
 ## Displacement Map 置换图
 effect-set-matte = Set Matte
 parameter-mondrian-effect-builtin-set-matte-matte-source-label = Take Matte From Layer

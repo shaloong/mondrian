@@ -126,6 +126,7 @@ pub mod key_cleaner;
 pub mod keylight;
 pub mod lut;
 pub mod mask;
+pub mod mask_deformation;
 pub mod mask_raster;
 pub mod matte_refine;
 pub mod prepared;
