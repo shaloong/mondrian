@@ -6268,30 +6268,30 @@ fn fs_glow_extract(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
         sample.rgb,
         vec3<f32>(uniforms.params.y, uniforms.params.z, uniforms.params.w),
     );
-    let threshold = clamp(uniforms.params.x, 0.0, 1.0);
-    var colour_weight = 0.0;
-    if (threshold < 1.0) {
-        colour_weight = clamp((luminance - threshold) / (1.0 - threshold), 0.0, 1.0);
-    }
     let based_on = u32(round(uniforms.extra.x));
-    var weight = colour_weight;
+    let signal = select(luminance, clamp(alpha, 0.0, 1.0), based_on == 1u);
+    let threshold = clamp(uniforms.params.x, 0.0, 1.0);
+    var threshold_weight = 0.0;
+    if (threshold < 1.0) {
+        threshold_weight = clamp((signal - threshold) / (1.0 - threshold), 0.0, 1.0);
+    }
+    var weight = threshold_weight;
     var colour = sample.rgb;
     if (based_on == 1u) {
-        weight = alpha;
         colour = vec3<f32>(1.0, 1.0, 1.0);
     } else if (based_on == 2u) {
-        weight = max(colour_weight, alpha);
+        weight = max(threshold_weight, alpha);
     }
     let colours = u32(round(uniforms.extra.y));
     let midpoint = uniforms.extra.z;
     var tint = colour;
     if (colours == 1u) {
-        let ramp_low = 0.5 * luminance / midpoint;
-        let ramp_high = 0.5 + 0.5 * (luminance - midpoint) / (1.0 - midpoint);
-        let ramp = select(ramp_high, ramp_low, luminance < midpoint);
+        let ramp_low = 0.5 * signal / midpoint;
+        let ramp_high = 0.5 + 0.5 * (signal - midpoint) / (1.0 - midpoint);
+        let ramp = select(ramp_high, ramp_low, signal < midpoint);
         tint = mix(uniforms.aces.rgb, uniforms.extra1.rgb, ramp);
     } else if (colours == 2u) {
-        let phase = uniforms.extra.w + luminance * uniforms.aces.a;
+        let phase = uniforms.extra.w + signal * uniforms.aces.a;
         tint = mix(uniforms.aces.rgb, uniforms.extra1.rgb, fract(phase));
     }
     return vec4<f32>(tint, weight);
@@ -9268,20 +9268,58 @@ fn blend_rgb(mode: u32, base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
     );
 }
 
-// The glow merge mirrors `GlowGrade::composite`: the contribution is the
-// extracted-and-blurred layer times its own coverage and the authored
-// intensity, and the merge always keeps the source alpha.
+// Alpha glow gives the edge its own coverage so it is visible outside the source.
+fn composite_alpha_glow(
+    source: vec4<f32>,
+    glow: vec4<f32>,
+    intensity: f32,
+    mode: u32,
+    composite: u32,
+) -> vec4<f32> {
+    let source_alpha = clamp(source.a, 0.0, 1.0);
+    let threshold = clamp(uniforms.extra.y, 0.0, 1.0);
+    var center_mask = 0.0;
+    if (threshold < 1.0) {
+        center_mask = clamp((source_alpha - threshold) / (1.0 - threshold), 0.0, 1.0);
+    }
+    let edge = abs(glow.a - center_mask);
+    if (edge <= 1.0e-6 || intensity == 0.0) {
+        return select(source, vec4<f32>(0.0), composite == 2u);
+    }
+    let glow_alpha = min(edge, 1.0) * min(intensity, 1.0);
+    let glow_rgb = glow.rgb * max(intensity, 1.0);
+    if (composite == 2u || source_alpha == 0.0) {
+        return vec4<f32>(glow_rgb, glow_alpha);
+    }
+    let behind = composite == 1u;
+    let base = select(source.rgb, glow_rgb, behind);
+    let front = select(glow_rgb, source.rgb, behind);
+    let base_alpha = select(source_alpha, glow_alpha, behind);
+    let front_alpha = select(glow_alpha, source_alpha, behind);
+    let base_only = base_alpha * (1.0 - front_alpha);
+    let front_only = front_alpha * (1.0 - base_alpha);
+    let overlap = base_alpha * front_alpha;
+    let alpha = front_alpha + base_only;
+    let rgb = (base * base_only + front * front_only + blend_rgb(mode, base, front) * overlap)
+        / alpha;
+    return vec4<f32>(rgb, alpha);
+}
+
+// The colour modes preserve source coverage and blend the weighted radiance.
 @fragment
 fn fs_glow_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
     let source = load_clamped_from(original_texture, pixel);
     let glow = load_clamped_from(auxiliary_texture, pixel);
-    if (source.a <= 0.0) {
-        return source;
-    }
     let intensity = uniforms.params.x;
     let mode = u32(round(uniforms.params.y));
     let composite = u32(round(uniforms.params.z));
+    if (uniforms.extra.x == 1.0) {
+        return composite_alpha_glow(source, glow, intensity, mode, composite);
+    }
+    if (source.a <= 0.0) {
+        return source;
+    }
     let contribution = glow.rgb * glow.a * intensity;
     var blended = contribution;
     if (composite == 0u) {
@@ -12730,7 +12768,34 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 .expect("cycling glow grade"),
             ),
         ];
-        for (index, (label, grade)) in cases.iter().enumerate() {
+        let alpha_cases = [
+            ("alpha on top", mondrian_effects::GlowComposite::OnTop),
+            ("alpha behind", mondrian_effects::GlowComposite::Behind),
+            ("alpha only", mondrian_effects::GlowComposite::None),
+        ]
+        .map(|(label, composite)| {
+            (
+                label,
+                mondrian_effects::GlowGrade::new(
+                    mondrian_effects::GlowBasedOn::Alpha,
+                    32.0,
+                    2.5,
+                    160.0,
+                    composite,
+                    mondrian_effects::GlowOperation::Overlay,
+                    mondrian_effects::GlowColors::AAndB,
+                    1.0,
+                    0.0,
+                    0.6,
+                    [0.1, 0.2, 0.9],
+                    [0.9, 0.4, 0.1],
+                    mondrian_effects::GlowDimensions::Both,
+                    [0.2126, 0.7152, 0.0722],
+                )
+                .expect("alpha glow grade"),
+            )
+        });
+        for (index, (label, grade)) in cases.iter().chain(&alpha_cases).enumerate() {
             let mut cpu = pixels.clone();
             assert!(mondrian_effects::glow_frame_f32(
                 &mut cpu,
@@ -12759,15 +12824,18 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 .expect("recorded glow");
             context.queue.submit(Some(encoder.finish()));
             let gpu = readback(&context, &output, width, height);
+            let mut max_error = 0.0_f32;
             for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
                 for channel in 0..4 {
                     let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    max_error = max_error.max(difference);
                     assert!(
                         difference <= 1.0e-4,
                         "glow case {index} ({label}) pixel {pixel_index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
             }
+            eprintln!("LGT-01 raw {label} error={max_error:.9e}");
         }
     }
 

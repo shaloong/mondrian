@@ -19156,6 +19156,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spatial_chain_alpha_glow_adds_coverage_to_a_transparent_composite() {
+        use mondrian_core::{PropertyValue, TimelineTime};
+        use mondrian_effects::{EffectGpuSpatialPass, EffectGpuStage, EffectType};
+
+        let context = crate::GpuContext::new().await.expect("GPU for Alpha glow parity");
+        let (width, height) = (21, 9);
+        let space = WorkingColorSpace::LinearRec709;
+        let pixels: Vec<_> = (0..width * height)
+            .map(|index| {
+                if (5..=15).contains(&(index % width)) {
+                    [0.1, 0.2, 0.3, 1.0]
+                } else {
+                    [0.9, 0.0, 0.0, 0.0]
+                }
+            })
+            .collect();
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width,
+            height,
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: space,
+            data: pixels.clone(),
+        });
+        let mut effect = mondrian_effects::instantiate_effect_node(EffectType::Glow).unwrap();
+        for (parameter, value) in [
+            ("based_on", PropertyValue::Enum("alpha".to_owned())),
+            ("radius", PropertyValue::Float(2.0)),
+            ("strength", PropertyValue::Float(100.0)),
+        ] {
+            effect
+                .set_static_value_by_parameter(
+                    &EffectType::Glow.parameter_id(parameter).unwrap(),
+                    value,
+                )
+                .unwrap();
+        }
+        let compiled =
+            mondrian_effects::compile_clip_effect_graph(&[effect], &[], TimelineTime::ZERO, space)
+                .unwrap();
+        let pipeline = mondrian_effects::lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+        let [EffectGpuStage::Spatial { pass: EffectGpuSpatialPass::Glow { grade }, .. }] =
+            pipeline.stages()
+        else {
+            panic!("expected one Glow spatial stage");
+        };
+        let mut expected = pixels;
+        assert!(mondrian_effects::glow_frame_f32(
+            &mut expected,
+            width as usize,
+            height as usize,
+            grade
+        ));
+        for pixel in &mut expected {
+            if pixel[3] == 0.0 {
+                *pixel = [0.0; 4];
+            }
+        }
+        let layers = [GpuCompositeSpatialLayer {
+            layer: spatial_test_layer(&frame),
+            spatial_plan: Some(&pipeline),
+        }];
+        let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+            &context, &layers, width, height, space,
+        );
+        assert!(actual[4][..3].iter().all(|channel| (channel - 1.0).abs() <= 1.0e-4));
+        assert!(actual[4][3] > 0.0);
+        assert_eq!(actual[0], [0.0; 4]);
+        let error = max_spatial_float_error(&expected, &actual);
+        eprintln!(
+            "LGT-01 Alpha compositor error={error:.9e} edge_alpha={:.9e}",
+            actual[4][3]
+        );
+        assert_spatial_chain_matches(&expected, &actual);
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+        assert_eq!(diagnostics.spatial_effect_passes, 6);
+    }
+
+    #[tokio::test]
     async fn spatial_chain_reports_a_directional_blur_unsupported_pass() {
         use mondrian_effects::EffectRenderOp;
 
