@@ -3540,6 +3540,15 @@ inspector-reshape-smooth = Smooth
 inspector-reshape-add-pair = Add pair
 inspector-reshape-remove-pair = Remove
 
+effect-detail-preserving-upscale = Detail-preserving Upscale
+parameter-group-detail-preserving-upscale = Detail-preserving Upscale
+parameter-mondrian-effect-builtin-detail-preserving-upscale-scale-label = Scale
+parameter-mondrian-effect-builtin-detail-preserving-upscale-reduce-noise-label = Reduce Noise
+parameter-mondrian-effect-builtin-detail-preserving-upscale-detail-label = Detail
+parameter-mondrian-effect-builtin-detail-preserving-upscale-alpha-label = Alpha
+parameter-mondrian-effect-detail-preserving-upscale-alpha-bilinear = Bilinear
+parameter-mondrian-effect-detail-preserving-upscale-alpha-bicubic = Bicubic
+
 ## Displacement Map 置换图
 effect-set-matte = Set Matte
 parameter-mondrian-effect-builtin-set-matte-matte-source-label = Take Matte From Layer

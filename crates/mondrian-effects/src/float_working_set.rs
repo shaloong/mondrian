@@ -109,12 +109,12 @@ pub(crate) fn reservations(
                 taken.push(raster);
             }
         }
-        let outset = if primary_extent.is_empty() {
-            [0, 0]
+        let change = if primary_extent.is_empty() {
+            crate::EffectRasterChange::Preserve
         } else {
-            node.output_outset()
+            node.raster_change()
         };
-        let grows = outset != [0, 0];
+        let changes_grid = !change.is_identity();
         let (raster, scratch) = match &node.kind {
             EffectGraphNodeKind::Source => (
                 Raster {
@@ -165,11 +165,11 @@ pub(crate) fn reservations(
             EffectGraphNodeKind::UnaryEffect { .. }
             | EffectGraphNodeKind::DomainEffect { .. }
             | EffectGraphNodeKind::AuxiliaryEffect { .. }
-                if grows =>
+                if changes_grid =>
             {
                 let input = taken.first().ok_or_else(|| missing(*id))?;
                 let extent = crate::EffectRasterBounds::from_extent(input.extent)
-                    .checked_outset(outset)
+                    .checked_apply(change)
                     .ok_or(EffectFloatFrameError::ExtentOverflow)?
                     .extent();
                 // Growth writes a disjoint output while the primary is still live.
@@ -219,6 +219,16 @@ pub(crate) fn reservations(
             _ => 0,
         };
         let tile_scratch = match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: crate::EffectRenderOp::DetailPreservingUpscale { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: crate::EffectRenderOp::DetailPreservingUpscale { grade },
+                ..
+            } => grade
+                .resize_scratch_bytes(taken.first().ok_or_else(|| missing(*id))?.extent)
+                .ok_or(EffectFloatFrameError::ExtentOverflow)?,
             EffectGraphNodeKind::UnaryEffect { op, .. }
             | EffectGraphNodeKind::DomainEffect { op, .. } => {
                 crate::adjustment::render_op_tile_scratch_bytes(
@@ -237,7 +247,7 @@ pub(crate) fn reservations(
                 .saturating_add(mask_bytes),
             raster.extent,
         ));
-        for overlay in taken.into_iter().skip(usize::from(!grows)) {
+        for overlay in taken.into_iter().skip(usize::from(!changes_grid)) {
             pool.release(overlay);
         }
         outputs.insert(*id, raster);

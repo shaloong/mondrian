@@ -351,6 +351,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "范围扩散" => Some("parameter-group-grow-bounds"),
         "漩涡条纹" => Some("parameter-group-smear"),
         "改变形状" => Some("parameter-group-reshape"),
+        "超分放大" => Some("parameter-group-detail-preserving-upscale"),
         "第二图层" => Some("parameter-group-second-layer"),
         "通道混合器" => Some("parameter-group-channel-mixer"),
         "移除颜色遮罩" => Some("parameter-group-remove-color-matting"),

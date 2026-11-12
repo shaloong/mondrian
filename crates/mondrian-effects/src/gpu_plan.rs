@@ -1102,6 +1102,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",
         EffectRenderOp::Smear { .. } => "smear",
         EffectRenderOp::Reshape { .. } => "reshape",
+        EffectRenderOp::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

@@ -509,7 +509,9 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
-        EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => {
+        EffectRenderOp::Smear { .. }
+        | EffectRenderOp::Reshape { .. }
+        | EffectRenderOp::DetailPreservingUpscale { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: crate::execution::effect_render_op_name(op),
                 parameter: "requires_float32",
@@ -1267,6 +1269,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::DisplacementMap { .. } => 1,
         EffectRenderOp::GrowBounds { .. } => 0,
         EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 1,
+        EffectRenderOp::DetailPreservingUpscale { .. } => 1,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
         EffectRenderOp::Minimax { .. } => 4,
@@ -1847,6 +1850,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::DisplacementMap { .. } => Ok(false),
         EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),
+        EffectRenderOp::DetailPreservingUpscale { grade } => {
+            if !region.is_full_frame() {
+                return Ok(false);
+            }
+            grade.apply_unity_controlled(
+                working,
+                crate::EffectFrameExtent::new(width, height),
+                checkpoint,
+            )
+        }
         EffectRenderOp::Smear { grade } | EffectRenderOp::Reshape { grade } => {
             if !region.is_full_frame() {
                 return Ok(false);

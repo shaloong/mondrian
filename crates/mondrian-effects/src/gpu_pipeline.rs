@@ -337,15 +337,32 @@ pub enum EffectGpuSpatialPass {
         /// Proven sampling of the source grid selected by the host.
         sampling: Option<mondrian_core::ImageSampling>,
     },
+    /// Enlarge a raster using the shared, centered Float32 pyramid.
+    DetailPreservingUpscale {
+        /// Scale and reconstruction controls.
+        grade: crate::DetailPreservingUpscaleGrade,
+    },
 }
 
 impl EffectGpuSpatialPass {
-    /// Growth in pixels on each side of the input along each axis.
-    pub fn output_outset(&self) -> [u32; 2] {
+    /// Checked raster geometry operation applied before this pass is recorded.
+    pub fn raster_change(&self) -> crate::EffectRasterChange {
+        use crate::EffectRasterChange::{Outset, Preserve};
         match *self {
-            Self::DisplacementMap { grade, .. } => grade.output_outset(),
-            Self::GrowBounds { grade } => grade.output_outset(),
-            _ => [0, 0],
+            Self::DisplacementMap { grade, .. } => Outset(grade.output_outset()),
+            Self::GrowBounds { grade } => Outset(grade.output_outset()),
+            Self::DetailPreservingUpscale { grade } => {
+                crate::EffectRasterChange::Upscale(grade.scale())
+            }
+            _ => Preserve,
+        }
+    }
+
+    /// Integer border growth on each axis, or zero for other raster changes.
+    pub fn output_outset(&self) -> [u32; 2] {
+        match self.raster_change() {
+            crate::EffectRasterChange::Outset(outset) => outset,
+            crate::EffectRasterChange::Preserve | crate::EffectRasterChange::Upscale(_) => [0, 0],
         }
     }
 
@@ -423,6 +440,7 @@ impl EffectGpuSpatialPass {
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
+            Self::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
         }
     }
 
@@ -515,7 +533,9 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[0],
-            Self::Smear { .. } | Self::Reshape { .. } => u32::MAX,
+            Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
+                u32::MAX
+            }
         }
     }
 
@@ -594,7 +614,9 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[1],
-            Self::Smear { .. } | Self::Reshape { .. } => u32::MAX,
+            Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
+                u32::MAX
+            }
         }
     }
 }
@@ -1088,6 +1110,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::Reshape { grade } => {
             Some(EffectGpuSpatialPass::Reshape { grade: Arc::clone(grade), sampling: None })
+        }
+        EffectRenderOp::DetailPreservingUpscale { grade } => {
+            Some(EffectGpuSpatialPass::DetailPreservingUpscale { grade: *grade })
         }
         EffectRenderOp::SetMatte { grade } => Some(EffectGpuSpatialPass::SetMatte {
             grade: *grade,

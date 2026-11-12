@@ -428,19 +428,28 @@ pub struct EffectGraphNode {
 }
 
 impl EffectGraphNode {
-    pub(crate) fn output_outset(&self) -> [u32; 2] {
+    pub(crate) fn raster_change(&self) -> crate::EffectRasterChange {
+        use crate::EffectRasterChange::{Outset, Preserve};
         match &self.kind {
             EffectGraphNodeKind::UnaryEffect {
                 op: EffectRenderOp::GrowBounds { grade }, ..
             }
             | EffectGraphNodeKind::DomainEffect {
                 op: EffectRenderOp::GrowBounds { grade }, ..
-            } => grade.output_outset(),
+            } => Outset(grade.output_outset()),
             EffectGraphNodeKind::AuxiliaryEffect {
                 op: EffectRenderOp::DisplacementMap { grade },
                 ..
-            } => grade.output_outset(),
-            _ => [0, 0],
+            } => Outset(grade.output_outset()),
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::DetailPreservingUpscale { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::DetailPreservingUpscale { grade },
+                ..
+            } => crate::EffectRasterChange::Upscale(grade.scale()),
+            _ => Preserve,
         }
     }
 
@@ -1114,7 +1123,7 @@ impl CompiledEffectGraph {
         self.schedule
             .ordered_nodes
             .iter()
-            .any(|id| self.graph.node(*id).is_some_and(|node| node.output_outset() != [0, 0]))
+            .any(|id| self.graph.node(*id).is_some_and(|node| !node.raster_change().is_identity()))
     }
 
     /// Resolve output dimensions and layer origin before allocating any pixels.
@@ -1161,7 +1170,7 @@ impl CompiledEffectGraph {
                 }
             }
             bounds = bounds
-                .checked_outset(node.output_outset())
+                .checked_apply(node.raster_change())
                 .ok_or(crate::EffectFloatFrameError::ExtentOverflow)?;
             previous = Some(*id);
         }
@@ -2971,7 +2980,8 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::BlankingFill { .. }
         | EffectRenderOp::GrowBounds { .. }
         | EffectRenderOp::Smear { .. }
-        | EffectRenderOp::Reshape { .. } => EffectImplementationRequirements {
+        | EffectRenderOp::Reshape { .. }
+        | EffectRenderOp::DetailPreservingUpscale { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float

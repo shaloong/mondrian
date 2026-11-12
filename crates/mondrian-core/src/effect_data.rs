@@ -214,6 +214,8 @@ pub enum EffectType {
     /// Deform a source mask inside an independent boundary mask.
     Smear,
     Reshape,
+    /// Enlarge a layer while retaining local edge detail.
+    DetailPreservingUpscale,
 }
 
 impl EffectType {
@@ -333,6 +335,7 @@ impl EffectType {
             Self::SetMatte => "builtin.set_matte".to_string(),
             Self::Smear => "builtin.smear".to_string(),
             Self::Reshape => "builtin.reshape".to_string(),
+            Self::DetailPreservingUpscale => "builtin.detail_preserving_upscale".to_string(),
             Self::DisplacementMap => "builtin.displacement_map".to_string(),
             Self::GrowBounds => "builtin.grow_bounds".to_string(),
             Self::SmartBlur => "builtin.smart_blur".to_string(),
@@ -461,6 +464,7 @@ impl EffectType {
             "builtin.set_matte" => Self::SetMatte,
             "builtin.smear" => Self::Smear,
             "builtin.reshape" => Self::Reshape,
+            "builtin.detail_preserving_upscale" => Self::DetailPreservingUpscale,
             "builtin.displacement_map" => Self::DisplacementMap,
             "builtin.grow_bounds" => Self::GrowBounds,
             "builtin.smart_blur" => Self::SmartBlur,
@@ -589,6 +593,7 @@ impl EffectType {
             Self::SetMatte => "设置遮罩",
             Self::Smear => "漩涡条纹",
             Self::Reshape => "改变形状",
+            Self::DetailPreservingUpscale => "超分放大",
             Self::DisplacementMap => "置换图",
             Self::GrowBounds => "范围扩散",
             Self::SmartBlur => "智能模糊",
@@ -717,7 +722,7 @@ impl EffectType {
             Self::DisplacementMap => vec!["变形"],
             Self::GrowBounds => vec!["通道"],
             Self::SmartBlur | Self::BilateralBlur => vec!["模糊与锐化"],
-            Self::ChromaticAberrationRemoval => vec!["修复"],
+            Self::ChromaticAberrationRemoval | Self::DetailPreservingUpscale => vec!["修复"],
             Self::Basic3D => vec!["变换"],
             Self::CameraView => vec!["变换"],
             Self::BlankingFill => vec!["变换"],
@@ -841,6 +846,7 @@ impl EffectType {
             Self::SetMatte => "set_matte".to_string(),
             Self::Smear => "smear".to_string(),
             Self::Reshape => "reshape".to_string(),
+            Self::DetailPreservingUpscale => "detail_preserving_upscale".to_string(),
             Self::DisplacementMap => "displacement_map".to_string(),
             Self::GrowBounds => "grow_bounds".to_string(),
             Self::SmartBlur => "smart_blur".to_string(),
@@ -1342,7 +1348,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::KeyCleaner => Ok(()),
             Self::ChannelCombiner => Ok(()),
             Self::SetMatte => Ok(()),
-            Self::Smear | Self::Reshape => Ok(()),
+            Self::Smear | Self::Reshape | Self::DetailPreservingUpscale => Ok(()),
             Self::DisplacementMap => Ok(()),
             Self::GrowBounds => Ok(()),
             // Range-domain blur: it samples and reweights existing pixels, so it

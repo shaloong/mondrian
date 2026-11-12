@@ -3468,6 +3468,15 @@ inspector-reshape-smooth = 平滑
 inspector-reshape-add-pair = 添加点对
 inspector-reshape-remove-pair = 删除
 
+effect-detail-preserving-upscale = 超分放大
+parameter-group-detail-preserving-upscale = 超分放大
+parameter-mondrian-effect-builtin-detail-preserving-upscale-scale-label = 缩放
+parameter-mondrian-effect-builtin-detail-preserving-upscale-reduce-noise-label = 减少杂色
+parameter-mondrian-effect-builtin-detail-preserving-upscale-detail-label = 详细信息
+parameter-mondrian-effect-builtin-detail-preserving-upscale-alpha-label = Alpha
+parameter-mondrian-effect-detail-preserving-upscale-alpha-bilinear = 双线性
+parameter-mondrian-effect-detail-preserving-upscale-alpha-bicubic = 双三次
+
 ## Displacement Map 置换图
 effect-set-matte = 设置遮罩
 parameter-mondrian-effect-builtin-set-matte-matte-source-label = 从图层获取遮罩

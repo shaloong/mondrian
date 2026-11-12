@@ -1849,6 +1849,12 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     outputs.insert(node.id, source);
                     continue;
                 }
+                if let EffectRenderOp::DetailPreservingUpscale { grade } = op {
+                    let output =
+                        crate::apply_detail_preserving_upscale_controlled(source, *grade, control)?;
+                    outputs.insert(node.id, output);
+                    continue;
+                }
                 let supported = if matches!(op, EffectRenderOp::Custom { .. }) {
                     let caller_owned_bytes = outputs
                         .values()
@@ -2659,30 +2665,7 @@ impl EffectExecutionSession {
             processor,
             control,
         )?;
-        let processed = if bounds.origin() == [0, 0] {
-            processed
-        } else {
-            // An adjustment writes back to its accumulator's fixed canvas.
-            // Compact the original rectangle into the existing grown buffer.
-            if processed.extent() != bounds.extent() {
-                return Err(crate::EffectFloatFrameError::GridExtentMismatch {
-                    expected: bounds.extent(),
-                    actual: processed.extent(),
-                }
-                .into());
-            }
-            let (extent, format, sampling, mut pixels) = processed.into_parts();
-            let [left, top] = bounds.origin().map(|origin| origin.unsigned_abs() as usize);
-            let stride = extent.width() as usize;
-            let width = base_extent.width() as usize;
-            for row in 0..base_extent.height() as usize {
-                scalar_checkpoint(control)?;
-                let start = (top + row) * stride + left;
-                pixels.copy_within(start..start + width, row * width);
-            }
-            pixels.truncate(base.len());
-            crate::EffectFloatFrame::from_validated_parts(base_extent, format, sampling, pixels)
-        };
+        let processed = project_adjustment_raster(processed, bounds, base_extent, control)?;
         let blend_result = match policy {
             crate::EffectPassBlendPolicy::Mix => crate::mix_float_frames_controlled(
                 &mut base,
@@ -2703,6 +2686,80 @@ impl EffectExecutionSession {
         let result = blend_result.and_then(|()| scalar_checkpoint(control)).map(|()| base);
         finish_scalar_attempt(self, control, result)
     }
+}
+
+fn project_adjustment_raster(
+    mut frame: crate::EffectFloatFrame,
+    bounds: crate::EffectRasterBounds,
+    canvas: crate::EffectFrameExtent,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<crate::EffectFloatFrame, EffectFloatExecutionError> {
+    let extent = frame.extent();
+    if extent != bounds.extent() {
+        return Err(crate::EffectFloatFrameError::GridExtentMismatch {
+            expected: bounds.extent(),
+            actual: extent,
+        }
+        .into());
+    }
+    let [x, y] = bounds.origin_half_pixels().map(i64::unsigned_abs);
+    if [x, y] == [0, 0] {
+        return Ok(frame);
+    }
+    let half_x = !x.is_multiple_of(2);
+    let half_y = !y.is_multiple_of(2);
+    let subpixel = half_x || half_y;
+    if subpixel {
+        frame = crate::materialize_straight_coverage(
+            frame,
+            crate::EffectAlphaConsumer::StraightCoverageOperation,
+        )?;
+    }
+    let (_, format, sampling, mut pixels) = frame.into_parts();
+    let stride = extent.width() as usize;
+    let (width, height) = (canvas.width() as usize, canvas.height() as usize);
+    let (left, top) = ((x / 2) as usize, (y / 2) as usize);
+
+    // The fixed accumulator is contained in the enlarged raster. Reads
+    // always follow the current destination in row-major order.
+    if subpixel {
+        crate::straight_alpha::premultiply_rgba_controlled(&mut pixels, &mut || {
+            scalar_checkpoint(control)
+        })?;
+        let average = |a: [f32; 4], b: [f32; 4]| {
+            std::array::from_fn(|channel| a[channel] * 0.5 + b[channel] * 0.5)
+        };
+        for row in 0..height {
+            scalar_checkpoint(control)?;
+            for column in 0..width {
+                let start = (row + top) * stride + column + left;
+                let horizontal = |index| {
+                    if half_x {
+                        average(pixels[index], pixels[index + 1])
+                    } else {
+                        pixels[index]
+                    }
+                };
+                let sampled = if half_y {
+                    average(horizontal(start), horizontal(start + stride))
+                } else {
+                    horizontal(start)
+                };
+                pixels[row * width + column] =
+                    crate::coverage::straight_rgba_from_premultiplied(sampled);
+            }
+        }
+    } else {
+        for row in 0..height {
+            scalar_checkpoint(control)?;
+            let start = (top + row) * stride + left;
+            pixels.copy_within(start..start + width, row * width);
+        }
+    }
+    pixels.truncate(width * height);
+    Ok(crate::EffectFloatFrame::from_validated_parts(
+        canvas, format, sampling, pixels,
+    ))
 }
 
 /// Execute and blend a compiled graph, failing on unresolved domains.
@@ -3057,6 +3114,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",
         EffectRenderOp::Smear { .. } => "smear",
         EffectRenderOp::Reshape { .. } => "reshape",
+        EffectRenderOp::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",
@@ -3594,6 +3652,49 @@ pub(crate) fn apply_alpha_mask_f32_region_controlled<E>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn projecting_a_half_pixel_raster_keeps_the_adjustment_on_its_canvas() {
+        use crate::{
+            EffectColorDomain, EffectFloatFrame, EffectFrameExtent, EffectProcessorControl,
+            EffectRasterBounds, EffectRasterChange, EffectRasterScale, EffectValueFormat,
+            EffectWorkingPrecision,
+        };
+        use mondrian_core::{ColorFrameAlpha, ImageSampling};
+
+        let canvas = EffectFrameExtent::new(2, 1);
+        let bounds = EffectRasterBounds::from_extent(canvas)
+            .checked_apply(EffectRasterChange::Upscale(
+                EffectRasterScale::from_percent(125.0).unwrap(),
+            ))
+            .unwrap();
+        let red = [2.0, 0.0, -1.0, 1.0];
+        let hidden = [17.0, 19.0, 21.0, 0.0];
+        let blue = [0.0, 0.0, 3.0, 1.0];
+        let frame = EffectFloatFrame::from_pixels(
+            bounds.extent(),
+            EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                ColorFrameAlpha::StraightCoverage,
+            ),
+            ImageSampling::UNIT_SQUARE,
+            vec![red, hidden, blue, red, hidden, blue],
+        )
+        .unwrap();
+        let projected = super::project_adjustment_raster(
+            frame,
+            bounds,
+            canvas,
+            &mut EffectProcessorControl::uncancelled(),
+        )
+        .unwrap();
+        assert_eq!(projected.extent(), canvas);
+        assert_eq!(
+            projected.pixels(),
+            &[[2.0, 0.0, -1.0, 0.5], [0.0, 0.0, 3.0, 0.5]]
+        );
+    }
+
     #[test]
     fn scalar_owner_stop_blocks_empty_identity_and_cached_output() {
         use crate::{EffectProcessorControl, EffectProcessorStopReason};

@@ -66,6 +66,7 @@ pub mod corner_pin;
 pub mod coverage;
 pub mod deband;
 pub mod dent;
+pub mod detail_preserving_upscale;
 pub mod directional_blur;
 pub mod drop_shadow;
 pub mod dust_scratches;
@@ -329,6 +330,10 @@ pub use dent::{
     DENT_DEFAULT_SIZE_FRACTION, DENT_DEFAULT_STRENGTH, DENT_MAX_SIZE_FRACTION, DENT_MAX_STRENGTH,
     DENT_MIN_SIZE_FRACTION, DENT_MIN_STRENGTH,
 };
+pub use detail_preserving_upscale::{
+    apply_detail_preserving_upscale_controlled, detail_preserving_upscale_frame_f32,
+    DetailPreservingUpscaleError, DetailPreservingUpscaleGrade, UpscaleAlpha,
+};
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
     effect_display_name, effect_library_types, effect_registry_revision, instantiate_effect_node,
@@ -365,7 +370,8 @@ pub use execution_planning::{
     EffectExecutionEnvironmentError, EffectExecutionLane, EffectExecutionLaneId,
     EffectExecutionModeObligation, EffectExecutionObligations, EffectExecutionTransfer,
     EffectFrameExtent, EffectInputRoi, EffectLinearStagePlacement, EffectLinearStagePlacementError,
-    EffectLinearStagePlacementStep, EffectPixelRoi, EffectRasterBounds, EffectRoiHalo,
+    EffectLinearStagePlacementStep, EffectPixelRoi, EffectRasterAxisSample, EffectRasterBounds,
+    EffectRasterChange, EffectRasterScale, EffectRasterUpscaleStage, EffectRoiHalo,
     EffectTemporalBoundary, EffectTemporalDirection, EffectTemporalWindow, EffectWorkingPrecisions,
 };
 pub use execution_session::{

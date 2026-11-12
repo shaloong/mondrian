@@ -1297,6 +1297,11 @@ pub enum EffectRenderOp {
         /// Contours and authored correspondence evaluated for this graph.
         grade: Arc<crate::mask_deformation::MaskDeformation>,
     },
+    /// Enlarge the raster about its center with an edge-directed filter.
+    DetailPreservingUpscale {
+        /// Scale, noise reduction, detail and coverage controls.
+        grade: crate::DetailPreservingUpscaleGrade,
+    },
     /// Counter-shift red and blue around the green reference channel.
     ChromaticAberrationRemoval {
         grade: crate::ChromaticAberrationRemovalGrade,
@@ -1699,6 +1704,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Smear { grade } => formatter.debug_struct("Smear").field("grade", grade).finish(),
             Self::Reshape { grade } => {
                 formatter.debug_struct("Reshape").field("grade", grade).finish()
+            }
+            Self::DetailPreservingUpscale { grade } => {
+                formatter.debug_struct("DetailPreservingUpscale").field("grade", grade).finish()
             }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
@@ -2801,6 +2809,10 @@ impl EffectRenderOp {
                 122u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::DetailPreservingUpscale { grade } => {
+                123u8.hash(state);
+                grade.hash_state(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2954,6 +2966,7 @@ impl EffectRenderOp {
             EffectRenderOp::DisplacementMap { .. } => 5,
             EffectRenderOp::GrowBounds { .. } => 2,
             EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 48,
+            EffectRenderOp::DetailPreservingUpscale { .. } => 32,
             EffectRenderOp::DustScratches { .. } => 4,
             // Three passes, four when the chatter softening is enabled.
             EffectRenderOp::KeyCleaner { grade } => grade.cost(),
@@ -3513,7 +3526,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 122] {
+fn builtin_effect_types() -> [EffectType; 123] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3631,6 +3644,7 @@ fn builtin_effect_types() -> [EffectType; 122] {
         EffectType::GrowBounds,
         EffectType::Smear,
         EffectType::Reshape,
+        EffectType::DetailPreservingUpscale,
         EffectType::BilateralBlur,
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
@@ -11040,6 +11054,44 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 );
             }
         }
+        EffectType::DetailPreservingUpscale => {
+            let group = "超分放大";
+            for (key, label, default, min, max) in [
+                ("scale", "缩放", 100.0, 100.0, 30_000.0),
+                ("reduce_noise", "减少杂色", 0.0, 0.0, 100.0),
+                ("detail", "详细信息", 50.0, 0.0, 100.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    key,
+                    group,
+                    label,
+                    PropertyValue::Float(default),
+                    Some(min),
+                    Some(max),
+                    Some(0.1),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "alpha",
+                group,
+                "Alpha",
+                "bicubic",
+                [("bilinear", "双线性"), ("bicubic", "双三次")]
+                    .into_iter()
+                    .map(|(key, label)| {
+                        ParameterEnumOption::new(
+                            key,
+                            label,
+                            format!("mondrian.effect.detail_preserving_upscale.alpha.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::SetMatte => {
             let group = "通道";
             define_builtin_property(
@@ -13175,6 +13227,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Smear, "mask_offset") => ParameterUnit::Normalized,
         (EffectType::Smear, "mask_rotation") => ParameterUnit::Degrees,
         (EffectType::Smear | EffectType::Reshape, "percent") => ParameterUnit::Percent,
+        (EffectType::DetailPreservingUpscale, "scale" | "reduce_noise" | "detail") => {
+            ParameterUnit::Percent
+        }
         (EffectType::Colorama, "phase_shift") => ParameterUnit::Degrees,
         (EffectType::Colorama, "blend_with_original") => ParameterUnit::Percent,
         (
@@ -13605,7 +13660,8 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         | EffectType::BlankingFill
         | EffectType::GrowBounds
         | EffectType::Smear
-        | EffectType::Reshape => EffectExecutionContract {
+        | EffectType::Reshape
+        | EffectType::DetailPreservingUpscale => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
@@ -19364,6 +19420,33 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::DetailPreservingUpscale => {
+            let [scale, reduce_noise, detail, alpha] = ["scale", "reduce_noise", "detail", "alpha"]
+                .map(|parameter| builtin_parameter_id(effect_type, parameter));
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let alpha = match effect.evaluate_enum_parameter(&alpha, context.time).as_deref() {
+                    Some("bilinear") => crate::UpscaleAlpha::Bilinear,
+                    Some("bicubic") | None => crate::UpscaleAlpha::Bicubic,
+                    Some(_) => return Err(invalid("unknown upscale alpha mode".into())),
+                };
+                let grade = crate::DetailPreservingUpscaleGrade::new(
+                    effect.evaluate_f32_parameter(&scale, context.time, 100.0),
+                    effect.evaluate_f32_parameter(&reduce_noise, context.time, 0.0),
+                    effect.evaluate_f32_parameter(&detail, context.time, 50.0),
+                    alpha,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::DetailPreservingUpscale { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SetMatte => {
             let source = builtin_parameter_id(effect_type, "matte_source");
             let channel = builtin_parameter_id(effect_type, "channel");
@@ -21147,6 +21230,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::GrowBounds => "范围扩散",
         EffectType::Smear => "漩涡条纹",
         EffectType::Reshape => "改变形状",
+        EffectType::DetailPreservingUpscale => "超分放大",
         EffectType::SmartBlur => "智能模糊",
         EffectType::BilateralBlur => "双向模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
@@ -22549,6 +22633,7 @@ mod tests {
             EffectType::GrowBounds,
             EffectType::Smear,
             EffectType::Reshape,
+            EffectType::DetailPreservingUpscale,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -31698,7 +31783,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 122);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 123);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -32226,7 +32311,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 122);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 123);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -35185,7 +35270,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 122);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 123);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -36321,7 +36406,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 122);
+        assert_eq!(builtin_effect_types().len(), 123);
     }
 
     #[test]

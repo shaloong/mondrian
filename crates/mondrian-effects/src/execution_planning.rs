@@ -52,17 +52,171 @@ impl EffectFrameExtent {
     }
 }
 
-/// A raster extent and its pixel origin relative to the original layer.
+/// A raster extent and its origin relative to the original layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectRasterBounds {
     extent: EffectFrameExtent,
-    origin: [i32; 2],
+    origin_half_pixels: [i64; 2],
+}
+
+/// Exact uniform upscale ratio for an authored Float32 percentage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectRasterScale(u32);
+
+impl EffectRasterScale {
+    // From 100 through 30000, every f32 percentage is an exact multiple of
+    // 2^-17 and its scaled numerator fits u32.
+    const PERCENT_UNIT: u32 = 1 << 17;
+    const DENOMINATOR: u32 = 100 * Self::PERCENT_UNIT;
+
+    /// Admit a finite percentage in the supported 100–30000 range.
+    pub fn from_percent(percent: f32) -> Option<Self> {
+        (100.0..=30_000.0)
+            .contains(&percent)
+            .then(|| Self((f64::from(percent) * f64::from(Self::PERCENT_UNIT)) as u32))
+    }
+
+    /// Whether the exact ratio is one.
+    pub const fn is_identity(self) -> bool {
+        self.0 == Self::DENOMINATOR
+    }
+
+    /// Input texels per output texel, for the shared CPU/GPU sampling map.
+    pub fn inverse_factor(self) -> f32 {
+        (f64::from(Self::DENOMINATOR) / f64::from(self.0)) as f32
+    }
+
+    /// Scale the extent and round each axis up, keeping an empty grid empty.
+    pub fn checked_extent(self, extent: EffectFrameExtent) -> Option<EffectFrameExtent> {
+        if extent.is_empty() {
+            return Some(extent);
+        }
+        let scale = |size| {
+            let product = u64::from(size) * u64::from(self.0);
+            u32::try_from(product.div_ceil(u64::from(Self::DENOMINATOR))).ok()
+        };
+        Some(EffectFrameExtent::new(
+            scale(extent.width())?,
+            scale(extent.height())?,
+        ))
+    }
+
+    /// Resolve a bounded pyramid whose stages upscale by at most 2×.
+    ///
+    /// The integral levels never round. The final level uses the total
+    /// authored ratio and the original input extent to round exactly once.
+    pub fn stages(self, input: EffectFrameExtent) -> Option<Vec<EffectRasterUpscaleStage>> {
+        if self.is_identity() || input.is_empty() {
+            return Some(Vec::new());
+        }
+        let output = self.checked_extent(input)?;
+        let mut stages = Vec::new();
+        let mut extent = input;
+        let mut denominator = Self::DENOMINATOR;
+        while denominator < self.0.div_ceil(2) {
+            let doubled = EffectFrameExtent::new(
+                extent.width().checked_mul(2)?,
+                extent.height().checked_mul(2)?,
+            );
+            stages.push(EffectRasterUpscaleStage { input: extent, output: doubled, ratio: [2, 1] });
+            extent = doubled;
+            denominator *= 2;
+        }
+        stages.push(EffectRasterUpscaleStage {
+            input: extent,
+            output,
+            ratio: [self.0, denominator],
+        });
+        Some(stages)
+    }
+}
+
+/// The input and output geometry of one centered upscale level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectRasterUpscaleStage {
+    input: EffectFrameExtent,
+    output: EffectFrameExtent,
+    ratio: [u32; 2],
+}
+
+impl EffectRasterUpscaleStage {
+    /// Grid read by this level.
+    pub const fn input_extent(self) -> EffectFrameExtent {
+        self.input
+    }
+
+    /// Grid written by this level.
+    pub const fn output_extent(self) -> EffectFrameExtent {
+        self.output
+    }
+
+    /// Source positions for each output column, in order.
+    pub fn column_samples(self) -> impl ExactSizeIterator<Item = EffectRasterAxisSample> {
+        self.axis_samples(self.input.width(), self.output.width())
+    }
+
+    /// Source positions for each output row, in order.
+    pub fn row_samples(self) -> impl ExactSizeIterator<Item = EffectRasterAxisSample> {
+        self.axis_samples(self.input.height(), self.output.height())
+    }
+
+    fn axis_samples(
+        self,
+        input: u32,
+        output: u32,
+    ) -> impl ExactSizeIterator<Item = EffectRasterAxisSample> {
+        let [num, den] = self.ratio.map(i128::from);
+        let divisor = 2 * num;
+        let last = i128::from(input - 1);
+        let bias = (1 - i128::from(output)) * den + last * num;
+        (0..output).map(move |index| {
+            let numerator = (2 * i128::from(index) * den + bias).clamp(0, last * divisor);
+            let base = (numerator / divisor) as u32;
+            let fraction = ((numerator % divisor) as f64 / divisor as f64) as f32;
+            if fraction == 1.0 {
+                EffectRasterAxisSample { base: base + 1, fraction: 0.0 }
+            } else {
+                EffectRasterAxisSample { base, fraction }
+            }
+        })
+    }
+}
+
+/// One clamped source texel position, split for shared CPU and GPU sampling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectRasterAxisSample {
+    /// Index of the source texel at or below the sample position.
+    pub base: u32,
+    /// Fraction of a texel toward the next source position.
+    pub fraction: f32,
+}
+
+/// A stage's effect on the raster presented to the next stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectRasterChange {
+    /// Retain the entire incoming grid.
+    Preserve,
+    /// Add an integer border on both sides of each axis.
+    Outset([u32; 2]),
+    /// Uniformly enlarge the grid about its center.
+    Upscale(EffectRasterScale),
+}
+
+impl EffectRasterChange {
+    /// Whether this stage can keep using its incoming grid.
+    pub const fn is_identity(self) -> bool {
+        match self {
+            Self::Preserve | Self::Outset([0, 0]) => true,
+            Self::Outset(_) => false,
+            Self::Upscale(scale) => scale.is_identity(),
+        }
+    }
 }
 
 impl EffectRasterBounds {
     /// The original layer grid, before any effect grows it.
     pub const fn from_extent(extent: EffectFrameExtent) -> Self {
-        Self { extent, origin: [0, 0] }
+        Self { extent, origin_half_pixels: [0, 0] }
     }
 
     /// Dimensions of the addressable raster.
@@ -70,31 +224,63 @@ impl EffectRasterBounds {
         self.extent
     }
 
-    /// Layer coordinates of the raster's top-left pixel.
+    /// Integer floor of the raster's top-left origin in layer coordinates.
     pub const fn origin(self) -> [i32; 2] {
-        self.origin
+        [
+            self.origin_half_pixels[0].div_euclid(2) as i32,
+            self.origin_half_pixels[1].div_euclid(2) as i32,
+        ]
+    }
+
+    /// Exact layer origin in half-pixel units.
+    pub const fn origin_half_pixels(self) -> [i64; 2] {
+        self.origin_half_pixels
+    }
+
+    /// Resolve the next stage in the same layer coordinate system.
+    pub fn checked_apply(self, change: EffectRasterChange) -> Option<Self> {
+        match change {
+            EffectRasterChange::Preserve => Some(self),
+            EffectRasterChange::Outset(outset) => self.checked_outset(outset),
+            EffectRasterChange::Upscale(scale) => {
+                let extent = scale.checked_extent(self.extent)?;
+                self.with_extent_and_shift(
+                    extent,
+                    [
+                        i64::from(self.extent.width()) - i64::from(extent.width()),
+                        i64::from(self.extent.height()) - i64::from(extent.height()),
+                    ],
+                )
+            }
+        }
     }
 
     /// Grow symmetrically along both axes, preserving the original pixel positions.
     pub fn checked_outset(self, [x, y]: [u32; 2]) -> Option<Self> {
         let width = self.extent.width().checked_add(x.checked_mul(2)?)?;
         let height = self.extent.height().checked_add(y.checked_mul(2)?)?;
-        let origin = [
-            self.origin[0].checked_sub(i32::try_from(x).ok()?)?,
-            self.origin[1].checked_sub(i32::try_from(y).ok()?)?,
+        self.with_extent_and_shift(
+            EffectFrameExtent::new(width, height),
+            [-2 * i64::from(x), -2 * i64::from(y)],
+        )
+    }
+
+    fn with_extent_and_shift(self, extent: EffectFrameExtent, [x, y]: [i64; 2]) -> Option<Self> {
+        let origin_half_pixels = [
+            self.origin_half_pixels[0] + x,
+            self.origin_half_pixels[1] + y,
         ];
-        Some(Self {
-            extent: EffectFrameExtent::new(width, height),
-            origin,
-        })
+        i32::try_from(origin_half_pixels[0].div_euclid(2)).ok()?;
+        i32::try_from(origin_half_pixels[1].div_euclid(2)).ok()?;
+        Some(Self { extent, origin_half_pixels })
     }
 
     /// Move the layer affine to the new origin without changing its linear part.
     pub fn project_affine(self, [a, b, tx, c, d, ty]: [f32; 6]) -> [f32; 6] {
-        if self.origin == [0, 0] {
+        if self.origin_half_pixels == [0, 0] {
             return [a, b, tx, c, d, ty];
         }
-        let [x, y] = self.origin.map(|value| value as f32);
+        let [x, y] = self.origin_half_pixels.map(|value| value as f32 * 0.5);
         [a, b, tx + a * x + b * y, c, d, ty + c * x + d * y]
     }
 }
@@ -1141,6 +1327,111 @@ fn required_transfer(
 mod tests {
     use super::*;
     use crate::{EffectDeterminism, EffectGraphTopology};
+
+    #[test]
+    fn fractional_upscale_keeps_the_layer_center_on_odd_input_grids() {
+        let input = EffectRasterBounds::from_extent(EffectFrameExtent::new(3, 5));
+        let scale = EffectRasterScale::from_percent(125.0).unwrap();
+        let output = input.checked_apply(EffectRasterChange::Upscale(scale)).unwrap();
+        assert_eq!(output.extent(), EffectFrameExtent::new(4, 7));
+        assert_eq!(output.origin_half_pixels(), [-1, -2]);
+        assert_eq!(output.origin(), [-1, -1]);
+        assert_eq!(scale.inverse_factor(), 0.8);
+        assert_eq!(
+            output.project_affine([2.0, 0.5, 10.0, -0.25, 3.0, 8.0]),
+            [2.0, 0.5, 8.5, -0.25, 3.0, 5.125],
+        );
+    }
+
+    #[test]
+    fn upscaling_and_integer_outsets_compose_in_stage_order() {
+        let input = EffectRasterBounds::from_extent(EffectFrameExtent::new(3, 5));
+        let scale = EffectRasterChange::Upscale(EffectRasterScale::from_percent(150.0).unwrap());
+        let outset = EffectRasterChange::Outset([2, 3]);
+        let outset_first = input.checked_apply(outset).unwrap().checked_apply(scale).unwrap();
+        let upscale_first = input.checked_apply(scale).unwrap().checked_apply(outset).unwrap();
+        assert_eq!(outset_first.extent(), EffectFrameExtent::new(11, 17));
+        assert_eq!(outset_first.origin_half_pixels(), [-8, -12]);
+        assert_eq!(upscale_first.extent(), EffectFrameExtent::new(9, 14));
+        assert_eq!(upscale_first.origin_half_pixels(), [-6, -9]);
+        for grid in [outset_first, upscale_first] {
+            let [x, y] = grid.origin_half_pixels();
+            assert_eq!(
+                [
+                    x + i64::from(grid.extent().width()),
+                    y + i64::from(grid.extent().height())
+                ],
+                [3, 5]
+            );
+        }
+    }
+
+    #[test]
+    fn upscale_ratio_checks_author_range_empty_extents_and_overflow() {
+        for percent in [
+            0.0,
+            100.0_f32.next_down(),
+            30_000.0_f32.next_up(),
+            f32::NAN,
+            f32::INFINITY,
+        ] {
+            assert!(EffectRasterScale::from_percent(percent).is_none());
+        }
+        let identity = EffectRasterScale::from_percent(100.0).unwrap();
+        let maximum = EffectRasterScale::from_percent(30_000.0).unwrap();
+        let large = EffectFrameExtent::new(u32::MAX, 1);
+        assert_eq!(identity.checked_extent(large), Some(large));
+        assert_eq!(maximum.checked_extent(large), None);
+        let empty = EffectFrameExtent::new(0, u32::MAX);
+        assert_eq!(maximum.checked_extent(empty), Some(empty));
+        let next = EffectRasterScale::from_percent(100.0_f32.next_up()).unwrap();
+        assert_eq!(
+            next.checked_extent(EffectFrameExtent::new(1, 3)),
+            Some(EffectFrameExtent::new(2, 4))
+        );
+    }
+
+    #[test]
+    fn upscale_levels_round_only_the_final_extent() {
+        let scale = EffectRasterScale::from_percent(350.0).unwrap();
+        let input = EffectFrameExtent::new(3, 5);
+        let stages = scale.stages(input).unwrap();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].input_extent(), input);
+        assert_eq!(stages[0].output_extent(), EffectFrameExtent::new(6, 10));
+        assert_eq!(stages[1].input_extent(), stages[0].output_extent());
+        assert_eq!(stages[1].output_extent(), EffectFrameExtent::new(11, 18));
+
+        let unit = EffectFrameExtent::new(1, 1);
+        let maximum = EffectRasterScale::from_percent(30_000.0).unwrap();
+        let levels = maximum.stages(unit).unwrap();
+        assert_eq!(levels.len(), 9);
+        assert_eq!(levels[7].output_extent(), EffectFrameExtent::new(256, 256));
+        assert_eq!(levels[8].output_extent(), EffectFrameExtent::new(300, 300));
+        let identity = EffectRasterScale::from_percent(100.0).unwrap();
+        assert!(identity.stages(unit).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upscale_axis_samples_use_exact_centers_and_clamp_single_pixel_axes() {
+        let scale = EffectRasterScale::from_percent(125.0).unwrap();
+        let levels = scale.stages(EffectFrameExtent::new(3, 1)).unwrap();
+        let stage = levels[0];
+        let columns = stage.column_samples().collect::<Vec<_>>();
+        assert_eq!(
+            columns,
+            [
+                EffectRasterAxisSample { base: 0, fraction: 0.0 },
+                EffectRasterAxisSample { base: 0, fraction: 0.6 },
+                EffectRasterAxisSample { base: 1, fraction: 0.4 },
+                EffectRasterAxisSample { base: 2, fraction: 0.0 },
+            ]
+        );
+        assert_eq!(
+            stage.row_samples().collect::<Vec<_>>(),
+            [EffectRasterAxisSample { base: 0, fraction: 0.0 }; 2],
+        );
+    }
 
     fn tt(numerator: i64, denominator: i64) -> TimelineTime {
         TimelineTime::new(numerator, denominator).expect("valid test time")
