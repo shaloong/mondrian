@@ -1226,7 +1226,11 @@ fn scalar_processor_reservations(
                 };
                 (
                     crate::adjustment::render_op_f32_scratch_frames(op),
-                    bytes,
+                    bytes.saturating_add(crate::adjustment::render_op_tile_scratch_bytes(
+                        op,
+                        node_extent.width(),
+                        node_extent.height(),
+                    )),
                     key,
                 )
             }
@@ -3039,6 +3043,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::DustScratches { .. } => "dust_scratches",
         EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
         EffectRenderOp::SmartBlur { .. } => "smart_blur",
+        EffectRenderOp::BilateralBlur { .. } => "bilateral_blur",
         EffectRenderOp::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
         EffectRenderOp::Basic3D { .. } => "basic_3d",
         EffectRenderOp::CameraView { .. } => "camera_view",

@@ -84,7 +84,14 @@ pub(super) fn temporal_scalar_required_bytes(
                                     required_bytes: usize::MAX,
                                     budget_bytes: usize::MAX,
                                 })?;
-                            working.ensure_transient(scratch_bytes)?;
+                            let roi = demand.input_roi().region();
+                            working.ensure_transient(scratch_bytes.saturating_add(
+                                crate::adjustment::render_op_tile_scratch_bytes(
+                                    op,
+                                    roi.width(),
+                                    roi.height(),
+                                ),
+                            ))?;
                             processor_charge = crate::processor_residency::frame_processor_charge(
                                 op,
                                 demand.input_roi().region().width(),

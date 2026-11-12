@@ -1092,6 +1092,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::DustScratches { .. } => "dust_scratches",
         EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
         EffectRenderOp::SmartBlur { .. } => "smart_blur",
+        EffectRenderOp::BilateralBlur { .. } => "bilateral_blur",
         EffectRenderOp::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
         EffectRenderOp::Basic3D { .. } => "basic_3d",
         EffectRenderOp::CameraView { .. } => "camera_view",

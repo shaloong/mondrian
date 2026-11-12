@@ -253,6 +253,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored edge radius, chatter fraction, alpha contrast and strength.
         grade: crate::KeyCleanerGrade,
     },
+    /// Coverage-weighted bilateral compute grid.
+    BilateralBlur {
+        /// Validated grid controls.
+        grade: crate::BilateralBlurGrade,
+    },
     SmartBlur {
         /// Authored radius, threshold and the output mode.
         grade: crate::SmartBlurGrade,
@@ -382,6 +387,7 @@ impl EffectGpuSpatialPass {
             Self::DustScratches { .. } => "dust_scratches",
             Self::KeyCleaner { .. } => "key_cleaner",
             Self::SmartBlur { .. } => "smart_blur",
+            Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
             Self::Basic3D { .. } => "basic_3d",
             Self::CameraView { .. } => "camera_view",
@@ -476,6 +482,7 @@ impl EffectGpuSpatialPass {
             // The blur window is the authored radius plus the one fractional
             // tap, so it is bounded by the authoring ceiling of 100.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
@@ -553,6 +560,7 @@ impl EffectGpuSpatialPass {
             Self::KeyCleaner { .. } => u32::MAX,
             // Same reach as the horizontal halo.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } => 0,
@@ -988,6 +996,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         // three-scratch geometry while the chain is still being planned.
         EffectRenderOp::KeyCleaner { grade } => {
             Some(EffectGpuSpatialPass::KeyCleaner { grade: *grade })
+        }
+        EffectRenderOp::BilateralBlur { grade } => {
+            Some(EffectGpuSpatialPass::BilateralBlur { grade: *grade })
         }
         EffectRenderOp::SmartBlur { grade } => {
             Some(EffectGpuSpatialPass::SmartBlur { grade: *grade })

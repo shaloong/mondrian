@@ -34,6 +34,11 @@ pub use float_frame::{
 };
 pub use float_working_set::estimate_compiled_float_raster_working_bytes;
 pub mod basic_3d;
+pub mod bilateral_blur;
+pub use bilateral_blur::{
+    bilateral_blur_frame_f32, BilateralBlurError, BilateralBlurGrade, BilateralBlurGrid,
+    BILATERAL_MAX_RADIUS, BILATERAL_MAX_THRESHOLD,
+};
 pub mod black_white;
 pub mod blanking_fill;
 pub mod box_blur;

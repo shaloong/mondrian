@@ -2083,7 +2083,15 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                         },
                                     )?;
                                 self.working.ensure_transient(
-                                    scratch_bytes.saturating_add(scope.feedback_bytes(control)),
+                                    scratch_bytes
+                                        .saturating_add(
+                                            crate::adjustment::render_op_tile_scratch_bytes(
+                                                &op,
+                                                self.raster_region.frame_width(),
+                                                self.raster_region.frame_height(),
+                                            ),
+                                        )
+                                        .saturating_add(scope.feedback_bytes(control)),
                                 )?;
                                 let execution = if matches!(
                                     op,
@@ -2865,6 +2873,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::DustScratches { .. } => "dust_scratches",
         crate::EffectRenderOp::KeyCleaner { .. } => "key_cleaner",
         crate::EffectRenderOp::SmartBlur { .. } => "smart_blur",
+        crate::EffectRenderOp::BilateralBlur { .. } => "bilateral_blur",
         crate::EffectRenderOp::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
         crate::EffectRenderOp::Basic3D { .. } => "basic_3d",
         crate::EffectRenderOp::CameraView { .. } => "camera_view",

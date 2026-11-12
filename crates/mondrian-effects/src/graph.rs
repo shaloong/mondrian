@@ -2920,7 +2920,8 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
-        EffectRenderOp::SmartBlur { .. }
+        EffectRenderOp::BilateralBlur { .. }
+        | EffectRenderOp::SmartBlur { .. }
         | EffectRenderOp::ChromaticAberrationRemoval { .. }
         | EffectRenderOp::Basic3D { .. }
         | EffectRenderOp::CameraView { .. }

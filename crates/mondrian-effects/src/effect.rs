@@ -1264,6 +1264,11 @@ pub enum EffectRenderOp {
         /// Authored template, inversion, solid alpha and colour-space weights.
         grade: crate::ChannelCombinerGrade,
     },
+    /// Coverage-weighted bilateral filtering.
+    BilateralBlur {
+        /// Validated grid controls.
+        grade: crate::BilateralBlurGrade,
+    },
     /// Smart blur: a separable range-domain mean gated by luminance distance.
     SmartBlur {
         /// Authored radius, luminance threshold and output mode.
@@ -1648,6 +1653,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ChannelCombiner { grade } => {
                 formatter.debug_struct("ChannelCombiner").field("grade", grade).finish()
+            }
+            Self::BilateralBlur { grade } => {
+                formatter.debug_struct("BilateralBlur").field("grade", grade).finish()
             }
             Self::SmartBlur { grade } => {
                 formatter.debug_struct("SmartBlur").field("grade", grade).finish()
@@ -2721,6 +2729,10 @@ impl EffectRenderOp {
                 // alpha and the colour-space weights all reach the kernel.
                 grade.hash(state);
             }
+            EffectRenderOp::BilateralBlur { grade } => {
+                119u8.hash(state);
+                grade.hash_signature(state);
+            }
             EffectRenderOp::SmartBlur { grade } => {
                 112u8.hash(state);
                 // Radius, threshold and mode all change the kernel weights, so
@@ -2932,6 +2944,7 @@ impl EffectRenderOp {
             EffectRenderOp::Colorama { .. } => 2,
             EffectRenderOp::ChannelCombiner { .. } => 1,
             EffectRenderOp::SmartBlur { .. } => 3,
+            EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
             EffectRenderOp::BlankingFill { .. } => 8,
@@ -3465,7 +3478,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 118] {
+fn builtin_effect_types() -> [EffectType; 119] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3580,6 +3593,7 @@ fn builtin_effect_types() -> [EffectType; 118] {
         EffectType::ChannelCombiner,
         EffectType::DisplacementMap,
         EffectType::GrowBounds,
+        EffectType::BilateralBlur,
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
         EffectType::Basic3D,
@@ -11908,6 +11922,35 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::BilateralBlur => {
+            for (key, label, default, maximum) in [
+                ("radius", "半径", 25.0, crate::BILATERAL_MAX_RADIUS),
+                ("threshold", "阈值", 3.0, crate::BILATERAL_MAX_THRESHOLD),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    key,
+                    "双向模糊",
+                    label,
+                    PropertyValue::Float(default),
+                    Some(0.0),
+                    Some(f64::from(maximum)),
+                    Some(0.1),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "colorize",
+                "双向模糊",
+                "彩色化",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::BlankingFill => define_blanking_fill_properties(&mut properties, &effect_type),
         EffectType::SmartBlur => {
             // The documented default (radius 3 at threshold 25 %) already
@@ -12871,8 +12914,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::KeyCleaner, "alpha_contrast" | "strength") => ParameterUnit::Percent,
         // The window radius is in pixels and the gate is a percentage of the
         // normalised luma range, matching the dump's "阈值 0.1–100".
-        (EffectType::SmartBlur, "radius") => ParameterUnit::Pixels,
-        (EffectType::SmartBlur, "threshold") => ParameterUnit::Percent,
+        (EffectType::SmartBlur | EffectType::BilateralBlur, "radius") => ParameterUnit::Pixels,
+        (EffectType::SmartBlur | EffectType::BilateralBlur, "threshold") => ParameterUnit::Percent,
         (EffectType::ChromaticAberrationRemoval, "lateral" | "longitudinal") => {
             ParameterUnit::Pixels
         }
@@ -13317,6 +13360,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The erosion window reaches 250 pixels in every direction and the
             // dedicated spatial pass writes a whole-frame destination, so the
             // definition-level envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::BilateralBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -19261,6 +19309,36 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::BilateralBlur => {
+            let radius = builtin_parameter_id(effect_type, "radius");
+            let threshold = builtin_parameter_id(effect_type, "threshold");
+            let colorize = builtin_parameter_id(effect_type, "colorize");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let colorize = match effect.evaluate_parameter(&colorize, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    None => true,
+                    Some(_) => {
+                        return Err(invalid("bilateral blur colorize must be a boolean".into()))
+                    }
+                };
+                let grade = crate::BilateralBlurGrade::new(
+                    effect.evaluate_f32_parameter(&radius, context.time, 25.0),
+                    effect.evaluate_f32_parameter(&threshold, context.time, 3.0),
+                    colorize,
+                    context.working_color_space,
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                if grade.filters_neighbors() || !grade.colorize() {
+                    graph.append_unary(EffectRenderOp::BilateralBlur { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::BlankingFill => Some(blanking_fill_graph_builder(effect_type)),
         EffectType::SmartBlur => {
             let radius_id = builtin_parameter_id(effect_type, "radius");
@@ -20654,6 +20732,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::DisplacementMap => "置换图",
         EffectType::GrowBounds => "范围扩散",
         EffectType::SmartBlur => "智能模糊",
+        EffectType::BilateralBlur => "双向模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
         EffectType::Basic3D => "基本 3D",
         EffectType::CameraView => "摄像机视图",
@@ -22043,6 +22122,7 @@ mod tests {
             EffectType::Colorama,
             EffectType::KeyCleaner,
             EffectType::ChannelCombiner,
+            EffectType::BilateralBlur,
             EffectType::SmartBlur,
             EffectType::ChromaticAberrationRemoval,
             EffectType::Basic3D,
@@ -31123,7 +31203,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 118);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 119);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -31651,7 +31731,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 118);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 119);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -34608,7 +34688,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 118);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 119);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -35744,7 +35824,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 118);
+        assert_eq!(builtin_effect_types().len(), 119);
     }
 
     #[test]
@@ -36040,6 +36120,27 @@ mod tests {
             std::hash::Hasher::finish(&second),
             "an equal grade hashes equally"
         );
+    }
+
+    #[test]
+    fn bilateral_blur_authoring_lowers_and_zero_color_radius_elides() {
+        let kind = EffectType::BilateralBlur;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        let graph =
+            build_effect_render_graph(&[effect.clone()], tt(0), TEST_WORKING_SPACE).unwrap();
+        let compiled = crate::compile_reference_render_graph(graph).unwrap();
+        let gpu = crate::lower_effect_graph_to_gpu_pipeline(&compiled).unwrap();
+        assert!(matches!(gpu.stages(), [crate::EffectGpuStage::Spatial {
+            pass: crate::EffectGpuSpatialPass::BilateralBlur { grade }, ..
+        }] if grade.colorize() && grade.filters_neighbors()));
+        effect
+            .set_static_value_by_parameter(
+                &kind.parameter_id("radius").unwrap(),
+                PropertyValue::Float(0.0),
+            )
+            .unwrap();
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE).unwrap();
+        assert_eq!(graph.nodes.len(), 1);
     }
 
     fn smart_blur_op(graph: &EffectRenderGraph) -> Option<crate::SmartBlurGrade> {

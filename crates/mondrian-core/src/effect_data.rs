@@ -198,6 +198,8 @@ pub enum EffectType {
     /// Smart blur: a separable range-domain mean that only averages neighbours
     /// whose luminance stays within the authored threshold.
     SmartBlur,
+    /// Coverage-weighted bilateral blur.
+    BilateralBlur,
     ChromaticAberrationRemoval,
     Basic3D,
     CameraView,
@@ -326,6 +328,7 @@ impl EffectType {
             Self::DisplacementMap => "builtin.displacement_map".to_string(),
             Self::GrowBounds => "builtin.grow_bounds".to_string(),
             Self::SmartBlur => "builtin.smart_blur".to_string(),
+            Self::BilateralBlur => "builtin.bilateral_blur".to_string(),
             Self::ChromaticAberrationRemoval => "builtin.chromatic_aberration_removal".to_string(),
             Self::Basic3D => "builtin.basic_3d".to_string(),
             Self::CameraView => "builtin.camera_view".to_string(),
@@ -450,6 +453,7 @@ impl EffectType {
             "builtin.displacement_map" => Self::DisplacementMap,
             "builtin.grow_bounds" => Self::GrowBounds,
             "builtin.smart_blur" => Self::SmartBlur,
+            "builtin.bilateral_blur" => Self::BilateralBlur,
             "builtin.chromatic_aberration_removal" => Self::ChromaticAberrationRemoval,
             "builtin.basic_3d" => Self::Basic3D,
             "builtin.camera_view" => Self::CameraView,
@@ -574,6 +578,7 @@ impl EffectType {
             Self::DisplacementMap => "置换图",
             Self::GrowBounds => "范围扩散",
             Self::SmartBlur => "智能模糊",
+            Self::BilateralBlur => "双向模糊",
             Self::ChromaticAberrationRemoval => "色差校正",
             Self::Basic3D => "基本 3D",
             Self::CameraView => "摄像机视图",
@@ -695,7 +700,7 @@ impl EffectType {
             Self::ChannelCombiner => vec!["通道"],
             Self::DisplacementMap => vec!["变形"],
             Self::GrowBounds => vec!["通道"],
-            Self::SmartBlur => vec!["模糊与锐化"],
+            Self::SmartBlur | Self::BilateralBlur => vec!["模糊与锐化"],
             Self::ChromaticAberrationRemoval => vec!["修复"],
             Self::Basic3D => vec!["变换"],
             Self::CameraView => vec!["变换"],
@@ -820,6 +825,7 @@ impl EffectType {
             Self::DisplacementMap => "displacement_map".to_string(),
             Self::GrowBounds => "grow_bounds".to_string(),
             Self::SmartBlur => "smart_blur".to_string(),
+            Self::BilateralBlur => "bilateral_blur".to_string(),
             Self::ChromaticAberrationRemoval => "chromatic_aberration_removal".to_string(),
             Self::Basic3D => "basic_3d".to_string(),
             Self::CameraView => "camera_view".to_string(),
@@ -1285,7 +1291,10 @@ impl crate::AuthoringFootprint for EffectType {
             Self::GrowBounds => Ok(()),
             // Range-domain blur: it samples and reweights existing pixels, so it
             // can never paint a region the source left empty.
-            Self::SmartBlur | Self::ChromaticAberrationRemoval | Self::Basic3D => Ok(()),
+            Self::SmartBlur
+            | Self::BilateralBlur
+            | Self::ChromaticAberrationRemoval
+            | Self::Basic3D => Ok(()),
             Self::CameraView | Self::BlankingFill => Ok(()),
         }
     }

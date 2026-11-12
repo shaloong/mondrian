@@ -218,10 +218,22 @@ pub(crate) fn reservations(
             }
             _ => 0,
         };
+        let tile_scratch = match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. } => {
+                crate::adjustment::render_op_tile_scratch_bytes(
+                    op,
+                    raster.extent.width(),
+                    raster.extent.height(),
+                )
+            }
+            _ => 0,
+        };
         result.push((
             pool.allocated
                 .saturating_add(bytes(raster.extent)?.saturating_mul(scratch))
                 .saturating_add(auxiliary_scratch)
+                .saturating_add(tile_scratch)
                 .saturating_add(mask_bytes),
             raster.extent,
         ));

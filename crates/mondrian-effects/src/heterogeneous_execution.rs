@@ -2883,6 +2883,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::KeyCleaner { .. } => 111,
         EffectRenderOp::ChannelCombiner { .. } => 112,
         EffectRenderOp::SmartBlur { .. } => 113,
+        EffectRenderOp::BilateralBlur { .. } => 120,
         EffectRenderOp::DisplacementMap { .. } => 114,
         EffectRenderOp::ChromaticAberrationRemoval { .. } => 115,
         EffectRenderOp::Basic3D { .. } => 116,
@@ -4243,7 +4244,14 @@ fn cpu_prefix_working_bytes(
             .checked_add(scratch_frames.max(usize::from(is_mask_source)))
             .and_then(|frames| frames.checked_mul(frame_bytes))
             .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-        reservations.push(node_peak);
+        let tile_scratch = match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. } => {
+                crate::adjustment::render_op_tile_scratch_bytes(op, extent.width(), extent.height())
+            }
+            _ => 0,
+        };
+        reservations.push(node_peak.saturating_add(tile_scratch));
         if is_mask_source {
             live_frames = live_frames
                 .checked_add(1)
@@ -4277,7 +4285,10 @@ fn cpu_prefix_working_bytes(
     let peak = frame_bytes
         .checked_mul(peak_owned_frames)
         .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
-    Ok((peak, reservations))
+    Ok((
+        peak.max(reservations.iter().copied().max().unwrap_or(0)),
+        reservations,
+    ))
 }
 
 fn prepare_gpu_suffix(
@@ -5147,6 +5158,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Colorama { .. }
             | crate::EffectRenderOp::KeyCleaner { .. }
             | crate::EffectRenderOp::SmartBlur { .. }
+            | crate::EffectRenderOp::BilateralBlur { .. }
             | crate::EffectRenderOp::ChromaticAberrationRemoval { .. }
             | crate::EffectRenderOp::Basic3D { .. }
             | crate::EffectRenderOp::CameraView { .. }

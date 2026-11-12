@@ -390,6 +390,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "蒙尘与划痕" => Some("parameter-group-dust-scratches"),
         "键控清理" => Some("parameter-group-key-cleaner"),
         "智能模糊" => Some("parameter-group-smart-blur"),
+        "双向模糊" => Some("parameter-group-bilateral-blur"),
         "色差校正" => Some("parameter-group-chromatic-aberration-removal"),
         "基本 3D" => Some("parameter-group-basic-3d"),
         "摄像机视图" => Some("parameter-group-camera-view"),

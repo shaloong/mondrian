@@ -503,6 +503,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::BilateralBlur { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "bilateral_blur",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::SmartBlur { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "smart_blur",
@@ -1164,11 +1170,16 @@ pub(crate) fn apply_render_op_f32(
     }
 }
 
+/// Scratch bytes owned by a CPU kernel in addition to its full raster slots.
+pub(crate) fn render_op_tile_scratch_bytes(op: &EffectRenderOp, width: u32, height: u32) -> usize {
+    match op {
+        EffectRenderOp::BilateralBlur { grade } => grade.tile_scratch_bytes(width, height),
+        _ => 0,
+    }
+}
+
 /// Peak same-sized scratch images owned by the current CPU Float32 kernel in
 /// addition to its caller-owned mutable output.
-///
-/// Keep this beside the dispatcher so every executor admits the concrete
-/// implementation rather than maintaining a parallel memory model.
 pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
     match op {
         EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
@@ -1214,6 +1225,13 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The premultiplied source snapshot is the gate reference for both
         // passes, and the horizontal pass writes a second full-frame plane.
         EffectRenderOp::SmartBlur { .. } => 2,
+        EffectRenderOp::BilateralBlur { grade } => {
+            if grade.filters_neighbors() {
+                2
+            } else {
+                0
+            }
+        }
         EffectRenderOp::ChromaticAberrationRemoval { .. }
         | EffectRenderOp::Basic3D { .. }
         | EffectRenderOp::CameraView { .. } => 1,
@@ -1831,6 +1849,18 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 region.width as usize,
                 region.height as usize,
                 *grade,
+                checkpoint,
+            )
+        }
+        EffectRenderOp::BilateralBlur { grade } => {
+            if !region.is_full_frame() {
+                return Ok(false);
+            }
+            crate::bilateral_blur::apply_bilateral_blur_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
                 checkpoint,
             )
         }

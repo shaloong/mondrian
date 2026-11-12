@@ -3346,6 +3346,12 @@ parameter-mondrian-effect-colorama-preset-palette-ramp-cyan = 渐变青色
 parameter-mondrian-effect-colorama-preset-palette-none = 无
 
 ## 智能模糊 Smart Blur
+effect-bilateral-blur = 双向模糊
+parameter-group-bilateral-blur = 双向模糊
+parameter-mondrian-effect-builtin-bilateral-blur-radius-label = 半径
+parameter-mondrian-effect-builtin-bilateral-blur-threshold-label = 阈值
+parameter-mondrian-effect-builtin-bilateral-blur-colorize-label = 彩色化
+
 effect-smart-blur = 智能模糊
 parameter-group-smart-blur = 智能模糊
 parameter-mondrian-effect-builtin-smart-blur-radius-label = 半径
