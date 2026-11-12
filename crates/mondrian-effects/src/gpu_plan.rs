@@ -1101,6 +1101,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",
         EffectRenderOp::Smear { .. } => "smear",
+        EffectRenderOp::Reshape { .. } => "reshape",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

@@ -8,7 +8,7 @@ use crate::mask::{MaskShape, MAX_MASK_PATH_POINTS};
 use crate::mask_raster::cubic_bezier;
 use crate::{EffectFrameExtent, EffectProcessorControl, EffectProcessorStopReason};
 use glam::{DMat2, DVec2};
-use mondrian_core::ImageSampling;
+use mondrian_core::{ImageSampling, MaskCorrespondenceInterpolation, MaskCorrespondencePoints};
 use std::sync::Arc;
 
 const PATH_STEPS: usize = 8;
@@ -51,17 +51,28 @@ impl From<EffectProcessorStopReason> for MaskDeformationError {
     }
 }
 
-/// Evaluated source transform and boundary for a Smear-style mask deformation.
+/// Evaluated source, target transform and boundary for a mask deformation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaskDeformation {
     source: Arc<Contour>,
     boundary: Arc<Contour>,
-    target: DVec2,
-    angle_radians: f64,
-    scale: f64,
+    target: DeformationTarget,
     strength: f64,
     elasticity: u32,
     density: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DeformationTarget {
+    Similarity {
+        center: DVec2,
+        angle_radians: f64,
+        scale: f64,
+    },
+    Contour {
+        destination: Arc<Contour>,
+        correspondence: ContourCorrespondence,
+    },
 }
 
 /// Author controls for the evaluated source transform.
@@ -91,9 +102,20 @@ impl MaskDeformation {
                 point.to_array().map(f64::to_bits).hash(state);
             }
         }
-        self.target.to_array().map(f64::to_bits).hash(state);
-        self.angle_radians.to_bits().hash(state);
-        self.scale.to_bits().hash(state);
+        match &self.target {
+            DeformationTarget::Similarity { center, angle_radians, scale } => {
+                center.to_array().map(f64::to_bits).hash(state);
+                angle_radians.to_bits().hash(state);
+                scale.to_bits().hash(state);
+            }
+            DeformationTarget::Contour { destination, correspondence } => {
+                destination.points.len().hash(state);
+                for point in &destination.points {
+                    point.to_array().map(f64::to_bits).hash(state);
+                }
+                correspondence.hash_state(state);
+            }
+        }
         self.strength.to_bits().hash(state);
         self.elasticity.hash(state);
         self.density.hash(state);
@@ -171,21 +193,82 @@ impl MaskDeformation {
         Ok(Self {
             source: Arc::new(Contour::from_shape(source)?),
             boundary: Arc::new(Contour::from_shape(boundary)?),
-            target,
-            angle_radians: controls.angle_degrees.to_radians(),
-            scale: controls.scale,
+            target: DeformationTarget::Similarity {
+                center: target,
+                angle_radians: controls.angle_degrees.to_radians(),
+                scale: controls.scale,
+            },
             strength: controls.strength,
             elasticity: controls.elasticity,
             density: controls.density,
         })
     }
 
+    /// Build a closed-contour deformation from explicitly authored pairings.
+    /// An omitted boundary uses the complete normalized picture rectangle.
+    pub fn reshape(
+        source: &MaskShape,
+        destination: &MaskShape,
+        boundary: Option<&MaskShape>,
+        points: &MaskCorrespondencePoints,
+        strength: f64,
+        elasticity: u32,
+        density: u32,
+    ) -> Result<Self, MaskDeformationError> {
+        if !(0.0..=1.0).contains(&strength)
+            || !(1..=9).contains(&elasticity)
+            || !(1..=3).contains(&density)
+        {
+            return Err(MaskDeformationError::InvalidControls(
+                "strength, elasticity or density",
+            ));
+        }
+        let full_picture = MaskShape::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            corner_radius: 0.0,
+        };
+        let [source, destination, boundary] =
+            [source, destination, boundary.unwrap_or(&full_picture)];
+        if [source, destination, boundary]
+            .iter()
+            .any(|shape| matches!(shape, MaskShape::Path { closed: false, .. }))
+        {
+            return Err(MaskDeformationError::InvalidContour(
+                "Reshape requires closed masks",
+            ));
+        }
+        let source = Arc::new(Contour::from_shape(source)?);
+        let destination = Arc::new(Contour::from_shape(destination)?);
+        let correspondence = ContourCorrespondence::new(
+            points,
+            source.positive_winding != destination.positive_winding,
+        )?;
+        Ok(Self {
+            source,
+            boundary: Arc::new(Contour::from_shape(boundary)?),
+            target: DeformationTarget::Contour { destination, correspondence },
+            strength,
+            elasticity,
+            density,
+        })
+    }
+
     /// Whether the authored transform can use the source directly.
     pub fn is_identity(&self) -> bool {
         self.strength == 0.0
-            || (self.source.center == self.target
-                && (self.angle_radians * self.strength).rem_euclid(std::f64::consts::TAU) == 0.0
-                && self.scale == 1.0)
+            || match &self.target {
+                DeformationTarget::Similarity { center, angle_radians, scale } => {
+                    self.source.center == *center
+                        && (angle_radians * self.strength).rem_euclid(std::f64::consts::TAU) == 0.0
+                        && *scale == 1.0
+                }
+                DeformationTarget::Contour { destination, correspondence } => {
+                    self.source.points == destination.points && correspondence.is_identity()
+                }
+            }
     }
 
     /// Build the fixed-point lattice and exact scanline windows for the current
@@ -211,28 +294,53 @@ impl MaskDeformation {
             return Ok(MaskDeformationRaster::identity(extent));
         }
         let metric = physical_extent(extent, sampling);
-        let source_center = self.source.center * metric;
-        let target_center = self.source.center.lerp(self.target, self.strength) * metric;
-        let rotation = DMat2::from_angle(self.angle_radians * self.strength);
-        let scale = 1.0 + (self.scale - 1.0) * self.strength;
-        let transform = Similarity { source_center, target_center, rotation, scale };
+        let transform = match self.target {
+            DeformationTarget::Similarity { center, angle_radians, scale } => Some(Similarity {
+                source_center: self.source.center * metric,
+                target_center: self.source.center.lerp(center, self.strength) * metric,
+                rotation: DMat2::from_angle(angle_radians * self.strength),
+                scale: 1.0 + (scale - 1.0) * self.strength,
+            }),
+            DeformationTarget::Contour { .. } => None,
+        };
 
         let landmark_scale = (self.boundary.max - self.boundary.min) * metric;
         let normalizer = landmark_scale.max_element();
         let base = self.boundary.min * metric;
         let boundary_landmarks =
             self.boundary.uniform_landmarks(24 + self.density as usize * 8, metric);
-        let source_landmarks =
-            self.source.uniform_landmarks(12 + self.density as usize * 4, metric);
-        let mut landmarks = Vec::with_capacity(boundary_landmarks.len() + source_landmarks.len());
+        let count = 12 + self.density as usize * 4;
+        let authored = match &self.target {
+            DeformationTarget::Contour { correspondence, .. } => {
+                correspondence.knots.len().saturating_sub(1)
+            }
+            DeformationTarget::Similarity { .. } => 0,
+        };
+        let mut landmarks = Vec::with_capacity(boundary_landmarks.len() + count + authored);
         for p in boundary_landmarks {
             let p = (p * metric - base) / normalizer;
             landmarks.push((p, p));
         }
-        for p in source_landmarks {
-            let from = p * metric;
-            let to = transform.forward(from);
-            landmarks.push(((from - base) / normalizer, (to - base) / normalizer));
+        if let Some(transform) = &transform {
+            for p in self.source.uniform_landmarks(count, metric) {
+                let from = p * metric;
+                let to = transform.forward(from);
+                landmarks.push(((from - base) / normalizer, (to - base) / normalizer));
+            }
+        } else if let DeformationTarget::Contour { destination, correspondence } = &self.target {
+            let from = ArcLengthContour::new(&self.source, metric);
+            let to = ArcLengthContour::new(destination, metric);
+            for position in correspondence.landmark_positions(count) {
+                let p = from.sample(position);
+                let q = p.lerp(
+                    to.sample(correspondence.destination(position)),
+                    self.strength,
+                );
+                landmarks.push((
+                    (p * metric - base) / normalizer,
+                    (q * metric - base) / normalizer,
+                ));
+            }
         }
         let regularization = 1e-6 * f64::from(10 - self.elasticity).powi(2);
         let forward = ThinPlate::fit(&landmarks, regularization, control)?;
@@ -261,8 +369,10 @@ impl MaskDeformation {
                 let mapped = if !self.boundary.contains(p) {
                     p
                 } else {
-                    let ideal = transform.inverse(p * metric) / metric;
-                    if self.source.contains(ideal) && self.boundary.contains(ideal) {
+                    let ideal = transform.as_ref().map(|value| value.inverse(p * metric) / metric);
+                    if let Some(ideal) =
+                        ideal.filter(|p| self.source.contains(*p) && self.boundary.contains(*p))
+                    {
                         ideal
                     } else {
                         let q = (p * metric - base) / normalizer;
@@ -541,6 +651,7 @@ struct Contour {
     min: DVec2,
     max: DVec2,
     center: DVec2,
+    positive_winding: bool,
 }
 
 impl Contour {
@@ -632,7 +743,14 @@ impl Contour {
         let center = min + weighted_center / (3.0 * area);
         let crossing_index =
             (points.len() > ELLIPSE_STEPS).then(|| ContourCrossingIndex::new(&points));
-        Ok(Self { points, crossing_index, min, max, center })
+        Ok(Self {
+            points,
+            crossing_index,
+            min,
+            max,
+            center,
+            positive_winding: area > 0.0,
+        })
     }
 
     fn contains(&self, p: DVec2) -> bool {
@@ -720,6 +838,166 @@ impl Contour {
         }
         offsets.push(spans.len() as u32);
         Ok((offsets, spans))
+    }
+}
+
+struct ArcLengthContour<'a> {
+    points: &'a [DVec2],
+    distances: Vec<f64>,
+}
+
+impl<'a> ArcLengthContour<'a> {
+    fn new(contour: &'a Contour, metric: DVec2) -> Self {
+        let points = &contour.points;
+        let mut distances = Vec::with_capacity(points.len() + 1);
+        distances.push(0.0);
+        let mut distance = 0.0;
+        for (a, b) in edges(points) {
+            distance += ((b - a) * metric).length();
+            distances.push(distance);
+        }
+        Self { points, distances }
+    }
+
+    fn sample(&self, arc: f64) -> DVec2 {
+        let distance = arc.rem_euclid(1.0) * self.distances[self.points.len()];
+        let i = self
+            .distances
+            .partition_point(|at| *at <= distance)
+            .saturating_sub(1)
+            .min(self.points.len() - 1);
+        let length = self.distances[i + 1] - self.distances[i];
+        let fraction = if length > 0.0 {
+            (distance - self.distances[i]) / length
+        } else {
+            0.0
+        };
+        self.points[i].lerp(
+            self.points[(i + 1) % self.points.len()],
+            fraction.clamp(0.0, 1.0),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ContourCorrespondence {
+    knots: Vec<CorrespondenceKnot>,
+    reversed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CorrespondenceKnot {
+    source: f64,
+    destination: f64,
+    smooth: bool,
+}
+
+impl ContourCorrespondence {
+    fn new(
+        points: &MaskCorrespondencePoints,
+        reversed: bool,
+    ) -> Result<Self, MaskDeformationError> {
+        let mut knots = points
+            .points()
+            .iter()
+            .map(|point| CorrespondenceKnot {
+                source: f64::from(point.source),
+                destination: f64::from(point.destination),
+                smooth: point.interpolation == MaskCorrespondenceInterpolation::Smooth,
+            })
+            .collect::<Vec<_>>();
+        knots.sort_unstable_by(|left, right| left.source.total_cmp(&right.source));
+        if let Some(first) = knots.first().copied() {
+            for knot in &mut knots[1..] {
+                if knot.destination < first.destination {
+                    knot.destination += 1.0;
+                }
+            }
+            knots.push(CorrespondenceKnot {
+                source: first.source + 1.0,
+                destination: first.destination + 1.0,
+                smooth: first.smooth,
+            });
+            if knots.windows(2).any(|pair| pair[0].destination >= pair[1].destination) {
+                return Err(MaskDeformationError::InvalidControls(
+                    "correspondences cross in the masks' shared winding",
+                ));
+            }
+        }
+        Ok(Self { knots, reversed })
+    }
+
+    fn orient(arc: f64, reversed: bool) -> f64 {
+        if reversed {
+            (-arc).rem_euclid(1.0)
+        } else {
+            arc.rem_euclid(1.0)
+        }
+    }
+
+    fn hash_state(&self, state: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.reversed.hash(state);
+        self.knots.len().hash(state);
+        for knot in &self.knots {
+            knot.source.to_bits().hash(state);
+            knot.destination.to_bits().hash(state);
+            knot.smooth.hash(state);
+        }
+    }
+
+    fn is_identity(&self) -> bool {
+        !self.reversed && self.knots.iter().all(|knot| knot.source == knot.destination)
+    }
+
+    fn landmark_positions(&self, count: usize) -> impl Iterator<Item = f64> + '_ {
+        let authored = &self.knots[..self.knots.len().saturating_sub(1)];
+        (0..count)
+            .map(move |i| i as f64 / count as f64)
+            .filter(|arc| {
+                authored.iter().all(|knot| {
+                    let distance = (knot.source - arc).abs();
+                    distance.min(1.0 - distance) > 1e-7
+                })
+            })
+            .chain(authored.iter().map(|knot| knot.source))
+    }
+
+    fn destination(&self, source: f64) -> f64 {
+        let Some(first) = self.knots.first() else {
+            return Self::orient(source, self.reversed);
+        };
+        let source = if source < first.source {
+            source + 1.0
+        } else {
+            source
+        };
+        let intervals = self.knots.len() - 1;
+        let i = self
+            .knots
+            .partition_point(|knot| knot.source <= source)
+            .saturating_sub(1)
+            .min(intervals - 1);
+        let [left, right] = [self.knots[i], self.knots[i + 1]];
+        let width = right.source - left.source;
+        let t = (source - left.source) / width;
+        let rise = right.destination - left.destination;
+        let destination = if left.smooth {
+            let secant = |i: usize| {
+                let [a, b] = [self.knots[i], self.knots[i + 1]];
+                (b.destination - a.destination) / (b.source - a.source)
+            };
+            let slope = rise / width;
+            let harmonic = |a: f64, b: f64| 2.0 * a * b / (a + b);
+            let start = width * harmonic(secant((i + intervals - 1) % intervals), slope);
+            let end = width * harmonic(slope, secant((i + 1) % intervals));
+            left.destination
+                + t * (start
+                    + t * (3.0 * rise - 2.0 * start - end + t * (start + end - 2.0 * rise)))
+        } else {
+            left.destination + t * rise
+        };
+        Self::orient(destination, self.reversed)
     }
 }
 
@@ -950,6 +1228,119 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reshape_smooth_correspondence_keeps_authored_pairs_and_cyclic_order() {
+        use mondrian_core::MaskCorrespondencePoint;
+        let points = MaskCorrespondencePoints::new(vec![
+            MaskCorrespondencePoint {
+                id: 7,
+                source: 0.5,
+                destination: 0.125,
+                interpolation: MaskCorrespondenceInterpolation::Smooth,
+            },
+            MaskCorrespondencePoint {
+                id: 9,
+                source: 0.125,
+                destination: 0.875,
+                interpolation: MaskCorrespondenceInterpolation::Smooth,
+            },
+            MaskCorrespondencePoint {
+                id: 2,
+                source: 0.875,
+                destination: 0.625,
+                interpolation: MaskCorrespondenceInterpolation::Linear,
+            },
+        ])
+        .unwrap();
+        let mapping = ContourCorrespondence::new(&points, false).unwrap();
+        let reversed = ContourCorrespondence::new(&points, true).unwrap();
+        for point in points.points() {
+            assert_eq!(
+                mapping.destination(f64::from(point.source)),
+                f64::from(point.destination)
+            );
+            assert_eq!(
+                reversed.destination(f64::from(point.source)),
+                (1.0 - f64::from(point.destination)).rem_euclid(1.0)
+            );
+        }
+        let mut previous = 0.875;
+        for i in 1..=1024 {
+            let source = (0.125 + f64::from(i) / 1024.0).rem_euclid(1.0);
+            let mapped = mapping.destination(source);
+            let unwrapped = 0.875 + (mapped - 0.875).rem_euclid(1.0);
+            if i < 1024 {
+                assert!(unwrapped > previous);
+                previous = unwrapped;
+            } else {
+                assert_eq!(mapped, 0.875);
+            }
+        }
+    }
+
+    #[test]
+    fn reshape_author_pairs_change_the_field_and_preserve_outside_coverage() {
+        use mondrian_core::MaskCorrespondencePoint;
+        let source = rect(0.23, 0.29, 0.36, 0.40);
+        let destination = MaskShape::Path {
+            points: [[0.38, 0.21], [0.69, 0.31], [0.79, 0.59], [0.41, 0.69]]
+                .into_iter()
+                .map(|point| BezierPoint::new(Vec2::from_array(point)))
+                .collect(),
+            closed: true,
+        };
+        let boundary = rect(0.06, 0.08, 0.89, 0.82);
+        let authored = MaskCorrespondencePoints::new(vec![MaskCorrespondencePoint {
+            id: 14,
+            source: 0.125,
+            destination: 0.375,
+            interpolation: MaskCorrespondenceInterpolation::Linear,
+        }])
+        .unwrap();
+        let extent = EffectFrameExtent::new(103, 77);
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let input = (0..extent.width() * extent.height())
+            .map(|i| {
+                [
+                    (i % 27) as f32 / 7.0,
+                    (i % 13) as f32 / -4.0,
+                    0.75,
+                    (i % 7) as f32 / 6.0,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let render = |pairs: &MaskCorrespondencePoints, strength| {
+            let grade = MaskDeformation::reshape(
+                &source,
+                &destination,
+                Some(&boundary),
+                pairs,
+                strength,
+                5,
+                2,
+            )
+            .unwrap();
+            let control = &mut EffectProcessorControl::uncancelled();
+            let field = grade.prepare(extent, sampling, control).unwrap();
+            let mut pixels = vec![[0.0; 4]; input.len()];
+            field.apply_f32(&input, &mut pixels, control).unwrap();
+            pixels
+        };
+        assert_eq!(render(&authored, 0.0), input);
+        let explicit = render(&authored, 1.0);
+        assert_ne!(explicit, render(&MaskCorrespondencePoints::default(), 1.0));
+        assert_ne!(explicit, input);
+        assert_eq!(
+            explicit[..extent.width() as usize],
+            input[..extent.width() as usize]
+        );
+        assert!(explicit.iter().flatten().all(|value| value.is_finite()));
+    }
+
     fn effect_mask(shape: MaskShape) -> crate::MaskComponent {
         let mut mask = crate::MaskComponent::new(
             "Smear fixture".into(),
@@ -957,6 +1348,80 @@ mod tests {
         );
         mask.participation = mondrian_core::mask_data::MaskParticipation::EffectOnly;
         mask
+    }
+
+    #[test]
+    fn reshape_author_graph_resolves_destination_and_hashes_correspondence() {
+        use crate::{EffectGpuSpatialPass, EffectGpuStage, EffectType, PreparedEffectStack};
+        use mondrian_core::{
+            MaskCorrespondencePoint, PropertyValue, TimelineTime, WorkingColorSpace,
+        };
+
+        let kind = EffectType::Reshape;
+        let mut effect = crate::instantiate_effect_node(kind.clone()).unwrap();
+        let source = effect_mask(rect(0.25, 0.29, 0.32, 0.39));
+        let destination = effect_mask(rect(0.39, 0.31, 0.44, 0.43));
+        let compile = |effect: &crate::EffectNode, masks: &[crate::MaskComponent]| {
+            let graph = PreparedEffectStack::prepare_with_masks(
+                std::slice::from_ref(effect),
+                masks,
+                WorkingColorSpace::LinearRec709,
+            )?
+            .evaluate_graph(TimelineTime::ZERO)?;
+            Ok::<_, crate::EffectGraphBuildError>(
+                crate::compile_reference_render_graph(graph).unwrap(),
+            )
+        };
+        assert!(compile(&effect, &[]).unwrap().graph().is_identity());
+        for (key, value) in [
+            ("source_mask", PropertyValue::MaskReference(Some(source.id))),
+            (
+                "destination_mask",
+                PropertyValue::MaskReference(Some(destination.id)),
+            ),
+            ("percent", PropertyValue::Float(80.0)),
+        ] {
+            effect
+                .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+                .unwrap();
+        }
+        let missing = compile(&effect, std::slice::from_ref(&source)).unwrap_err();
+        assert!(
+            missing.to_string().contains(&destination.id.to_string()),
+            "{missing}"
+        );
+        let masks = [source, destination];
+        let automatic = compile(&effect, &masks).unwrap();
+        let pair_parameter = kind.parameter_id("correspondence_points").unwrap();
+        let mut pair = MaskCorrespondencePoint {
+            id: 8,
+            source: 0.125,
+            destination: 0.25,
+            interpolation: MaskCorrespondenceInterpolation::Smooth,
+        };
+        let value = |pair| {
+            PropertyValue::MaskCorrespondencePoints(
+                MaskCorrespondencePoints::new(vec![pair]).unwrap(),
+            )
+        };
+        effect.set_static_value_by_parameter(&pair_parameter, value(pair)).unwrap();
+        let authored = compile(&effect, &masks).unwrap();
+        assert_ne!(automatic.identity(), authored.identity());
+        pair.id = 21;
+        effect.set_static_value_by_parameter(&pair_parameter, value(pair)).unwrap();
+        assert_eq!(
+            authored.identity(),
+            compile(&effect, &masks).unwrap().identity()
+        );
+        let pipeline = crate::lower_effect_graph_to_gpu_pipeline(&authored).unwrap();
+        assert!(pipeline.requires_image_sampling());
+        assert!(matches!(
+            pipeline.with_image_sampling(ImageSampling::UNIT_SQUARE).stages(),
+            [EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::Reshape { sampling: Some(value), .. },
+                ..
+            }] if *value == ImageSampling::UNIT_SQUARE
+        ));
     }
 
     #[test]

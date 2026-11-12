@@ -3988,6 +3988,9 @@ pub(super) fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
         PropertyValue::QualifierSamples(samples) => {
             return Some((samples.samples().len() as f32 + 1.0) * 34.0);
         }
+        PropertyValue::MaskCorrespondencePoints(points) => {
+            return Some((3.0 * points.points().len() as f32 + 1.0) * 34.0);
+        }
         PropertyValue::Vec2(_) | PropertyValue::DoubleVec2(_) | PropertyValue::IntVec2(_) => 2,
         PropertyValue::Vec3(_)
         | PropertyValue::DoubleVec3(_)
@@ -4345,6 +4348,9 @@ pub(super) fn inspector_property_value_widget(
         PropertyValue::QualifierSamples(samples) => {
             qualifier_sample_editor(localizer, samples, can_edit, selection, target)
         }
+        PropertyValue::MaskCorrespondencePoints(points) => {
+            mask_correspondence_editor(localizer, points, can_edit, selection, target)
+        }
         PropertyValue::DoubleVec2(value) => {
             vector_property_widget(&["X", "Y"], value, property, can_edit, selection, target)
         }
@@ -4413,6 +4419,169 @@ pub(super) fn inspector_property_value_widget(
             target,
         ),
     }
+}
+
+fn mask_correspondence_editor(
+    localizer: &Localizer,
+    points: &mondrian_core::MaskCorrespondencePoints,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+) -> Box<dyn Widget> {
+    use mondrian_core::{MaskCorrespondenceInterpolation, MaskCorrespondencePoint};
+
+    let action = |points| mask_correspondence_action(selection, target.clone(), points);
+    let points = points.points();
+    let mut rows = Vec::with_capacity(3 * points.len() + 1);
+    let mut order = (0..points.len()).collect::<Vec<_>>();
+    order.sort_unstable_by(|&a, &b| points[a].source.total_cmp(&points[b].source));
+    for &index in &order {
+        let pair = points[index];
+        for (label, source) in [
+            ("inspector-reshape-source-position", true),
+            ("inspector-reshape-destination-position", false),
+        ] {
+            let coordinate = |pair: &MaskCorrespondencePoint| {
+                if source {
+                    pair.source
+                } else {
+                    pair.destination
+                }
+            };
+            let current = coordinate(&pair);
+            let (min, max) = points.iter().filter(|other| other.id != pair.id).fold(
+                (0.0_f32, 1.0_f32.next_down()),
+                |(min, max), other| {
+                    let neighbor = coordinate(other);
+                    if neighbor < current {
+                        (min.max(neighbor.next_up()), max)
+                    } else {
+                        (min, max.min(neighbor.next_down()))
+                    }
+                },
+            );
+            let base = points.to_vec();
+            let target = target.clone();
+            let label = localizer.text(label);
+            let mut input = NumberInput::new(current, min, max)
+                .with_width(54.0)
+                .with_decimals(3)
+                .with_step(0.01)
+                .enabled(can_edit)
+                .on_change(move |value| {
+                    let mut changed = base.clone();
+                    if source {
+                        changed[index].source = value;
+                    } else {
+                        changed[index].destination = value;
+                    }
+                    mask_correspondence_action(selection, target.clone(), changed)
+                });
+            input.set_accessible_name(Some(label.clone()));
+            rows.push(FlexChild::fixed(Box::new(
+                FlexContainer::row(vec![
+                    FlexChild::flex(Box::new(Label::new(label).muted()), 1.0),
+                    FlexChild::flex(Box::new(input), 1.0),
+                ])
+                .with_gap(4.0),
+            )));
+        }
+
+        let modes = [
+            (
+                MaskCorrespondenceInterpolation::Linear,
+                "inspector-reshape-linear",
+            ),
+            (
+                MaskCorrespondenceInterpolation::Smooth,
+                "inspector-reshape-smooth",
+            ),
+        ];
+        let selected = localizer.text(
+            if pair.interpolation == MaskCorrespondenceInterpolation::Linear {
+                modes[0].1
+            } else {
+                modes[1].1
+            },
+        );
+        let items = modes
+            .into_iter()
+            .map(|(mode, label)| {
+                let mut changed = points.to_vec();
+                changed[index].interpolation = mode;
+                MenuItem::new(localizer.text(label), action(changed))
+                    .checked(mode == pair.interpolation)
+            })
+            .collect();
+        let mut changed = points.to_vec();
+        changed.remove(index);
+        rows.push(FlexChild::fixed(Box::new(
+            FlexContainer::row(vec![
+                FlexChild::flex(
+                    Box::new(Dropdown::new(selected, items).enabled(can_edit)),
+                    1.0,
+                ),
+                FlexChild::fixed(Box::new(
+                    Button::new(localizer.text("inspector-reshape-remove-pair"))
+                        .enabled(can_edit)
+                        .on_click(action(changed)),
+                )),
+            ])
+            .with_gap(4.0),
+        )));
+    }
+
+    let add = (points.len() < mondrian_core::MAX_MASK_CORRESPONDENCE_POINTS)
+        .then(|| {
+            let mut changed = points.to_vec();
+            let id = (1..).find(|id| points.iter().all(|point| point.id != *id)).unwrap();
+            let gap = order
+                .iter()
+                .zip(order.iter().cycle().skip(1))
+                .map(|(&left, &right)| {
+                    let left = points[left];
+                    let right = points[right];
+                    let arc = |a: f32, b: f32| if b > a { b - a } else { 1.0 - a + b };
+                    (
+                        arc(left.source, right.source),
+                        left,
+                        arc(left.destination, right.destination),
+                    )
+                })
+                .max_by(|a, b| a.0.total_cmp(&b.0));
+            let (source, destination, interpolation) = gap.map_or(
+                (0.0, 0.0, MaskCorrespondenceInterpolation::Linear),
+                |(source_gap, left, destination_gap)| {
+                    (
+                        (left.source + source_gap * 0.5).rem_euclid(1.0),
+                        (left.destination + destination_gap * 0.5).rem_euclid(1.0),
+                        left.interpolation,
+                    )
+                },
+            );
+            changed.push(MaskCorrespondencePoint { id, source, destination, interpolation });
+            action(changed)
+        })
+        .flatten();
+    rows.push(FlexChild::fixed(Box::new(
+        Button::new(localizer.text("inspector-reshape-add-pair"))
+            .enabled(can_edit && add.is_some())
+            .on_click(add),
+    )));
+    Box::new(FlexContainer::column(rows).with_gap(4.0))
+}
+
+fn mask_correspondence_action(
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    points: Vec<mondrian_core::MaskCorrespondencePoint>,
+) -> Option<Action> {
+    let points = mondrian_core::MaskCorrespondencePoints::new(points).ok()?;
+    inspector_property_action(
+        selection,
+        target,
+        PropertyValue::MaskCorrespondencePoints(points),
+    )
 }
 
 fn qualifier_sample_editor(

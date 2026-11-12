@@ -3452,6 +3452,22 @@ parameter-mondrian-effect-builtin-smear-percent-label = 百分比
 parameter-mondrian-effect-builtin-smear-elasticity-label = 弹性
 parameter-mondrian-effect-builtin-smear-calculation-density-label = 计算密度
 
+effect-reshape = 改变形状
+parameter-group-reshape = 改变形状
+parameter-mondrian-effect-builtin-reshape-source-mask-label = 源蒙版
+parameter-mondrian-effect-builtin-reshape-destination-mask-label = 目标蒙版
+parameter-mondrian-effect-builtin-reshape-boundary-mask-label = 边界蒙版
+parameter-mondrian-effect-builtin-reshape-percent-label = 百分比
+parameter-mondrian-effect-builtin-reshape-elasticity-label = 弹性
+parameter-mondrian-effect-builtin-reshape-calculation-density-label = 计算密度
+parameter-mondrian-effect-builtin-reshape-correspondence-points-label = 对应点
+inspector-reshape-source-position = 源位置
+inspector-reshape-destination-position = 目标位置
+inspector-reshape-linear = 线性
+inspector-reshape-smooth = 平滑
+inspector-reshape-add-pair = 添加点对
+inspector-reshape-remove-pair = 删除
+
 ## Displacement Map 置换图
 effect-set-matte = 设置遮罩
 parameter-mondrian-effect-builtin-set-matte-matte-source-label = 从图层获取遮罩

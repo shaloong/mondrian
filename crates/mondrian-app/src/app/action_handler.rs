@@ -2621,6 +2621,21 @@ mod tests {
             PropertyValue::MaskReference(reference) => {
                 PropertyValue::MaskReference(reference.is_none().then(mondrian_core::MaskId::new))
             }
+            PropertyValue::MaskCorrespondencePoints(value) => {
+                let points = if value.points().is_empty() {
+                    vec![mondrian_core::MaskCorrespondencePoint {
+                        id: 1,
+                        source: 0.25,
+                        destination: 0.5,
+                        interpolation: mondrian_core::MaskCorrespondenceInterpolation::Smooth,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                PropertyValue::MaskCorrespondencePoints(
+                    mondrian_core::MaskCorrespondencePoints::new(points).unwrap(),
+                )
+            }
             PropertyValue::Text(value) => PropertyValue::Text(format!("{value} edited")),
         }
     }
@@ -8135,6 +8150,75 @@ mod tests {
             .and_then(|effect| effect.properties.property(&path))
             .expect("reapplied Qualifier samples");
         assert_eq!(property.static_value(), &next_value);
+    }
+
+    #[test]
+    fn reshape_correspondence_edits_survive_undo_redo_and_project_reopen() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("Reshape point pairs");
+        let mut clip = Clip::new_solid_color(
+            AssetId::new(),
+            mondrian_core::Color::BLACK,
+            TimelineTime::ZERO,
+            TimelineTime::new(2, 1).unwrap(),
+        )
+        .unwrap();
+        let clip_id = clip.id;
+        let effect = mondrian_effects::instantiate_effect_node(EffectType::Reshape).unwrap();
+        let effect_id = effect.id;
+        let parameter_id = EffectType::Reshape.parameter_id("correspondence_points").unwrap();
+        let (_, property) = effect
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == &parameter_id)
+            .unwrap();
+        let parameter = property.address();
+        let initial = property.static_value().clone();
+        let authored = different_property_value(&initial);
+        clip.add_effect_node(effect);
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        state.test_set_sequence(Some(sequence));
+        state
+            .dispatch_action(visual_effect_set_parameter_value_action(
+                VisualEffectSetParameterValuePayload {
+                    clip_id,
+                    effect_id,
+                    write: ParameterValueWrite::Value {
+                        parameter: parameter.clone(),
+                        value: authored.clone(),
+                    },
+                },
+            ))
+            .unwrap();
+        let current = |state: &AppState| {
+            state
+                .active_sequence()
+                .unwrap()
+                .find_clip(clip_id)
+                .unwrap()
+                .effects
+                .iter()
+                .find(|effect| effect.id == effect_id)
+                .unwrap()
+                .properties
+                .property_by_address(&parameter)
+                .expect("stable correspondence address")
+                .1
+                .static_value()
+                .clone()
+        };
+        assert_eq!(current(&state), authored);
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(current(&state), initial);
+        assert!(state.redo_timeline().unwrap());
+        assert_eq!(current(&state), authored);
+
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("改变形状.mdp");
+        state.save_project_file_as(project.clone()).unwrap();
+        let mut reopened = AppState::new();
+        reopened.open_project_file(project).unwrap();
+        assert_eq!(current(&reopened), authored);
     }
 
     #[test]

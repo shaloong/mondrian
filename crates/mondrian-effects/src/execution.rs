@@ -2972,7 +2972,7 @@ fn unsupported_float_graph_node(
     }
 }
 
-fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
+pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
     match op {
         EffectRenderOp::ColorAdjust { .. } => "color_adjust",
         EffectRenderOp::WhiteBalance { .. } => "white_balance",
@@ -3056,6 +3056,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",
         EffectRenderOp::Smear { .. } => "smear",
+        EffectRenderOp::Reshape { .. } => "reshape",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

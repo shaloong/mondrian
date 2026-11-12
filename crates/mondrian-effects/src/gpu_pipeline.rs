@@ -330,6 +330,13 @@ pub enum EffectGpuSpatialPass {
         /// Proven sampling of the source grid selected by the host.
         sampling: Option<mondrian_core::ImageSampling>,
     },
+    /// Reshape the evaluated source contour toward the destination contour.
+    Reshape {
+        /// Geometry and correspondence resolved for this graph evaluation.
+        grade: Arc<crate::mask_deformation::MaskDeformation>,
+        /// Proven sampling of the source grid selected by the host.
+        sampling: Option<mondrian_core::ImageSampling>,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -415,6 +422,7 @@ impl EffectGpuSpatialPass {
             Self::DisplacementMap { .. } => "displacement_map",
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
+            Self::Reshape { .. } => "reshape",
         }
     }
 
@@ -507,7 +515,7 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[0],
-            Self::Smear { .. } => u32::MAX,
+            Self::Smear { .. } | Self::Reshape { .. } => u32::MAX,
         }
     }
 
@@ -586,7 +594,7 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
             Self::DisplacementMap { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[1],
-            Self::Smear { .. } => u32::MAX,
+            Self::Smear { .. } | Self::Reshape { .. } => u32::MAX,
         }
     }
 }
@@ -707,7 +715,10 @@ impl CompiledEffectGpuPipeline {
         self.stages.iter().any(|stage| {
             matches!(
                 stage,
-                EffectGpuStage::Spatial { pass: EffectGpuSpatialPass::Smear { .. }, .. }
+                EffectGpuStage::Spatial {
+                    pass: EffectGpuSpatialPass::Smear { .. } | EffectGpuSpatialPass::Reshape { .. },
+                    ..
+                }
             )
         })
     }
@@ -718,7 +729,9 @@ impl CompiledEffectGpuPipeline {
         let mut pipeline = self.clone();
         for stage in &mut pipeline.stages {
             if let EffectGpuStage::Spatial {
-                pass: EffectGpuSpatialPass::Smear { sampling: value, .. },
+                pass:
+                    EffectGpuSpatialPass::Smear { sampling: value, .. }
+                    | EffectGpuSpatialPass::Reshape { sampling: value, .. },
                 ..
             } = stage
             {
@@ -1072,6 +1085,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::Smear { grade } => {
             Some(EffectGpuSpatialPass::Smear { grade: Arc::clone(grade), sampling: None })
+        }
+        EffectRenderOp::Reshape { grade } => {
+            Some(EffectGpuSpatialPass::Reshape { grade: Arc::clone(grade), sampling: None })
         }
         EffectRenderOp::SetMatte { grade } => Some(EffectGpuSpatialPass::SetMatte {
             grade: *grade,

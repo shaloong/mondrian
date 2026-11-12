@@ -1159,6 +1159,127 @@ fn inspector_mask_reference_lists_available_masks_and_writes_stable_identity() {
 }
 
 #[test]
+fn reshape_inspector_adds_a_localized_pair_through_the_typed_property_action() {
+    use crate::app::product_action::VisualEffectSetParameterValuePayload;
+    use mondrian_core::{
+        MaskCorrespondenceInterpolation, MaskCorrespondencePoint, MaskCorrespondencePoints,
+    };
+
+    let kind = EffectType::Reshape;
+    let mut effect = mondrian_effects::instantiate_effect_node(kind.clone()).unwrap();
+    let parameter = kind.parameter_id("correspondence_points").unwrap();
+    let pair = MaskCorrespondencePoint {
+        id: 4,
+        source: 0.125,
+        destination: 0.375,
+        interpolation: MaskCorrespondenceInterpolation::Smooth,
+    };
+    effect
+        .set_static_value_by_parameter(
+            &parameter,
+            PropertyValue::MaskCorrespondencePoints(
+                MaskCorrespondencePoints::new(vec![pair]).unwrap(),
+            ),
+        )
+        .unwrap();
+    let (path, property) = effect
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.parameter_id() == &parameter)
+        .unwrap();
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn] {
+        let localizer = Localizer::new(locale).unwrap();
+        let model = inspector_property_model(path, property, TimelineTime::ZERO, &localizer);
+        let height = effect_property_row_height(&model.value).unwrap();
+        let mut widget =
+            effect_property_value_widget(&localizer, &model, true, Some(selection), effect.id);
+        widget.layout(Rect::new(0.0, 0.0, 170.0, height));
+        assert_eq!(widget.child_count(), 4);
+        for (index, id) in [
+            "inspector-reshape-source-position",
+            "inspector-reshape-destination-position",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let coordinate = widget.child(index).unwrap().child(1).unwrap();
+            assert_eq!(
+                coordinate.accessibility().unwrap().name,
+                Some(localizer.text(id))
+            );
+        }
+
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let add = widget.child_mut(3).unwrap();
+        assert_eq!(
+            add.accessibility().unwrap().name,
+            Some(localizer.text("inspector-reshape-add-pair"))
+        );
+        let point = Point::new(20.0, height - 17.0);
+        assert!(add.hit_test(point));
+        for event in [
+            UiEvent::MouseDown {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseUp {
+                position: point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            add.event(&event, &mut ctx);
+        }
+        let recorded = actions.borrow();
+        let [Action::Custom { payload, .. }] = recorded.as_slice() else {
+            panic!("expected one point pair write");
+        };
+        let payload: VisualEffectSetParameterValuePayload =
+            serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(payload.clip_id, selection.clip_id);
+        assert_eq!(payload.effect_id, effect.id);
+        let ParameterValueWrite::Value {
+            parameter,
+            value: PropertyValue::MaskCorrespondencePoints(points),
+        } = payload.write
+        else {
+            panic!("expected typed correspondence points");
+        };
+        assert_eq!(parameter, model.address);
+        assert_eq!(
+            points.points(),
+            &[
+                pair,
+                MaskCorrespondencePoint {
+                    id: 1,
+                    source: 0.625,
+                    destination: 0.875,
+                    interpolation: MaskCorrespondenceInterpolation::Smooth,
+                },
+            ]
+        );
+    }
+}
+
+#[test]
 fn inspector_parameter_locale_preserves_title_author_keys_and_history() {
     let mut sequence = Sequence::new("Localized Title");
     let track_id = sequence.video_tracks[0].id;

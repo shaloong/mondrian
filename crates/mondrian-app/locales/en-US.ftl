@@ -3524,6 +3524,22 @@ parameter-mondrian-effect-builtin-smear-percent-label = Percent
 parameter-mondrian-effect-builtin-smear-elasticity-label = Elasticity
 parameter-mondrian-effect-builtin-smear-calculation-density-label = Calculation Density
 
+effect-reshape = Reshape
+parameter-group-reshape = Reshape
+parameter-mondrian-effect-builtin-reshape-source-mask-label = Source Mask
+parameter-mondrian-effect-builtin-reshape-destination-mask-label = Destination Mask
+parameter-mondrian-effect-builtin-reshape-boundary-mask-label = Boundary Mask
+parameter-mondrian-effect-builtin-reshape-percent-label = Percent
+parameter-mondrian-effect-builtin-reshape-elasticity-label = Elasticity
+parameter-mondrian-effect-builtin-reshape-calculation-density-label = Calculation Density
+parameter-mondrian-effect-builtin-reshape-correspondence-points-label = Correspondence Points
+inspector-reshape-source-position = Source
+inspector-reshape-destination-position = Destination
+inspector-reshape-linear = Linear
+inspector-reshape-smooth = Smooth
+inspector-reshape-add-pair = Add pair
+inspector-reshape-remove-pair = Remove
+
 ## Displacement Map 置换图
 effect-set-matte = Set Matte
 parameter-mondrian-effect-builtin-set-matte-matte-source-label = Take Matte From Layer

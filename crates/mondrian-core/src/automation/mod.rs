@@ -3,7 +3,12 @@
 //! 提供共享的关键帧轨道、动态属性值、属性包和 mutation API，
 //! 让内建属性、效果参数和未来 Extension 属性走同一条链路。
 
+mod mask_correspondence;
 mod query;
+pub use mask_correspondence::{
+    MaskCorrespondenceError, MaskCorrespondenceInterpolation, MaskCorrespondencePoint,
+    MaskCorrespondencePoints, MAX_MASK_CORRESPONDENCE_POINTS,
+};
 pub use query::{AutomationQueryError, AutomationQueryTime, PreparedPropertyQuery};
 
 use crate::{
@@ -123,6 +128,8 @@ pub enum PropertyValue {
     Text(String),
     /// A stable reference to a mask owned by the same clip, or an unbound field.
     MaskReference(Option<crate::MaskId>),
+    /// Stable editable pairs on two mask contours.
+    MaskCorrespondencePoints(MaskCorrespondencePoints),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +161,7 @@ pub enum PropertyValueType {
     VisualSource,
     Text,
     MaskReference,
+    MaskCorrespondencePoints,
 }
 
 /// Maximum authored control points in one normalized transfer curve.
@@ -708,6 +716,7 @@ impl ParameterSchema {
                 | PropertyValueType::Resource
                 | PropertyValueType::VisualSource
                 | PropertyValueType::MaskReference
+                | PropertyValueType::MaskCorrespondencePoints
                 | PropertyValueType::Text
         ) {
             vec![ParameterInterpolation::Hold]
@@ -848,6 +857,7 @@ impl ParameterSchema {
                 | PropertyValueType::Resource
                 | PropertyValueType::VisualSource
                 | PropertyValueType::MaskReference
+                | PropertyValueType::MaskCorrespondencePoints
                 | PropertyValueType::Text
         ) && self.allowed_interpolations != [ParameterInterpolation::Hold]
         {
@@ -863,6 +873,7 @@ impl ParameterSchema {
                     | PropertyValueType::Resource
                     | PropertyValueType::VisualSource
                     | PropertyValueType::MaskReference
+                    | PropertyValueType::MaskCorrespondencePoints
                     | PropertyValueType::Text
             ) {
                 return Err(ParameterSchemaError::NumericContractTypeMismatch);
@@ -1495,6 +1506,7 @@ impl PropertyValue {
             Self::Resource(_) => "resource",
             Self::VisualSource(_) => "visual_source",
             Self::MaskReference(_) => "mask_reference",
+            Self::MaskCorrespondencePoints(_) => "mask_correspondence_points",
             Self::Text(_) => "text",
         }
     }
@@ -1521,6 +1533,7 @@ impl PropertyValue {
             Self::Resource(_) => PropertyValueType::Resource,
             Self::VisualSource(_) => PropertyValueType::VisualSource,
             Self::MaskReference(_) => PropertyValueType::MaskReference,
+            Self::MaskCorrespondencePoints(_) => PropertyValueType::MaskCorrespondencePoints,
             Self::Text(_) => PropertyValueType::Text,
         }
     }
@@ -1605,6 +1618,7 @@ impl PropertyValue {
             | Self::Resource(_)
             | Self::VisualSource(_)
             | Self::MaskReference(_)
+            | Self::MaskCorrespondencePoints(_)
             | Self::Text(_) => vec![],
         }
     }
@@ -1672,6 +1686,7 @@ impl PropertyValue {
             | PropertyValueType::Resource
             | PropertyValueType::VisualSource
             | PropertyValueType::MaskReference
+            | PropertyValueType::MaskCorrespondencePoints
             | PropertyValueType::Text => fallback.clone(),
         }
     }
@@ -1697,6 +1712,7 @@ impl PropertyValueType {
             | Self::Resource
             | Self::VisualSource
             | Self::MaskReference
+            | Self::MaskCorrespondencePoints
             | Self::Text => 0,
         }
     }
@@ -1709,6 +1725,7 @@ impl PropertyValueType {
                 | Self::Resource
                 | Self::VisualSource
                 | Self::MaskReference
+                | Self::MaskCorrespondencePoints
                 | Self::Text
         )
     }
@@ -1723,6 +1740,7 @@ impl PropertyValueType {
             | Self::Resource
             | Self::VisualSource
             | Self::MaskReference
+            | Self::MaskCorrespondencePoints
             | Self::Text => InterpolationType::Hold,
             _ => interpolation,
         }
@@ -5218,6 +5236,7 @@ impl crate::AuthoringFootprint for PropertyValueType {
             | Self::Resource
             | Self::VisualSource
             | Self::MaskReference
+            | Self::MaskCorrespondencePoints
             | Self::Text => Ok(()),
         }
     }
@@ -5302,6 +5321,7 @@ impl crate::AuthoringFootprint for PropertyValue {
             Self::VisualSource(reference) => collector.collect(reference),
             Self::Curve(curve) => collector.collect(&curve.points),
             Self::QualifierSamples(samples) => collector.collect(&samples.0),
+            Self::MaskCorrespondencePoints(points) => collector.collect(points),
             Self::Bool(_)
             | Self::Int(_)
             | Self::Float(_)
