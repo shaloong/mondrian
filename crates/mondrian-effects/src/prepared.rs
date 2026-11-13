@@ -589,6 +589,24 @@ fn specialize_builtin_definition(
                 ..contract
             }
         }
+        crate::EffectType::VideoCollage => {
+            let Ok(sources) = crate::video_collage::video_collage_sources(effect) else {
+                return definition;
+            };
+            let temporal_input = sources
+                .tiles
+                .iter()
+                .filter_map(|tile| tile.effective_reference().ok()?.retime())
+                .fold(
+                    EffectTemporalInputExtent::CURRENT_FRAME,
+                    |extent, retime| {
+                        extent.merge(crate::graph::temporal_input_extent_for_sample_offset(
+                            retime.time_offset,
+                        ))
+                    },
+                );
+            EffectExecutionContract { temporal_input, ..contract }
+        }
         _ => return definition,
     };
     if specialized == contract {
@@ -651,7 +669,7 @@ fn evaluate_instance_into_builder(
             if auxiliary_sources.iter().any(|source| {
                 source.effect_id() != instance.effect.id
                     || instance.effect.evaluate_visual_source_parameter(source.parameter_id())
-                        != Some(source.reference())
+                        != Some(source.authored_reference())
             }) {
                 return Err(EffectGraphBuildError::InvalidAuthorState {
                     effect_key,
@@ -718,7 +736,7 @@ fn evaluate_instance_into_builder(
                 && request.parameter_id == *parameter_id
                 && request.slot == *slot
                 && instance.effect.evaluate_visual_source_parameter(parameter_id)
-                    == Some(request.reference)
+                    == Some(request.authored_reference)
             {
                 let cause = if request.reference == mondrian_core::VisualSourceReference::Unbound {
                     crate::AuxiliaryPreviewFallbackCause::Unbound
@@ -1175,7 +1193,7 @@ impl PreparedEffectProgram {
     pub fn visit_authored_visual_sources(
         &self,
         mut visit: impl FnMut(mondrian_core::VisualSourceReference),
-    ) {
+    ) -> Result<(), EffectGraphBuildError> {
         let inner = &self.inner;
         let stacks = inner
             .grade_before
@@ -1185,6 +1203,24 @@ impl PreparedEffectProgram {
             .chain(inner.grade_after.iter().map(|grade| &grade.inner.stack));
         for stack in stacks {
             for instance in stack.instances.iter() {
+                if instance.effect.effect_type == crate::EffectType::VideoCollage {
+                    let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: instance.effect.effect_type.key(),
+                        effect_id: instance.effect.id,
+                        reason,
+                    };
+                    let sources = crate::video_collage::video_collage_sources(&instance.effect)
+                        .map_err(|error| invalid(error.to_string()))?;
+                    for tile in sources.tiles {
+                        let reference = tile
+                            .effective_reference()
+                            .map_err(|error| invalid(error.to_string()))?;
+                        if reference != mondrian_core::VisualSourceReference::Unbound {
+                            visit(reference);
+                        }
+                    }
+                    continue;
+                }
                 for (_, property) in instance.effect.properties.iter() {
                     if let mondrian_core::PropertyValue::VisualSource(reference) =
                         property.static_value()
@@ -1195,6 +1231,7 @@ impl PreparedEffectProgram {
                 }
             }
         }
+        Ok(())
     }
 
     /// Bind the input of a concrete Custom processor in this program's actual
@@ -2216,6 +2253,16 @@ fn remap_graph_node_kind(
                 op: op.clone(),
                 role: *role,
                 sampling: *sampling,
+            }
+        }
+        EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
+            EffectGraphNodeKind::VideoCollage {
+                input: remap(*input)?,
+                sources: sources
+                    .iter()
+                    .map(|id| id.map(remap).transpose())
+                    .collect::<Result<_, _>>()?,
+                grade: *grade,
             }
         }
         EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {

@@ -38,7 +38,7 @@ impl AuxiliaryPreviewFallback {
     pub fn parameter_id(&self) -> &ParameterId {
         &self.parameter_id
     }
-    /// Authored address retained without changing author state.
+    /// Effective source request retained without changing the author state.
     pub const fn reference(&self) -> VisualSourceReference {
         self.reference
     }
@@ -56,6 +56,7 @@ impl AuxiliaryPreviewFallback {
 pub(crate) struct MissingAuxiliaryPreviewRequest {
     pub(crate) effect_id: EffectId,
     pub(crate) parameter_id: ParameterId,
+    pub(crate) authored_reference: VisualSourceReference,
     pub(crate) reference: VisualSourceReference,
     pub(crate) slot: u32,
 }

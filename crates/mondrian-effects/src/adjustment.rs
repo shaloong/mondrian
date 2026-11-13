@@ -512,6 +512,7 @@ pub(crate) fn apply_render_op(
         EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }
         | EffectRenderOp::DetailPreservingUpscale { .. }
+        | EffectRenderOp::VideoCollage { .. }
         | EffectRenderOp::Glass { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: crate::execution::effect_render_op_name(op),
@@ -1275,6 +1276,8 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 1,
         EffectRenderOp::DetailPreservingUpscale { .. } => 1,
         EffectRenderOp::Glass { .. } => 1,
+        // The graph owns the disjoint output raster and charges it directly.
+        EffectRenderOp::VideoCollage { .. } => 0,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
         EffectRenderOp::Minimax { .. } => 4,
@@ -1855,7 +1858,7 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::DisplacementMap { .. } => Ok(false),
         // Glass uses the complete graph's raster and auxiliary inputs.
-        EffectRenderOp::Glass { .. } => Ok(false),
+        EffectRenderOp::Glass { .. } | EffectRenderOp::VideoCollage { .. } => Ok(false),
         EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),
         EffectRenderOp::DetailPreservingUpscale { grade } => {
             if !region.is_full_frame() {

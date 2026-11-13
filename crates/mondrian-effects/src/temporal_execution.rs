@@ -2045,10 +2045,11 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                 kind: "external_input",
                             })
                         }
-                        EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+                        EffectGraphNodeKind::AuxiliaryEffect { .. }
+                        | EffectGraphNodeKind::VideoCollage { .. } => {
                             return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
                                 node_id,
-                                kind: "auxiliary_effect",
+                                kind: crate::gpu_plan::node_kind_name(&node.kind),
                             })
                         }
                         EffectGraphNodeKind::Source => {
@@ -2886,6 +2887,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Reshape { .. } => "reshape",
         crate::EffectRenderOp::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
         crate::EffectRenderOp::Glass { .. } => "glass",
+        crate::EffectRenderOp::VideoCollage { .. } => "video_collage",
         crate::EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         crate::EffectRenderOp::LensFlare { .. } => "lens_flare",
         crate::EffectRenderOp::Bulge { .. } => "bulge",

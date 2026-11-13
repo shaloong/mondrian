@@ -162,6 +162,11 @@ pub(crate) fn reservations(
                 },
                 0,
             ),
+            EffectGraphNodeKind::VideoCollage { .. } => {
+                let extent = taken.first().ok_or_else(|| missing(*id))?.extent;
+                let capacity = pool.acquire(bytes(extent)?, false);
+                (Raster { extent, capacity, borrowed: false }, 0)
+            }
             EffectGraphNodeKind::UnaryEffect { .. }
             | EffectGraphNodeKind::DomainEffect { .. }
             | EffectGraphNodeKind::AuxiliaryEffect { .. }
@@ -248,7 +253,9 @@ pub(crate) fn reservations(
                 .saturating_add(mask_bytes),
             raster.extent,
         ));
-        for overlay in taken.into_iter().skip(usize::from(!changes_grid)) {
+        let retains_input =
+            !changes_grid && !matches!(node.kind, EffectGraphNodeKind::VideoCollage { .. });
+        for overlay in taken.into_iter().skip(usize::from(retains_input)) {
             pool.release(overlay);
         }
         outputs.insert(*id, raster);

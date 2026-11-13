@@ -221,10 +221,11 @@ impl TemporalProgramBuilder<'_> {
                     kind: "external_input",
                 })
             }
-            EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+            EffectGraphNodeKind::AuxiliaryEffect { .. }
+            | EffectGraphNodeKind::VideoCollage { .. } => {
                 return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
                     node_id,
-                    kind: "auxiliary_effect",
+                    kind: crate::gpu_plan::node_kind_name(&node.kind),
                 })
             }
             EffectGraphNodeKind::UnaryEffect { input, op }

@@ -1014,6 +1014,7 @@ pub(crate) fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
         EffectGraphNodeKind::MultiInput { .. } => "multi_input",
         EffectGraphNodeKind::ExternalInput { .. } => "external_input",
         EffectGraphNodeKind::AuxiliaryEffect { .. } => "auxiliary_effect",
+        EffectGraphNodeKind::VideoCollage { .. } => "video_collage",
     }
 }
 
@@ -1104,6 +1105,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Reshape { .. } => "reshape",
         EffectRenderOp::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
         EffectRenderOp::Glass { .. } => "glass",
+        EffectRenderOp::VideoCollage { .. } => "video_collage",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

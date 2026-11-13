@@ -151,6 +151,13 @@ impl AuxiliarySampling {
         out_of_bounds: AuxiliaryOutOfBounds::Clamp,
     };
 
+    /// Apply the delivery affine before bilinear reconstruction.
+    pub const FRAME_TRANSFORM_LINEAR_CLAMP: Self = Self {
+        mapping: AuxiliaryCoordinateMapping::FrameTransform,
+        filter: AuxiliaryFilter::Linear,
+        out_of_bounds: AuxiliaryOutOfBounds::Clamp,
+    };
+
     /// Registered, exact-texel, clamped reading (map default).
     pub const PRIMARY_GRID_NEAREST_CLAMP: Self = Self {
         mapping: AuxiliaryCoordinateMapping::PrimaryGrid,
@@ -312,6 +319,9 @@ pub enum EffectGraphError {
         /// Offending node.
         node: EffectGraphNodeId,
     },
+    /// The spatial kernel does not have one valid source choice per cell.
+    #[error("graph node {node:?} has invalid Video Collage sources")]
+    InvalidVideoCollageSources { node: EffectGraphNodeId },
 }
 
 #[derive(Debug, Clone)]
@@ -391,7 +401,7 @@ pub enum EffectGraphNodeKind {
     /// the primary frame; runtime- and curve-driven retimes are not
     /// representable in v1.
     ExternalInput {
-        /// Host binding slot; v1 supports one slot per layer.
+        /// Host binding slot within the compiled graph.
         slot: u32,
         /// Declared sample format of the delivered raster.
         format: crate::EffectValueFormat,
@@ -418,6 +428,12 @@ pub enum EffectGraphNodeKind {
         role: AuxiliaryRole,
         /// Declared sampling of the auxiliary branch.
         sampling: AuxiliarySampling,
+    },
+    /// One spatial output with a canvas input and an optional external image per cell.
+    VideoCollage {
+        input: EffectGraphNodeId,
+        sources: Arc<[Option<EffectGraphNodeId>]>,
+        grade: crate::VideoCollageGrade,
     },
 }
 
@@ -467,6 +483,9 @@ impl EffectGraphNode {
             EffectGraphNodeKind::ExternalInput { .. } => Vec::new(),
             EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
                 vec![input, auxiliary]
+            }
+            EffectGraphNodeKind::VideoCollage { input, ref sources, .. } => {
+                std::iter::once(input).chain(sources.iter().flatten().copied()).collect()
             }
         }
     }
@@ -582,6 +601,12 @@ impl EffectGraphIdentity {
                     mapping.hash(&mut writer);
                     filter.hash(&mut writer);
                     out_of_bounds.hash(&mut writer);
+                }
+                EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
+                    15u8.hash(&mut writer);
+                    input.hash(&mut writer);
+                    sources.hash(&mut writer);
+                    hash_render_op(&EffectRenderOp::VideoCollage { grade: *grade }, &mut writer);
                 }
             }
         }
@@ -704,6 +729,9 @@ impl EffectRenderGraph {
                 EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
                     render_op_retained_bytes_estimate(op)
                 }
+                EffectGraphNodeKind::VideoCollage { sources, .. } => {
+                    std::mem::size_of_val(sources.as_ref())
+                }
                 EffectGraphNodeKind::ExternalInput { .. }
                 | EffectGraphNodeKind::Source
                 | EffectGraphNodeKind::Blend { .. }
@@ -762,6 +790,7 @@ pub struct AuxiliarySourceBinding {
     slot: u32,
     effect_id: mondrian_core::EffectId,
     parameter_id: mondrian_core::ParameterId,
+    authored_reference: mondrian_core::VisualSourceReference,
     reference: mondrian_core::VisualSourceReference,
 }
 
@@ -782,9 +811,13 @@ impl AuxiliarySourceBinding {
     pub const fn parameter_id(&self) -> &mondrian_core::ParameterId {
         &self.parameter_id
     }
-    /// Authored address and exact constant retiming, without decoded resources.
+    /// Source address and effective exact retiming, without decoded resources.
     pub const fn reference(&self) -> mondrian_core::VisualSourceReference {
         self.reference
+    }
+
+    pub(crate) const fn authored_reference(&self) -> mondrian_core::VisualSourceReference {
+        self.authored_reference
     }
 
     pub(crate) fn remapped(&self, producer: EffectGraphNodeId, slot: u32) -> Self {
@@ -1172,8 +1205,11 @@ impl CompiledEffectGraph {
     /// Whether an executed node samples a second raster, including a graph-local value.
     pub fn has_auxiliary_effects(&self) -> bool {
         self.graph.nodes.iter().any(|node| {
-            matches!(node.kind, EffectGraphNodeKind::AuxiliaryEffect { .. })
-                && self.schedule.ordered_nodes.contains(&node.id)
+            matches!(
+                node.kind,
+                EffectGraphNodeKind::AuxiliaryEffect { .. }
+                    | EffectGraphNodeKind::VideoCollage { .. }
+            ) && self.schedule.ordered_nodes.contains(&node.id)
         })
     }
 
@@ -1219,6 +1255,12 @@ impl CompiledEffectGraph {
                             Some(EffectGraphNodeKind::ExternalInput { .. })
                         )
                         && self.external_auxiliary_is_read_only(*auxiliary) => {}
+                EffectGraphNodeKind::VideoCollage { input, sources, .. }
+                    if Some(*input) == previous
+                        && sources
+                            .iter()
+                            .flatten()
+                            .all(|id| self.external_auxiliary_is_read_only(*id)) => {}
                 _ => {
                     return Err(crate::EffectFloatExecutionError::UnsupportedNode {
                         node_id: *id,
@@ -1243,6 +1285,8 @@ impl CompiledEffectGraph {
             && self.graph.nodes.iter().all(|node| {
                 matches!(node.kind, EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. }
                     if auxiliary == producer && input != producer)
+                    || matches!(&node.kind, EffectGraphNodeKind::VideoCollage { input, sources, .. }
+                        if *input != producer && sources.contains(&Some(producer)))
                     || !node.input_ids().contains(&producer)
                     || !self.schedule.ordered_nodes.contains(&node.id)
             })
@@ -1307,6 +1351,7 @@ impl CompiledEffectGraph {
                     | EffectGraphNodeKind::MaskSource { .. }
                     | EffectGraphNodeKind::MaskCombine { .. }
                     | EffectGraphNodeKind::MatteMix { .. }
+                    | EffectGraphNodeKind::VideoCollage { .. }
                     | EffectGraphNodeKind::MultiInput { .. } => {}
                 }
             }
@@ -1534,6 +1579,11 @@ enum EffectGraphNodeShape {
         input: EffectGraphNodeId,
         auxiliary: EffectGraphNodeId,
     },
+    VideoCollage {
+        id: EffectGraphNodeId,
+        input: EffectGraphNodeId,
+        sources: Arc<[Option<EffectGraphNodeId>]>,
+    },
 }
 
 impl PreparedEffectGraphTopology {
@@ -1550,6 +1600,9 @@ impl PreparedEffectGraphTopology {
             .map(|node| match node {
                 EffectGraphNodeShape::MultiInput { inputs, .. } => {
                     inputs.capacity().saturating_mul(std::mem::size_of::<EffectGraphNodeId>())
+                }
+                EffectGraphNodeShape::VideoCollage { sources, .. } => {
+                    std::mem::size_of_val(sources.as_ref())
                 }
                 _ => 0,
             })
@@ -1880,6 +1933,15 @@ fn derive_implementation_requirements<'a>(
                     .merge_branches(requirement_for(*auxiliary, &requirements))
                     .compose_node(auxiliary_effect_node_requirements(op, *role, *sampling))
             }
+            EffectGraphNodeKind::VideoCollage { input, sources, grade } => sources
+                .iter()
+                .flatten()
+                .fold(requirement_for(*input, &requirements), |merged, id| {
+                    merged.merge_branches(requirement_for(*id, &requirements))
+                })
+                .compose_node(render_op_requirements(&EffectRenderOp::VideoCollage {
+                    grade: *grade,
+                })),
         };
         requirements.insert(node.id, derived);
     }
@@ -1963,6 +2025,11 @@ fn raw_node_implementation_requirements(
         }
         EffectGraphNodeKind::AuxiliaryEffect { op, role, sampling, .. } => {
             Some(auxiliary_effect_node_requirements(op, *role, *sampling))
+        }
+        EffectGraphNodeKind::VideoCollage { grade, .. } => {
+            Some(render_op_requirements(&EffectRenderOp::VideoCollage {
+                grade: *grade,
+            }))
         }
     }
 }
@@ -2505,6 +2572,18 @@ impl EffectGraphBuilderState {
         format: crate::EffectValueFormat,
         domain: EffectColorDomainContract,
     ) -> Result<EffectGraphNodeId, crate::EffectGraphBuildError> {
+        self.append_visual_source_input_at(effect, parameter_id, format, domain, TimelineTime::ZERO)
+    }
+
+    /// Bind a source with a native Definition's exact offset in the consumer's clock.
+    pub(crate) fn append_visual_source_input_at(
+        &mut self,
+        effect: &mondrian_core::effect_data::EffectNode,
+        parameter_id: &mondrian_core::ParameterId,
+        format: crate::EffectValueFormat,
+        domain: EffectColorDomainContract,
+        offset: TimelineTime,
+    ) -> Result<EffectGraphNodeId, crate::EffectGraphBuildError> {
         let used = self
             .graph
             .nodes
@@ -2518,24 +2597,30 @@ impl EffectGraphBuilderState {
             .filter_map(|slot| u32::try_from(slot).ok())
             .find(|slot| *slot != UNBOUND_AUXILIARY_SLOT && !used.contains(slot))
             .ok_or(crate::EffectGraphBuildError::InvalidGraph)?;
-        let reference = effect.evaluate_visual_source_parameter(parameter_id).ok_or_else(|| {
-            crate::EffectGraphBuildError::InvalidAuthorState {
-                effect_key: effect.effect_type.key(),
-                effect_id: effect.id,
-                reason: format!("visual source parameter `{parameter_id}` is absent or invalid"),
-            }
+        let invalid = |reason| crate::EffectGraphBuildError::InvalidAuthorState {
+            effect_key: effect.effect_type.key(),
+            effect_id: effect.id,
+            reason,
+        };
+        let authored_reference =
+            effect.evaluate_visual_source_parameter(parameter_id).ok_or_else(|| {
+                invalid(format!(
+                    "visual source parameter `{parameter_id}` is absent or invalid"
+                ))
+            })?;
+        let reference = authored_reference.checked_offset(offset).map_err(|error| {
+            invalid(format!(
+                "visual source parameter `{parameter_id}` cannot be retimed: {error}"
+            ))
         })?;
         if format.precision() != crate::EffectWorkingPrecision::Float32
             || format.domain() != EffectColorDomain::SceneLinearRgb
             || !format.alpha().is_straight_compatible()
             || domain != EffectColorDomainContract::SCENE_LINEAR
         {
-            return Err(crate::EffectGraphBuildError::InvalidAuthorState {
-                effect_key: effect.effect_type.key(),
-                effect_id: effect.id,
-                reason: "authored auxiliary sources require scene-linear Float32 independent RGB"
-                    .into(),
-            });
+            return Err(invalid(
+                "authored auxiliary sources require scene-linear Float32 independent RGB".into(),
+            ));
         }
         if reference == mondrian_core::VisualSourceReference::Unbound
             || self.unavailable_auxiliary_sources.contains(&reference)
@@ -2544,6 +2629,7 @@ impl EffectGraphBuilderState {
                 Some(crate::auxiliary_preview::MissingAuxiliaryPreviewRequest {
                     effect_id: effect.id,
                     parameter_id: parameter_id.clone(),
+                    authored_reference,
                     reference,
                     slot,
                 });
@@ -2567,6 +2653,7 @@ impl EffectGraphBuilderState {
             slot,
             effect_id: effect.id,
             parameter_id: parameter_id.clone(),
+            authored_reference,
             reference,
         });
         Ok(producer)
@@ -2618,6 +2705,25 @@ impl EffectGraphBuilderState {
         role: AuxiliaryRole,
     ) -> EffectGraphNodeId {
         self.add_auxiliary_effect(input, auxiliary, op, role, role.default_sampling())
+    }
+
+    /// Append a collage on the current canvas. Each `None` reads that canvas.
+    pub fn append_video_collage(
+        &mut self,
+        grade: crate::VideoCollageGrade,
+        sources: impl Into<Arc<[Option<EffectGraphNodeId>]>>,
+    ) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::VideoCollage {
+                input: self.current_output,
+                sources: sources.into(),
+                grade,
+            },
+        });
+        self.current_output = id;
+        id
     }
 
     pub fn set_current_output(&mut self, node_id: EffectGraphNodeId) {
@@ -3041,6 +3147,7 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }
         | EffectRenderOp::DetailPreservingUpscale { .. }
+        | EffectRenderOp::VideoCollage { .. }
         | EffectRenderOp::Glass { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
@@ -3598,6 +3705,21 @@ pub(crate) fn compile_effect_domain_plan(
                 }
                 target_domain
             }
+            EffectGraphNodeKind::VideoCollage { input, sources, .. } => {
+                let target = EffectColorDomain::SceneLinearRgb;
+                for id in std::iter::once(input).chain(sources.iter().flatten()) {
+                    let from = *plan.node_output_domains.get(id)?;
+                    plan_domain_edge(
+                        &mut plan,
+                        Some(node.id),
+                        *id,
+                        from,
+                        target,
+                        EffectDomainBlockerKind::NonRgbDomainTransition,
+                    );
+                }
+                target
+            }
         };
         plan.node_output_domains.insert(node.id, output_domain);
     }
@@ -3779,6 +3901,12 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
 /// sampling. Host availability is resolved later by the caller that owns the
 /// slot bindings.
 pub fn validate_auxiliary_graph(graph: &EffectRenderGraph) -> Result<(), EffectGraphError> {
+    auxiliary_slot_declarations(graph).map(|_| ())
+}
+
+fn auxiliary_slot_declarations(
+    graph: &EffectRenderGraph,
+) -> Result<HashMap<u32, (AuxiliaryRole, AuxiliarySampling)>, EffectGraphError> {
     use std::collections::hash_map::Entry;
 
     let mut slots = HashMap::<u32, EffectGraphNodeId>::new();
@@ -3799,52 +3927,73 @@ pub fn validate_auxiliary_graph(graph: &EffectRenderGraph) -> Result<(), EffectG
         }
     }
 
-    let mut consumed = HashSet::<EffectGraphNodeId>::new();
     let mut declarations = HashMap::<u32, (AuxiliaryRole, AuxiliarySampling)>::new();
-    for node in &graph.nodes {
-        let EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, role, sampling, .. } =
-            &node.kind
-        else {
-            continue;
-        };
-        if *auxiliary == *input || *auxiliary == node.id {
-            return Err(EffectGraphError::SelfAuxiliaryInput { node: node.id });
+    let mut declare = |slot, role, sampling| match declarations.entry(slot) {
+        Entry::Vacant(entry) => {
+            entry.insert((role, sampling));
+            Ok(())
         }
-        let Some(auxiliary_node) = graph.node(*auxiliary) else {
-            return Err(EffectGraphError::NonExternalAuxiliaryInput { node: node.id });
-        };
-        let EffectGraphNodeKind::ExternalInput { slot, .. } = &auxiliary_node.kind else {
-            // Graph-local values have their own complete extent and metadata.
-            // Their dependencies participate through input_ids(), just as the
-            // host producer does; only host slots need binding declarations.
-            continue;
-        };
-        consumed.insert(*auxiliary);
-        match declarations.entry(*slot) {
-            Entry::Vacant(entry) => {
-                entry.insert((*role, *sampling));
-            }
-            Entry::Occupied(entry) => {
-                if *entry.get() != (*role, *sampling) {
-                    return Err(EffectGraphError::ConflictingAuxiliaryInput { slot: *slot });
+        Entry::Occupied(entry) if *entry.get() == (role, sampling) => Ok(()),
+        Entry::Occupied(_) => Err(EffectGraphError::ConflictingAuxiliaryInput { slot }),
+    };
+    for node in &graph.nodes {
+        match &node.kind {
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, role, sampling, .. } => {
+                if *auxiliary == *input || *auxiliary == node.id {
+                    return Err(EffectGraphError::SelfAuxiliaryInput { node: node.id });
+                }
+                let auxiliary = graph
+                    .node(*auxiliary)
+                    .ok_or(EffectGraphError::NonExternalAuxiliaryInput { node: node.id })?;
+                if let EffectGraphNodeKind::ExternalInput { slot, .. } = auxiliary.kind {
+                    declare(slot, *role, *sampling)?;
                 }
             }
+            EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
+                let invalid = EffectGraphError::InvalidVideoCollageSources { node: node.id };
+                if sources.len() != grade.tile_count()
+                    || matches!(
+                        graph.node(*input).map(|node| &node.kind),
+                        Some(EffectGraphNodeKind::ExternalInput { .. })
+                    )
+                {
+                    return Err(invalid);
+                }
+                for source in sources.iter().flatten() {
+                    let Some(EffectGraphNodeKind::ExternalInput { slot, format, .. }) =
+                        graph.node(*source).map(|node| &node.kind)
+                    else {
+                        return Err(invalid);
+                    };
+                    if format.precision() != crate::EffectWorkingPrecision::Float32
+                        || format.domain() != EffectColorDomain::SceneLinearRgb
+                    {
+                        return Err(invalid);
+                    }
+                    declare(
+                        *slot,
+                        AuxiliaryRole::Layer,
+                        AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP,
+                    )?;
+                }
+            }
+            _ => {}
         }
     }
 
-    for (slot, node) in &slots {
-        if !consumed.contains(node) {
+    for slot in slots.keys() {
+        if !declarations.contains_key(slot) {
             return Err(EffectGraphError::EmptyAuxiliaryInput { slot: *slot });
         }
     }
-    Ok(())
+    Ok(declarations)
 }
 
 /// Collect one required input spec per declared auxiliary slot.
 pub fn collect_auxiliary_inputs(
     graph: &EffectRenderGraph,
 ) -> Result<Arc<[AuxiliaryInputSpec]>, EffectGraphError> {
-    validate_auxiliary_graph(graph)?;
+    let declarations = auxiliary_slot_declarations(graph)?;
     let mut specs = Vec::new();
     for node in &graph.nodes {
         let EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset } =
@@ -3852,17 +4001,7 @@ pub fn collect_auxiliary_inputs(
         else {
             continue;
         };
-        let consumer = graph.nodes.iter().find_map(|candidate| match &candidate.kind {
-            EffectGraphNodeKind::AuxiliaryEffect { auxiliary, role, sampling, .. }
-                if *auxiliary == node.id =>
-            {
-                Some((*role, *sampling))
-            }
-            _ => None,
-        });
-        let Some((role, sampling)) = consumer else {
-            continue;
-        };
+        let (role, sampling) = declarations[slot];
         specs.push(
             AuxiliaryInputSpec::new(*slot, *format, *alpha, *domain, role, sampling, true)
                 .with_time_offset(*time_offset),
@@ -4015,6 +4154,13 @@ fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
                     id: node.id,
                     input: *input,
                     auxiliary: *auxiliary,
+                }
+            }
+            EffectGraphNodeKind::VideoCollage { input, sources, .. } => {
+                EffectGraphNodeShape::VideoCollage {
+                    id: node.id,
+                    input: *input,
+                    sources: Arc::clone(sources),
                 }
             }
         })
@@ -4388,6 +4534,30 @@ pub(crate) fn compile_effect_node_profiles(
                     cache_policy,
                     estimated_cost,
                     output_cache_enabled,
+                }
+            }
+            EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
+                let op = EffectRenderOp::VideoCollage { grade: *grade };
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                15u8.hash(&mut hasher);
+                op.hash_signature(&mut hasher);
+                let primary = profiles.get(input)?;
+                primary.subtree_signature.hash(&mut hasher);
+                let mut cache_policy = primary.cache_policy;
+                let mut estimated_cost = primary.estimated_cost.saturating_add(op.estimated_cost());
+                for source in sources.iter() {
+                    let profile = source.and_then(|id| profiles.get(&id));
+                    profile.map(|value| value.subtree_signature).hash(&mut hasher);
+                    if let Some(profile) = profile {
+                        cache_policy = cache_policy.combine(profile.cache_policy);
+                        estimated_cost = estimated_cost.saturating_add(profile.estimated_cost);
+                    }
+                }
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy,
+                    estimated_cost,
+                    output_cache_enabled: cache_policy.permits_cross_call_reuse(),
                 }
             }
         };

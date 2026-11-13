@@ -351,6 +351,12 @@ pub enum EffectGpuSpatialPass {
         auxiliary: Option<crate::AuxiliarySampling>,
         external_slot: Option<u32>,
     },
+    /// Multiple source pictures recorded into disjoint rectangles of one output.
+    VideoCollage {
+        grade: crate::VideoCollageGrade,
+        slots: Arc<[Option<u32>]>,
+        sampling: Option<mondrian_core::ImageSampling>,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -385,6 +391,18 @@ impl EffectGpuSpatialPass {
             | Self::Glass { auxiliary: Some(_), external_slot, .. } => Some(external_slot),
             _ => None,
         }
+    }
+
+    /// Direct host slots in sampling order. A collage may read a slot in several cells.
+    pub fn external_slots(&self) -> impl Iterator<Item = u32> + '_ {
+        let many = match self {
+            Self::VideoCollage { slots, .. } => slots.as_ref(),
+            _ => &[],
+        };
+        self.auxiliary_slot()
+            .flatten()
+            .into_iter()
+            .chain(many.iter().flatten().copied())
     }
 
     /// Stable name used by diagnostics and renderer dispatch.
@@ -452,6 +470,7 @@ impl EffectGpuSpatialPass {
             Self::Reshape { .. } => "reshape",
             Self::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
             Self::Glass { .. } => "glass",
+            Self::VideoCollage { .. } => "video_collage",
         }
     }
 
@@ -542,7 +561,9 @@ impl EffectGpuSpatialPass {
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
-            Self::DisplacementMap { .. } | Self::Glass { .. } => u32::MAX,
+            Self::DisplacementMap { .. } | Self::Glass { .. } | Self::VideoCollage { .. } => {
+                u32::MAX
+            }
             Self::GrowBounds { grade } => grade.output_outset()[0],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -623,7 +644,9 @@ impl EffectGpuSpatialPass {
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
-            Self::DisplacementMap { .. } | Self::Glass { .. } => u32::MAX,
+            Self::DisplacementMap { .. } | Self::Glass { .. } | Self::VideoCollage { .. } => {
+                u32::MAX
+            }
             Self::GrowBounds { grade } => grade.output_outset()[1],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -761,7 +784,8 @@ impl CompiledEffectGpuPipeline {
                 EffectGpuStage::Spatial {
                     pass: EffectGpuSpatialPass::Smear { .. }
                         | EffectGpuSpatialPass::Reshape { .. }
-                        | EffectGpuSpatialPass::Glass { .. },
+                        | EffectGpuSpatialPass::Glass { .. }
+                        | EffectGpuSpatialPass::VideoCollage { .. },
                     ..
                 }
             )
@@ -777,7 +801,8 @@ impl CompiledEffectGpuPipeline {
                 pass:
                     EffectGpuSpatialPass::Smear { sampling: value, .. }
                     | EffectGpuSpatialPass::Reshape { sampling: value, .. }
-                    | EffectGpuSpatialPass::Glass { sampling: value, .. },
+                    | EffectGpuSpatialPass::Glass { sampling: value, .. }
+                    | EffectGpuSpatialPass::VideoCollage { sampling: value, .. },
                 ..
             } = stage
             {
@@ -905,10 +930,13 @@ pub fn lower_effect_graph_to_gpu_pipeline(
         let Some(node) = compiled.graph().node(node_id) else {
             return Err(EffectGpuPlanBlocker::DisconnectedChain { node_id });
         };
-        let (input, op, domain, auxiliary_pass) = match &node.kind {
-            EffectGraphNodeKind::UnaryEffect { input, op } => {
-                (*input, op, EffectColorDomain::SceneLinearRgb, None)
-            }
+        let (input, op, domain, spatial_pass) = match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { input, op } => (
+                *input,
+                Some(op),
+                EffectColorDomain::SceneLinearRgb,
+                spatial_pass_for(op),
+            ),
             EffectGraphNodeKind::DomainEffect { input, op, domain_contract } => {
                 if domain_contract.input != domain_contract.output {
                     return Err(EffectGpuPlanBlocker::NonPreservingColorDomain {
@@ -917,7 +945,12 @@ pub fn lower_effect_graph_to_gpu_pipeline(
                         output: domain_contract.output,
                     });
                 }
-                (*input, op, domain_contract.input, None)
+                (
+                    *input,
+                    Some(op),
+                    domain_contract.input,
+                    spatial_pass_for(op),
+                )
             }
             EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
                 let Some(EffectGraphNodeKind::ExternalInput { slot, .. }) =
@@ -942,7 +975,46 @@ pub fn lower_effect_graph_to_gpu_pipeline(
                 let pass = lower_auxiliary_spatial_pass(op, *role, *sampling, Some(*slot)).ok_or(
                     EffectGpuPlanBlocker::UnsupportedTopology { node_id, kind: "auxiliary_kernel" },
                 )?;
-                (*input, op, EffectColorDomain::SceneLinearRgb, Some(pass))
+                (
+                    *input,
+                    Some(op),
+                    EffectColorDomain::SceneLinearRgb,
+                    Some(pass),
+                )
+            }
+            EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
+                let admitted =
+                    compiled.node_execution_modes(node_id).unwrap_or(EffectExecutionModes::NONE);
+                if !admitted.contains(
+                    EffectProcessingBackend::Gpu,
+                    EffectWorkingPrecision::Float32,
+                ) {
+                    return Err(EffectGpuPlanBlocker::NodeExecutionModeNotAdmitted {
+                        node_id,
+                        admitted,
+                    });
+                }
+                let slots = sources
+                    .iter()
+                    .map(|source| {
+                        source
+                            .map(|source| {
+                                match compiled.graph().node(source).map(|node| &node.kind) {
+                                    Some(EffectGraphNodeKind::ExternalInput { slot, .. }) => {
+                                        Ok(*slot)
+                                    }
+                                    _ => Err(EffectGpuPlanBlocker::UnsupportedTopology {
+                                        node_id,
+                                        kind: "video_collage_source",
+                                    }),
+                                }
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<Arc<[_]>, _>>()?;
+                let pass =
+                    EffectGpuSpatialPass::VideoCollage { grade: *grade, slots, sampling: None };
+                (*input, None, EffectColorDomain::SceneLinearRgb, Some(pass))
             }
             kind => {
                 return Err(EffectGpuPlanBlocker::UnsupportedTopology {
@@ -960,7 +1032,7 @@ pub fn lower_effect_graph_to_gpu_pipeline(
         }
         merge_processing_domain(&mut processing_domain, domain)?;
 
-        match auxiliary_pass.or_else(|| spatial_pass_for(op)) {
+        match spatial_pass {
             Some(pass) => {
                 flush_point_stage(&mut stages, &mut pending_operations, &mut pending_ids);
                 stages.push(EffectGpuStage::Spatial { pass, node_id });
@@ -977,6 +1049,10 @@ pub fn lower_effect_graph_to_gpu_pipeline(
                         admitted,
                     });
                 }
+                let op = op.ok_or(EffectGpuPlanBlocker::UnsupportedTopology {
+                    node_id,
+                    kind: "missing_operation",
+                })?;
                 pending_operations.push(lower_point_op(node_id, op)?);
                 pending_ids.push(node_id);
                 if pending_operations.len() >= MAX_FUSED_GPU_EFFECT_OPS {

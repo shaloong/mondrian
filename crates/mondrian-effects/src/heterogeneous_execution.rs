@@ -2828,7 +2828,9 @@ fn hash_effect_operation_shape(
                 },
             );
         }
-        EffectGraphNodeKind::ExternalInput { .. } | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
+        EffectGraphNodeKind::ExternalInput { .. }
+        | EffectGraphNodeKind::VideoCollage { .. }
+        | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
             return Err(
                 PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
                     reason: "shape_identity_contains_auxiliary_input",
@@ -2928,6 +2930,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::Reshape { .. } => 123,
         EffectRenderOp::DetailPreservingUpscale { .. } => 124,
         EffectRenderOp::Glass { .. } => 125,
+        EffectRenderOp::VideoCollage { .. } => 126,
         EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::ColorBalance { .. } => 79,
@@ -4137,6 +4140,7 @@ fn execute_cpu_dag_prefix(
             EffectGraphNodeKind::Source
             | EffectGraphNodeKind::CustomSource { .. }
             | EffectGraphNodeKind::ExternalInput { .. }
+            | EffectGraphNodeKind::VideoCollage { .. }
             | EffectGraphNodeKind::AuxiliaryEffect { .. } => {
                 return Err(
                     PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
@@ -5317,6 +5321,7 @@ fn cpu_node_scratch_frames(
                 Ok(render_op_f32_scratch_frames(op))
             }
             crate::EffectRenderOp::TemporalFrameBlend { .. }
+            | crate::EffectRenderOp::VideoCollage { .. }
             | crate::EffectRenderOp::Custom { processor: None, .. } => {
                 Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })
             }
@@ -5334,6 +5339,7 @@ fn cpu_node_scratch_frames(
         EffectGraphNodeKind::MultiInput { inputs, .. } if !inputs.is_empty() => Ok(0),
         EffectGraphNodeKind::Source
         | EffectGraphNodeKind::CustomSource { .. }
+        | EffectGraphNodeKind::VideoCollage { .. }
         | EffectGraphNodeKind::MultiInput { .. } => {
             Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })
         }

@@ -54,6 +54,22 @@ impl VisualSourceReference {
             | Self::Sequence { retime, .. } => Some(retime),
         }
     }
+
+    /// Add a consumer's exact offset while preserving the source and boundary policy.
+    pub fn checked_offset(self, offset: TimelineTime) -> Result<Self, TimelineTimeError> {
+        let shift = |mut retime: VisualSourceRetime| {
+            retime.time_offset = retime.time_offset.checked_add(offset)?;
+            Ok::<_, TimelineTimeError>(retime)
+        };
+        Ok(match self {
+            Self::Unbound => Self::Unbound,
+            Self::Asset { asset_id, retime } => Self::Asset { asset_id, retime: shift(retime)? },
+            Self::Clip { clip_id, retime } => Self::Clip { clip_id, retime: shift(retime)? },
+            Self::Sequence { sequence_id, retime } => {
+                Self::Sequence { sequence_id, retime: shift(retime)? }
+            }
+        })
+    }
 }
 
 /// Behavior outside the selected source's half-open available interval.

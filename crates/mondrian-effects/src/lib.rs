@@ -16,6 +16,7 @@ pub use displacement_map::{
 };
 pub mod glass;
 pub mod grow_bounds;
+pub mod video_collage;
 pub use glass::{
     GlassChannel, GlassEffectLight, GlassError, GlassGpuControls, GlassGrade, GlassHeightPlan,
     GlassMaterial, GlassProjection, GlassSceneLighting,
@@ -25,6 +26,11 @@ pub use grow_bounds::{
     GROW_BOUNDS_MAX_PIXELS,
 };
 pub use mondrian_core::EffectPassBlendPolicy;
+pub use video_collage::{
+    video_collage_frame_f32, video_collage_source_key, video_collage_source_position,
+    VideoCollageError, VideoCollageGpuControls, VideoCollageGrade, VideoCollagePlayback,
+    COLLAGE_MAX_AXIS,
+};
 pub mod alpha_contract;
 pub mod arithmetic;
 mod float_frame;

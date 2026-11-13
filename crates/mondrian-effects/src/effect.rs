@@ -1310,6 +1310,10 @@ pub enum EffectRenderOp {
         /// Physical projection bound at the actual raster owner.
         projection: Option<crate::GlassProjection>,
     },
+    /// Assemble a grid of independently sampled pictures.
+    VideoCollage {
+        grade: crate::VideoCollageGrade,
+    },
     /// Counter-shift red and blue around the green reference channel.
     ChromaticAberrationRemoval {
         grade: crate::ChromaticAberrationRemovalGrade,
@@ -1722,6 +1726,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .field("lighting", lighting)
                 .field("projection", projection)
                 .finish(),
+            Self::VideoCollage { grade } => {
+                formatter.debug_struct("VideoCollage").field("grade", grade).finish()
+            }
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
                 .field("semantic_fingerprint", lut.semantic_fingerprint())
@@ -2839,6 +2846,10 @@ impl EffectRenderOp {
                     projection.hash_state(state);
                 }
             }
+            EffectRenderOp::VideoCollage { grade } => {
+                125u8.hash(state);
+                grade.hash_signature(state);
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2994,6 +3005,7 @@ impl EffectRenderOp {
             EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 48,
             EffectRenderOp::DetailPreservingUpscale { .. } => 32,
             EffectRenderOp::Glass { .. } => 24,
+            EffectRenderOp::VideoCollage { .. } => 8,
             EffectRenderOp::DustScratches { .. } => 4,
             // Three passes, four when the chatter softening is enabled.
             EffectRenderOp::KeyCleaner { grade } => grade.cost(),
@@ -3553,7 +3565,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 124] {
+fn builtin_effect_types() -> [EffectType; 125] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3673,6 +3685,7 @@ fn builtin_effect_types() -> [EffectType; 124] {
         EffectType::Reshape,
         EffectType::DetailPreservingUpscale,
         EffectType::Glass,
+        EffectType::VideoCollage,
         EffectType::BilateralBlur,
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
@@ -11123,6 +11136,9 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
         EffectType::Glass => {
             define_glass_properties(&mut properties, &effect_type);
         }
+        EffectType::VideoCollage => {
+            define_video_collage_properties(&mut properties, &effect_type);
+        }
         EffectType::SetMatte => {
             let group = "通道";
             define_builtin_property(
@@ -12966,6 +12982,158 @@ fn define_glass_properties(properties: &mut PropertyBag, effect_type: &EffectTyp
     }
 }
 
+fn define_video_collage_properties(properties: &mut PropertyBag, effect_type: &EffectType) {
+    use crate::{video_collage_source_key, VideoCollagePlayback, COLLAGE_MAX_AXIS};
+    let group = "拼贴布局";
+    for (key, label, default) in [("columns", "网格列数", 3), ("rows", "网格行数", 2)] {
+        define_builtin_property(
+            properties,
+            effect_type,
+            key,
+            group,
+            label,
+            PropertyValue::Int(default),
+            Some(1.0),
+            Some(f64::from(COLLAGE_MAX_AXIS)),
+            Some(1.0),
+        );
+    }
+    for (key, label, default, maximum) in [
+        ("spacing", "间距", 8.0, 100.0),
+        ("roundness", "圆角", 0.0, 100.0),
+        ("border_width", "边框宽度", 0.0, 20.0),
+    ] {
+        define_builtin_property(
+            properties,
+            effect_type,
+            key,
+            group,
+            label,
+            PropertyValue::Float(default),
+            Some(0.0),
+            Some(maximum),
+            Some(0.1),
+        );
+    }
+    define_builtin_property(
+        properties,
+        effect_type,
+        "border_color",
+        group,
+        "边框颜色",
+        PropertyValue::Color(Color::BLACK),
+        None,
+        None,
+        None,
+    );
+    define_builtin_enum_property(
+        properties,
+        effect_type,
+        "playback",
+        "播放",
+        "播放模式",
+        "sequential",
+        VideoCollagePlayback::OPTIONS
+            .into_iter()
+            .map(|(key, label, _)| {
+                ParameterEnumOption::new(
+                    key,
+                    label,
+                    format!("mondrian.effect.video_collage.playback.{key}"),
+                )
+            })
+            .collect(),
+    );
+    define_builtin_property(
+        properties,
+        effect_type,
+        "tile_delay",
+        "播放",
+        "逐格延迟（秒）",
+        PropertyValue::Float(0.0),
+        Some(0.0),
+        Some(2.0),
+        Some(0.001),
+    );
+    for row in 0..COLLAGE_MAX_AXIS {
+        for column in 0..COLLAGE_MAX_AXIS {
+            define_builtin_property(
+                properties,
+                effect_type,
+                &video_collage_source_key(column, row),
+                "拼贴来源",
+                &format!("第 {} 行第 {} 列", row + 1, column + 1),
+                PropertyValue::VisualSource(mondrian_core::VisualSourceReference::Unbound),
+                None,
+                None,
+                None,
+            );
+        }
+    }
+}
+
+fn video_collage_graph_builder() -> EffectGraphBuilder {
+    let kind = EffectType::VideoCollage;
+    let [spacing, roundness, border_width, border_color] =
+        ["spacing", "roundness", "border_width", "border_color"]
+            .map(|key| builtin_parameter_id(&kind, key));
+    Arc::new(move |effect, context, graph| {
+        let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
+            effect_key: effect.effect_type.key(),
+            effect_id: effect.id,
+            reason,
+        };
+        let Some(PropertyValue::Color(border)) =
+            effect.evaluate_parameter(&border_color, context.time)
+        else {
+            return Err(invalid("invalid Video Collage border color".into()));
+        };
+        let authoring = crate::video_collage::video_collage_sources(effect)
+            .map_err(|error| invalid(error.to_string()))?;
+        let number = |id, default| effect.evaluate_f32_parameter(id, context.time, default);
+        let grade = crate::VideoCollageGrade::new(
+            authoring.columns,
+            authoring.rows,
+            number(&spacing, 8.0),
+            number(&roundness, 0.0),
+            number(&border_width, 0.0),
+            [border.r, border.g, border.b, border.a],
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        let format = crate::EffectValueFormat::new(
+            crate::EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        );
+        let mut producers = HashMap::new();
+        let sources = authoring
+            .tiles
+            .iter()
+            .map(|tile| {
+                if tile.reference == mondrian_core::VisualSourceReference::Unbound {
+                    return Ok(None);
+                }
+                let reference =
+                    tile.effective_reference().map_err(|error| invalid(error.to_string()))?;
+                if let Some(&producer) = producers.get(&reference) {
+                    return Ok(Some(producer));
+                }
+                let producer = graph.append_visual_source_input_at(
+                    effect,
+                    &tile.parameter,
+                    format,
+                    EffectColorDomainContract::SCENE_LINEAR,
+                    tile.offset,
+                )?;
+                producers.insert(reference, producer);
+                Ok(Some(producer))
+            })
+            .collect::<Result<Vec<_>, EffectGraphBuildError>>()?;
+        graph.append_video_collage(grade, sources);
+        Ok(())
+    })
+}
+
 fn glass_graph_builder(effect_type: &EffectType) -> EffectGraphBuilder {
     let [bump_map, channel, softness, height, displacement, lighting, light_intensity, light_color, light_type, light_height, light_position, light_direction, ambient, diffuse, specular, roughness, metal] =
         [
@@ -13123,6 +13291,13 @@ fn define_builtin_property(
     if matches!(effect_type, EffectType::Qualifier) && parameter == "matte_preview" {
         descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Topology);
     }
+    if matches!(effect_type, EffectType::VideoCollage)
+        && matches!(parameter, "columns" | "rows" | "tile_delay")
+    {
+        descriptor = descriptor
+            .with_cache_impact(ParameterCacheImpact::Topology)
+            .with_animatable(false);
+    }
     descriptor.ui_metadata = AnimatablePropertyUiMetadata {
         group_name: Some(group.to_string()),
         supports_spatial: false,
@@ -13146,6 +13321,9 @@ fn define_builtin_enum_property(
             .with_parameter_id(builtin_parameter_id(effect_type, parameter))
             .with_enum_options(options)
             .with_animatable(false);
+    if *effect_type == EffectType::VideoCollage && parameter == "playback" {
+        descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Topology);
+    }
     descriptor.ui_metadata = AnimatablePropertyUiMetadata {
         group_name: Some(group.to_owned()),
         supports_spatial: false,
@@ -13535,6 +13713,8 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Pixels
         }
         (EffectType::Glass, "light_direction") => ParameterUnit::Degrees,
+        (EffectType::VideoCollage, "spacing" | "border_width") => ParameterUnit::Pixels,
+        (EffectType::VideoCollage, "roundness") => ParameterUnit::Percent,
         (EffectType::Glass, "light_position") => ParameterUnit::Normalized,
         (EffectType::Glass, "light_intensity" | "ambient" | "diffuse" | "specular" | "metal") => {
             ParameterUnit::Percent
@@ -13585,6 +13765,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::SetMatte
                 | EffectType::DisplacementMap
                 | EffectType::Glass
+                | EffectType::VideoCollage
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -13848,12 +14029,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
-        EffectType::DisplacementMap | EffectType::Glass => EffectExecutionContract {
-            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-            roi_propagation: EffectRoiPropagation::FullFrame,
-            topology: EffectGraphTopology::GeneralDag,
-            ..cpu_linear
-        },
+        EffectType::DisplacementMap | EffectType::Glass | EffectType::VideoCollage => {
+            EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+                roi_propagation: EffectRoiPropagation::FullFrame,
+                topology: EffectGraphTopology::GeneralDag,
+                ..cpu_linear
+            }
+        }
         EffectType::Choker => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The alpha morphology reads the whole frame, so the definition-level
@@ -19758,6 +19941,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             }))
         }
         EffectType::Glass => Some(glass_graph_builder(effect_type)),
+        EffectType::VideoCollage => Some(video_collage_graph_builder()),
         EffectType::SetMatte => {
             let source = builtin_parameter_id(effect_type, "matte_source");
             let channel = builtin_parameter_id(effect_type, "channel");
@@ -21543,6 +21727,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Reshape => "改变形状",
         EffectType::DetailPreservingUpscale => "超分放大",
         EffectType::Glass => "玻璃",
+        EffectType::VideoCollage => "视频拼贴",
         EffectType::SmartBlur => "智能模糊",
         EffectType::BilateralBlur => "双向模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
@@ -22947,6 +23132,7 @@ mod tests {
             EffectType::Reshape,
             EffectType::DetailPreservingUpscale,
             EffectType::Glass,
+            EffectType::VideoCollage,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -32096,7 +32282,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 124);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 125);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -32624,7 +32810,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 124);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 125);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -35583,7 +35769,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 124);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 125);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -36719,7 +36905,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 124);
+        assert_eq!(builtin_effect_types().len(), 125);
     }
 
     #[test]

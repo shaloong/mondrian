@@ -254,6 +254,8 @@ pub enum EffectFloatExecutionError {
         node_id: EffectGraphNodeId,
         source: crate::GlassError,
     },
+    /// A Video Collage source or cell geometry violates the compiled plan.
+    VideoCollage(crate::VideoCollageError),
     /// The graph contains a node shape or render op that cannot execute in float.
     UnsupportedNode {
         /// Unsupported node id.
@@ -278,6 +280,12 @@ pub enum EffectFloatExecutionError {
 impl From<crate::EffectFloatFrameError> for EffectFloatExecutionError {
     fn from(error: crate::EffectFloatFrameError) -> Self {
         Self::FrameContract(error)
+    }
+}
+
+impl From<crate::VideoCollageError> for EffectFloatExecutionError {
+    fn from(error: crate::VideoCollageError) -> Self {
+        Self::VideoCollage(error)
     }
 }
 
@@ -477,6 +485,9 @@ fn execute_effect_graph_with_auxiliary(
                 };
                 validate_auxiliary_frame(frame, *slot, width, height)?;
                 outputs.insert(node.id, frame.pixels.to_vec());
+            }
+            EffectGraphNodeKind::VideoCollage { .. } => {
+                return Err(EffectExecutionError::InvalidGraph);
             }
             EffectGraphNodeKind::AuxiliaryEffect {
                 input: input_id,
@@ -1316,7 +1327,8 @@ fn validate_float_auxiliary_inputs(
         return Ok(None);
     }
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.effect-auxiliary.f32.v1");
+    hasher.update(b"mondrian.effect-auxiliary.f32.v2");
+    let mut planes = HashMap::new();
     for spec in compiled.auxiliary_inputs() {
         let mut matches = inputs.iter().filter(|binding| binding.slot == spec.slot());
         let binding = matches.next().ok_or_else(|| {
@@ -1328,7 +1340,6 @@ fn validate_float_auxiliary_inputs(
             return Err(invalid(spec.slot(), "duplicate_slot"));
         }
         let raster = binding.raster;
-        raster.frame.validate_controlled(&mut || scalar_checkpoint(control))?;
         if raster.frame.format() != spec.format() {
             return Err(invalid(spec.slot(), "format_mismatch"));
         }
@@ -1350,14 +1361,38 @@ fn validate_float_auxiliary_inputs(
         for value in raster.transform {
             hasher.update(value.to_bits().to_le_bytes());
         }
-        for chunk in raster.frame.pixels().chunks(4096) {
-            scalar_checkpoint(control)?;
-            for pixel in chunk {
-                for value in pixel {
-                    hasher.update(value.to_bits().to_le_bytes());
-                }
-            }
+        let sampling = raster.frame.sampling();
+        let aspect = sampling.sample_aspect_ratio();
+        hasher.update(aspect.numerator().to_le_bytes());
+        hasher.update(aspect.denominator().to_le_bytes());
+        for scale in sampling.render_scale() {
+            hasher.update(scale.num.to_le_bytes());
+            hasher.update(scale.den.to_le_bytes());
         }
+        let pixels = raster.frame.pixels();
+        let key = (
+            pixels.as_ptr(),
+            pixels.len(),
+            raster.frame.extent(),
+            raster.frame.format(),
+        );
+        let digest = match planes.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                raster.frame.validate_controlled(&mut || scalar_checkpoint(control))?;
+                let mut plane = Sha256::new();
+                for chunk in pixels.chunks(4096) {
+                    scalar_checkpoint(control)?;
+                    for pixel in chunk {
+                        for value in pixel {
+                            plane.update(value.to_bits().to_le_bytes());
+                        }
+                    }
+                }
+                *entry.insert(EffectInputContentFingerprint::from(plane.finalize()))
+            }
+        };
+        hasher.update(digest);
     }
     Ok(Some(hasher.finalize().into()))
 }
@@ -1601,6 +1636,64 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     })?
                     .raster;
                 outputs.insert(node.id, raster.frame.to_owned()?);
+            }
+            EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
+                let primary = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *input,
+                )
+                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *input })?;
+                let primary = apply_effect_domain_transition(
+                    compiled,
+                    Some(node.id),
+                    *input,
+                    primary,
+                    &mut processor,
+                )?;
+                let rasters = sources
+                    .iter()
+                    .map(|source| {
+                        source
+                            .map(|id| {
+                                let Some(EffectGraphNodeKind::ExternalInput { slot, .. }) =
+                                    compiled.graph().node(id).map(|node| &node.kind)
+                                else {
+                                    return Err(EffectFloatExecutionError::VideoCollage(
+                                        crate::VideoCollageError::Sources,
+                                    ));
+                                };
+                                let raster = auxiliary
+                                    .iter()
+                                    .find(|binding| binding.slot == *slot)
+                                    .ok_or(EffectFloatExecutionError::AuxiliaryInput(
+                                        EffectExecutionError::AuxiliaryFrameMissing { slot: *slot },
+                                    ))?
+                                    .raster;
+                                decrement_float_graph_use(&mut remaining_uses, id).ok_or(
+                                    EffectFloatExecutionError::MissingOutput { node_id: id },
+                                )?;
+                                Ok(raster)
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let pixels = crate::video_collage::apply_video_collage_controlled(
+                    primary.view(),
+                    &rasters,
+                    *grade,
+                    &mut || scalar_checkpoint(control),
+                )?;
+                let output = crate::EffectFloatFrame::from_validated_parts(
+                    primary.extent(),
+                    primary.format().with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                    primary.sampling(),
+                    pixels,
+                );
+                output.validate()?;
+                release_float_execution_buffer(&mut buffer_pool, primary);
+                outputs.insert(node.id, output);
             }
             EffectGraphNodeKind::AuxiliaryEffect {
                 input: input_id,
@@ -3029,6 +3122,7 @@ fn validate_float_effect_graph_shape(
             | EffectGraphNodeKind::MaskSource { .. }
             | EffectGraphNodeKind::MaskCombine { .. }
             | EffectGraphNodeKind::MatteMix { .. }
+            | EffectGraphNodeKind::VideoCollage { .. }
             | EffectGraphNodeKind::MultiInput { .. } => {}
         }
     }
@@ -3048,7 +3142,9 @@ fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
         EffectRenderOp::Custom { processor, .. } => {
             processor.as_ref().is_some_and(|binding| binding.supports_float32())
         }
-        EffectRenderOp::TemporalFrameBlend { .. } | EffectRenderOp::DisplacementMap { .. } => false,
+        EffectRenderOp::TemporalFrameBlend { .. }
+        | EffectRenderOp::DisplacementMap { .. }
+        | EffectRenderOp::VideoCollage { .. } => false,
         _ => true,
     }
 }
@@ -3150,6 +3246,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Reshape { .. } => "reshape",
         EffectRenderOp::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
         EffectRenderOp::Glass { .. } => "glass",
+        EffectRenderOp::VideoCollage { .. } => "video_collage",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",
