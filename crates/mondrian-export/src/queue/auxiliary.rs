@@ -675,12 +675,60 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "real GPU Export second-picture qualification; run independently"]
+    fn export_glass_with_a_separate_sequence_bump_map_matches_cpu_float32() {
+        let mut source = Sequence::new("Glass bump map");
+        source.settings.resolution = Resolution { width: 31, height: 17 };
+        let mut bump = solid(Color::BLACK, TimelineTime::ZERO);
+        let mut ramp = instantiate_effect_node(EffectType::Ramp).unwrap();
+        for (key, point) in [("start", [0.0_f32, 0.0]), ("end", [31.0, 17.0])] {
+            ramp.set_static_value_by_parameter(
+                &EffectType::Ramp.parameter_id(key).unwrap(),
+                PropertyValue::Vec2(point.into()),
+            )
+            .unwrap();
+        }
+        bump.add_effect_node(ramp);
+        source.video_tracks[0].add_clip(bump).unwrap();
+        let mut glass = instantiate_effect_node(EffectType::Glass).unwrap();
+        for (key, value) in [
+            (
+                "bump_map",
+                PropertyValue::VisualSource(VisualSourceReference::Sequence {
+                    sequence_id: source.id,
+                    retime: Default::default(),
+                }),
+            ),
+            ("softness", PropertyValue::Float(0.0)),
+            ("metal", PropertyValue::Float(0.0)),
+            ("roughness", PropertyValue::Float(0.25)),
+            ("light_type", PropertyValue::Enum("point".to_owned())),
+        ] {
+            glass
+                .set_static_value_by_parameter(&EffectType::Glass.parameter_id(key).unwrap(), value)
+                .unwrap();
+        }
+        let mut timeline = snapshot_with_effect(glass);
+        timeline.sequences.push(source);
+        let (cpu, gpu) = render_export_gpu_auxiliary_pair(&timeline);
+        let alpha_error =
+            cpu.chunks_exact(4).map(|pixel| (pixel[3] - 1.0).abs()).fold(0.0, f32::max);
+        assert!(
+            alpha_error <= 1.0e-6,
+            "opaque fixture alpha error {alpha_error:e}"
+        );
+        assert!(cpu.chunks_exact(4).any(|pixel| pixel[0] > 0.0));
+        let first = cpu[0];
+        assert!(cpu.chunks_exact(4).any(|pixel| (pixel[0] - first).abs() > 0.01));
+        assert_auxiliary_float32_parity(&cpu, &gpu);
+    }
+
     fn assert_export_gpu_auxiliary_sequence(
         effect: impl FnOnce(VisualSourceReference) -> mondrian_effects::EffectNode,
         map_color: Color,
         expected: [f32; 4],
     ) {
-        let _gpu = GpuVisualExecutionGuard::activate();
         let mut source = Sequence::new("Export GPU matte source");
         source.settings.resolution = Resolution { width: 31, height: 17 };
         source.video_tracks[0].add_clip(solid(map_color, TimelineTime::ZERO)).unwrap();
@@ -695,6 +743,13 @@ mod tests {
             .iter()
             .zip(expected)
             .all(|(actual, expected)| (actual - expected).abs() < 1.0e-6)));
+        let (cpu, gpu) = render_export_gpu_auxiliary_pair(&timeline);
+        assert!(cpu.chunks_exact(4).all(|pixel| pixel[3] == 1.0));
+        assert_auxiliary_float32_parity(&cpu, &gpu);
+    }
+
+    fn render_export_gpu_auxiliary_pair(timeline: &TimelineExportSnapshot) -> (Vec<f32>, Vec<f32>) {
+        let _gpu = GpuVisualExecutionGuard::activate();
         let mut session = ExportVisualRenderSession::default();
         let color = timeline
             .sequence
@@ -722,7 +777,7 @@ mod tests {
                 cancellation: &cancellation,
             };
             render_sequence_frame_into(
-                &timeline,
+                timeline,
                 &mut context,
                 &timeline.sequence,
                 0,
@@ -742,8 +797,18 @@ mod tests {
         assert_eq!(diagnostics.gpu_visual_spatial_cpu_retries, 0);
         assert_eq!(gpu.len(), 16 * 16 * 4);
         assert_eq!(gpu.len(), cpu.len());
-        assert!(cpu.chunks_exact(4).all(|pixel| pixel[3] == 1.0));
-        let max_error = gpu.iter().zip(&cpu).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        (cpu, gpu)
+    }
+
+    fn assert_auxiliary_float32_parity(cpu: &[f32], gpu: &[f32]) {
+        let max_error = gpu
+            .iter()
+            .zip(cpu)
+            .map(|(a, b)| {
+                assert!(a.is_finite() && b.is_finite());
+                (a - b).abs()
+            })
+            .fold(0.0, f32::max);
         eprintln!("Export auxiliary Float32 maximum error: {max_error:e}");
         assert!(max_error <= 1.0e-4);
     }

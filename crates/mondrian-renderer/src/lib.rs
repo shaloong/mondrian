@@ -25,6 +25,7 @@ pub mod cross_application_qualification;
 mod detail_preserving_upscale_gpu;
 pub mod display_calibration;
 mod display_matte;
+mod glass_gpu;
 mod mask_deformation_gpu;
 pub mod spatial_driver;
 mod spatial_pass_gpu;

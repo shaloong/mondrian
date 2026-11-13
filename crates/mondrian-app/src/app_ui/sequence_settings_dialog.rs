@@ -6,10 +6,11 @@
 use fluent_bundle::FluentArgs;
 use mondrian_core::display_labels::color_space_label;
 use mondrian_core::{
-    ColorSpace, DisplayToneMapPolicy, Rational, Resolution, SmpteCountingMode,
-    TimelineDisplayFormat, WorkingColorSpace,
+    AuthoringList, ColorSpace, DisplayToneMapPolicy, Rational, Resolution, SceneLightId,
+    SmpteCountingMode, TimelineDisplayFormat, WorkingColorSpace,
 };
 use mondrian_timeline::{
+    scene_light::SceneLight,
     sequence::{
         ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, StaticHdrMetadataPolicy,
         VideoRange,
@@ -27,13 +28,16 @@ use mondrian_ui_widgets::{Button, Checkbox, DialogSurface, Label, NumberInput, S
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_confirm_sequence_settings_action,
     app_shell_sequence_settings_draft_changed_action,
-    app_shell_sequence_settings_tab_changed_action, SequenceSettingsDraftUpdatePayload,
-    SequenceSettingsTabPayload, SequenceUpdateSettingsPayload,
+    app_shell_sequence_settings_tab_changed_action, SceneLightDraftEdit,
+    SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload, SequenceUpdateSettingsPayload,
 };
 use crate::app_ui::color_management_controls::color_engine_label_in_locale;
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::localization::{AppUiLocale, Localizer};
 use crate::app_ui::preview_scale::preview_scale_percent_label;
+
+mod lighting;
+use lighting::SceneLightEditor;
 
 /// Shell-local sequence settings form state.
 #[derive(Debug, Clone)]
@@ -44,6 +48,9 @@ pub struct AppUiSequenceSettingsDraft {
     pub name: String,
     /// Editable timeline format and preview settings.
     pub settings: SequenceSettings,
+    scene_lights: AuthoringList<SceneLight>,
+    selected_light: Option<SceneLightId>,
+    scene_lights_changed: bool,
     /// Read-only Project engine used to validate this Sequence draft.
     pub project_color_environment: mondrian_core::ProjectColorEnvironment,
 }
@@ -66,6 +73,9 @@ impl AppUiSequenceSettingsDraft {
             sequence_id: sequence.id,
             name: sequence.name.clone(),
             settings: sequence.settings.clone(),
+            scene_lights: sequence.scene_lights.clone(),
+            selected_light: sequence.scene_lights.first().map(|light| light.id),
+            scene_lights_changed: false,
             project_color_environment: project_color_environment.clone(),
         }
     }
@@ -78,7 +88,16 @@ impl AppUiSequenceSettingsDraft {
                 reason: "序列名称不能为空".to_owned(),
             });
         }
-        self.settings.validate_with_color_environment(&self.project_color_environment)
+        self.settings.validate_with_color_environment(&self.project_color_environment)?;
+        for light in &self.scene_lights {
+            light
+                .validate()
+                .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "sequence_scene_light_validate".to_owned(),
+                    reason: error.to_string(),
+                })?;
+        }
+        Ok(())
     }
 
     fn can_edit_working_color_space(&self) -> bool {
@@ -179,6 +198,7 @@ impl AppUiSequenceSettingsDraft {
             SequenceSettingsDraftUpdatePayload::PreviewCacheEnabled(enabled) => {
                 self.settings.preview.cache_enabled = enabled;
             }
+            SequenceSettingsDraftUpdatePayload::SceneLight(edit) => self.edit_scene_light(edit),
         }
     }
 
@@ -188,6 +208,7 @@ impl AppUiSequenceSettingsDraft {
             sequence_id: self.sequence_id,
             name: self.name.trim().to_owned(),
             settings: self.settings,
+            scene_lights: self.scene_lights_changed.then_some(self.scene_lights),
         }
     }
 }
@@ -305,13 +326,14 @@ const DELIVERY_BIT_DEPTH_OPTIONS: [DeliveryBitDepth; 3] = [
 ];
 
 impl SequenceSettingsTabPayload {
-    const ALL: [Self; 3] = [Self::Format, Self::Color, Self::Preview];
+    const ALL: [Self; 4] = [Self::Format, Self::Color, Self::Preview, Self::Lighting];
 
     fn label(self, localizer: Option<&Localizer>) -> String {
         let (id, fallback) = match self {
             Self::Format => ("sequence-tab-format", "格式"),
             Self::Color => ("sequence-tab-color", "色彩"),
             Self::Preview => ("sequence-tab-preview", "预览"),
+            Self::Lighting => ("sequence-tab-lighting", "灯光"),
         };
         sequence_text(localizer, id, fallback)
     }
@@ -1163,6 +1185,7 @@ pub struct SequenceSettingsDialog {
     preview_render_format_dropdown: Dropdown,
     preview_scale_slider: Slider,
     preview_cache_checkbox: Checkbox,
+    lighting: SceneLightEditor,
     error_label: Label,
     cancel_button: Button,
     apply_button: Button,
@@ -1184,7 +1207,7 @@ impl SequenceSettingsDialog {
             .with_padding(0.0, 0.0);
         let description_label = Label::new(text(
             "sequence-settings-description",
-            "调整活动序列的时间线格式和预览设置。",
+            "调整活动序列的格式、色彩、预览和灯光。",
         ))
         .muted()
         .with_font_size(LABEL_FONT_SIZE)
@@ -1272,6 +1295,7 @@ impl SequenceSettingsDialog {
         let preview_render_format_dropdown = preview_render_format_dropdown_for(&draft);
         let preview_scale_slider = preview_scale_slider_for(&draft);
         let preview_cache_checkbox = preview_cache_checkbox_for(&draft, localizer.as_ref());
+        let lighting = SceneLightEditor::new(&draft, localizer.as_ref());
         let cancel_text = text("sequence-cancel", "取消");
         let apply_text = text("sequence-apply", "应用");
         Self {
@@ -1323,6 +1347,7 @@ impl SequenceSettingsDialog {
             preview_render_format_dropdown,
             preview_scale_slider,
             preview_cache_checkbox,
+            lighting,
             error_label: Label::new("")
                 .with_semantic_color(LabelColor::Destructive)
                 .with_font_size(LABEL_FONT_SIZE)
@@ -1337,6 +1362,27 @@ impl SequenceSettingsDialog {
 
     /// Apply one shell-local update and rebuild controls whose labels changed.
     pub fn apply_update(&mut self, update: SequenceSettingsDraftUpdatePayload) {
+        if let SequenceSettingsDraftUpdatePayload::SceneLight(edit) = update {
+            let rename = matches!(edit, SceneLightDraftEdit::Name(..));
+            let rebuild = matches!(
+                edit,
+                SceneLightDraftEdit::Select(_)
+                    | SceneLightDraftEdit::Add { .. }
+                    | SceneLightDraftEdit::Remove(_)
+                    | SceneLightDraftEdit::Falloff(..)
+            );
+            self.draft.edit_scene_light(edit);
+            self.error_label.set_text(String::new());
+            if rebuild {
+                self.lighting = SceneLightEditor::new(&self.draft, self.localizer.as_ref());
+                if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                    self.layout(self.bounds);
+                }
+            } else if rename {
+                self.lighting.update_selected_name(&self.draft, self.localizer.as_ref());
+            }
+            return;
+        }
         let rebuild_controls = !matches!(update, SequenceSettingsDraftUpdatePayload::Name(_));
         self.draft.apply_update(update);
         self.error_label.set_text(String::new());
@@ -1391,6 +1437,7 @@ impl SequenceSettingsDialog {
             .with_padding(0.0, 0.0);
             self.preview_cache_checkbox =
                 preview_cache_checkbox_for(&self.draft, self.localizer.as_ref());
+            self.lighting = SceneLightEditor::new(&self.draft, self.localizer.as_ref());
             if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                 self.layout(self.bounds);
             }
@@ -1686,6 +1733,12 @@ impl Widget for SequenceSettingsDialog {
                     DROPDOWN_HEIGHT,
                 ));
             }
+            SequenceSettingsTabPayload::Lighting => self.lighting.layout(Rect::new(
+                content.x,
+                content.y + 122.0,
+                content.width,
+                (content.height - 210.0).max(0.0),
+            )),
         }
 
         let button_y = self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT;
@@ -1783,6 +1836,7 @@ impl Widget for SequenceSettingsDialog {
                     return EventResult::Handled;
                 }
             }
+            SequenceSettingsTabPayload::Lighting => return self.lighting.event(event, ctx),
         }
         EventResult::Ignored
     }
@@ -1835,6 +1889,7 @@ impl Widget for SequenceSettingsDialog {
                 self.preview_scale_label.paint(ctx);
                 self.preview_scale_slider.paint(ctx);
             }
+            SequenceSettingsTabPayload::Lighting => self.lighting.paint(ctx),
         }
         self.error_label.paint(ctx);
         self.cancel_button.paint(ctx);
@@ -1846,7 +1901,7 @@ impl Widget for SequenceSettingsDialog {
     }
 
     fn child_count(&self) -> usize {
-        42
+        44
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -1891,6 +1946,8 @@ impl Widget for SequenceSettingsDialog {
             39 => Some(&self.apply_button),
             40 => Some(&self.output_tone_map_policy_dropdown),
             41 => Some(&self.error_label),
+            42 => self.tab_buttons.get(3).map(|button| button as &dyn Widget),
+            43 if self.active_tab == SequenceSettingsTabPayload::Lighting => Some(&self.lighting),
             _ => None,
         }
     }
@@ -1937,6 +1994,10 @@ impl Widget for SequenceSettingsDialog {
             39 => Some(&mut self.apply_button),
             40 => Some(&mut self.output_tone_map_policy_dropdown),
             41 => Some(&mut self.error_label),
+            42 => self.tab_buttons.get_mut(3).map(|button| button as &mut dyn Widget),
+            43 if self.active_tab == SequenceSettingsTabPayload::Lighting => {
+                Some(&mut self.lighting)
+            }
             _ => None,
         }
     }
@@ -1945,6 +2006,46 @@ impl Widget for SequenceSettingsDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequence_lighting_tab_edits_only_its_draft_and_preserves_automation() {
+        use mondrian_core::{
+            ExactAutomationCurve, SceneLightFalloff, SceneLightSample, SceneLightSource,
+        };
+        use mondrian_timeline::scene_light::SceneLightParameter;
+
+        let mut sequence = Sequence::new("Composition");
+        let mut ambient = SceneLight::new("Ambient", SceneLightSample::default());
+        let intensity = SceneLightParameter::Intensity;
+        ambient.automation.insert(
+            intensity,
+            ExactAutomationCurve::new(intensity.parameter_id(), 20.0).unwrap(),
+        );
+        sequence.scene_lights.push(ambient.clone());
+        let draft = AppUiSequenceSettingsDraft::from_sequence(&sequence);
+        assert!(draft.clone().into_payload().scene_lights.is_none());
+        let mut dialog = SequenceSettingsDialog::with_locale(draft, AppUiLocale::EnUs);
+        dialog.set_active_tab(SequenceSettingsTabPayload::Lighting);
+        let mut edit =
+            |edit| dialog.apply_update(SequenceSettingsDraftUpdatePayload::SceneLight(edit));
+        edit(SceneLightDraftEdit::Parameter(ambient.id, intensity, 5.0));
+        edit(SceneLightDraftEdit::Add {
+            name: "Key".to_owned(),
+            source: SceneLightSource::Point {
+                position: [20.0, 15.0, 30.0],
+                falloff: SceneLightFalloff::None,
+            },
+        });
+        let key = dialog.draft.selected_light.unwrap();
+        dialog.apply_update(SequenceSettingsDraftUpdatePayload::SceneLight(
+            SceneLightDraftEdit::Parameter(key, intensity, -25.0),
+        ));
+        dialog.draft.validate().unwrap();
+        let lights = dialog.draft.clone().into_payload().scene_lights.unwrap();
+        assert_eq!(lights[0], ambient);
+        assert_eq!(lights[1].values.intensity_percent, -25.0);
+        assert_eq!(sequence.scene_lights.as_slice(), &[ambient]);
+    }
 
     #[test]
     fn english_sequence_settings_reprojects_values_and_keeps_draft() {

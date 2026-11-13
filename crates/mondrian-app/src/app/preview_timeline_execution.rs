@@ -28,11 +28,12 @@ use mondrian_renderer::{
     basic_title_raster_request_identity,
     color::{RenderColorStageDiagnostics, WorkingColorModule},
     execute_prepared_visual_closure, prepare_bound_visual_frame_closure_for_targets,
-    project_basic_title_transform, BasicTitleRasterFrame, BasicTitleRasterRequestIdentity,
-    CpuColorFrame, PreparedAuxiliaryVisualSource, PreparedHeterogeneousEffectRoute,
-    PreparedTimelinePreviewEffectRoutes, PreparedVisualAuthorSnapshotIdentity,
-    PreparedVisualAuxiliaryKey, PreparedVisualChildCanvasPolicy, PreparedVisualExecutionAdapter,
-    PreparedVisualExecutionError, PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
+    project_affine_to_sampled_extents, project_basic_title_transform, BasicTitleRasterFrame,
+    BasicTitleRasterRequestIdentity, CpuColorFrame, PreparedAuxiliaryVisualSource,
+    PreparedHeterogeneousEffectRoute, PreparedTimelinePreviewEffectRoutes,
+    PreparedVisualAuthorSnapshotIdentity, PreparedVisualAuxiliaryKey,
+    PreparedVisualChildCanvasPolicy, PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
+    PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
     PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
     PreparedVisualFrameInvocation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
     PreparedVisualFrameTarget, PreparedVisualMaterializationContract, PreparedVisualNestedSample,
@@ -2976,6 +2977,26 @@ fn standalone_preview_heterogeneous_graph_budget() -> EffectGraphExecutionBudget
     )
 }
 
+fn project_preview_solid_transform(
+    transform: [f32; 6],
+    author_resolution: Resolution,
+    target_resolution: Resolution,
+) -> Result<[f32; 6], PreviewTimelineAbort> {
+    project_affine_to_sampled_extents(
+        transform,
+        author_resolution,
+        target_resolution,
+        author_resolution,
+        target_resolution,
+    )
+    .ok_or_else(|| {
+        PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+            PreviewOutputStage::TimelineEvaluation,
+            "Solid Color has invalid Preview transform geometry",
+        ))
+    })
+}
+
 fn resolve_prepared_visual_node<MediaFrame, TitleFrame>(
     execution: &mut PreviewTimelineExecutionAdapter<'_, '_, '_, MediaFrame, TitleFrame>,
     inputs: &PreviewNodeInputs<'_>,
@@ -3058,7 +3079,11 @@ where
                         color: solid.color,
                         opacity: solid.opacity,
                         blend_mode: solid.blend_mode,
-                        transform: solid.transform,
+                        transform: project_preview_solid_transform(
+                            solid.transform,
+                            author_resolution,
+                            target_resolution,
+                        )?,
                         effect_graph: solid.effect_graph,
                         frame_seed: solid.frame_seed,
                     };
@@ -3679,7 +3704,11 @@ where
                 color: solid.color,
                 opacity: solid.opacity,
                 blend_mode: solid.blend_mode,
-                transform: solid.transform,
+                transform: project_preview_solid_transform(
+                    solid.transform,
+                    parent_author_resolution,
+                    target_resolution,
+                )?,
                 effect_graph: solid.effect_graph,
                 frame_seed: solid.frame_seed,
             };

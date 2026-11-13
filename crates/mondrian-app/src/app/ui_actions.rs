@@ -533,6 +533,31 @@ pub enum NewProjectDraftUpdatePayload {
     PreviewCacheEnabled(bool),
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SceneLightDraftEdit {
+    Select(mondrian_core::SceneLightId),
+    Add {
+        name: String,
+        source: mondrian_core::SceneLightSource,
+    },
+    Remove(mondrian_core::SceneLightId),
+    Name(mondrian_core::SceneLightId, String),
+    Enabled(mondrian_core::SceneLightId, bool),
+    Parameter(
+        mondrian_core::SceneLightId,
+        mondrian_timeline::scene_light::SceneLightParameter,
+        f64,
+    ),
+    Falloff(mondrian_core::SceneLightId, SceneLightFalloffMode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneLightFalloffMode {
+    None,
+    Smooth,
+    InverseSquare,
+}
+
 /// One mutation to the shell-local project color-settings draft.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectSettingsDraftUpdatePayload {
@@ -593,6 +618,8 @@ pub enum SequenceSettingsDraftUpdatePayload {
     PreviewResolutionScale(f32),
     /// Whether preview rendering cache is enabled.
     PreviewCacheEnabled(bool),
+    /// Edit one composition light in the uncommitted Sequence settings draft.
+    SceneLight(SceneLightDraftEdit),
 }
 
 /// Section selected in the app UI sequence settings dialog.
@@ -604,6 +631,8 @@ pub enum SequenceSettingsTabPayload {
     Color,
     /// Preview render/cache settings.
     Preview,
+    /// Sequence-owned lights consumed by visual effects.
+    Lighting,
 }
 
 /// Build an action that selects a clip in the active timeline.

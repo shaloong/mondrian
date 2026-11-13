@@ -498,6 +498,7 @@ fn gpu_composite_layers_with_auxiliary(
                     working_color_space,
                     scratch,
                     layer_auxiliary,
+                    canvas_sampling,
                 )?)));
                 has_composited_layer |= opacity.clamp(0.0, 1.0) > 0.0;
             }
@@ -1018,6 +1019,7 @@ fn gpu_media_source(
     working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
     auxiliary: Option<&PreparedAuxiliaryRasters<'_>>,
+    canvas_sampling: mondrian_core::ImageSampling,
 ) -> Result<ViewerGpuSourceLayer, GpuCompositingBlockerReason> {
     if matches!(
         prepared_effect_route,
@@ -1044,7 +1046,7 @@ fn gpu_media_source(
             if frame.is_data_texture() {
                 return Err(GpuCompositingBlockerReason::EffectRequiresCpu);
             }
-            let pipeline = if needs_source_grid {
+            let mut pipeline = if needs_source_grid {
                 let sampling = frame
                     .spatial_image_sampling()
                     .ok_or(GpuCompositingBlockerReason::EffectRequiresCpu)?;
@@ -1052,6 +1054,11 @@ fn gpu_media_source(
             } else {
                 pipeline
             };
+            if pipeline.requires_scene_projection() {
+                let projection =
+                    mondrian_effects::GlassProjection::new(transform, canvas_sampling).ok();
+                pipeline = Arc::new(pipeline.with_glass_projection(projection));
+            }
             let (identity, spatial) = gpu_spatial_source_plan(
                 pipeline,
                 effect_graph,
@@ -1178,11 +1185,16 @@ fn gpu_solid_source(
                 || layer.effect_graph.has_raster_growth()
                 || pipeline.requires_image_sampling() =>
         {
-            let pipeline = if pipeline.requires_image_sampling() {
+            let mut pipeline = if pipeline.requires_image_sampling() {
                 Arc::new(pipeline.with_image_sampling(canvas_sampling))
             } else {
                 pipeline
             };
+            if pipeline.requires_scene_projection() {
+                let projection =
+                    mondrian_effects::GlassProjection::new(layer.transform, canvas_sampling).ok();
+                pipeline = Arc::new(pipeline.with_glass_projection(projection));
+            }
             let (identity, spatial) = gpu_spatial_source_plan(
                 pipeline,
                 &layer.effect_graph,
@@ -1239,6 +1251,7 @@ fn gpu_transition_input(
             working_color_space,
             scratch,
             auxiliary,
+            canvas_sampling,
         )?,
     };
     Ok(ViewerGpuTransitionInput::Source(Box::new(source)))
@@ -2060,6 +2073,79 @@ mod heterogeneous_tests {
             EffectFrameExtent::new(56, 35)
         );
         assert_eq!(admitted.output_bounds.origin_half_pixels(), [-19, -12]);
+    }
+
+    #[test]
+    fn a_glass_solid_binds_preview_sampling_and_its_physical_projection() {
+        use mondrian_core::{
+            ImageSampling, Rational, SampleAspectRatio, SceneLightFalloff, SceneLightSample,
+            SceneLightSource,
+        };
+        use mondrian_effects::{
+            EffectGpuSpatialPass, EffectGpuStage, GlassProjection, GlassSceneLighting,
+        };
+
+        let mut effect = mondrian_effects::instantiate_effect_node(EffectType::Glass).unwrap();
+        effect
+            .set_static_value_by_parameter(
+                &EffectType::Glass.parameter_id("lighting").unwrap(),
+                PropertyValue::Enum("composition".into()),
+            )
+            .unwrap();
+        let graph = mondrian_effects::compile_clip_effect_graph(
+            &[effect],
+            &[],
+            TimelineTime::ZERO,
+            WORKING_SPACE,
+        )
+        .unwrap();
+        let lights = Arc::new(
+            GlassSceneLighting::from_samples(&[SceneLightSample {
+                source: SceneLightSource::Point {
+                    position: [42.0, 18.0, 65.0],
+                    falloff: SceneLightFalloff::None,
+                },
+                ..Default::default()
+            }])
+            .unwrap(),
+        );
+        let graph = graph.bind_glass_lighting(Some(&lights), None);
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(2, 1).unwrap(),
+            [Rational::new(1, 2), Rational::new(1, 2)],
+        )
+        .unwrap();
+        let transform = [-1.0, 0.0, 38.5, 0.0, 1.0, 0.25];
+        let mut element = ordinary_solid(graph, 31);
+        let ResolvedPreviewElement::SolidColor(layer) = &mut element else {
+            unreachable!()
+        };
+        layer.transform = transform;
+        let extent = EffectFrameExtent::new(37, 23);
+        let mut scratch = TimelineCompositeScratch::default();
+        scratch.set_spatial_chain_preference(mondrian_renderer::SpatialChainPreference::ForceGpu);
+        let PreparedPreviewViewerGpuLayers::Ordinary { layers } =
+            prepare_gpu_composite_layers_with_heterogeneous_effects(
+                &[element],
+                WORKING_SPACE,
+                sampling,
+                &mut scratch,
+                cpu_grant(),
+                &[],
+                extent,
+            )
+            .unwrap()
+        else {
+            panic!("Glass should retain the ordinary GPU route")
+        };
+        let ViewerGpuSourceLayer::SolidColor { spatial_plan: Some(plan), .. } =
+            source_layer(&layers)
+        else {
+            panic!("expected Glass spatial plan")
+        };
+        assert!(matches!(plan.pipeline.stages(), [EffectGpuStage::Spatial {
+            pass: EffectGpuSpatialPass::Glass { sampling: Some(actual), projection: Some(projected), .. }, ..
+        }] if *actual == sampling && *projected == GlassProjection::new(transform, sampling).unwrap()));
     }
 
     #[test]

@@ -402,6 +402,16 @@ impl AppState {
         name: impl Into<String>,
         settings: mondrian_timeline::sequence::SequenceSettings,
     ) -> mondrian_core::Result<()> {
+        self.apply_sequence_settings_draft(sequence_id, name, settings, None)
+    }
+
+    pub(super) fn apply_sequence_settings_draft(
+        &mut self,
+        sequence_id: SequenceId,
+        name: impl Into<String>,
+        settings: mondrian_timeline::sequence::SequenceSettings,
+        lights: Option<mondrian_core::AuthoringList<mondrian_timeline::scene_light::SceneLight>>,
+    ) -> mondrian_core::Result<()> {
         let name = name.into();
         let name = name.trim();
         if name.is_empty() {
@@ -418,6 +428,9 @@ impl AppState {
         }
         self.commit_sequence_edit(sequence_id, "修改序列设置", move |sequence| {
             sequence.name = name;
+            if let Some(lights) = lights {
+                sequence.scene_lights = lights;
+            }
             apply_sequence_settings_with_effect_defaults(sequence, settings)
         })?;
         if active {

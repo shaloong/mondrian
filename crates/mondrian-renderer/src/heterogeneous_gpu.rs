@@ -880,6 +880,12 @@ pub fn record_heterogeneous_gpu_continuation(
     completion: PreparedHeterogeneousCpuCompletion,
 ) -> Result<HeterogeneousGpuRecordedContinuation, HeterogeneousGpuContinuationError> {
     validate_completion(request, &completion)?;
+    let sampling = completion
+        .boundary_values()
+        .first()
+        .map(|value| value.frame().sampling())
+        .ok_or(HeterogeneousGpuContinuationError::InvalidPlan { reason: "gpu_frontier_missing" })?;
+    validate_gpu_readback_sampling(&completion, sampling)?;
     let batch_id = allocate_heterogeneous_gpu_batch_id()?;
     let (boundary_values, execution_plan, gpu_suffix, cpu_evidence) = completion.into_parts();
     let binding = request.binding();
@@ -970,6 +976,7 @@ pub fn record_heterogeneous_gpu_continuation(
         uploaded_handles,
         binding.frame_seed(),
         binding.working_color_space(),
+        sampling,
     )?;
     Ok(HeterogeneousGpuRecordedContinuation {
         output,
@@ -1004,6 +1011,7 @@ fn record_gpu_suffix(
     >,
     frame_seed: i64,
     working_color_space: WorkingColorSpace,
+    sampling: mondrian_core::ImageSampling,
 ) -> Result<
     (
         crate::GpuColorFrameHandle,
@@ -1248,6 +1256,13 @@ fn record_gpu_suffix(
                         output,
                         pass,
                         ..
+                    }
+                    | PreparedHeterogeneousGpuDispatch::GlassMap {
+                        input,
+                        auxiliary: mask,
+                        output,
+                        pass,
+                        ..
                     },
                 ) => {
                     let input_handle = handles.get(input).ok_or(
@@ -1270,6 +1285,7 @@ fn record_gpu_suffix(
                         mask_handle,
                         pass,
                         working_color_space,
+                        sampling,
                     )?;
                     if handles.insert(*output, output_handle).is_some() {
                         return Err(HeterogeneousGpuContinuationError::InvalidPlan {
@@ -2020,6 +2036,7 @@ fn gpu_recording_device_demand(
             | PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer { .. }
             | PreparedHeterogeneousGpuDispatch::SetMatte { .. }
             | PreparedHeterogeneousGpuDispatch::DisplacementMap { .. }
+            | PreparedHeterogeneousGpuDispatch::GlassMap { .. }
             | PreparedHeterogeneousGpuDispatch::MaskCombine { .. }
             | PreparedHeterogeneousGpuDispatch::MatteMix { .. } => 1,
         };
@@ -2038,6 +2055,22 @@ fn gpu_recording_device_demand(
                 reason: "gpu_recording_materialization_count_overflow",
             },
         )?;
+        if let PreparedHeterogeneousGpuDispatch::GlassMap { pass, .. } = dispatch {
+            let mondrian_effects::EffectGpuSpatialPass::Glass { grade, lighting, .. } = pass else {
+                return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                    reason: "gpu_glass_dispatch_pass_mismatch",
+                });
+            };
+            let light_count = if grade.uses_composition_lights() {
+                lighting.as_ref().map_or(0, |lights| lights.light_count())
+            } else {
+                1
+            };
+            let (scratch, planes) =
+                crate::glass_gpu::GlassGpuPlan::recording_bound(plan.frame_extent(), light_count);
+            bytes = bytes.saturating_add(scratch);
+            materializations = materializations.saturating_add(planes);
+        }
     }
     Ok(GpuRecordingDeviceDemand { bytes, materializations })
 }
@@ -2464,6 +2497,15 @@ fn validate_gpu_suffix_schedule(
                     waits,
                     signal,
                     ..
+                }
+                | PreparedHeterogeneousGpuDispatch::GlassMap {
+                    node,
+                    input,
+                    auxiliary: mask,
+                    output,
+                    waits,
+                    signal,
+                    ..
                 },
             ) => {
                 require_plan(
@@ -2500,6 +2542,7 @@ fn validate_gpu_suffix_schedule(
                         PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer { .. }
                             | PreparedHeterogeneousGpuDispatch::SetMatte { .. }
                             | PreparedHeterogeneousGpuDispatch::DisplacementMap { .. }
+                            | PreparedHeterogeneousGpuDispatch::GlassMap { .. }
                     )
                 ) {
                     EffectColorDomain::SceneLinearRgb
@@ -4072,6 +4115,19 @@ mod tests {
             GpuContext::new().await.expect("real GPU adapter"),
             EffectRenderOp::DisplacementMap { grade },
             AuxiliaryRole::Map,
+        );
+    }
+
+    #[tokio::test]
+    async fn real_wgpu_glass_joins_two_graph_values() {
+        assert_graph_local_auxiliary_parity(
+            GpuContext::new().await.expect("real GPU adapter"),
+            EffectRenderOp::Glass {
+                grade: Default::default(),
+                lighting: None,
+                projection: None,
+            },
+            mondrian_effects::AuxiliaryRole::Map,
         );
     }
 

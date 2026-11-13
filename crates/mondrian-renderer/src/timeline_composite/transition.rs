@@ -54,6 +54,7 @@ pub(super) fn composite_transition_input_f32(
                             input,
                             &layer.effect_graph,
                             layer.frame_seed,
+                            layer.transform,
                             runtime,
                             control,
                         )
@@ -105,6 +106,7 @@ pub(super) fn composite_transition_input_f32(
                             input,
                             &layer.effect_graph,
                             layer.frame_seed,
+                            layer.transform,
                             runtime,
                             control,
                         )

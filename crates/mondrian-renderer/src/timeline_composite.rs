@@ -2143,6 +2143,7 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                         input,
                         &layer.effect_graph,
                         layer.frame_seed,
+                        layer.transform,
                         runtime.at_occurrence(0, TimelineAuxiliarySide::Element),
                         control,
                     )
@@ -2239,6 +2240,7 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                                 input,
                                 &layer.effect_graph,
                                 layer.frame_seed,
+                                layer.transform,
                                 runtime,
                                 control,
                             )
@@ -2335,6 +2337,7 @@ fn composite_supported_elements_to_working_frame_with_inputs(
                                 input,
                                 &layer.effect_graph,
                                 layer.frame_seed,
+                                layer.transform,
                                 runtime,
                                 control,
                             )
@@ -2630,16 +2633,28 @@ fn is_exact_full_frame_identity_normal_media(
         && frame.alpha == ColorFrameAlpha::StraightCoverage
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_effect_graph_f32(
     session: &mut EffectExecutionSession,
     color_session: &mut crate::RenderCpuColorExecutionSession,
     input: mondrian_effects::EffectFloatFrameView<'_>,
-    graph: &CompiledEffectGraph,
+    graph: &Arc<CompiledEffectGraph>,
     frame_seed: i64,
+    transform: [f32; 6],
     runtime: TimelineEffectColorRuntime<'_>,
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<mondrian_effects::EffectFloatFrame, EffectFloatExecutionError> {
     let auxiliary = runtime.auxiliary_for(graph, input.extent())?;
+    let projected;
+    let graph = if graph.requires_scene_lighting() {
+        projected = graph.bind_glass_lighting(
+            None,
+            mondrian_effects::GlassProjection::new(transform, runtime.sampling).ok(),
+        );
+        projected.as_ref()
+    } else {
+        graph.as_ref()
+    };
     if !auxiliary.is_empty() || !graph.auxiliary_inputs().is_empty() {
         return session.apply_compiled_rgba_f32_with_auxiliary_and_domain_processor(
             input,
@@ -2670,7 +2685,7 @@ fn apply_effect_graph_pass_f32(
     session: &mut EffectExecutionSession,
     color_session: &mut crate::RenderCpuColorExecutionSession,
     input: mondrian_effects::EffectFloatFrame,
-    graph: &CompiledEffectGraph,
+    graph: &Arc<CompiledEffectGraph>,
     opacity: f32,
     blend_policy: mondrian_core::EffectPassBlendPolicy,
     frame_seed: i64,
@@ -2678,6 +2693,20 @@ fn apply_effect_graph_pass_f32(
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<mondrian_effects::EffectFloatFrame, EffectFloatExecutionError> {
     let auxiliary = runtime.auxiliary_for(graph, input.extent())?;
+    let projected;
+    let graph = if graph.requires_scene_lighting() {
+        projected = graph.bind_glass_lighting(
+            None,
+            mondrian_effects::GlassProjection::new(
+                mondrian_effects::IDENTITY_AFFINE,
+                runtime.sampling,
+            )
+            .ok(),
+        );
+        projected.as_ref()
+    } else {
+        graph.as_ref()
+    };
     if !auxiliary.is_empty() || !graph.auxiliary_inputs().is_empty() {
         return session.apply_compiled_pass_rgba_f32_owned_with_auxiliary_and_domain_processor(
             input,

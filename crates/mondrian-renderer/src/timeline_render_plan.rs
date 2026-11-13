@@ -436,9 +436,13 @@ pub(crate) fn compile_auxiliary_clip_sample(
             source.clone(),
             placement.endpoint,
             schedule,
-            frame_seed,
+            VisualEvaluationFrame { time: source_time, seed: frame_seed },
             &mut TimelineEvaluationDiagnostics::default(),
-            &mut SessionPreparedClipEffectResolver { program, session },
+            &mut SessionPreparedClipEffectResolver {
+                program,
+                session,
+                lighting: FrameSceneLighting::default(),
+            },
         )
     } else {
         Ok(None)
@@ -583,7 +587,8 @@ pub fn evaluate_prepared_visual_program(
     program: &PreparedVisualProgram,
     request: TimelineEvaluationRequest,
 ) -> Result<TimelineRenderPlan> {
-    let mut effects = PreparedClipEffectResolver { program };
+    let mut effects =
+        PreparedClipEffectResolver { program, lighting: FrameSceneLighting::default() };
     validate_prepared_auxiliary_policy(program, request)?;
     evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
 }
@@ -600,7 +605,11 @@ pub fn evaluate_prepared_visual_program_with_session(
     session: &mut EffectExecutionSession,
 ) -> Result<TimelineRenderPlan> {
     validate_prepared_auxiliary_policy(program, request)?;
-    let mut effects = SessionPreparedClipEffectResolver { program, session };
+    let mut effects = SessionPreparedClipEffectResolver {
+        program,
+        session,
+        lighting: FrameSceneLighting::default(),
+    };
     evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
 }
 
@@ -620,7 +629,11 @@ pub fn evaluate_prepared_visual_program_for_auxiliary_preview(
             reason: "auxiliary Preview source decisions require a Preview program".to_owned(),
         });
     }
-    let mut effects = AuxiliaryPreviewClipEffectResolver { program, unavailable };
+    let mut effects = AuxiliaryPreviewClipEffectResolver {
+        program,
+        unavailable,
+        lighting: FrameSceneLighting::default(),
+    };
     evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
 }
 
@@ -640,6 +653,14 @@ fn validate_prepared_auxiliary_policy(
 trait ClipEffectResolver {
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>>;
 
+    fn scene_lighting(
+        &mut self,
+        graph: &Arc<CompiledEffectGraph>,
+        _sequence_time: TimelineTime,
+    ) -> Result<Arc<CompiledEffectGraph>> {
+        Ok(Arc::clone(graph))
+    }
+
     fn evaluate_timeline_grade(
         &mut self,
         sequence_time: TimelineTime,
@@ -648,12 +669,48 @@ trait ClipEffectResolver {
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()>;
 }
 
+#[derive(Default)]
+struct FrameSceneLighting(Option<(TimelineTime, Arc<mondrian_effects::GlassSceneLighting>)>);
+
+impl FrameSceneLighting {
+    fn bind(
+        &mut self,
+        program: &PreparedVisualProgram,
+        graph: &Arc<CompiledEffectGraph>,
+        time: TimelineTime,
+    ) -> Result<Arc<CompiledEffectGraph>> {
+        if !graph.requires_scene_lighting() {
+            return Ok(Arc::clone(graph));
+        }
+        if self.0.as_ref().is_none_or(|(cached_time, _)| *cached_time != time) {
+            let samples = program.scene_lights_at(time)?;
+            let lighting =
+                mondrian_effects::GlassSceneLighting::from_samples(&samples).map_err(|error| {
+                    MondrianError::EffectGraphEvaluationFailed {
+                        reason: format!("composition lighting at {time:?}: {error}"),
+                    }
+                })?;
+            self.0 = Some((time, Arc::new(lighting)));
+        }
+        Ok(graph.bind_glass_lighting(self.0.as_ref().map(|(_, lighting)| lighting), None))
+    }
+}
+
 struct AuxiliaryPreviewClipEffectResolver<'a> {
     program: &'a PreparedVisualProgram,
     unavailable: &'a [mondrian_core::VisualSourceReference],
+    lighting: FrameSceneLighting,
 }
 
 impl ClipEffectResolver for AuxiliaryPreviewClipEffectResolver<'_> {
+    fn scene_lighting(
+        &mut self,
+        graph: &Arc<CompiledEffectGraph>,
+        sequence_time: TimelineTime,
+    ) -> Result<Arc<CompiledEffectGraph>> {
+        self.lighting.bind(self.program, graph, sequence_time)
+    }
+
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
         self.program.evaluate_clip_effects_for_auxiliary_preview(
             clip.clip_id,
@@ -706,9 +763,18 @@ impl ClipEffectResolver for DirectClipEffectResolver {
 
 struct PreparedClipEffectResolver<'a> {
     program: &'a PreparedVisualProgram,
+    lighting: FrameSceneLighting,
 }
 
 impl ClipEffectResolver for PreparedClipEffectResolver<'_> {
+    fn scene_lighting(
+        &mut self,
+        graph: &Arc<CompiledEffectGraph>,
+        sequence_time: TimelineTime,
+    ) -> Result<Arc<CompiledEffectGraph>> {
+        self.lighting.bind(self.program, graph, sequence_time)
+    }
+
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
         self.program.evaluate_clip_effects(clip.clip_id, clip.clip_time)
     }
@@ -728,9 +794,18 @@ impl ClipEffectResolver for PreparedClipEffectResolver<'_> {
 struct SessionPreparedClipEffectResolver<'a> {
     program: &'a PreparedVisualProgram,
     session: &'a mut EffectExecutionSession,
+    lighting: FrameSceneLighting,
 }
 
 impl ClipEffectResolver for SessionPreparedClipEffectResolver<'_> {
+    fn scene_lighting(
+        &mut self,
+        graph: &Arc<CompiledEffectGraph>,
+        sequence_time: TimelineTime,
+    ) -> Result<Arc<CompiledEffectGraph>> {
+        self.lighting.bind(self.program, graph, sequence_time)
+    }
+
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
         self.program
             .evaluate_clip_effects_with_session(clip.clip_id, clip.clip_time, self.session)
@@ -791,12 +866,19 @@ pub(crate) fn validate_timeline_evaluation_position(
     Ok(TimelineTime::from_frame_position(position)?)
 }
 
+#[derive(Clone, Copy)]
+struct VisualEvaluationFrame {
+    time: TimelineTime,
+    seed: i64,
+}
+
 fn evaluate_timeline_render_plan_with_effects(
     source: &dyn RenderPlanSource,
     request: TimelineEvaluationRequest,
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineRenderPlan> {
     let current_time = validate_timeline_evaluation_position(source, request.position)?;
+    let frame = VisualEvaluationFrame { time: current_time, seed: request.position.frame };
     let active = source.flat_visual_items_at(current_time)?;
     let mut diagnostics = TimelineEvaluationDiagnostics {
         active_visual_items: active.len(),
@@ -811,7 +893,7 @@ fn evaluate_timeline_render_plan_with_effects(
                     clip,
                     TimelineClipEndpointContext::Ordinary,
                     source,
-                    request.position.frame,
+                    frame,
                     &mut diagnostics,
                     effects,
                 )? {
@@ -822,7 +904,7 @@ fn evaluate_timeline_render_plan_with_effects(
                 elements.push(compile_transition(
                     *transition,
                     source,
-                    request.position.frame,
+                    frame,
                     &mut diagnostics,
                     effects,
                 )?);
@@ -831,6 +913,7 @@ fn evaluate_timeline_render_plan_with_effects(
     }
 
     if let Some(effect_graph) = effects.evaluate_timeline_grade(current_time)? {
+        let effect_graph = effects.scene_lighting(&effect_graph, current_time)?;
         elements.push(TimelineRenderPlanElement::TimelineGrade(
             TimelineGradePlan { effect_graph, frame_seed: request.position.frame },
         ));
@@ -850,7 +933,7 @@ fn evaluate_timeline_render_plan_with_effects(
 fn compile_transition(
     transition: FlatVideoTransition,
     source: &dyn RenderPlanSource,
-    timeline_frame: i64,
+    frame: VisualEvaluationFrame,
     diagnostics: &mut TimelineEvaluationDiagnostics,
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineRenderPlanElement> {
@@ -863,7 +946,7 @@ fn compile_transition(
                     transition_id: transition.transition_id,
                 },
                 source,
-                timeline_frame,
+                frame,
                 diagnostics,
                 effects,
             )?;
@@ -873,7 +956,7 @@ fn compile_transition(
                     transition_id: transition.transition_id,
                 },
                 source,
-                timeline_frame,
+                frame,
                 diagnostics,
                 effects,
             )?;
@@ -943,14 +1026,14 @@ fn compile_transition_input(
     clip: FlatActiveClip,
     endpoint: TimelineClipEndpointContext,
     source: &dyn RenderPlanSource,
-    timeline_frame: i64,
+    frame: VisualEvaluationFrame,
     diagnostics: &mut TimelineEvaluationDiagnostics,
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineTransitionInputPlan> {
     if clip.is_disabled || clip.opacity.clamp(0.0, 1.0) <= 0.0 {
         return Ok(TimelineTransitionInputPlan::Transparent);
     }
-    let element = compile_flat_clip(clip, endpoint, source, timeline_frame, diagnostics, effects)?
+    let element = compile_flat_clip(clip, endpoint, source, frame, diagnostics, effects)?
         .ok_or_else(|| MondrianError::WorkflowStepFailed {
             step_id: "compile_video_transition".to_owned(),
             reason: "Transition endpoint did not produce a visual input".to_owned(),
@@ -981,7 +1064,7 @@ fn compile_flat_clip(
     ac: FlatActiveClip,
     endpoint: TimelineClipEndpointContext,
     source: &dyn RenderPlanSource,
-    timeline_frame: i64,
+    frame: VisualEvaluationFrame,
     diagnostics: &mut TimelineEvaluationDiagnostics,
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<Option<TimelineRenderPlanElement>> {
@@ -992,7 +1075,8 @@ fn compile_flat_clip(
     }
 
     let effect_graph = effects.evaluate(&ac)?;
-    let frame_seed = timeline_frame;
+    let effect_graph = effects.scene_lighting(&effect_graph, frame.time)?;
+    let frame_seed = frame.seed;
     let placement = TimelineClipExecutionRef {
         sequence_id: source.source_sequence_id(),
         sequence_revision: source.source_sequence_revision(),
@@ -1693,6 +1777,69 @@ mod tests {
         assert_eq!(
             preview_semantic_signature(&preview),
             preview_semantic_signature(&export)
+        );
+    }
+
+    #[test]
+    fn glass_preview_and_export_freeze_the_same_lights_at_the_exact_frame() {
+        use mondrian_core::{ExactAutomationCurve, ExactAutomationKeyframe};
+        use mondrian_effects::{instantiate_effect_node, EffectType};
+        use mondrian_timeline::scene_light::{SceneLight, SceneLightParameter, SceneLightSample};
+
+        let mut seq = Sequence::new("Glass lighting");
+        let tb = seq.time_base();
+        let mut clip =
+            Clip::new_solid_color(AssetId::new(), Color::WHITE, tt(2, tb), tt(20, tb)).unwrap();
+        let mut glass = instantiate_effect_node(EffectType::Glass).unwrap();
+        glass
+            .set_static_value_by_parameter(
+                &EffectType::Glass.parameter_id("lighting").unwrap(),
+                PropertyValue::Enum("composition".to_owned()),
+            )
+            .unwrap();
+        clip.add_effect_node(glass);
+        seq.video_tracks[0].add_clip(clip).unwrap();
+        let mut light = SceneLight::new("Key", SceneLightSample::default());
+        let intensity = SceneLightParameter::Intensity;
+        let mut curve = ExactAutomationCurve::new(intensity.parameter_id(), 100.0).unwrap();
+        curve.set_keyframe(ExactAutomationKeyframe::linear(tt(2, tb), 20.0)).unwrap();
+        curve.set_keyframe(ExactAutomationKeyframe::linear(tt(12, tb), 140.0)).unwrap();
+        light.automation.insert(intensity, curve);
+        seq.scene_lights.push(light);
+        let program = PreparedVisualProgram::prepare(&seq).unwrap();
+        let mut session = EffectExecutionSession::default();
+        let mut evaluate = |program: &PreparedVisualProgram, request| {
+            let plan =
+                evaluate_prepared_visual_program_with_session(program, request, &mut session)
+                    .unwrap();
+            let [TimelineRenderPlanElement::SolidColor(layer)] = plan.elements.as_slice() else {
+                panic!("expected one Glass layer");
+            };
+            layer.effect_graph.semantic_fingerprint()
+        };
+        let first = evaluate(
+            &program,
+            TimelineEvaluationRequest::preview(fp(3, tb), 0.25),
+        );
+        let later = evaluate(
+            &program,
+            TimelineEvaluationRequest::preview(fp(11, tb), 0.5),
+        );
+        assert_ne!(first, later);
+        assert_eq!(
+            later,
+            evaluate(&program, TimelineEvaluationRequest::export(fp(11, tb)))
+        );
+        assert_eq!(
+            first,
+            evaluate(&program, TimelineEvaluationRequest::preview(fp(3, tb), 1.0))
+        );
+
+        seq.scene_lights[0].name = "Renamed key".to_owned();
+        let renamed = PreparedVisualProgram::prepare(&seq).unwrap();
+        assert_eq!(
+            first,
+            evaluate(&renamed, TimelineEvaluationRequest::export(fp(3, tb)))
         );
     }
 

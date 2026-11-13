@@ -8756,6 +8756,7 @@ fn render_prepared_visual_node_gpu(
                     media.placement,
                     &source,
                     decoded.image_sampling(),
+                    transform,
                     resolution,
                     &mut decode_cache,
                 )?;
@@ -8781,6 +8782,7 @@ fn render_prepared_visual_node_gpu(
                     title.placement,
                     &source,
                     Some(resolved.frame.rgba_f32().sampling),
+                    resolved.transform,
                     resolution,
                     &mut decode_cache,
                 )?;
@@ -8824,6 +8826,7 @@ fn render_prepared_visual_node_gpu(
                     nested.placement,
                     &source,
                     child.materialization_contract().image_sampling(sampled).ok(),
+                    transform,
                     resolution,
                     &mut decode_cache,
                 )?;
@@ -8854,6 +8857,7 @@ fn render_prepared_visual_node_gpu(
                     solid.placement,
                     &source,
                     materialization.image_sampling(resolution).ok(),
+                    transform,
                     resolution,
                     &mut decode_cache,
                 )?;
@@ -9042,6 +9046,7 @@ fn lower_export_gpu_source_effect(
     placement: TimelineClipExecutionRef,
     source: &GpuVisualFrameSource,
     source_sampling: Option<mondrian_core::ImageSampling>,
+    transform: [f32; 6],
     canvas: Resolution,
     cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
 ) -> Result<ExportGpuSourceEffect, ExportPreparedVisualError> {
@@ -9053,12 +9058,21 @@ fn lower_export_gpu_source_effect(
         GpuRoute::Point(point) => return Ok(ExportGpuSourceEffect { point, spatial: None }),
         GpuRoute::Spatial(pipeline) => pipeline,
     };
-    let pipeline = match source_sampling {
+    let mut pipeline = match source_sampling {
         Some(sampling) if pipeline.requires_image_sampling() => {
             Arc::new(pipeline.with_image_sampling(sampling))
         }
         _ => pipeline,
     };
+    if pipeline.requires_scene_projection() {
+        let canvas_sampling = inputs
+            .node()
+            .materialization_contract()
+            .image_sampling(canvas)
+            .map_err(|error| format!("invalid Glass canvas sampling: {error}"))?;
+        let projection = mondrian_effects::GlassProjection::new(transform, canvas_sampling).ok();
+        pipeline = Arc::new(pipeline.with_glass_projection(projection));
+    }
     let (width, height) = source.extent(canvas.width, canvas.height);
     let slots = graph.auxiliary_inputs().iter().map(|input| input.slot()).collect::<Vec<_>>();
     let plan = mondrian_renderer::spatial_driver::gpu_spatial_chain_plan_with_auxiliary(
@@ -9141,6 +9155,7 @@ fn lower_export_gpu_transition_input(
                 media.placement,
                 &source,
                 decoded.image_sampling(),
+                transform,
                 resolution,
                 decode_cache,
             )?;
@@ -9171,6 +9186,7 @@ fn lower_export_gpu_transition_input(
                 title.placement,
                 &source,
                 Some(resolved.frame.rgba_f32().sampling),
+                resolved.transform,
                 resolution,
                 decode_cache,
             )?;
@@ -9216,6 +9232,7 @@ fn lower_export_gpu_transition_input(
                 nested.placement,
                 &source,
                 child.materialization_contract().image_sampling(sampled).ok(),
+                transform,
                 resolution,
                 decode_cache,
             )?;
@@ -9246,6 +9263,7 @@ fn lower_export_gpu_transition_input(
                 solid.placement,
                 &source,
                 materialization.image_sampling(resolution).ok(),
+                transform,
                 resolution,
                 decode_cache,
             )?;
@@ -17294,6 +17312,12 @@ mod tests {
         export_spatial_effect_matches_cpu(mondrian_effects::EffectType::DetailPreservingUpscale);
     }
 
+    #[test]
+    #[ignore = "real GPU Export Glass qualification; run independently"]
+    fn export_glass_projects_composition_light_and_matches_cpu() {
+        export_spatial_effect_matches_cpu(mondrian_effects::EffectType::Glass);
+    }
+
     fn export_spatial_effect_matches_cpu(kind: mondrian_effects::EffectType) {
         use mondrian_core::mask_data::MaskParticipation;
         use mondrian_core::{
@@ -17350,6 +17374,29 @@ mod tests {
                 ("scale", PropertyValue::Float(150.0)),
                 ("reduce_noise", PropertyValue::Float(35.0)),
                 ("detail", PropertyValue::Float(80.0)),
+            ]
+        } else if kind == EffectType::Glass {
+            use mondrian_core::{SceneLightFalloff, SceneLightSample, SceneLightSource};
+            use mondrian_timeline::scene_light::SceneLight;
+            clip.transform.set_position([0.5, 0.25].into());
+            sequence
+                .scene_lights
+                .push(SceneLight::new("Ambient", SceneLightSample::default()));
+            sequence.scene_lights.push(SceneLight::new(
+                "Key",
+                SceneLightSample {
+                    color: [1.0, 0.9, 0.4],
+                    intensity_percent: 120.0,
+                    source: SceneLightSource::Point {
+                        position: [14.0, 8.0, 20.0],
+                        falloff: SceneLightFalloff::Smooth { radius: 20.0, distance: 55.0 },
+                    },
+                },
+            ));
+            vec![
+                ("lighting", PropertyValue::Enum("composition".into())),
+                ("softness", PropertyValue::Float(2.75)),
+                ("displacement", PropertyValue::Float(22.0)),
             ]
         } else {
             let source = clip.add_mask_component(mask(0.27, 0.46));
@@ -17448,6 +17495,7 @@ mod tests {
         assert_eq!(diagnostics.gpu_visual_spatial_cpu_retries, 0);
         assert_eq!(cpu.len(), (raster.width * raster.height * 4) as usize);
         assert_eq!(gpu.len(), cpu.len());
+        assert!(cpu.chunks_exact(4).any(|pixel| pixel[0] > 0 && pixel[3] == 255));
         let max_error = cpu.iter().zip(&gpu).map(|(cpu, gpu)| cpu.abs_diff(*gpu)).max().unwrap();
         eprintln!(
             "{} production Export maximum error: {max_error} RGBA8 steps",

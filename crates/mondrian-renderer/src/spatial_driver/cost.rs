@@ -337,12 +337,15 @@ fn estimate_ns(
                     gpu += copy_out_ns(pixels);
                 }
                 // CPU rates include all internal passes of each spatial kernel.
-                let cpu_pixels =
-                    if matches!(pass, EffectGpuSpatialPass::DetailPreservingUpscale { .. }) {
-                        *draw_pixels as f64
-                    } else {
-                        pixels
-                    };
+                let cpu_pixels = if matches!(
+                    pass,
+                    EffectGpuSpatialPass::DetailPreservingUpscale { .. }
+                        | EffectGpuSpatialPass::Glass { .. }
+                ) {
+                    *draw_pixels as f64
+                } else {
+                    pixels
+                };
                 cpu += cpu_pixels * cpu_ns_per_px(pass);
             }
             GpuSpatialStagePlan::PointOps { operations } => {
@@ -411,6 +414,7 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "grow_bounds" => 0.8,
         "smear" | "reshape" => 2.4,
         "detail_preserving_upscale" => 28.0,
+        "glass" => 18.0,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 1.4,
             _ => 3.6,
@@ -444,6 +448,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "grow_bounds" => 1.1,
         "smear" | "reshape" => 24.0,
         "detail_preserving_upscale" => 110.0,
+        "glass" => 75.0,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 3.0,
             _ => 12.0,

@@ -218,6 +218,7 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
     let mut direct_working_bytes = 0_u64;
     let mut direct_scratch_bytes = 0_u64;
     let mut output_bounds = EffectRasterBounds::from_extent(EffectFrameExtent::new(width, height));
+    let primary_extent = output_bounds.extent();
     let mut scratch_extents = std::collections::HashSet::new();
     for stage in pipeline.stages() {
         match stage {
@@ -283,6 +284,24 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                         }
                     })?;
                     minimum_draw_passes = plan.passes;
+                    exact_draw_pixels = Some(plan.draw_pixels);
+                    direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
+                    direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.scratch_bytes);
+                    0
+                } else if matches!(pass, EffectGpuSpatialPass::Glass { .. }) {
+                    let plan =
+                        crate::glass_gpu::GlassGpuPlan::new(pass, primary_extent, output_bounds)
+                            .map_err(|error| GpuSpatialChainBlocker::UnsupportedPass {
+                                pass: pass.name(),
+                                detail: error.to_string(),
+                            })?;
+                    if !plan.fits(&wgpu::Limits::default()) {
+                        return Err(GpuSpatialChainBlocker::UnsupportedPass {
+                            pass: pass.name(),
+                            detail: "Glass exceeds texture or light storage limits".into(),
+                        });
+                    }
+                    minimum_draw_passes = plan.draws;
                     exact_draw_pixels = Some(plan.draw_pixels);
                     direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
                     direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.scratch_bytes);
@@ -608,6 +627,48 @@ mod tests {
         let plan =
             gpu_spatial_chain_plan(&chromatic_aberration_removal_pipeline(), 8192, 2048).unwrap();
         assert_eq!(plan.scratch_bytes, 536_870_912);
+    }
+
+    #[test]
+    fn spatial_chain_glass_budgets_scalar_planes_at_maximum_softness() {
+        use mondrian_effects::{GlassChannel, GlassEffectLight, GlassGrade, GlassMaterial};
+
+        let grade = GlassGrade::new(
+            GlassChannel::Lightness,
+            500.0,
+            25.0,
+            100.0,
+            100.0,
+            [1.0; 3],
+            GlassEffectLight::Distant { direction_degrees: -45.0, height: 65.0 },
+            GlassMaterial {
+                ambient: 50.0,
+                diffuse: 50.0,
+                specular: 50.0,
+                roughness: 0.025,
+                metal: 100.0,
+            },
+            false,
+        )
+        .unwrap();
+        let mut graph = EffectGraphBuilderState::new();
+        graph.append_unary(EffectRenderOp::Glass { grade, lighting: None, projection: None });
+        let graph = compile_reference_render_graph(graph.finish()).unwrap();
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph)
+            .unwrap()
+            .with_image_sampling(mondrian_core::ImageSampling::UNIT_SQUARE);
+        let plan = gpu_spatial_chain_plan(&pipeline, 4096, 2160).unwrap();
+        assert_eq!(plan.spatial_passes, 10);
+        assert_eq!(plan.scratch_textures, 0);
+        assert_eq!(plan.scratch_bytes, 47_202_592);
+        assert_eq!(
+            plan.output_bounds.extent(),
+            EffectFrameExtent::new(4096, 2160)
+        );
+        assert!(matches!(
+            gpu_spatial_chain_plan(&pipeline, 7680, 4320),
+            Err(GpuSpatialChainBlocker::ScratchBudgetExceeded { .. })
+        ));
     }
 
     #[test]

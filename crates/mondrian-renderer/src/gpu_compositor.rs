@@ -33,8 +33,8 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     AuxiliaryPolicy, AuxiliaryResolution, CompiledEffectGpuPipeline, CompiledEffectGpuPlan,
-    EffectColorDomain, EffectGpuPointOp, EffectGpuSpatialPass, EffectGpuStage, MaskOp,
-    PreparedQualifier, QualifierMode, MAX_FUSED_GPU_EFFECT_OPS,
+    EffectColorDomain, EffectFrameExtent, EffectGpuPointOp, EffectGpuSpatialPass, EffectGpuStage,
+    MaskOp, PreparedQualifier, QualifierMode, MAX_FUSED_GPU_EFFECT_OPS,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -572,7 +572,7 @@ fn sample_layer(src_center: vec2<f32>) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     let src_size = uniforms.geometry.zw;
-    // Resized spatial output uses the CPU compositor's bilinear projection.
+    // Spatial passes that require the CPU compositor's bilinear projection set this flag.
     // The working texture may be unfilterable, so load and clamp each tap.
     if (uniforms.inv_transform1.z != 0.0) {
         let index = src_center - vec2<f32>(0.5);
@@ -5106,7 +5106,7 @@ impl GpuFrameCompositor {
                 ),
             };
             let mut transform = layer.transform;
-            let mut sample_resized_output = false;
+            let mut sample_spatial_output_bilinear = false;
             if let Some(chain) = spatial_chain_at(index) {
                 let source_descriptor = layer_source_descriptor(layer.source).ok_or(
                     GpuCompositeError::SpatialPlanOnUnsupportedSource {
@@ -5148,13 +5148,14 @@ impl GpuFrameCompositor {
                 let extent = chain.output_bounds.extent();
                 source_size = [extent.width() as f32, extent.height() as f32];
                 transform = chain.output_bounds.project_affine(transform);
-                sample_resized_output = chain.stages.iter().any(|stage| {
-                    matches!(
-                        stage.spatial_pass(),
-                        Some(EffectGpuSpatialPass::DetailPreservingUpscale { grade })
-                            if !grade.scale().is_identity()
-                    )
-                });
+                sample_spatial_output_bilinear =
+                    chain.stages.iter().any(|stage| match stage.spatial_pass() {
+                        Some(EffectGpuSpatialPass::DetailPreservingUpscale { grade }) => {
+                            !grade.scale().is_identity()
+                        }
+                        Some(EffectGpuSpatialPass::Glass { .. }) => true,
+                        _ => false,
+                    });
                 spatial_effect_layers = spatial_effect_layers.saturating_add(1);
                 spatial_chain_gpu_choices = spatial_chain_gpu_choices.saturating_add(1);
                 spatial_effect_passes =
@@ -5255,7 +5256,7 @@ impl GpuFrameCompositor {
                     inv_transform1: [
                         inv_transform[4],
                         inv_transform[5],
-                        f32::from(sample_resized_output),
+                        f32::from(sample_spatial_output_bilinear),
                         0.0,
                     ],
                     geometry: [width as f32, height as f32, source_size[0], source_size[1]],
@@ -5354,6 +5355,8 @@ impl GpuFrameCompositor {
         let mut current_texture = source_texture.clone();
         let mut current_view = source_view.clone();
         let mut current_handle = None;
+        let primary_extent =
+            mondrian_effects::EffectFrameExtent::new(descriptor.width, descriptor.height);
         for stage in &chain.stages {
             let width = working_descriptor.width;
             let height = working_descriptor.height;
@@ -5427,6 +5430,38 @@ impl GpuFrameCompositor {
                                 &current_texture,
                                 &output.resource().texture,
                                 *grade,
+                            )
+                            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                                pass: spatial_failure_pass(&error),
+                                detail: error.to_string(),
+                            })?;
+                    } else if let EffectGpuSpatialPass::Glass { auxiliary, external_slot, .. } =
+                        pass
+                    {
+                        let map = if let Some(sampling) = auxiliary {
+                            let binding = auxiliary_rasters
+                                .iter()
+                                .find(|binding| Some(binding.slot) == *external_slot)
+                                .ok_or_else(|| GpuCompositeError::SpatialChainFailed {
+                                    pass: "glass_auxiliary",
+                                    detail: format!("Glass lost auxiliary slot {external_slot:?}"),
+                                })?;
+                            let resource = table
+                                .get(binding.frame)
+                                .map_err(GpuCompositeError::ResourceTable)?;
+                            Some((&resource.resource().texture, binding.transform, *sampling))
+                        } else {
+                            None
+                        };
+                        self.spatial
+                            .record_glass(
+                                device,
+                                encoder,
+                                pass,
+                                &current_texture,
+                                &output.resource().texture,
+                                map,
+                                primary_extent,
                             )
                             .map_err(|error| GpuCompositeError::SpatialChainFailed {
                                 pass: spatial_failure_pass(&error),
@@ -6006,6 +6041,7 @@ impl GpuFrameCompositor {
         auxiliary: &GpuColorFrameHandle,
         pass: &EffectGpuSpatialPass,
         working_color_space: mondrian_core::WorkingColorSpace,
+        sampling: mondrian_core::ImageSampling,
     ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
         if pass.auxiliary_slot() != Some(None) {
             return Err(GpuCompositeError::SpatialChainFailed {
@@ -6046,20 +6082,51 @@ impl GpuFrameCompositor {
             "gpu-graph-auxiliary-output",
             resource_pool,
         )?;
-        self.spatial
-            .record_auxiliary(
+        let source = &input_resource.resource().texture;
+        let map = &auxiliary_resource.resource().texture;
+        let destination = &output.resource().texture;
+        let result = if let EffectGpuSpatialPass::Glass {
+            grade,
+            lighting,
+            projection,
+            auxiliary: Some(policy),
+            ..
+        } = pass
+        {
+            let pass = EffectGpuSpatialPass::Glass {
+                grade: *grade,
+                lighting: lighting.clone(),
+                projection: *projection,
+                sampling: Some(sampling),
+                auxiliary: Some(*policy),
+                external_slot: None,
+            };
+            self.spatial.record_glass(
                 device,
                 encoder,
-                pass,
-                &input_resource.resource().texture,
-                &auxiliary_resource.resource().texture,
-                &output.resource().texture,
-                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                &pass,
+                source,
+                destination,
+                Some((map, mondrian_effects::IDENTITY_AFFINE, *policy)),
+                EffectFrameExtent::new(source.width(), source.height()),
             )
-            .map_err(|error| GpuCompositeError::SpatialChainFailed {
-                pass: spatial_failure_pass(&error),
-                detail: error.to_string(),
-            })?;
+        } else {
+            self.spatial
+                .record_auxiliary(
+                    device,
+                    encoder,
+                    pass,
+                    source,
+                    map,
+                    destination,
+                    mondrian_effects::IDENTITY_AFFINE,
+                )
+                .map(|_| ())
+        };
+        result.map_err(|error| GpuCompositeError::SpatialChainFailed {
+            pass: spatial_failure_pass(&error),
+            detail: error.to_string(),
+        })?;
         let handle = output.handle().clone();
         table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
         Ok(handle)
@@ -8309,6 +8376,7 @@ fn spatial_failure_pass(error: &crate::spatial_pass_gpu::EffectSpatialGpuError) 
         crate::spatial_pass_gpu::EffectSpatialGpuError::MaskDeformation(_) => {
             "mask_deformation_preparation"
         }
+        crate::spatial_pass_gpu::EffectSpatialGpuError::Glass(_) => "glass",
     }
 }
 
@@ -17568,6 +17636,197 @@ mod tests {
         assert_auxiliary_texture_cases(context, role, cases);
     }
 
+    #[test]
+    fn spatial_chain_glass_matches_cpu_with_a_different_auxiliary_grid() {
+        use mondrian_effects::{
+            AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryOutOfBounds, AuxiliaryRole,
+            AuxiliarySampling, EffectRenderOp, GlassChannel, GlassEffectLight, GlassGrade,
+            GlassMaterial,
+        };
+        let context =
+            pollster::block_on(crate::GpuContext::new_without_float32_filterable_for_test())
+                .expect("real GPU adapter for Glass parity");
+        let make = |channel, softness, height| EffectRenderOp::Glass {
+            grade: GlassGrade::new(
+                channel,
+                softness,
+                height,
+                16.0,
+                120.0,
+                [0.7, 1.0, 1.2],
+                GlassEffectLight::Point { position: [0.4, 0.6], height: 18.0 },
+                GlassMaterial {
+                    ambient: 40.0,
+                    diffuse: 68.0,
+                    specular: 23.0,
+                    roughness: 0.08,
+                    metal: 37.0,
+                },
+                false,
+            )
+            .unwrap(),
+            lighting: None,
+            projection: None,
+        };
+        assert_auxiliary_texture_cases(
+            &context,
+            AuxiliaryRole::Map,
+            [
+                (
+                    make(GlassChannel::Red, 0.0, 12.0),
+                    AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
+                    mondrian_effects::IDENTITY_AFFINE,
+                ),
+                (
+                    make(GlassChannel::Alpha, 2.75, -19.0),
+                    AuxiliarySampling::new(
+                        AuxiliaryCoordinateMapping::FrameTransform,
+                        AuxiliaryFilter::Linear,
+                        AuxiliaryOutOfBounds::Transparent,
+                    ),
+                    [0.9, 0.1, -0.05, 0.0, 1.0, 0.18],
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn spatial_chain_glass_projects_composition_lights_over_a_reflected_raster() {
+        use mondrian_core::{
+            ImageSampling, Rational, SampleAspectRatio, SceneLightFalloff, SceneLightSample,
+            SceneLightSource,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            EffectColorDomain, EffectFloatFrameView, EffectGraphBuilderState, EffectRenderOp,
+            EffectValueFormat, EffectWorkingPrecision, GlassChannel, GlassEffectLight, GlassGrade,
+            GlassMaterial, GlassProjection, GlassSceneLighting,
+        };
+        use std::sync::Arc;
+        let context =
+            pollster::block_on(crate::GpuContext::new_without_float32_filterable_for_test())
+                .expect("real GPU adapter for projected Glass parity");
+        let (width, height) = (97, 63);
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(2, 1).unwrap(),
+            [Rational::new(1, 2), Rational::new(3, 4)],
+        )
+        .unwrap();
+        let transform = [-1.0, 0.0, width as f32, 0.0, 1.0, 0.0];
+        let projection = GlassProjection::new(transform, sampling).unwrap();
+        let make_light = |color, intensity_percent, source| SceneLightSample {
+            color,
+            intensity_percent,
+            source,
+        };
+        let lighting = Arc::new(
+            GlassSceneLighting::from_samples(&[
+                make_light([0.3, 0.8, 0.6], 75.0, SceneLightSource::Ambient),
+                make_light(
+                    [1.0, 0.6, 0.8],
+                    100.0,
+                    SceneLightSource::Parallel {
+                        position: [150.0, 15.0, 100.0],
+                        target: [230.0, 40.0, 0.0],
+                        falloff: SceneLightFalloff::None,
+                    },
+                ),
+                make_light(
+                    [0.5, 1.0, 0.7],
+                    -25.0,
+                    SceneLightSource::Point {
+                        position: [90.0, 55.0, 110.0],
+                        falloff: SceneLightFalloff::Smooth { radius: 30.0, distance: 240.0 },
+                    },
+                ),
+                make_light(
+                    [0.9, 0.75, 1.0],
+                    80.0,
+                    SceneLightSource::Spot {
+                        position: [170.0, 25.0, 130.0],
+                        target: [200.0, 40.0, 0.0],
+                        cone_angle_degrees: 120.0,
+                        cone_feather_percent: 35.0,
+                        falloff: SceneLightFalloff::InverseSquareClamped { radius: 120.0 },
+                    },
+                ),
+            ])
+            .unwrap(),
+        );
+        let pixels = spatial_test_pixels(width, height);
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
+            width,
+            height,
+            color_space: space,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            data: pixels.clone(),
+        });
+        for (softness, expected_draws) in [(0.0, 2), (500.0, 8)] {
+            let grade = GlassGrade::new(
+                GlassChannel::Lightness,
+                softness,
+                33.0,
+                -39.0,
+                100.0,
+                [1.0; 3],
+                GlassEffectLight::Point { position: [0.5; 2], height: 65.0 },
+                GlassMaterial {
+                    ambient: 35.0,
+                    diffuse: 80.0,
+                    specular: 40.0,
+                    roughness: 0.12,
+                    metal: 25.0,
+                },
+                true,
+            )
+            .unwrap();
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Glass {
+                grade,
+                lighting: Some(Arc::clone(&lighting)),
+                projection: Some(projection),
+            });
+            let graph = compile_reference_render_graph(builder.finish()).unwrap();
+            let pipeline = mondrian_effects::lower_effect_graph_to_gpu_pipeline(&graph)
+                .unwrap()
+                .with_image_sampling(sampling);
+            let view = EffectFloatFrameView::new(
+                extent,
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    ColorFrameAlpha::StraightCoverage,
+                ),
+                sampling,
+                &pixels,
+            );
+            let cpu = apply_compiled_effect_graph_rgba_f32(view, &graph, 0).unwrap();
+            assert_ne!(cpu.pixels(), pixels);
+            let expected: Vec<_> = cpu
+                .pixels()
+                .chunks_exact(width as usize)
+                .flat_map(|row| row.iter().rev().copied())
+                .collect();
+            let entries = [GpuCompositeSpatialLayer {
+                layer: GpuCompositeLayer { transform, ..spatial_test_layer(&frame) },
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context, &entries, width, height, space,
+            );
+            let max_error = max_spatial_float_error(&expected, &actual);
+            eprintln!(
+                "Glass scene lights, softness {softness}, max absolute error = {max_error:.9e}"
+            );
+            assert!(max_error <= 1.0e-4);
+            assert_eq!(diagnostics.spatial_effect_passes, expected_draws);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+        }
+    }
+
     fn assert_auxiliary_texture_cases(
         context: &crate::GpuContext,
         role: mondrian_effects::AuxiliaryRole,
@@ -17638,6 +17897,7 @@ mod tests {
                 builder.append_external_input(9, format, EffectColorDomainContract::SCENE_LINEAR);
             let grows = matches!(op, mondrian_effects::EffectRenderOp::DisplacementMap { grade }
                 if grade.output_outset() != [0, 0]);
+            let glass = matches!(op, mondrian_effects::EffectRenderOp::Glass { .. });
             let output = builder.add_auxiliary_effect(builder.source(), aux, op, role, sampling);
             builder.set_current_output(output);
             if grows {
@@ -17649,7 +17909,10 @@ mod tests {
                 });
             }
             let graph = compile_reference_render_graph(builder.finish()).unwrap();
-            let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            let mut pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            if pipeline.requires_image_sampling() {
+                pipeline = pipeline.with_image_sampling(ImageSampling::UNIT_SQUARE);
+            }
             assert!(matches!(
                 pipeline.stages(),
                 [EffectGpuStage::Spatial {
@@ -17763,7 +18026,15 @@ mod tests {
                 )
                 .expect("record a dual-texture spatial pass");
             assert_eq!(record.diagnostics.spatial_effect_layers, 1);
-            assert_eq!(record.diagnostics.spatial_effect_passes, 1);
+            let plan =
+                gpu_spatial_chain_plan_with_auxiliary(&pipeline, width, height, &[9]).unwrap();
+            assert_eq!(
+                record.diagnostics.spatial_effect_passes,
+                u64::from(plan.spatial_passes)
+            );
+            if !glass {
+                assert_eq!(record.diagnostics.spatial_effect_passes, 1);
+            }
             assert_eq!(record.diagnostics.spatial_point_stages, u64::from(grows));
             assert_eq!(record.diagnostics.cpu_fallback_composites, 0);
             let actual = readback_composite_output(

@@ -43,11 +43,13 @@ pub(crate) enum EffectSpatialGpuError {
     #[error("spatial pass requires an auxiliary raster")]
     MissingAuxiliaryInput,
     /// The source adapter must bind the sampling of the selected grid.
-    #[error("mask deformation requires the actual source image sampling")]
+    #[error("spatial pass requires the actual source image sampling")]
     MissingImageSampling,
     /// Building the bounded inverse lattice failed.
     #[error("{0}")]
     MaskDeformation(#[from] mondrian_effects::mask_deformation::MaskDeformationError),
+    #[error(transparent)]
+    Glass(#[from] mondrian_effects::GlassError),
 }
 
 /// Reusable pipelines for GPU spatial effect passes.
@@ -56,6 +58,7 @@ pub(crate) struct EffectSpatialGpu {
     mask_deformation: std::sync::OnceLock<crate::mask_deformation_gpu::MaskDeformationGpu>,
     detail_preserving_upscale:
         std::sync::OnceLock<crate::detail_preserving_upscale_gpu::DetailPreservingUpscaleGpu>,
+    glass: std::sync::OnceLock<crate::glass_gpu::GlassGpu>,
     box_blur: wgpu::RenderPipeline,
     find_edges: wgpu::RenderPipeline,
     emboss: wgpu::RenderPipeline,
@@ -2241,6 +2244,7 @@ impl EffectSpatialGpu {
             bilateral: std::sync::OnceLock::new(),
             mask_deformation: std::sync::OnceLock::new(),
             detail_preserving_upscale: std::sync::OnceLock::new(),
+            glass: std::sync::OnceLock::new(),
             minimax,
             channel_blur,
             median,
@@ -3054,6 +3058,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
             EffectGpuSpatialPass::Smear { .. } | EffectGpuSpatialPass::Reshape { .. } => Ok(1),
             EffectGpuSpatialPass::DetailPreservingUpscale { .. } => Ok(1),
+            EffectGpuSpatialPass::Glass { .. } => Ok(1),
             EffectGpuSpatialPass::BlankingFill { grade } => {
                 Ok(if grade.warps_top_layer() { 1 } else { 2 })
             }
@@ -3107,6 +3112,13 @@ impl EffectSpatialGpu {
                 self.record_detail_preserving_upscale(device, encoder, source, output, *grade)?;
                 return Ok(output.clone());
             }
+            EffectGpuSpatialPass::Glass { auxiliary: None, .. } => {
+                let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let primary =
+                    mondrian_effects::EffectFrameExtent::new(source.width(), source.height());
+                self.record_glass(device, encoder, pass, source, output, None, primary)?;
+                return Ok(output.clone());
+            }
             EffectGpuSpatialPass::SetMatte { sampling: None, .. } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return self.record_auxiliary(
@@ -3122,7 +3134,8 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::FillMatte { .. }
             | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
             | EffectGpuSpatialPass::SetMatte { sampling: Some(_), .. }
-            | EffectGpuSpatialPass::DisplacementMap { .. } => {
+            | EffectGpuSpatialPass::DisplacementMap { .. }
+            | EffectGpuSpatialPass::Glass { auxiliary: Some(_), .. } => {
                 return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
             }
             EffectGpuSpatialPass::FindEdges { grade } => {
@@ -4296,6 +4309,35 @@ impl EffectSpatialGpu {
                 crate::detail_preserving_upscale_gpu::DetailPreservingUpscaleGpu::new(device)
             })
             .record(device, encoder, source, destination, &plan)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_glass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        pass: &EffectGpuSpatialPass,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        auxiliary: Option<(
+            &wgpu::Texture,
+            [f32; 6],
+            mondrian_effects::AuxiliarySampling,
+        )>,
+        primary: mondrian_effects::EffectFrameExtent,
+    ) -> Result<(), EffectSpatialGpuError> {
+        let extent = mondrian_effects::EffectFrameExtent::new(source.width(), source.height());
+        let bounds = mondrian_effects::EffectRasterBounds::centered_on(primary, extent)
+            .ok_or(mondrian_effects::GlassError::Extent)?;
+        let plan = crate::glass_gpu::GlassGpuPlan::new(pass, primary, bounds)?;
+        self.glass.get_or_init(|| crate::glass_gpu::GlassGpu::new(device)).record(
+            device,
+            encoder,
+            source,
+            destination,
+            auxiliary,
+            &plan,
+        )
     }
 
     pub(crate) fn record_mask_deformation_pass(

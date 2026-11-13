@@ -2376,6 +2376,10 @@ pub struct SequenceUpdateSettingsPayload {
     pub name: String,
     /// Complete Sequence settings after applying shell-local edits.
     pub settings: SequenceSettings,
+    /// Complete light list when the Lighting tab edited it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_lights:
+        Option<mondrian_core::AuthoringList<mondrian_timeline::scene_light::SceneLight>>,
 }
 
 /// Replace the complete constant reference owned by one stable Sequence.
@@ -3277,7 +3281,12 @@ impl<'a> ProductActionAvailability<'a> {
                 document.sequences.sequence(payload.sequence_id).is_some_and(|sequence| {
                     let name = payload.name.trim();
                     !name.is_empty()
-                        && (sequence.name != name || sequence.settings != payload.settings)
+                        && (sequence.name != name
+                            || sequence.settings != payload.settings
+                            || payload
+                                .scene_lights
+                                .as_ref()
+                                .is_some_and(|lights| lights != &sequence.scene_lights))
                 })
             }
             SequenceProductAction::SetMusicalTimeReference(payload) => {
@@ -4258,6 +4267,7 @@ mod tests {
                     sequence_id,
                     name: "Updated".to_owned(),
                     settings: SequenceSettings::default(),
+                    scene_lights: None,
                 },
             ))),
         ];
@@ -5282,6 +5292,7 @@ mod tests {
                 sequence_id: second_id,
                 name: second.name.clone(),
                 settings: second.settings.clone(),
+                scene_lights: None,
             },
         )));
         assert!(!state.product_action_availability().allows(&unchanged));
@@ -5290,6 +5301,7 @@ mod tests {
                 sequence_id: second_id,
                 name: "Renamed".to_owned(),
                 settings: second.settings.clone(),
+                scene_lights: None,
             },
         )));
         assert!(state.product_action_availability().allows(&changed));

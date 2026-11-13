@@ -666,6 +666,7 @@ mod tests {
                 sequence_id: second_id,
                 name: sequence.name.clone(),
                 settings: sequence.settings.clone(),
+                scene_lights: None,
             }),
             &state,
         ));

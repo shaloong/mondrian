@@ -1818,8 +1818,9 @@ impl AppState {
             }
             SequenceProductAction::Delete(payload) => self.delete_sequence(payload.sequence_id),
             SequenceProductAction::UpdateSettings(payload) => {
-                let SequenceUpdateSettingsPayload { sequence_id, name, settings } = *payload;
-                self.update_sequence_identity_and_settings(sequence_id, name, settings)
+                let SequenceUpdateSettingsPayload { sequence_id, name, settings, scene_lights } =
+                    *payload;
+                self.apply_sequence_settings_draft(sequence_id, name, settings, scene_lights)
             }
             SequenceProductAction::SetMusicalTimeReference(payload) => self.commit_sequence_edit(
                 payload.sequence_id,
@@ -3263,6 +3264,7 @@ mod tests {
                     sequence_id,
                     name: "Final Cut".to_owned(),
                     settings: settings.clone(),
+                    scene_lights: None,
                 },
             ))
             .expect("update sequence settings");
@@ -3277,6 +3279,37 @@ mod tests {
         let active = state.active_sequence().expect("active sequence");
         assert_eq!(active.name, "offline");
         assert_eq!(active.settings, SequenceSettings::default());
+    }
+
+    #[test]
+    fn sequence_lighting_edits_commit_and_undo_with_the_settings_draft() {
+        use mondrian_timeline::scene_light::{SceneLight, SceneLightSample};
+
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Composition");
+        let sequence_id = sequence.id;
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence.clone());
+        let light = SceneLight::new("Fill", SceneLightSample::default());
+        let change = sequence_update_settings_action(SequenceUpdateSettingsPayload {
+            sequence_id,
+            name: sequence.name,
+            settings: sequence.settings,
+            scene_lights: Some(vec![light.clone()].into()),
+        });
+        state.dispatch_action(change).unwrap();
+        assert_eq!(
+            state.active_sequence().unwrap().scene_lights.as_slice(),
+            &[light.clone()]
+        );
+        state.undo_timeline().unwrap();
+        assert!(state.active_sequence().unwrap().scene_lights.is_empty());
+        state.redo_timeline().unwrap();
+        assert_eq!(
+            state.active_sequence().unwrap().scene_lights.as_slice(),
+            &[light]
+        );
     }
 
     #[test]
@@ -3298,6 +3331,7 @@ mod tests {
                     sequence_id,
                     name: "Should Not Stick".to_owned(),
                     settings: invalid_settings,
+                    scene_lights: None,
                 },
             ))
             .expect_err("invalid settings should fail");
@@ -3329,6 +3363,7 @@ mod tests {
                     sequence_id,
                     name: "Must Not Stick".to_owned(),
                     settings,
+                    scene_lights: None,
                 },
             ))
             .expect_err("Custom OCIO working mismatch must fail before mutation");
@@ -3353,7 +3388,12 @@ mod tests {
 
         let error = state
             .dispatch_action(sequence_update_settings_action(
-                SequenceUpdateSettingsPayload { sequence_id, name: "changed".to_owned(), settings },
+                SequenceUpdateSettingsPayload {
+                    sequence_id,
+                    name: "changed".to_owned(),
+                    settings,
+                    scene_lights: None,
+                },
             ))
             .expect_err("Standard working mismatch must fail before mutation");
 

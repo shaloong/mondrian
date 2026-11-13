@@ -4242,6 +4242,12 @@ pub(super) fn inspector_property_value_widget(
         }
         PropertyValue::VisualSource(reference) => {
             let label = match reference {
+                mondrian_core::VisualSourceReference::Unbound
+                    if property.schema.parameter_id.as_str()
+                        == "mondrian.effect.builtin.glass.bump_map" =>
+                {
+                    localizer.text("glass-bump-source-current-layer")
+                }
                 mondrian_core::VisualSourceReference::Unbound => localizer.text("resource-unbound"),
                 mondrian_core::VisualSourceReference::Asset { .. } => {
                     localizer.text("visual-source-selected-asset")
