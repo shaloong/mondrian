@@ -12,9 +12,9 @@ use crate::{
     PreparedVisualProgramBinding,
 };
 use mondrian_core::{
-    AssetId, ClipId, FramePosition, SequenceId, SequenceRevision, SourceSampleTarget,
-    SourceSamplingBoundary, TimelineTime, TimelineTimeRange, VideoTransitionId,
-    VisualSourceBoundary, VisualSourceReference, VisualSourceRetime, VisualSourceTimeError,
+    AssetId, ClipId, FramePosition, SequenceId, SequenceRevision, SourceSampleTarget, TimelineTime,
+    TimelineTimeRange, VideoTransitionId, VisualSourceBoundary, VisualSourceReference,
+    VisualSourceRetime, VisualSourceTimeError,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -756,11 +756,8 @@ where
                     .map_err(|error| invalid(error.to_string()))?
                 {
                     let bounds = |target: SourceSampleTarget| {
-                        if target.boundary() == SourceSamplingBoundary::Covering {
-                            return Ok(target.time());
-                        }
                         let position =
-                            crate::prepared_visual_frame_closure::exact_nested_visual_position(
+                            crate::prepared_visual_frame_closure::auxiliary_sequence_position(
                                 target, child,
                             )
                             .map_err(invalid)?;

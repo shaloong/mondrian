@@ -179,7 +179,8 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
         TimelineCompositeError::FloatEffect {
             reason:
                 EffectFloatExecutionError::MaskRasterFailed { .. }
-                | EffectFloatExecutionError::GlassFailed { .. },
+                | EffectFloatExecutionError::GlassFailed { .. }
+                | EffectFloatExecutionError::VideoCollage(_),
         } => true,
         TimelineCompositeError::FloatEffect {
             reason:

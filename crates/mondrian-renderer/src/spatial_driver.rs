@@ -240,13 +240,14 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                 stages.push(GpuSpatialStagePlan::PointOps { operations: operations.clone() });
             }
             EffectGpuStage::Spatial { pass, .. } => {
-                if let Some(external_slot) = pass.auxiliary_slot() {
-                    let slot =
-                        external_slot.ok_or_else(|| GpuSpatialChainBlocker::UnsupportedPass {
-                            pass: pass.name(),
-                            detail: "a graph-local auxiliary input requires the graph dispatcher"
-                                .into(),
-                        })?;
+                if pass.auxiliary_slot() == Some(None) {
+                    return Err(GpuSpatialChainBlocker::UnsupportedPass {
+                        pass: pass.name(),
+                        detail: "a graph-local auxiliary input requires the graph dispatcher"
+                            .into(),
+                    });
+                }
+                for slot in pass.external_slots() {
                     if !auxiliary_slots.contains(&slot) {
                         return Err(GpuSpatialChainBlocker::MissingAuxiliaryInput { slot });
                     }
@@ -287,6 +288,16 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                     exact_draw_pixels = Some(plan.draw_pixels);
                     direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
                     direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.scratch_bytes);
+                    0
+                } else if matches!(pass, EffectGpuSpatialPass::VideoCollage { .. }) {
+                    let plan = crate::video_collage_gpu::VideoCollageGpuPlan::new(pass, output)
+                        .map_err(|error| GpuSpatialChainBlocker::UnsupportedPass {
+                            pass: pass.name(),
+                            detail: error.to_string(),
+                        })?;
+                    exact_draw_pixels = Some(plan.draw_pixels);
+                    direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
+                    direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.controls_bytes);
                     0
                 } else if matches!(pass, EffectGpuSpatialPass::Glass { .. }) {
                     let plan =
@@ -702,6 +713,35 @@ mod tests {
         assert!(matches!(
             gpu_spatial_chain_plan(&make_pipeline(30_000.0), 1920, 1080),
             Err(GpuSpatialChainBlocker::ExtentExceedsDeviceLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn spatial_chain_video_collage_sixty_four_tiles_use_one_direct_output() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_pipeline,
+            EffectGraphBuilderState, VideoCollageGrade,
+        };
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_video_collage(
+            VideoCollageGrade::new(8, 8, 8.0, 0.0, 0.0, [0.0, 0.0, 0.0, 1.0]).unwrap(),
+            vec![None; 64],
+        );
+        let graph = compile_reference_render_graph(builder.finish()).unwrap();
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph)
+            .unwrap()
+            .with_image_sampling(mondrian_core::ImageSampling::UNIT_SQUARE);
+        let plan = gpu_spatial_chain_plan(&pipeline, 4096, 2160).unwrap();
+        assert_eq!(plan.spatial_passes, 1);
+        assert_eq!(plan.scratch_textures, 0);
+        assert_eq!(plan.scratch_bytes, 64 * 96);
+        assert_eq!(
+            plan.output_bounds.extent(),
+            EffectFrameExtent::new(4096, 2160)
+        );
+        assert!(matches!(
+            gpu_spatial_chain_plan(&pipeline, 7680, 4320),
+            Err(GpuSpatialChainBlocker::ScratchBudgetExceeded { .. })
         ));
     }
 

@@ -1125,7 +1125,7 @@ where
                     .map_err(|error| invalid(error.to_string()))?,
             });
         };
-        let child_position = exact_nested_visual_position(sample, child).map_err(invalid)?;
+        let child_position = auxiliary_sequence_position(sample, child).map_err(invalid)?;
         let child_context = child
             .settings
             .nested_render_color_context(
@@ -1343,6 +1343,20 @@ pub(crate) fn exact_nested_visual_position(
         ));
     }
     Ok(field_position)
+}
+
+/// A VisualSource selects the presentation interval of the referenced Sequence.
+/// Preserve an exact frame/field match first and otherwise select its covering interval.
+pub(crate) fn auxiliary_sequence_position(
+    target: SourceSampleTarget,
+    sequence: &Sequence,
+) -> Result<FramePosition, String> {
+    match exact_nested_visual_position(target, sequence) {
+        Ok(position) => Ok(position),
+        Err(_) => target
+            .to_frame_position(sequence.settings.frame_rate)
+            .map_err(|error| error.to_string()),
+    }
 }
 
 fn collect_auxiliary_visual_keys(plan: &TimelineRenderPlan) -> Vec<PreparedVisualAuxiliaryKey> {
@@ -2086,6 +2100,27 @@ mod tests {
             self.0.push(node.id());
             Ok(node.id())
         }
+    }
+
+    #[test]
+    fn auxiliary_sequence_uses_the_covering_child_frame_for_off_grid_times() {
+        let mut child = Sequence::new("fractional auxiliary time");
+        child.settings.frame_rate = Rational::new(30_000, 1_001);
+        let target = SourceSampleTarget::covering(TimelineTime::new(1, 4).unwrap());
+        assert!(exact_nested_visual_position(target, &child).is_err());
+        let selected = auxiliary_sequence_position(target, &child).unwrap();
+        assert_eq!(
+            selected,
+            FramePosition::new(7, Rational::new(1_001, 30_000))
+        );
+        let next = TimelineTime::new(8_008, 30_000).unwrap();
+        let previous =
+            auxiliary_sequence_position(SourceSampleTarget::strict_predecessor(next), &child)
+                .unwrap();
+        assert_eq!(
+            TimelineTime::from_frame_position(previous).unwrap(),
+            TimelineTime::new(15_015, 60_000).unwrap()
+        );
     }
 
     #[test]

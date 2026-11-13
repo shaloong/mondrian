@@ -341,6 +341,7 @@ fn estimate_ns(
                     pass,
                     EffectGpuSpatialPass::DetailPreservingUpscale { .. }
                         | EffectGpuSpatialPass::Glass { .. }
+                        | EffectGpuSpatialPass::VideoCollage { .. }
                 ) {
                     *draw_pixels as f64
                 } else {
@@ -415,6 +416,7 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "smear" | "reshape" => 2.4,
         "detail_preserving_upscale" => 28.0,
         "glass" => 18.0,
+        "video_collage" => 2.0,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 1.4,
             _ => 3.6,
@@ -449,6 +451,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "smear" | "reshape" => 24.0,
         "detail_preserving_upscale" => 110.0,
         "glass" => 75.0,
+        "video_collage" => 12.0,
         "blanking_fill" => match pass {
             EffectGpuSpatialPass::BlankingFill { grade } if grade.warps_top_layer() => 3.0,
             _ => 12.0,

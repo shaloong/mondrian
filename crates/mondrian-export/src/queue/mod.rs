@@ -8513,8 +8513,7 @@ fn prepared_export_transition_input_supports_cpu_float(
 
 fn compiled_effect_graph_supports_cpu_float(graph: &mondrian_effects::CompiledEffectGraph) -> bool {
     graph
-        .execution_envelope()
-        .admit_single_frame_backend(
+        .admit_single_frame_backend_with_resolved_auxiliary(
             EffectProcessingBackend::Cpu,
             EffectWorkingPrecision::Float32,
         )
@@ -8592,17 +8591,17 @@ fn prepared_export_source_supports_gpu(
     graph: &Arc<mondrian_effects::CompiledEffectGraph>,
     scratch: &mut TimelineCompositeScratch,
 ) -> bool {
-    use mondrian_effects::{AuxiliaryRole, AuxiliarySampling, EffectColorDomain};
+    use mondrian_effects::EffectColorDomain;
 
     match scratch.get_or_lower_effect_gpu_route(graph) {
         Ok(GpuRoute::Point(_)) => graph.auxiliary_inputs().is_empty(),
         Ok(GpuRoute::Spatial(pipeline)) => {
             pipeline.processing_domain() == EffectColorDomain::SceneLinearRgb
                 && graph.auxiliary_inputs().iter().all(|input| {
-                    matches!(
-                        input.role(),
-                        AuxiliaryRole::Matte | AuxiliaryRole::Layer | AuxiliaryRole::Map
-                    ) && input.sampling() == AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP
+                    pipeline.stages().iter().any(|stage| {
+                        matches!(stage, mondrian_effects::EffectGpuStage::Spatial { pass, .. }
+                            if pass.external_slots().any(|slot| slot == input.slot()))
+                    })
                 })
         }
         Err(_) => false,

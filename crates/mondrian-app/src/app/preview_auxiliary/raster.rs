@@ -47,6 +47,7 @@ impl PreparedAuxiliaryRasters<'_> {
                     picture: mondrian_renderer::GpuVisualAuxiliaryPicture::Cpu(
                         std::sync::Arc::new(frame.clone()),
                     ),
+                    sampling: frame.rgba_f32().sampling,
                     policy: *policy,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 },

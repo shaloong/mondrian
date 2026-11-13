@@ -29,6 +29,7 @@ mod glass_gpu;
 mod mask_deformation_gpu;
 pub mod spatial_driver;
 mod spatial_pass_gpu;
+mod video_collage_gpu;
 pub use display_matte::GpuDisplayCalibrationBackdrop;
 pub use spatial_driver::{
     choose_spatial_chain, choose_spatial_chain_for_plan, gpu_spatial_chain_plan,

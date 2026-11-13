@@ -4202,6 +4202,8 @@ pub struct GpuSpatialAuxiliaryRaster<'a> {
     pub slot: u32,
     /// Retained working Float32 resource.
     pub frame: &'a GpuColorFrameHandle,
+    /// Physical sampling of the retained actual-grid picture.
+    pub sampling: mondrian_core::ImageSampling,
     /// Normalized affine mapping in `[a, b, tx, c, d, ty]` order.
     pub transform: [f32; 6],
     /// Host registration geometry.
@@ -5153,7 +5155,10 @@ impl GpuFrameCompositor {
                         Some(EffectGpuSpatialPass::DetailPreservingUpscale { grade }) => {
                             !grade.scale().is_identity()
                         }
-                        Some(EffectGpuSpatialPass::Glass { .. }) => true,
+                        Some(
+                            EffectGpuSpatialPass::Glass { .. }
+                            | EffectGpuSpatialPass::VideoCollage { .. },
+                        ) => true,
                         _ => false,
                     });
                 spatial_effect_layers = spatial_effect_layers.saturating_add(1);
@@ -5430,6 +5435,30 @@ impl GpuFrameCompositor {
                                 &current_texture,
                                 &output.resource().texture,
                                 *grade,
+                            )
+                            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                                pass: spatial_failure_pass(&error),
+                                detail: error.to_string(),
+                            })?;
+                    } else if matches!(pass, EffectGpuSpatialPass::VideoCollage { .. }) {
+                        self.spatial
+                            .record_video_collage(
+                                device,
+                                encoder,
+                                pass,
+                                &current_texture,
+                                &output.resource().texture,
+                                |slot| {
+                                    let binding = auxiliary_rasters
+                                        .iter()
+                                        .find(|binding| binding.slot == slot)?;
+                                    let resource = table.get(binding.frame).ok()?;
+                                    Some((
+                                        &resource.resource().texture,
+                                        binding.sampling,
+                                        binding.transform,
+                                    ))
+                                },
                             )
                             .map_err(|error| GpuCompositeError::SpatialChainFailed {
                                 pass: spatial_failure_pass(&error),
@@ -8031,7 +8060,7 @@ fn prepare_spatial_chains(
                 matches!(
                     stage,
                     EffectGpuStage::Spatial { pass, .. }
-                        if pass.auxiliary_slot() == Some(Some(binding.slot))
+                        if pass.external_slots().any(|slot| slot == binding.slot)
                 )
             });
             if !declared || slots[..binding_index].contains(&binding.slot) {
@@ -8377,6 +8406,7 @@ fn spatial_failure_pass(error: &crate::spatial_pass_gpu::EffectSpatialGpuError) 
             "mask_deformation_preparation"
         }
         crate::spatial_pass_gpu::EffectSpatialGpuError::Glass(_) => "glass",
+        crate::spatial_pass_gpu::EffectSpatialGpuError::VideoCollage(_) => "video_collage",
     }
 }
 
@@ -17827,6 +17857,155 @@ mod tests {
         }
     }
 
+    #[test]
+    fn spatial_chain_video_collage_matches_cpu_for_two_actual_grids() {
+        use mondrian_core::{ImageSampling, Rational, SampleAspectRatio, WorkingRgbaF32Frame};
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_pipeline,
+            AuxiliaryFloatFrame, AuxiliaryFloatInput, EffectColorDomainContract,
+            EffectExecutionSession, EffectFrameExtent, EffectGraphBuilderState,
+            EffectProcessorControl, EffectValueFormat, EffectWorkingPrecision, VideoCollageGrade,
+            IDENTITY_AFFINE,
+        };
+        let context =
+            pollster::block_on(crate::GpuContext::new_without_float32_filterable_for_test())
+                .expect("real GPU adapter for Video Collage parity");
+        let working_color_space = WorkingColorSpace::LinearRec709;
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let source_sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2); 2],
+        )
+        .unwrap();
+        let frame = |width, height, sampling: ImageSampling, hue: usize| {
+            let data = (0..width * height)
+                .map(|index| {
+                    let mut pixel = [0.1, -0.2, 0.35, (index % 5) as f32 * 0.25];
+                    pixel[hue] = 0.3 + index as f32 * 0.11;
+                    pixel
+                })
+                .collect();
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                width,
+                height,
+                sampling,
+                alpha: ColorFrameAlpha::StraightCoverage,
+                color_space: working_color_space,
+                data,
+            })
+        };
+        let primary = frame(19, 11, source_sampling, 2);
+        let a = frame(5, 3, ImageSampling::UNIT_SQUARE, 0);
+        let b = frame(3, 7, source_sampling, 1);
+        let transform = [0.85, 0.1, -0.05, -0.1, 0.95, 0.15];
+        let policy = AuxiliaryPolicy::new(AuxiliaryResolution::Authored);
+        let bindings = [(9, &a, IDENTITY_AFFINE), (5, &b, transform)];
+        let inputs = bindings.map(|(slot, frame, transform)| AuxiliaryFloatInput {
+            slot,
+            raster: AuxiliaryFloatFrame {
+                frame: crate::timeline_auxiliary_frame_view(frame),
+                policy,
+                transform,
+            },
+        });
+
+        let mut builder = EffectGraphBuilderState::new();
+        let left =
+            builder.append_external_input(9, format, EffectColorDomainContract::SCENE_LINEAR);
+        let right =
+            builder.append_external_input(5, format, EffectColorDomainContract::SCENE_LINEAR);
+        let grade = VideoCollageGrade::new(3, 1, 3.0, 70.0, 1.0, [0.9, 0.1, 0.2, 0.65]).unwrap();
+        builder.append_video_collage(grade, vec![Some(left), None, Some(right)]);
+        let graph = compile_reference_render_graph(builder.finish()).unwrap();
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph)
+            .unwrap()
+            .with_image_sampling(source_sampling);
+        let reference = EffectExecutionSession::default()
+            .apply_compiled_rgba_f32_with_auxiliary(
+                crate::timeline_auxiliary_frame_view(&primary),
+                &graph,
+                0,
+                &inputs,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert_eq!(reference.extent(), EffectFrameExtent::new(19, 11));
+        assert_eq!(reference.sampling(), source_sampling);
+        let mut ids = GpuColorFrameIdAllocator::new(1).unwrap();
+        let mut table = GpuColorFrameResourceTable::new();
+        let handles = bindings.map(|(_, frame, _)| {
+            let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
+                ids.allocate().unwrap(),
+                frame,
+                product_gpu_working_texture_format(),
+                "video-collage-fixture",
+            )
+            .unwrap();
+            let resource = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
+            let handle = resource.handle().clone();
+            table.insert(resource).unwrap();
+            handle
+        });
+        let gpu_bindings: [_; 2] = std::array::from_fn(|index| {
+            let (slot, frame, transform) = bindings[index];
+            GpuSpatialAuxiliaryRaster {
+                slot,
+                frame: &handles[index],
+                policy,
+                transform,
+                sampling: frame.rgba_f32().sampling,
+            }
+        });
+        let layers = [GpuCompositeSpatialLayer {
+            layer: spatial_test_layer(&primary),
+            spatial_plan: Some(&pipeline),
+        }];
+        let request = || GpuCompositeSpatialRequest {
+            width: 19,
+            height: 11,
+            working_color_space,
+            layers: &layers,
+        };
+        let mut encoder = context.device.create_command_encoder(&Default::default());
+        let compositor = GpuFrameCompositor::new(&context.device).unwrap();
+        assert!(matches!(
+            gpu_spatial_chain_plan_with_auxiliary(&pipeline, 19, 11, &[9]),
+            Err(crate::GpuSpatialChainBlocker::MissingAuxiliaryInput { slot: 5 })
+        ));
+        let record = compositor
+            .record_with_auxiliary_spatial_effect_chains(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                request(),
+                &[&gpu_bindings],
+            )
+            .unwrap();
+        assert_eq!(record.diagnostics.spatial_effect_passes, 1);
+        assert_eq!(record.diagnostics.spatial_scratch_textures_peak, 0);
+        assert_eq!(record.diagnostics.cpu_fallback_composites, 0);
+        let actual =
+            readback_composite_output(&context, encoder, &mut table, &record.output, 19, 11);
+        assert_spatial_chain_matches(reference.pixels(), &actual);
+        let max = reference
+            .pixels()
+            .iter()
+            .flatten()
+            .zip(actual.iter().flatten())
+            .map(|(cpu, gpu)| (cpu - gpu).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!(
+            "Video Collage two actual grids and non-square PAR max absolute error = {max:.9e}"
+        );
+    }
+
     fn assert_auxiliary_texture_cases(
         context: &crate::GpuContext,
         role: mondrian_effects::AuxiliaryRole,
@@ -18011,8 +18190,13 @@ mod tests {
                 error,
                 GpuCompositeError::SpatialChainFailed { pass: "spatial_auxiliary_missing", .. }
             ));
-            let gpu_binding =
-                GpuSpatialAuxiliaryRaster { slot: 9, frame: &matte_handle, transform, policy };
+            let gpu_binding = GpuSpatialAuxiliaryRaster {
+                slot: 9,
+                frame: &matte_handle,
+                transform,
+                policy,
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            };
             let record = compositor
                 .record_with_auxiliary_spatial_effect_chains(
                     &context.device,

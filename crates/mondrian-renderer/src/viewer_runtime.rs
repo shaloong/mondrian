@@ -5075,6 +5075,7 @@ mod tests {
                     pipeline: Arc::clone(&pipeline),
                     auxiliary: vec![GpuVisualAuxiliaryInput {
                         slot: 0,
+                        sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
                         picture: GpuVisualAuxiliaryPicture::Cpu(Arc::new(CpuColorFrame::working(
                             WorkingRgbaF32Frame {
                                 width: 4,

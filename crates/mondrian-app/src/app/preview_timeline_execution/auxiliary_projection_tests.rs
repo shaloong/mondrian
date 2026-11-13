@@ -179,6 +179,97 @@ fn a_sequence_matte_materializes_its_own_picture_and_changes_the_preview_cache_i
 }
 
 #[test]
+fn video_collage_preview_keeps_each_tile_on_its_exact_sequence_sample() {
+    use mondrian_core::{Color, SourceSampleTarget, TimelineTime};
+    let kind = EffectType::VideoCollage;
+    let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+    let child = |name, width, height, color| {
+        let mut sequence = Sequence::new(name);
+        sequence.settings.resolution = Resolution { width, height };
+        sequence.settings.frame_rate = mondrian_core::Rational::new(30_000, 1_001);
+        sequence.video_tracks[0]
+            .add_clip(
+                mondrian_timeline::Clip::new_solid_color(
+                    AssetId::new(),
+                    color,
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        sequence
+    };
+    let a = child("Collage A", 9, 5, Color::from_hex(0xff0000));
+    let b = child("Collage B", 5, 7, Color::from_hex(0x00ff00));
+    let reference = |sequence_id, time_offset| VisualSourceReference::Sequence {
+        sequence_id,
+        retime: mondrian_core::VisualSourceRetime { time_offset, ..Default::default() },
+    };
+    for (field, value) in [
+        ("columns", PropertyValue::Int(2)),
+        ("rows", PropertyValue::Int(1)),
+        ("spacing", PropertyValue::Float(0.0)),
+        ("tile_delay", PropertyValue::Float(0.125)),
+        (
+            "tile_source_01",
+            PropertyValue::VisualSource(reference(a.id, TimelineTime::ZERO)),
+        ),
+        (
+            "tile_source_02",
+            PropertyValue::VisualSource(reference(b.id, TimelineTime::new(3, 8).unwrap())),
+        ),
+    ] {
+        effect
+            .set_static_value_by_parameter(&kind.parameter_id(field).unwrap(), value)
+            .unwrap();
+    }
+    let root = super::auxiliary_sequence_with_effect(effect);
+    let resolved = output(resolve(
+        &root,
+        &[a, b],
+        &RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview()),
+        &RefCell::new(TimelineCompositeScratch::default()),
+        &mut |_| panic!("procedural Sequence cannot query an Asset"),
+        &mut |_| panic!("procedural Sequence cannot decode media"),
+        None,
+    ));
+    let mut bindings = Vec::new();
+    collect_auxiliary_bindings(&resolved.plan.elements[0], &mut bindings);
+    let [binding] = bindings.as_slice() else {
+        panic!("collage sources share one consumer");
+    };
+    let targets = binding
+        .sources
+        .iter()
+        .map(|source| {
+            let crate::app::preview_auxiliary::PreviewAuxiliaryEvidence::Visual(evidence) =
+                &source.evidence
+            else {
+                panic!("each tile must retain the visual time evidence");
+            };
+            evidence.time.source_sample.unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targets,
+        [
+            SourceSampleTarget::covering(TimelineTime::ZERO),
+            SourceSampleTarget::covering(TimelineTime::new(1, 4).unwrap())
+        ]
+    );
+    let pixels = pixels(&resolved);
+    assert_eq!(pixels.len(), 3);
+    for (pixel, channel) in pixels.iter().zip([0, 1, 1]) {
+        assert!(
+            pixel[channel] > 0.8 && (pixel[3] - 1.0).abs() < 1.0e-6,
+            "{pixel:?}"
+        );
+        assert!((0..3).filter(|other| *other != channel).all(|other| pixel[other] < 0.6));
+    }
+}
+
+#[test]
 fn a_track_matte_from_an_earlier_layer_renders_in_preview_and_falls_back_after_reordering() {
     use mondrian_core::{Color, SourceSampleTarget, TimelineTime};
     use mondrian_timeline::clip::Clip;

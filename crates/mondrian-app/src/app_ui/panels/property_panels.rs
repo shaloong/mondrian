@@ -4243,6 +4243,14 @@ pub(super) fn inspector_property_value_widget(
         PropertyValue::VisualSource(reference) => {
             let label = match reference {
                 mondrian_core::VisualSourceReference::Unbound
+                    if mondrian_effects::video_collage_source_position(
+                        &property.schema.parameter_id,
+                    )
+                    .is_some() =>
+                {
+                    localizer.text("video-collage-source-current-layer")
+                }
+                mondrian_core::VisualSourceReference::Unbound
                     if property.schema.parameter_id.as_str()
                         == "mondrian.effect.builtin.glass.bump_map" =>
                 {

@@ -124,6 +124,8 @@ pub struct GpuVisualAuxiliaryInput {
     pub slot: u32,
     /// Resolved working pixels or an explicit transparent boundary.
     pub picture: GpuVisualAuxiliaryPicture,
+    /// Exact physical sampling of the retained picture.
+    pub sampling: mondrian_core::ImageSampling,
     /// Registration relative to the primary grid.
     pub policy: AuxiliaryPolicy,
     /// Normalized affine transform for graph nodes that use it.
@@ -1123,13 +1125,23 @@ pub(crate) fn estimate_visual_spatial_plan(
         repeated_texture_demand(output.width(), output.height(), stage_outputs, stage)?,
         stage,
     )?;
+    let mut uploads = std::collections::HashSet::new();
+    let mut transparent = std::collections::HashSet::new();
     for input in &spatial.auxiliary {
         let (width, height) = match &input.picture {
             GpuVisualAuxiliaryPicture::Cpu(frame) => {
+                if !uploads.insert(frame.rgba_f32() as *const _) {
+                    continue;
+                }
                 let descriptor = frame.descriptor();
                 (descriptor.width, descriptor.height)
             }
-            GpuVisualAuxiliaryPicture::Transparent { width, height } => (*width, *height),
+            GpuVisualAuxiliaryPicture::Transparent { width, height } => {
+                if !transparent.insert((*width, *height)) {
+                    continue;
+                }
+                (*width, *height)
+            }
             GpuVisualAuxiliaryPicture::Gpu(_) => continue,
         };
         demand.checked_add(repeated_texture_demand(width, height, 1, stage)?, stage)?;
@@ -1197,6 +1209,7 @@ struct PreparedSourceLayer {
 pub(crate) struct PreparedAuxiliaryInput {
     slot: u32,
     frame: GpuColorFrameHandle,
+    sampling: mondrian_core::ImageSampling,
     policy: AuxiliaryPolicy,
     transform: [f32; 6],
 }
@@ -1243,36 +1256,54 @@ pub(crate) fn prepare_visual_auxiliary_inputs(
     let Some(plan) = plan else {
         return Ok(Vec::new());
     };
+    let mut uploads = std::collections::HashMap::<_, GpuColorFrameHandle>::new();
+    let mut transparent = std::collections::HashMap::<_, GpuColorFrameHandle>::new();
     plan.auxiliary
         .iter()
         .map(|input| {
             let frame = match &input.picture {
                 GpuVisualAuxiliaryPicture::Gpu(frame) => frame.clone(),
                 GpuVisualAuxiliaryPicture::Cpu(frame) => {
-                    let record = runtime.upload_wgpu_working_frame(device, queue, frame).map_err(
-                        |error| GpuVisualFrameExecutionError::AuxiliaryUpload(Box::new(error)),
-                    )?;
-                    diagnostics.accumulate(record.stage_diagnostics);
-                    record.output
+                    let key = frame.rgba_f32() as *const _;
+                    if let Some(existing) = uploads.get(&key) {
+                        existing.clone()
+                    } else {
+                        let record = runtime
+                            .upload_wgpu_working_frame(device, queue, frame)
+                            .map_err(|error| {
+                                GpuVisualFrameExecutionError::AuxiliaryUpload(Box::new(error))
+                            })?;
+                        diagnostics.accumulate(record.stage_diagnostics);
+                        uploads.insert(key, record.output.clone());
+                        record.output
+                    }
                 }
                 GpuVisualAuxiliaryPicture::Transparent { width, height } => {
-                    runtime
-                        .record_wgpu_solid_source(
-                            compositor,
-                            device,
-                            queue,
-                            encoder,
-                            *width,
-                            *height,
-                            working_color_space,
-                            Color::TRANSPARENT,
-                        )?
-                        .output
+                    let key = (*width, *height);
+                    if let Some(existing) = transparent.get(&key) {
+                        existing.clone()
+                    } else {
+                        let output = runtime
+                            .record_wgpu_solid_source(
+                                compositor,
+                                device,
+                                queue,
+                                encoder,
+                                *width,
+                                *height,
+                                working_color_space,
+                                Color::TRANSPARENT,
+                            )?
+                            .output;
+                        transparent.insert(key, output.clone());
+                        output
+                    }
                 }
             };
             Ok(PreparedAuxiliaryInput {
                 slot: input.slot,
                 frame,
+                sampling: input.sampling,
                 policy: input.policy,
                 transform: input.transform,
             })
@@ -1288,6 +1319,7 @@ pub(crate) fn visual_auxiliary_bindings(
         .map(|input| GpuSpatialAuxiliaryRaster {
             slot: input.slot,
             frame: &input.frame,
+            sampling: input.sampling,
             transform: input.transform,
             policy: input.policy,
         })

@@ -2994,6 +2994,20 @@ impl InspectorPanelModel {
                     label: localized_effect_name(&effect.effect_type, Some(localizer)),
                     enabled: effect.is_enabled,
                     properties: {
+                        let collage_grid =
+                            (effect.effect_type == EffectType::VideoCollage).then(|| {
+                                ["columns", "rows"].map(|key| {
+                                    match effect.evaluate_property(
+                                        &effect.effect_type.property_path(key),
+                                        clip_author_time,
+                                    ) {
+                                        Some(PropertyValue::Int(value)) => {
+                                            u32::try_from(value).unwrap_or(0)
+                                        }
+                                        _ => 0,
+                                    }
+                                })
+                            });
                         let mut properties = effect.properties.iter().collect::<Vec<_>>();
                         properties.sort_by(|(left_path, left), (right_path, right)| {
                             left.descriptor
@@ -3007,6 +3021,15 @@ impl InspectorPanelModel {
                         });
                         properties
                             .into_iter()
+                            .filter(|(_, property)| {
+                                let Some([columns, rows]) = collage_grid else {
+                                    return true;
+                                };
+                                mondrian_effects::video_collage_source_position(
+                                    property.descriptor.parameter_id(),
+                                )
+                                .is_none_or(|(column, row)| column < columns && row < rows)
+                            })
                             .map(|(path, property)| {
                                 inspector_effect_property_model(
                                     path,

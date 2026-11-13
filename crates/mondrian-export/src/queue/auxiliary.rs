@@ -88,7 +88,7 @@ pub(super) fn prepare_gpu_rasters(
 ) -> Result<Vec<GpuVisualAuxiliaryInput>, String> {
     graph.auxiliary_inputs().iter().map(|spec| {
         let key = auxiliary_key_for_slot(graph, Some(placement), spec.slot())?;
-        let (picture, extent) = match key.reference {
+        let (picture, (extent, sampling)) = match key.reference {
             VisualSourceReference::Asset { asset_id, retime } => {
                 let (source, domain) = plan_asset(inputs.node(), context.media, asset_id, retime)?;
                 match source {
@@ -99,23 +99,27 @@ pub(super) fn prepare_gpu_rasters(
                             context.visual_session, context.cancellation, ExportDecodedSourceRoute::CpuWorking,
                         )?;
                         let frame = decoded.cpu_frame()?;
-                        (GpuVisualAuxiliaryPicture::Cpu(Arc::new(frame.clone())), frame_domain(frame).0)
+                        (GpuVisualAuxiliaryPicture::Cpu(Arc::new(frame.clone())), frame_domain(frame))
                     }
-                    Source::Visual(None) => transparent_gpu_picture(domain.0),
+                    Source::Visual(None) => transparent_gpu_picture(domain),
                     Source::Visual(Some(_)) => return Err(format!("required export auxiliary Asset {asset_id} resolved a visual child")),
                 }
             }
             VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. } => {
                 match prepared_visual_source(inputs, key)? {
-                    PreparedAuxiliaryVisualSource::Child { .. } => {
+                    PreparedAuxiliaryVisualSource::Child { child, .. } => {
                         let Some(PreparedExportVisualOutput::NestedGpu(frame)) = inputs.auxiliary_output(key) else {
                             return Err(format!("required export auxiliary source produced no GPU picture: {key:?}"));
                         };
                         let descriptor = frame.descriptor();
-                        (GpuVisualAuxiliaryPicture::Gpu(frame.clone()), EffectFrameExtent::new(descriptor.width, descriptor.height))
+                        let node = inputs.closure().node(*child).ok_or("missing auxiliary GPU picture node")?;
+                        let resolution = Resolution { width: descriptor.width, height: descriptor.height };
+                        let sampling = node.materialization_contract().image_sampling(resolution)
+                            .map_err(|error| error.to_string())?;
+                        (GpuVisualAuxiliaryPicture::Gpu(frame.clone()), (EffectFrameExtent::new(descriptor.width, descriptor.height), sampling))
                     }
-                    PreparedAuxiliaryVisualSource::Transparent { resolution, .. } => {
-                        transparent_gpu_picture(EffectFrameExtent::new(resolution.width, resolution.height))
+                    PreparedAuxiliaryVisualSource::Transparent { resolution, sampling, .. } => {
+                        transparent_gpu_picture((EffectFrameExtent::new(resolution.width, resolution.height), *sampling))
                     }
                     PreparedAuxiliaryVisualSource::Unavailable(reason) => {
                         return Err(format!("required export auxiliary source {key:?} is unavailable: {reason:?}"));
@@ -131,16 +135,17 @@ pub(super) fn prepare_gpu_rasters(
         } else {
             AuxiliaryPolicy::new(AuxiliaryResolution::Authored)
         };
-        Ok(GpuVisualAuxiliaryInput { slot: key.slot, picture, policy, transform: mondrian_effects::IDENTITY_AFFINE })
+        Ok(GpuVisualAuxiliaryInput { slot: key.slot, picture, sampling, policy, transform: mondrian_effects::IDENTITY_AFFINE })
     }).collect()
 }
 
-fn transparent_gpu_picture(
-    extent: EffectFrameExtent,
-) -> (GpuVisualAuxiliaryPicture, EffectFrameExtent) {
+fn transparent_gpu_picture(domain: ImageDomain) -> (GpuVisualAuxiliaryPicture, ImageDomain) {
     (
-        GpuVisualAuxiliaryPicture::Transparent { width: extent.width(), height: extent.height() },
-        extent,
+        GpuVisualAuxiliaryPicture::Transparent {
+            width: domain.0.width(),
+            height: domain.0.height(),
+        },
+        domain,
     )
 }
 
@@ -711,7 +716,7 @@ mod tests {
         }
         let mut timeline = snapshot_with_effect(glass);
         timeline.sequences.push(source);
-        let (cpu, gpu) = render_export_gpu_auxiliary_pair(&timeline);
+        let (cpu, gpu) = render_export_gpu_auxiliary_pair(&timeline, 0, 1);
         let alpha_error =
             cpu.chunks_exact(4).map(|pixel| (pixel[3] - 1.0).abs()).fold(0.0, f32::max);
         assert!(
@@ -743,14 +748,17 @@ mod tests {
             .iter()
             .zip(expected)
             .all(|(actual, expected)| (actual - expected).abs() < 1.0e-6)));
-        let (cpu, gpu) = render_export_gpu_auxiliary_pair(&timeline);
+        let (cpu, gpu) = render_export_gpu_auxiliary_pair(&timeline, 0, 1);
         assert!(cpu.chunks_exact(4).all(|pixel| pixel[3] == 1.0));
         assert_auxiliary_float32_parity(&cpu, &gpu);
     }
 
-    fn render_export_gpu_auxiliary_pair(timeline: &TimelineExportSnapshot) -> (Vec<f32>, Vec<f32>) {
-        let _gpu = GpuVisualExecutionGuard::activate();
-        let mut session = ExportVisualRenderSession::default();
+    fn render_float_auxiliary_delivery(
+        timeline: &TimelineExportSnapshot,
+        frame: i64,
+        session: &mut ExportVisualRenderSession,
+        allow_gpu: bool,
+    ) -> Vec<f32> {
         let color = timeline
             .sequence
             .settings
@@ -758,46 +766,137 @@ mod tests {
             .unwrap();
         let cancellation = ExecutionCancellationToken::new();
         let contract = ExportFrameContract::FloatMasterRgba32;
-        let render = |session: &mut ExportVisualRenderSession, allow_gpu| {
-            session.resource_policy.opportunistic_gpu_acceleration = allow_gpu;
-            session
-                .composite_scratch
-                .set_spatial_chain_preference(mondrian_renderer::SpatialChainPreference::ForceGpu);
-            let mut packed = Vec::new();
-            let mut context = ExportFrameRenderContext {
-                media: &timeline.media,
-                color_environment: &timeline.color_environment,
-                alpha_mode: ExportAlphaMode::Preserve,
-                delivery_pixels: ExportDeliveryPixelContract::unmodified(contract),
-                input_color_counts: None,
-                stage_diagnostics: None,
-                composite_diagnostics: None,
-                export_diagnostics: None,
-                visual_session: session,
-                cancellation: &cancellation,
-            };
-            render_sequence_frame_into(
-                timeline,
-                &mut context,
-                &timeline.sequence,
-                0,
-                timeline.sequence.settings.resolution,
-                color.clone(),
-                SequenceRenderTarget::Deliverable(&mut packed),
-            )
-            .expect("Export with a real second picture");
-            contract.to_rgba_f32(&packed).expect("float pipe frame")
+        session.resource_policy.opportunistic_gpu_acceleration = allow_gpu;
+        session
+            .composite_scratch
+            .set_spatial_chain_preference(mondrian_renderer::SpatialChainPreference::ForceGpu);
+        let mut packed = Vec::new();
+        let mut context = ExportFrameRenderContext {
+            media: &timeline.media,
+            color_environment: &timeline.color_environment,
+            alpha_mode: ExportAlphaMode::Preserve,
+            delivery_pixels: ExportDeliveryPixelContract::unmodified(contract),
+            input_color_counts: None,
+            stage_diagnostics: None,
+            composite_diagnostics: None,
+            export_diagnostics: None,
+            visual_session: session,
+            cancellation: &cancellation,
         };
-        let cpu = render(&mut session, false);
-        let gpu = render(&mut session, true);
+        render_sequence_frame_into(
+            timeline,
+            &mut context,
+            &timeline.sequence,
+            frame,
+            timeline.sequence.settings.resolution,
+            color,
+            SequenceRenderTarget::Deliverable(&mut packed),
+        )
+        .expect("Export float deliverable");
+        contract.to_rgba_f32(&packed).expect("float pipe frame")
+    }
+
+    fn render_export_gpu_auxiliary_pair(
+        timeline: &TimelineExportSnapshot,
+        frame: i64,
+        expected_nested_outputs: u64,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let _gpu = GpuVisualExecutionGuard::activate();
+        let mut session = ExportVisualRenderSession::default();
+        let cpu = render_float_auxiliary_delivery(timeline, frame, &mut session, false);
+        let gpu = render_float_auxiliary_delivery(timeline, frame, &mut session, true);
         let diagnostics = session.visual_diagnostics();
         assert_eq!(diagnostics.gpu_visual_spatial_effect_layers, 1);
-        assert_eq!(diagnostics.gpu_visual_nested_outputs, 1);
+        assert_eq!(
+            diagnostics.gpu_visual_nested_outputs,
+            expected_nested_outputs
+        );
         assert_eq!(diagnostics.gpu_visual_output_readbacks, 1);
         assert_eq!(diagnostics.gpu_visual_spatial_cpu_retries, 0);
         assert_eq!(gpu.len(), 16 * 16 * 4);
         assert_eq!(gpu.len(), cpu.len());
         (cpu, gpu)
+    }
+
+    #[test]
+    #[ignore = "real GPU Export Video Collage qualification; run independently"]
+    fn export_video_collage_resolves_two_distinct_sequence_grids_and_tile_times() {
+        let rate = mondrian_core::Rational::new(8, 1);
+        let child = |name: &str, resolution, colors: [Color; 2]| {
+            let mut sequence = Sequence::new(name);
+            sequence.settings.resolution = resolution;
+            sequence.settings.frame_rate = rate;
+            for (index, color) in colors.into_iter().enumerate() {
+                let duration = TimelineTime::new(1, 2).unwrap();
+                let clip = Clip::new_solid_color(
+                    AssetId::new(),
+                    color,
+                    TimelineTime::new(index as i64, 2).unwrap(),
+                    duration,
+                )
+                .unwrap();
+                sequence.video_tracks[0].add_clip(clip).unwrap();
+            }
+            sequence
+        };
+        let first = child(
+            "Red at output time",
+            Resolution { width: 31, height: 17 },
+            [Color::BLACK, Color::from_hex(0xff0000)],
+        );
+        let second = child(
+            "Green one tile delay earlier",
+            Resolution { width: 17, height: 23 },
+            [Color::from_hex(0x00ff00), Color::from_hex(0x0000ff)],
+        );
+        let kind = EffectType::VideoCollage;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        let source = |sequence_id| {
+            PropertyValue::VisualSource(VisualSourceReference::Sequence {
+                sequence_id,
+                retime: Default::default(),
+            })
+        };
+        for (key, value) in [
+            ("columns", PropertyValue::Int(2)),
+            ("rows", PropertyValue::Int(1)),
+            ("spacing", PropertyValue::Float(0.0)),
+            ("tile_delay", PropertyValue::Float(0.25)),
+            ("tile_source_01", source(first.id)),
+            ("tile_source_02", source(second.id)),
+        ] {
+            effect
+                .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+                .unwrap();
+        }
+        let mut timeline = snapshot_with_effect(effect);
+        timeline.sequence.settings.frame_rate = rate;
+        timeline.sequences.extend([first, second]);
+        let mut reference = ExportVisualRenderSession::default();
+        let expected = [(0, 4), (1, 2)].map(|(child, time)| {
+            let independent = TimelineExportSnapshot {
+                sequence: timeline.sequences[child].clone(),
+                sequences: Vec::new(),
+                media: HashMap::new(),
+                color_environment: timeline.color_environment.clone(),
+                prepared_execution: None,
+                range: TimelineExportRange::EntireSequence,
+            };
+            render_float_auxiliary_delivery(&independent, time, &mut reference, false)[..4]
+                .try_into()
+                .unwrap()
+        });
+        let (cpu, gpu) = render_export_gpu_auxiliary_pair(&timeline, 4, 2);
+        for row in cpu.chunks_exact(16 * 4) {
+            for (column, pixel) in row.chunks_exact(4).enumerate() {
+                let expected: [f32; 4] = expected[usize::from(column >= 8)];
+                assert!(
+                    pixel.iter().zip(expected).all(|(a, b)| (a - b).abs() <= 1.0e-5),
+                    "column {column}: {pixel:?}, independent source {expected:?}"
+                );
+            }
+        }
+        assert_auxiliary_float32_parity(&cpu, &gpu);
     }
 
     fn assert_auxiliary_float32_parity(cpu: &[f32], gpu: &[f32]) {
@@ -891,6 +990,58 @@ mod tests {
             false,
         )
         .expect("full range includes the exact Clip sample");
+    }
+
+    #[test]
+    fn export_video_collage_preflight_checks_the_derived_tile_offset() {
+        let source = solid(Color::WHITE, TimelineTime::ZERO);
+        let clip_id = source.id;
+        let kind = EffectType::VideoCollage;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        for (key, value) in [
+            ("columns", PropertyValue::Int(2)),
+            ("rows", PropertyValue::Int(1)),
+            ("tile_delay", PropertyValue::Float(0.25)),
+            (
+                "tile_source_02",
+                PropertyValue::VisualSource(VisualSourceReference::Clip {
+                    clip_id,
+                    retime: Default::default(),
+                }),
+            ),
+        ] {
+            effect
+                .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+                .unwrap();
+        }
+        let mut timeline = snapshot_with_effect(effect);
+        timeline.sequence.settings.frame_rate = mondrian_core::Rational::new(8, 1);
+        timeline.sequence.video_tracks[0].add_clip(source).unwrap();
+        let error = crate::capture::prepare_timeline_export_dependencies(
+            &timeline.sequence,
+            &[],
+            TimelineExportRange::WorkArea { start_frame: 4, end_frame_exclusive: 5 },
+            false,
+        )
+        .expect_err("the second tile samples two frames before the one-frame export range");
+        assert!(
+            matches!(error,
+                crate::capture::TimelineExportDependencyError::VisualClosure(
+                    mondrian_renderer::PreparedVisualRangeClosureError::AuxiliaryClipOutsideRange {
+                        clip_id: actual, first, last, source_first, source_last, ..
+                    }
+                ) if actual == clip_id && first == TimelineTime::new(1, 2).unwrap() && last == first
+                    && source_first == TimelineTime::new(1, 4).unwrap() && source_last == source_first
+            ),
+            "{error}"
+        );
+        crate::capture::prepare_timeline_export_dependencies(
+            &timeline.sequence,
+            &[],
+            TimelineExportRange::EntireSequence,
+            false,
+        )
+        .unwrap();
     }
 
     #[test]

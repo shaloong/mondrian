@@ -50,6 +50,8 @@ pub(crate) enum EffectSpatialGpuError {
     MaskDeformation(#[from] mondrian_effects::mask_deformation::MaskDeformationError),
     #[error(transparent)]
     Glass(#[from] mondrian_effects::GlassError),
+    #[error(transparent)]
+    VideoCollage(#[from] mondrian_effects::VideoCollageError),
 }
 
 /// Reusable pipelines for GPU spatial effect passes.
@@ -59,6 +61,7 @@ pub(crate) struct EffectSpatialGpu {
     detail_preserving_upscale:
         std::sync::OnceLock<crate::detail_preserving_upscale_gpu::DetailPreservingUpscaleGpu>,
     glass: std::sync::OnceLock<crate::glass_gpu::GlassGpu>,
+    video_collage: std::sync::OnceLock<crate::video_collage_gpu::VideoCollageGpu>,
     box_blur: wgpu::RenderPipeline,
     find_edges: wgpu::RenderPipeline,
     emboss: wgpu::RenderPipeline,
@@ -2245,6 +2248,7 @@ impl EffectSpatialGpu {
             mask_deformation: std::sync::OnceLock::new(),
             detail_preserving_upscale: std::sync::OnceLock::new(),
             glass: std::sync::OnceLock::new(),
+            video_collage: std::sync::OnceLock::new(),
             minimax,
             channel_blur,
             median,
@@ -3059,6 +3063,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Smear { .. } | EffectGpuSpatialPass::Reshape { .. } => Ok(1),
             EffectGpuSpatialPass::DetailPreservingUpscale { .. } => Ok(1),
             EffectGpuSpatialPass::Glass { .. } => Ok(1),
+            EffectGpuSpatialPass::VideoCollage { .. } => Ok(0),
             EffectGpuSpatialPass::BlankingFill { grade } => {
                 Ok(if grade.warps_top_layer() { 1 } else { 2 })
             }
@@ -3118,6 +3123,11 @@ impl EffectSpatialGpu {
                     mondrian_effects::EffectFrameExtent::new(source.width(), source.height());
                 self.record_glass(device, encoder, pass, source, output, None, primary)?;
                 return Ok(output.clone());
+            }
+            EffectGpuSpatialPass::VideoCollage { .. } => {
+                return Err(EffectSpatialGpuError::UnsupportedPass(
+                    "video_collage_direct_output",
+                ));
             }
             EffectGpuSpatialPass::SetMatte { sampling: None, .. } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
@@ -4312,6 +4322,20 @@ impl EffectSpatialGpu {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_video_collage<'a>(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        pass: &EffectGpuSpatialPass,
+        primary: &wgpu::Texture,
+        output: &wgpu::Texture,
+        resolve: impl FnMut(u32) -> Option<(&'a wgpu::Texture, mondrian_core::ImageSampling, [f32; 6])>,
+    ) -> Result<(), EffectSpatialGpuError> {
+        self.video_collage
+            .get_or_init(|| crate::video_collage_gpu::VideoCollageGpu::new(device))
+            .record(device, encoder, pass, primary, output, resolve)
+    }
+
     pub(crate) fn record_glass(
         &self,
         device: &wgpu::Device,

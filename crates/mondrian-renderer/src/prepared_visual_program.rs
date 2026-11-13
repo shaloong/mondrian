@@ -1544,11 +1544,15 @@ impl PreparedVisualProgram {
                 continue;
             };
             let mut references = Vec::new();
-            program.visit_authored_visual_sources(|reference| {
-                if !references.contains(&reference) {
-                    references.push(reference);
-                }
-            });
+            program
+                .visit_authored_visual_sources(|reference| {
+                    if !references.contains(&reference) {
+                        references.push(reference);
+                    }
+                })
+                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                    reason: error.to_string(),
+                })?;
             if references.is_empty() {
                 continue;
             }
@@ -1564,14 +1568,18 @@ impl PreparedVisualProgram {
             }));
         }
         if let PreparedTimelineGrade::Ready(program) = &self.timeline_grade {
-            program.visit_authored_visual_sources(|reference| {
-                dependencies.push(PreparedAuxiliaryRangeDependency {
-                    placement: None,
-                    reference,
-                    first,
-                    last,
-                });
-            });
+            program
+                .visit_authored_visual_sources(|reference| {
+                    dependencies.push(PreparedAuxiliaryRangeDependency {
+                        placement: None,
+                        reference,
+                        first,
+                        last,
+                    });
+                })
+                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                    reason: error.to_string(),
+                })?;
         }
         Ok(dependencies)
     }
