@@ -207,7 +207,11 @@ fn render_frozen_working_frame(
     };
     match execute_prepared_visual_closure(&closure, &mut adapter) {
         Ok(PreparedExportVisualOutput::Root) => {}
-        Ok(PreparedExportVisualOutput::NestedCpu(_) | PreparedExportVisualOutput::NestedGpu(_)) => {
+        Ok(
+            PreparedExportVisualOutput::NestedCpu(_)
+            | PreparedExportVisualOutput::NestedGpu(_)
+            | PreparedExportVisualOutput::EffectInputGpu(..),
+        ) => {
             return Err(
                 "prepared Export validation returned a nested frame for the root".to_owned(),
             );

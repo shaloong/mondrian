@@ -1175,6 +1175,58 @@ impl RenderGpuOutputBoundaryRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_wgpu_spatial_effect_input(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        input: &GpuColorFrameHandle,
+        pipeline: &CompiledEffectGpuPipeline,
+        frame_seed: i64,
+        auxiliary: &[GpuSpatialAuxiliaryRaster<'_>],
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        compositor.record_spatial_effect_input(
+            device,
+            queue,
+            encoder,
+            &mut self.frame_ids,
+            &mut self.frame_table,
+            Some(&self.resource_pool),
+            input,
+            pipeline,
+            frame_seed,
+            auxiliary,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_wgpu_point_effect_input(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        input: &GpuColorFrameHandle,
+        plan: &mondrian_effects::CompiledEffectGpuPlan,
+        frame_seed: i64,
+    ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
+        compositor
+            .record_point_effect_pass(
+                device,
+                queue,
+                encoder,
+                &mut self.frame_ids,
+                &mut self.frame_table,
+                Some(&self.resource_pool),
+                input,
+                plan,
+                frame_seed,
+            )
+            .map(|record| record.output)
+    }
+
     /// Materialize one unblended procedural solid into the shared working-frame table.
     #[allow(clippy::too_many_arguments)]
     pub fn record_wgpu_solid_source(

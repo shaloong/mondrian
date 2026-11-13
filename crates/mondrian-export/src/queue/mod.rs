@@ -62,8 +62,8 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     identity_compiled_effect_graph, EffectExecutionContinuity, EffectExecutionSessionConfig,
-    EffectFrameExtent, EffectFrameTileF32, EffectProcessingBackend, EffectTemporalSourceIdentity,
-    EffectWorkingPrecision, PreparedTemporalFrameSet,
+    EffectFrameExtent, EffectFrameTileF32, EffectProcessingBackend, EffectProcessorControl,
+    EffectTemporalSourceIdentity, EffectWorkingPrecision, PreparedTemporalFrameSet,
 };
 #[cfg(target_os = "linux")]
 use mondrian_media::CudaResidentHevcEncoderSession;
@@ -591,6 +591,15 @@ impl ExportGpuExecutionRuntime {
         request: GpuVisualFrameRequest<'_>,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<GpuVisualFrameRecord, String> {
+        self.record_prepared_gpu_node(request, cancellation, false)
+    }
+
+    fn record_prepared_gpu_node(
+        &mut self,
+        request: GpuVisualFrameRequest<'_>,
+        cancellation: &ExecutionCancellationToken,
+        effect_input: bool,
+    ) -> Result<GpuVisualFrameRecord, String> {
         if cancellation.is_canceled() {
             return Err("export GPU visual execution canceled".to_owned());
         }
@@ -610,8 +619,8 @@ impl ExportGpuExecutionRuntime {
         let visual = backend.visual.as_ref().ok_or_else(|| {
             "export GPU visual executor was not prepared before recording".to_owned()
         })?;
-        let record = visual
-            .record(
+        let record = if effect_input {
+            visual.record_effect_input(
                 &mut backend.runtime,
                 &backend.context.device,
                 &backend.context.queue,
@@ -619,7 +628,17 @@ impl ExportGpuExecutionRuntime {
                 backend.native_import.as_mut(),
                 request,
             )
-            .map_err(|error| format!("export GPU visual node failed: {error}"))?;
+        } else {
+            visual.record(
+                &mut backend.runtime,
+                &backend.context.device,
+                &backend.context.queue,
+                &mut encoder,
+                backend.native_import.as_mut(),
+                request,
+            )
+        }
+        .map_err(|error| format!("export GPU visual node failed: {error}"))?;
         backend.context.queue.submit(std::iter::once(encoder.finish()));
         if cancellation.is_canceled() {
             return Err("export GPU visual execution canceled".to_owned());
@@ -7973,6 +7992,7 @@ enum PreparedExportVisualOutput {
     Root,
     NestedCpu(CpuColorFrame),
     NestedGpu(GpuColorFrameHandle),
+    EffectInputGpu(GpuColorFrameHandle, mondrian_core::ImageSampling),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -8054,7 +8074,11 @@ impl PreparedVisualExecutionAdapter<Vec<PreparedExportHeterogeneousElement>>
                 )
             })?;
         if self.mode == ExportPreparedVisualMode::Gpu {
-            let output = render_prepared_visual_node_gpu(self.context, &inputs, false)?;
+            let (output, source_sampling) =
+                render_prepared_visual_node_gpu(self.context, &inputs, false)?;
+            if let Some(sampling) = source_sampling {
+                return Ok(PreparedExportVisualOutput::EffectInputGpu(output, sampling));
+            }
             let (output, stage_diagnostics) =
                 self.context.visual_session.gpu_output.convert_gpu_working_frame(
                     &output,
@@ -8108,6 +8132,9 @@ fn prepared_export_nested_output<'a>(
             "prepared export child for Clip {} returned a GPU output to the CPU Adapter",
             placement.clip_id
         )),
+        Some(PreparedExportVisualOutput::EffectInputGpu(..)) => {
+            Err("ordinary nested CPU binding resolved an Effect input".into())
+        }
         Some(PreparedExportVisualOutput::Root) => Err(format!(
             "prepared export child for Clip {} returned the root output",
             placement.clip_id
@@ -8126,6 +8153,9 @@ fn prepared_export_nested_gpu_output(
 ) -> Result<GpuColorFrameHandle, String> {
     match inputs.nested_output(placement, sample) {
         Some(PreparedExportVisualOutput::NestedGpu(frame)) => Ok(frame.clone()),
+        Some(PreparedExportVisualOutput::EffectInputGpu(..)) => {
+            Err("ordinary nested GPU binding resolved an Effect input".into())
+        }
         Some(PreparedExportVisualOutput::NestedCpu(_)) => Err(format!(
             "prepared export child for Clip {} returned a CPU output to the GPU Adapter",
             placement.clip_id
@@ -8214,6 +8244,7 @@ fn prepare_export_visual_frame_closure(
             let prepared_frame = match invocation.target {
                 PreparedVisualFrameTarget::Sequence => scratch.prepare_timeline_frame_execution(program, request),
                 PreparedVisualFrameTarget::AuxiliaryClip(sample) => scratch.prepare_auxiliary_clip_frame_execution(program, request, sample),
+                PreparedVisualFrameTarget::ClipEffectInput(input) => scratch.prepare_clip_effect_input_frame_execution(program, request, input),
             }
                 .map_err(|error| error.to_string())?;
             for batch in prepared_frame.batches() {
@@ -8420,7 +8451,9 @@ fn render_sequence_sample_into(
         match execute_prepared_visual_closure(&closure, &mut adapter) {
             Ok(PreparedExportVisualOutput::Root) => return Ok(()),
             Ok(
-                PreparedExportVisualOutput::NestedCpu(_) | PreparedExportVisualOutput::NestedGpu(_),
+                PreparedExportVisualOutput::NestedCpu(_)
+                | PreparedExportVisualOutput::NestedGpu(_)
+                | PreparedExportVisualOutput::EffectInputGpu(..),
             ) => {
                 return Err(
                     "prepared export execution returned a nested frame for the root".to_owned(),
@@ -8617,7 +8650,7 @@ fn render_prepared_visual_node_gpu_into(
         &target,
         SequenceRenderTarget::Deliverable(_) | SequenceRenderTarget::Resident(_)
     ) && context.alpha_mode == ExportAlphaMode::FlattenBlack;
-    let output = render_prepared_visual_node_gpu(context, inputs, flatten_black)?;
+    let (output, _) = render_prepared_visual_node_gpu(context, inputs, flatten_black)?;
     match target {
         SequenceRenderTarget::Deliverable(canvas) => {
             finish_export_gpu_visual_output(context, inputs.node().color_context(), output, canvas)?
@@ -8639,7 +8672,8 @@ fn render_prepared_visual_node_gpu(
     context: &mut ExportFrameRenderContext<'_>,
     inputs: &ExportNodeInputs<'_>,
     flatten_black: bool,
-) -> Result<GpuColorFrameHandle, ExportPreparedVisualError> {
+) -> Result<(GpuColorFrameHandle, Option<mondrian_core::ImageSampling>), ExportPreparedVisualError>
+{
     if context.cancellation.is_canceled() {
         return Err("export GPU visual execution canceled".to_owned().into());
     }
@@ -8917,16 +8951,58 @@ fn render_prepared_visual_node_gpu(
         gpu_elements.push(gpu_element);
     }
 
-    let record = context.visual_session.gpu_output.record_visual_node(
-        GpuVisualFrameRequest {
-            width,
-            height,
-            working_color_space: color_context.working_color_space(),
-            color_engine: color_context.engine().clone(),
-            elements: &gpu_elements,
-        },
-        context.cancellation,
-    )?;
+    let effect_input_sampling = if node.clip_effect_input().is_some() {
+        match render_plan.elements.as_slice() {
+            [TimelineRenderPlanElement::Media(_)] => {
+                decoded_media[0].as_ref().and_then(|decoded| decoded.image_sampling())
+            }
+            [TimelineRenderPlanElement::BasicTitle(_)] => {
+                title_media[0].as_ref().map(|title| title.frame.rgba_f32().sampling)
+            }
+            [TimelineRenderPlanElement::NestedSequence(nested)] => {
+                let child_id = export_nested_child(
+                    inputs.closure(),
+                    node.id(),
+                    nested.placement,
+                    PreparedVisualNestedSample::Current,
+                )?;
+                let child = export_visual_node(inputs.closure(), child_id)?;
+                Some(
+                    child
+                        .materialization_contract()
+                        .image_sampling(child.execution_resolution())
+                        .map_err(|error| error.to_string())?,
+                )
+            }
+            [TimelineRenderPlanElement::SolidColor(_)] => Some(
+                materialization.image_sampling(resolution).map_err(|error| error.to_string())?,
+            ),
+            _ => return Err("historical Effect input has no single GPU source".to_owned().into()),
+        }
+        .ok_or_else(|| "historical GPU Effect input has no actual sampling".to_owned())
+        .map(Some)?
+    } else {
+        None
+    };
+    let request = GpuVisualFrameRequest {
+        width,
+        height,
+        working_color_space: color_context.working_color_space(),
+        color_engine: color_context.engine().clone(),
+        elements: &gpu_elements,
+    };
+    let record = if effect_input_sampling.is_some() {
+        context.visual_session.gpu_output.record_prepared_gpu_node(
+            request,
+            context.cancellation,
+            true,
+        )?
+    } else {
+        context
+            .visual_session
+            .gpu_output
+            .record_visual_node(request, context.cancellation)?
+    };
     for element in &gpu_elements {
         match element {
             GpuVisualFrameElement::Source(source) => {
@@ -9011,7 +9087,7 @@ fn render_prepared_visual_node_gpu(
             ..TimelineCompositeDiagnostics::default()
         });
     }
-    Ok(record.output)
+    Ok((record.output, effect_input_sampling))
 }
 
 fn export_gpu_cpu_source(frame: &CpuColorFrame, is_data_texture: bool) -> GpuVisualFrameSource {
@@ -9382,6 +9458,13 @@ fn render_prepared_visual_node_into(
     let resolution = node.execution_resolution();
     let color_context = node.color_context().clone();
     let Resolution { width, height } = resolution;
+    if node.clip_effect_input().is_some() {
+        let SequenceRenderTarget::Working(output) = &mut target else {
+            return Err("historical Clip input needs a working raster target".into());
+        };
+        **output = Some(render_export_clip_effect_input(context, inputs)?);
+        return Ok(());
+    }
     let media_dependencies = context.media;
 
     let frame_contract = context.delivery_pixels.frame;
@@ -10074,6 +10157,176 @@ fn render_prepared_visual_node_into(
     }
     *output_target = final_bytes;
     Ok(())
+}
+
+fn render_export_clip_effect_input(
+    context: &mut ExportFrameRenderContext<'_>,
+    inputs: &ExportNodeInputs<'_>,
+) -> Result<CpuColorFrame, String> {
+    let node = inputs.node();
+    let resolution = node.execution_resolution();
+    let materialization = node.materialization_contract();
+    let author = materialization.author_resolution();
+    let color = node.color_context();
+    let sampling = materialization.image_sampling(resolution).map_err(|error| error.to_string())?;
+    let [element] = node.evaluation().plan().elements.as_slice() else {
+        return Err("historical Clip input requires one source layer".into());
+    };
+    let mut cache = HashMap::new();
+    let mut checkpoint = || {
+        context
+            .cancellation
+            .is_canceled()
+            .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+    };
+    let mut control = EffectProcessorControl::new(&mut checkpoint);
+    let (frame, effect, seed, transform) = match element {
+        TimelineRenderPlanElement::Media(media) => {
+            let decoded = decode_export_media_plan(
+                context.media,
+                media,
+                resolution.width,
+                resolution.height,
+                color,
+                &mut cache,
+                context.input_color_counts.as_deref_mut(),
+                context.stage_diagnostics.as_deref_mut(),
+                context.visual_session,
+                context.cancellation,
+                ExportDecodedSourceRoute::CpuWorking,
+            )?;
+            let transform = project_export_picture_affine(
+                media.transform,
+                decoded.picture_geometry.source_to_display_affine(),
+                decoded.source_resolution,
+                decoded.extent(),
+                author,
+                resolution,
+                "historical media",
+            )?;
+            (
+                decoded.cpu_frame()?.clone(),
+                &media.effect_graph,
+                media.frame_seed,
+                transform,
+            )
+        }
+        TimelineRenderPlanElement::BasicTitle(title) => {
+            let rendered = render_export_basic_title_plan(
+                context.visual_session,
+                materialization,
+                title,
+                resolution.width,
+                resolution.height,
+                color.working_color_space(),
+            )?;
+            (
+                rendered.frame,
+                &title.effect_graph,
+                title.frame_seed,
+                rendered.transform,
+            )
+        }
+        TimelineRenderPlanElement::SolidColor(solid) => {
+            let frame = context
+                .visual_session
+                .composite_scratch
+                .materialize_effect_input_solid(
+                    resolution,
+                    sampling,
+                    solid.color,
+                    color.working_color_space(),
+                    &mut control,
+                )
+                .map_err(|error| error.to_string())?;
+            let transform = project_export_affine(
+                solid.transform,
+                author,
+                resolution,
+                author,
+                resolution,
+                "historical solid",
+            )?;
+            (frame, &solid.effect_graph, solid.frame_seed, transform)
+        }
+        TimelineRenderPlanElement::NestedSequence(nested) => {
+            let frame = prepared_export_nested_output(
+                inputs,
+                nested.placement,
+                PreparedVisualNestedSample::Current,
+            )?
+            .clone();
+            let child = export_nested_child(
+                inputs.closure(),
+                node.id(),
+                nested.placement,
+                PreparedVisualNestedSample::Current,
+            )?;
+            let source = export_visual_node(inputs.closure(), child)?.author_resolution();
+            let transform = project_export_affine(
+                nested.transform,
+                source,
+                decoded_frame_resolution(&frame),
+                author,
+                resolution,
+                "historical nested Sequence",
+            )?;
+            (frame, &nested.effect_graph, nested.frame_seed, transform)
+        }
+        _ => return Err("historical Clip input requires an independent picture".into()),
+    };
+    let raster =
+        timeline_effect_input_rasters(context, inputs, &frame, effect, &mut cache, &mut control)?;
+    let bindings = raster.iter().map(auxiliary::RegisteredInputs::inputs).collect::<Vec<_>>();
+    let sets = raster
+        .iter()
+        .zip(&bindings)
+        .map(|(set, values)| {
+            mondrian_renderer::TimelineAuxiliaryInputs::new(&set.graph, set.primary, values)
+        })
+        .collect::<Vec<_>>();
+    context
+        .visual_session
+        .composite_scratch
+        .execute_clip_effect_input(
+            &frame,
+            effect,
+            seed,
+            transform,
+            TimelineEffectColorRuntime::new(color.engine(), color.working_color_space(), sampling)
+                .with_auxiliary_inputs(&sets),
+            &mut control,
+        )
+        .map_err(|error| format!("historical Clip input failed: {error:?}"))
+}
+
+fn timeline_effect_input_rasters(
+    context: &mut ExportFrameRenderContext<'_>,
+    inputs: &ExportNodeInputs<'_>,
+    frame: &CpuColorFrame,
+    effect: &Arc<mondrian_effects::CompiledEffectGraph>,
+    cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+    control: &mut EffectProcessorControl<'_>,
+) -> Result<Vec<auxiliary::RegisteredInputs>, String> {
+    let sample = inputs.node().clip_effect_input().ok_or("missing historical Clip input")?;
+    let element = TimelineCompositeElement::Media(TimelineMediaLayer {
+        frame,
+        opacity: 1.0,
+        blend_mode: mondrian_core::BlendMode::Normal,
+        transform: mondrian_effects::IDENTITY_AFFINE,
+        effect_graph: Arc::clone(effect),
+        frame_seed: sample.frame_seed(),
+        processor_input_plan: None,
+    });
+    let domain = mondrian_renderer::timeline_auxiliary_frame_view(frame);
+    auxiliary::prepare_rasters(
+        inputs,
+        &[element],
+        (domain.extent(), domain.sampling()),
+        context,
+        cache,
+        control,
+    )
 }
 
 fn decode_export_media_plan(

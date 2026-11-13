@@ -294,6 +294,20 @@ impl PreparedVisualExecutionSchedule {
             }
             state[node_id.index()] = 1;
             stack.push((node_id, true));
+            let mut auxiliary_children = Vec::new();
+            let mut input_history = std::collections::HashSet::new();
+            for (index, (key, source)) in node.auxiliary_visual_sources().iter().enumerate() {
+                if let Some(child) = auxiliary_child(source) {
+                    if matches!(
+                        key.address,
+                        crate::PreparedVisualAuxiliaryAddress::InputHistory(_)
+                    ) && !input_history.insert(child)
+                    {
+                        continue;
+                    }
+                    auxiliary_children.push((child, index));
+                }
+            }
             let mut push_child = |child,
                                   edge|
              -> Result<(), PreparedVisualExecutionStructureError> {
@@ -309,10 +323,8 @@ impl PreparedVisualExecutionSchedule {
                 stack.push((child, false));
                 Ok(())
             };
-            for (index, (_, source)) in node.auxiliary_visual_sources().iter().enumerate().rev() {
-                if let Some(child) = auxiliary_child(source) {
-                    push_child(child, InboundEdge::Auxiliary(index))?;
-                }
+            for (child, index) in auxiliary_children.into_iter().rev() {
+                push_child(child, InboundEdge::Auxiliary(index))?;
             }
             for (index, binding) in node.bindings().iter().enumerate().rev() {
                 if binding.parent() != node_id {

@@ -474,8 +474,52 @@ impl GpuVisualFrameExecutor {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        native_import: Option<&mut crate::NativeVideoImportRuntime>,
+        request: GpuVisualFrameRequest<'_>,
+    ) -> Result<GpuVisualFrameRecord, GpuVisualFrameExecutionError> {
+        self.record_inner(
+            session,
+            device,
+            queue,
+            encoder,
+            native_import,
+            request,
+            false,
+        )
+    }
+
+    /// Record the entering value of one Effect on its own source grid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_effect_input(
+        &self,
+        session: &mut crate::color::GpuColorExecutionSession,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        native_import: Option<&mut crate::NativeVideoImportRuntime>,
+        request: GpuVisualFrameRequest<'_>,
+    ) -> Result<GpuVisualFrameRecord, GpuVisualFrameExecutionError> {
+        self.record_inner(
+            session,
+            device,
+            queue,
+            encoder,
+            native_import,
+            request,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_inner(
+        &self,
+        session: &mut crate::color::GpuColorExecutionSession,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         mut native_import: Option<&mut crate::NativeVideoImportRuntime>,
         request: GpuVisualFrameRequest<'_>,
+        effect_input: bool,
     ) -> Result<GpuVisualFrameRecord, GpuVisualFrameExecutionError> {
         let runtime = session.runtime_mut();
         let mut retained_textures = u64::try_from(runtime.frame_table().len()).map_err(|_| {
@@ -501,13 +545,22 @@ impl GpuVisualFrameExecutor {
                 .ok_or(GpuVisualFrameActiveWorkingSetEstimateError::RetainedResidencyOverflow)
                 .map_err(GpuVisualFrameActiveWorkingSetAdmissionError::from)?;
         }
-        let active_working_set = estimate_gpu_visual_frame_active_working_set(
-            &request,
-            GpuVisualFrameActiveTextureDemand {
-                bytes: retained_bytes,
-                textures: retained_textures,
-            },
-        )
+        let retained = GpuVisualFrameActiveTextureDemand {
+            bytes: retained_bytes,
+            textures: retained_textures,
+        };
+        let active_working_set = if effect_input {
+            let [GpuVisualFrameElement::Source(source)] = request.elements else {
+                return Err(GpuCompositeError::SpatialChainFailed {
+                    pass: "effect_input",
+                    detail: "historical Effect input requires one source".into(),
+                }
+                .into());
+            };
+            estimate_effect_input(&request, source, retained)
+        } else {
+            estimate_gpu_visual_frame_active_working_set(&request, retained)
+        }
         .map_err(GpuVisualFrameActiveWorkingSetAdmissionError::from)?;
         self.resource_grant.admit(active_working_set)?;
         let mut prepared = Vec::with_capacity(request.elements.len());
@@ -594,6 +647,82 @@ impl GpuVisualFrameExecutor {
                     }));
                 }
             }
+        }
+
+        if effect_input {
+            let [PreparedElement::Source(source)] = prepared.as_slice() else {
+                unreachable!("the effect input request admitted exactly one source")
+            };
+            let input = match &source.source {
+                GpuVisualFrameSource::GpuWorking(frame) => frame.clone(),
+                GpuVisualFrameSource::Working(frame) => {
+                    let record = runtime.upload_wgpu_working_frame(device, queue, frame).map_err(
+                        |error| GpuVisualFrameExecutionError::AuxiliaryUpload(Box::new(error)),
+                    )?;
+                    color_stage_diagnostics.accumulate(record.stage_diagnostics);
+                    record.output
+                }
+                GpuVisualFrameSource::Solid(color) => {
+                    runtime
+                        .record_wgpu_solid_source(
+                            &self.compositor,
+                            device,
+                            queue,
+                            encoder,
+                            request.width,
+                            request.height,
+                            request.working_color_space,
+                            *color,
+                        )?
+                        .output
+                }
+                _ => {
+                    return Err(GpuCompositeError::SpatialChainFailed {
+                        pass: "effect_input",
+                        detail: "historical Effect source has no working picture".into(),
+                    }
+                    .into())
+                }
+            };
+            let output = if let Some(pipeline) = &source.spatial_plan {
+                let record = runtime.record_wgpu_spatial_effect_input(
+                    &self.compositor,
+                    device,
+                    queue,
+                    encoder,
+                    &input,
+                    pipeline,
+                    source.frame_seed,
+                    &source.auxiliary_bindings(),
+                )?;
+                compositing_diagnostics.accumulate(record.diagnostics);
+                record.output
+            } else if let Some(plan) = &source.effect_plan {
+                runtime.record_wgpu_point_effect_input(
+                    &self.compositor,
+                    device,
+                    queue,
+                    encoder,
+                    &input,
+                    plan,
+                    source.frame_seed,
+                )?
+            } else {
+                input
+            };
+            return Ok(GpuVisualFrameRecord {
+                output,
+                compact_yuv_sources: u64::from(matches!(
+                    request.elements,
+                    [GpuVisualFrameElement::Source(source)]
+                        if matches!(source.source, GpuVisualFrameSource::CompactYuv { .. })
+                )),
+                working_float_decision: PRODUCT_GPU_WORKING_FLOAT_DECISION,
+                compositing_diagnostics,
+                color_stage_diagnostics,
+                external_adjustment_passes: 0,
+                active_working_set,
+            });
         }
 
         let layers = prepared.iter().map(PreparedElement::as_composite_layer).collect::<Vec<_>>();
@@ -907,6 +1036,34 @@ impl GpuVisualFrameExecutor {
         compositing_diagnostics.accumulate(frame.diagnostics);
         Ok(frame.output)
     }
+}
+
+fn estimate_effect_input(
+    request: &GpuVisualFrameRequest<'_>,
+    source: &GpuVisualSourceLayer,
+    retained: GpuVisualFrameActiveTextureDemand,
+) -> Result<GpuVisualFrameActiveWorkingSetEstimate, GpuVisualFrameActiveWorkingSetEstimateError> {
+    let mut estimate =
+        GpuVisualFrameActiveWorkingSetEstimate { retained_closure: retained, ..Default::default() };
+    estimate_visual_source(request, source, &mut estimate)?;
+    let (width, height) = source.source.extent(request.width, request.height);
+    let stage = GpuVisualFrameActiveWorkingSetStage::Effects;
+    let extra = u64::from(
+        matches!(source.source, GpuVisualFrameSource::Solid(_)) && source.spatial_plan.is_none(),
+    ) + u64::from(
+        !source.effect_plan.is_identity()
+            && source.effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb,
+    );
+    estimate
+        .effects
+        .checked_add(repeated_texture_demand(width, height, extra, stage)?, stage)?;
+    estimate.total = retained;
+    estimate.total.checked_add(
+        estimate.source_materialization,
+        GpuVisualFrameActiveWorkingSetStage::SourceMaterialization,
+    )?;
+    estimate.total.checked_add(estimate.effects, stage)?;
+    Ok(estimate)
 }
 
 /// Estimate one complete visual node plus GPU frames retained by earlier

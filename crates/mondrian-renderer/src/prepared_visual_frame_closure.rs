@@ -8,6 +8,7 @@
 //! temporal nested demands. It deliberately owns no media pixels, decode
 //! scheduling, Preview pending state, export encoding, or presentation.
 
+use crate::prepared_visual_program::PreparedClipEffectInputSample;
 use crate::{
     PreparedVisualMaterializationContract, PreparedVisualProgram, PreparedVisualProgramBinding,
     TimelineRenderPlan, TimelineRenderPlanElement, TimelineTemporalDemandBatch,
@@ -16,10 +17,10 @@ use crate::{
 use mondrian_core::timeline_data::{NestedColorProcessing, TimelineClipExecutionRef};
 use mondrian_core::{
     FramePosition, FrameRounding, Rational, Resolution, SequenceId, SequenceRevision,
-    SourceSampleTarget, TimelineTime, TimelineTimeRange, VisualSourceReference,
+    SourceSampleTarget, TimelineTime, TimelineTimeRange, VisualSourceReference, VisualSourceRetime,
     VisualSourceTimeSample, WorkingColorSpace,
 };
-use mondrian_effects::EffectTemporalFrameRequest;
+use mondrian_effects::{CompiledEffectGraph, EffectTemporalFrameRequest};
 use mondrian_timeline::sequence::{
     ProgramColorContext, Sequence, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
@@ -30,6 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+
+const MAX_CLIP_EFFECT_INPUT_SAMPLES: usize = 512;
 
 /// Stable index of one exact Sequence instance in a prepared frame closure.
 ///
@@ -70,7 +73,16 @@ pub struct PreparedVisualNestedInstanceStep {
     pub sample: PreparedVisualNestedSample,
 }
 
-/// Exact consumer of a Clip- or Sequence-valued source within one frame node.
+/// Immutable address used to fill one graph slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreparedVisualAuxiliaryAddress {
+    /// A source selected by the author, with the consumer's effective retime.
+    Authored(VisualSourceReference),
+    /// The owning Effect stage's entering value at an exact time offset.
+    InputHistory(TimelineTime),
+}
+
+/// Exact consumer of an auxiliary source within one frame node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PreparedVisualAuxiliaryKey {
     /// Ordinary or Transition placement. None identifies the Timeline Grade.
@@ -79,8 +91,35 @@ pub struct PreparedVisualAuxiliaryKey {
     pub stage_index: usize,
     /// Source slot in that graph.
     pub slot: u32,
-    /// Frozen address, including exact retiming and boundary behavior.
-    pub reference: VisualSourceReference,
+    /// Frozen source address, including exact retiming.
+    pub address: PreparedVisualAuxiliaryAddress,
+}
+
+impl PreparedVisualAuxiliaryKey {
+    /// Locate one exact stage-owned source binding for a compiled slot.
+    pub fn for_slot(
+        graph: &CompiledEffectGraph,
+        placement: Option<TimelineClipExecutionRef>,
+        slot: u32,
+    ) -> Option<Self> {
+        if let Some((stage, binding)) = graph.input_history_binding(slot) {
+            return Some(Self {
+                placement,
+                stage_index: stage.stage_index(),
+                slot,
+                address: PreparedVisualAuxiliaryAddress::InputHistory(binding.offset()),
+            });
+        }
+        graph.stage_bindings().iter().find_map(|stage| {
+            let source = stage.auxiliary_sources().iter().find(|source| source.slot() == slot)?;
+            Some(Self {
+                placement,
+                stage_index: stage.stage_index(),
+                slot,
+                address: PreparedVisualAuxiliaryAddress::Authored(source.reference()),
+            })
+        })
+    }
 }
 
 /// One authored edge in a visual execution instance path.
@@ -339,6 +378,7 @@ pub struct PreparedVisualFrameNode<T> {
     bindings: Vec<PreparedVisualNestedBinding>,
     binding_index: HashMap<PreparedVisualNestedBindingKey, PreparedVisualFrameNodeId>,
     auxiliary_visual_sources: Vec<(PreparedVisualAuxiliaryKey, PreparedAuxiliaryVisualSource)>,
+    clip_effect_input: Option<PreparedClipEffectInputSample>,
 }
 
 impl<T> PreparedVisualFrameNode<T> {
@@ -424,6 +464,11 @@ impl<T> PreparedVisualFrameNode<T> {
         &self.auxiliary_visual_sources
     }
 
+    /// Native source raster of a historical Clip Effect input, if this node owns one.
+    pub const fn clip_effect_input(&self) -> Option<&PreparedClipEffectInputSample> {
+        self.clip_effect_input.as_ref()
+    }
+
     /// Resolve an exact current or temporal nested child.
     pub fn nested_child(
         &self,
@@ -451,6 +496,7 @@ impl<T> PreparedVisualFrameNode<T> {
             bindings: self.bindings,
             binding_index: self.binding_index,
             auxiliary_visual_sources: self.auxiliary_visual_sources,
+            clip_effect_input: self.clip_effect_input,
         }
     }
 }
@@ -705,10 +751,7 @@ pub fn prepare_bound_visual_frame_closure<T>(
         request,
         resolve_program,
         |program, invocation| {
-            if matches!(
-                invocation.target,
-                PreparedVisualFrameTarget::AuxiliaryClip(_)
-            ) {
+            if !matches!(invocation.target, PreparedVisualFrameTarget::Sequence) {
                 return Err("this visual Adapter does not prepare standalone Clip sources".into());
             }
             evaluate(
@@ -729,6 +772,8 @@ pub enum PreparedVisualFrameTarget<'a> {
     Sequence,
     /// Render one standalone, independently sampled Clip on the Sequence canvas.
     AuxiliaryClip(&'a PreparedAuxiliaryClipSample),
+    /// Render only one historical, source-local Effect prefix.
+    ClipEffectInput(&'a PreparedClipEffectInputSample),
 }
 
 /// Exact invocation supplied to the visual frame preparation Adapter.
@@ -792,6 +837,7 @@ pub fn prepare_bound_visual_frame_closure_for_targets<T>(
         programs: HashMap::new(),
         nodes: Vec::new(),
         active_path: Vec::new(),
+        clip_effect_input_samples: 0,
     };
     let root = builder.prepare_node(
         request.root_sequence,
@@ -813,6 +859,7 @@ struct PreparedVisualFrameClosureBuilder<'a, T, Evaluate> {
     programs: HashMap<SequenceId, Arc<PreparedVisualProgram>>,
     nodes: Vec<PreparedVisualFrameNode<T>>,
     active_path: Vec<SequenceId>,
+    clip_effect_input_samples: usize,
 }
 
 impl<'a, T, Evaluate> PreparedVisualFrameClosureBuilder<'a, T, Evaluate>
@@ -874,6 +921,14 @@ where
                 ),
                 PreparedVisualFrameTarget::AuxiliaryClip(sample) => {
                     let placement = sample.placement();
+                    let time = program
+                        .schedule()
+                        .clip_to_sequence_time(placement, placement.clip_time)
+                        .map_err(|error| invalid_time(error.to_string()))?;
+                    (time, Some(placement))
+                }
+                PreparedVisualFrameTarget::ClipEffectInput(input) => {
+                    let placement = input.sample().placement();
                     let time = program
                         .schedule()
                         .clip_to_sequence_time(placement, placement.clip_time)
@@ -954,6 +1009,10 @@ where
                 bindings: Vec::new(),
                 binding_index: HashMap::new(),
                 auxiliary_visual_sources: Vec::new(),
+                clip_effect_input: match target {
+                    PreparedVisualFrameTarget::ClipEffectInput(input) => Some(input.clone()),
+                    _ => None,
+                },
             });
 
             for demand in demands {
@@ -986,16 +1045,20 @@ where
                         );
                     }
                 }
-                let child_position = exact_nested_visual_position(demand.source_sample, child)
-                    .map_err(
-                        |reason| PreparedVisualFrameClosureError::NestedTimeProjection {
-                            parent_sequence_id: sequence.id,
-                            nested_sequence_id: child.id,
-                            placement: Box::new(demand.placement),
-                            source_time: demand.source_sample.time(),
-                            reason,
-                        },
-                    )?;
+                let position = if matches!(target, PreparedVisualFrameTarget::ClipEffectInput(_)) {
+                    auxiliary_sequence_position(demand.source_sample, child)
+                } else {
+                    exact_nested_visual_position(demand.source_sample, child)
+                };
+                let child_position = position.map_err(|reason| {
+                    PreparedVisualFrameClosureError::NestedTimeProjection {
+                        parent_sequence_id: sequence.id,
+                        nested_sequence_id: child.id,
+                        placement: Box::new(demand.placement),
+                        source_time: demand.source_sample.time(),
+                        reason,
+                    }
+                })?;
                 if child_position.frame < 0 {
                     return Err(PreparedVisualFrameClosureError::InsufficientNestedHandle {
                         parent_sequence_id: sequence.id,
@@ -1055,20 +1118,27 @@ where
                 }
                 node.bindings.push(binding);
             }
-            for key in auxiliary_keys {
-                let source = match key.reference {
-                    VisualSourceReference::Sequence { .. } => self.prepare_auxiliary_sequence(
-                        key,
-                        time,
-                        &color_context,
-                        &instance_path,
-                        depth,
-                        intent,
-                    )?,
-                    VisualSourceReference::Clip { .. } => {
+            for (key, graph) in auxiliary_keys {
+                use PreparedVisualAuxiliaryAddress::{Authored, InputHistory};
+                let source = match key.address {
+                    Authored(VisualSourceReference::Sequence { .. }) => self
+                        .prepare_auxiliary_sequence(
+                            key,
+                            time,
+                            &color_context,
+                            &instance_path,
+                            depth,
+                            intent,
+                        )?,
+                    Authored(VisualSourceReference::Clip { .. }) => {
                         self.prepare_auxiliary_clip(id, key, sequence, depth)?
                     }
-                    VisualSourceReference::Unbound | VisualSourceReference::Asset { .. } => {
+                    InputHistory(offset) => {
+                        self.prepare_clip_effect_input(id, key, &graph, offset, sequence, depth)?
+                    }
+                    Authored(
+                        VisualSourceReference::Unbound | VisualSourceReference::Asset { .. },
+                    ) => {
                         unreachable!("only visual sources enter recursive preparation")
                     }
                 };
@@ -1092,7 +1162,11 @@ where
         depth: usize,
         intent: crate::TimelineRenderIntent,
     ) -> Result<PreparedAuxiliaryVisualSource, PreparedVisualFrameClosureError> {
-        let VisualSourceReference::Sequence { sequence_id, retime } = key.reference else {
+        let PreparedVisualAuxiliaryAddress::Authored(VisualSourceReference::Sequence {
+            sequence_id,
+            retime,
+        }) = key.address
+        else {
             unreachable!("only Sequence keys enter recursive preparation");
         };
         let unavailable = |reason| unavailable_auxiliary_visual_source(key, intent, reason);
@@ -1161,7 +1235,11 @@ where
         sequence: &Sequence,
         depth: usize,
     ) -> Result<PreparedAuxiliaryVisualSource, PreparedVisualFrameClosureError> {
-        let VisualSourceReference::Clip { clip_id, retime } = key.reference else {
+        let PreparedVisualAuxiliaryAddress::Authored(VisualSourceReference::Clip {
+            clip_id,
+            retime,
+        }) = key.address
+        else {
             unreachable!("only Clip keys enter standalone Clip preparation");
         };
         let node = &self.nodes[owner.index()];
@@ -1226,6 +1304,82 @@ where
             path.into(),
             depth.saturating_add(1),
             PreparedVisualFrameTarget::AuxiliaryClip(&sample),
+        )?;
+        Ok(PreparedAuxiliaryVisualSource::Child { child, time })
+    }
+
+    fn prepare_clip_effect_input(
+        &mut self,
+        owner: PreparedVisualFrameNodeId,
+        key: PreparedVisualAuxiliaryKey,
+        graph: &CompiledEffectGraph,
+        offset: TimelineTime,
+        sequence: &Sequence,
+        depth: usize,
+    ) -> Result<PreparedAuxiliaryVisualSource, PreparedVisualFrameClosureError> {
+        let invalid = |reason| PreparedVisualFrameClosureError::AuxiliaryVisualSourcePreparation {
+            key: Box::new(key),
+            reason,
+        };
+        let node = &self.nodes[owner.index()];
+        let placement = key.placement.ok_or_else(|| {
+            invalid("a Timeline Grade has no standalone Clip input history".into())
+        })?;
+        let stage = graph
+            .stage_bindings()
+            .get(key.stage_index)
+            .ok_or_else(|| invalid("historical source has no owner stage".into()))?;
+        let input = node
+            .program()
+            .prepare_clip_effect_input_sample(
+                placement,
+                stage,
+                VisualSourceRetime { time_offset: offset, ..Default::default() },
+                node.position().time_base,
+            )
+            .map_err(|error| invalid(error.to_string()))?
+            .ok_or_else(|| invalid("clamped historical Clip input has no picture".into()))?;
+        let time = input.sample().time();
+        let placement = input.sample().placement();
+        // An in-edge clamp can make many tiles select the same prefix raster.
+        // Share it within this owner without merging unrelated instance paths.
+        if let Some(child) = node.auxiliary_visual_sources().iter().find_map(|(_, source)| {
+            let PreparedAuxiliaryVisualSource::Child { child, .. } = source else {
+                return None;
+            };
+            let previous = self.nodes.get(child.index())?.clip_effect_input()?;
+            (previous.sample().placement() == placement && previous.origin() == input.origin())
+                .then_some(*child)
+        }) {
+            return Ok(PreparedAuxiliaryVisualSource::Child { child, time });
+        }
+        let selected = node
+            .program()
+            .schedule()
+            .clip_to_sequence_time(placement, placement.clip_time)
+            .map_err(|error| invalid(error.to_string()))?;
+        let position = selected
+            .to_frame_position(
+                Rational::new(node.position().time_base.den, node.position().time_base.num),
+                FrameRounding::Floor,
+            )
+            .map_err(|error| invalid(error.to_string()))?;
+        if self.clip_effect_input_samples >= MAX_CLIP_EFFECT_INPUT_SAMPLES {
+            return Err(invalid(format!(
+                "historical Clip input closure exceeds {MAX_CLIP_EFFECT_INPUT_SAMPLES} unique samples"
+            )));
+        }
+        self.clip_effect_input_samples += 1;
+        let mut path = node.instance_path().to_vec();
+        path.push(PreparedVisualInstanceStep::Auxiliary(key));
+        let child = self.prepare_node(
+            sequence,
+            position,
+            node.execution_resolution(),
+            node.color_context().clone(),
+            path.into(),
+            depth.saturating_add(1),
+            PreparedVisualFrameTarget::ClipEffectInput(&input),
         )?;
         Ok(PreparedAuxiliaryVisualSource::Child { child, time })
     }
@@ -1359,27 +1513,24 @@ pub(crate) fn auxiliary_sequence_position(
     }
 }
 
-fn collect_auxiliary_visual_keys(plan: &TimelineRenderPlan) -> Vec<PreparedVisualAuxiliaryKey> {
+fn collect_auxiliary_visual_keys(
+    plan: &TimelineRenderPlan,
+) -> Vec<(PreparedVisualAuxiliaryKey, Arc<CompiledEffectGraph>)> {
     let mut keys = Vec::new();
     for element in &plan.elements {
         let _: Result<(), std::convert::Infallible> =
             element.visit_effect_graphs(|placement, graph| {
-                for stage in graph.stage_bindings() {
-                    keys.extend(stage.auxiliary_sources().iter().filter_map(|binding| {
-                        let reference = binding.reference();
-                        matches!(
-                            reference,
+                keys.extend(graph.auxiliary_inputs().iter().filter_map(|spec| {
+                    let key = PreparedVisualAuxiliaryKey::for_slot(graph, placement, spec.slot())?;
+                    matches!(
+                        key.address,
+                        PreparedVisualAuxiliaryAddress::Authored(
                             VisualSourceReference::Sequence { .. }
                                 | VisualSourceReference::Clip { .. }
-                        )
-                        .then_some(PreparedVisualAuxiliaryKey {
-                            placement,
-                            stage_index: stage.stage_index(),
-                            slot: binding.slot(),
-                            reference,
-                        })
-                    }));
-                }
+                        ) | PreparedVisualAuxiliaryAddress::InputHistory(_)
+                    )
+                    .then(|| (key, Arc::clone(graph)))
+                }));
                 Ok(())
             });
     }
@@ -2169,7 +2320,10 @@ mod tests {
         else {
             panic!("expected exactly one auxiliary child binding");
         };
-        assert_eq!(key.reference, reference);
+        assert_eq!(
+            key.address,
+            PreparedVisualAuxiliaryAddress::Authored(reference)
+        );
         assert_eq!(key.stage_index, 0);
         assert_eq!(key.slot, 0);
         let expected_auxiliary_time = root.time().checked_add(offset).unwrap();
@@ -2235,7 +2389,7 @@ mod tests {
         assert!(
             matches!(error, PreparedVisualFrameClosureError::UnavailableAuxiliaryVisualSource {
             key, reason: PreparedAuxiliaryVisualUnavailable::Cycle(path),
-        } if key.reference == reference && path == expected)
+        } if key.address == PreparedVisualAuxiliaryAddress::Authored(reference) && path == expected)
         );
     }
 
@@ -2309,7 +2463,7 @@ mod tests {
         else {
             panic!("later Y must retain the available X source");
         };
-        assert_eq!(early_key.reference, late_key.reference);
+        assert_eq!(early_key.address, late_key.address);
         assert_eq!(cycle, &[x_id, y_id, x_id]);
         let late_x = closure.node(*child).unwrap();
         assert_eq!(late_x.time(), late_sample);

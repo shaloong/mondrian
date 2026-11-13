@@ -350,6 +350,61 @@ impl PreparedVisualSchedule {
         self.evaluate_admitted_auxiliary_clip(admitted, sequence_time, retime)
     }
 
+    /// Sample the original picture of an exact Clip occurrence at another time.
+    ///
+    /// The renderer still has to prove which part of the Effect stack enters
+    /// the consumer. This address cannot be used as an authored Clip reference.
+    pub fn sample_clip_effect_input(
+        &self,
+        placement: TimelineClipExecutionRef,
+        retime: VisualSourceRetime,
+    ) -> std::result::Result<PreparedAuxiliaryClipSample, AuxiliaryClipAdmissionError> {
+        let admitted = self.admit_clip_effect_input(placement)?;
+        let sequence_time = self
+            .clip_to_sequence_time(placement, placement.clip_time)
+            .map_err(AuxiliaryClipAdmissionError::InvalidConsumer)?;
+        self.evaluate_admitted_auxiliary_clip(admitted, sequence_time, retime)
+    }
+
+    /// Prove the exact interval available to a historical input of this Clip.
+    pub fn admit_clip_effect_input(
+        &self,
+        placement: TimelineClipExecutionRef,
+    ) -> std::result::Result<PreparedAuxiliaryClipPlacement, AuxiliaryClipAdmissionError> {
+        let (track_index, clip_index) = self
+            .clip_location(placement)
+            .map_err(AuxiliaryClipAdmissionError::InvalidConsumer)?;
+        let track = &self.tracks[track_index];
+        let clip = &track.track.clips[clip_index];
+        if clip.is_disabled || !track.track.is_visible || track.track.is_muted {
+            return Err(AuxiliaryClipAdmissionError::Unavailable { clip_id: clip.id });
+        }
+        if matches!(clip.content, ClipContent::AdjustmentLayer { .. }) {
+            return Err(AuxiliaryClipAdmissionError::NotIndependent { clip_id: clip.id });
+        }
+        let mut start = clip.position;
+        let mut end = clip.end_position().map_err(AuxiliaryClipAdmissionError::Evaluation)?;
+        if let TimelineClipEndpointContext::TransitionLeft { transition_id }
+        | TimelineClipEndpointContext::TransitionRight { transition_id } = placement.endpoint
+        {
+            let transition = track
+                .transitions
+                .iter()
+                .find(|transition| transition.transition_id == transition_id)
+                .expect("the placement was validated against this transition");
+            start = start.min(transition.sequence_range.start);
+            end = end.max(transition.sequence_range.end().map_err(VisualSourceTimeError::from)?);
+        }
+        let available = end
+            .checked_sub(start)
+            .and_then(|duration| TimelineTimeRange::new(start, duration))
+            .map_err(|error| AuxiliaryClipAdmissionError::InvalidRange {
+                clip_id: clip.id,
+                error,
+            })?;
+        Ok(PreparedAuxiliaryClipPlacement { placement, available })
+    }
+
     fn evaluate_admitted_auxiliary_clip(
         &self,
         admitted: PreparedAuxiliaryClipPlacement,

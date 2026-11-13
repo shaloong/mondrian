@@ -337,7 +337,7 @@ pub use prepared_visual_execution::{
 pub use prepared_visual_frame_closure::{
     prepare_bound_visual_frame_closure, prepare_bound_visual_frame_closure_for_targets,
     prepare_visual_frame_closure, PreparedAuxiliaryVisualSource,
-    PreparedAuxiliaryVisualUnavailable, PreparedVisualAuxiliaryKey,
+    PreparedAuxiliaryVisualUnavailable, PreparedVisualAuxiliaryAddress, PreparedVisualAuxiliaryKey,
     PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureError,
     PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
     PreparedVisualFrameInvocation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
@@ -346,12 +346,12 @@ pub use prepared_visual_frame_closure::{
 };
 pub use prepared_visual_program::{
     prepared_visual_author_fingerprint, PreparedAuxiliaryConsumerLocation,
-    PreparedGradeAssignmentScope, PreparedVisualAuthorFingerprintError,
-    PreparedVisualAuthorSnapshotIdentity, PreparedVisualEffectBlocker,
-    PreparedVisualFrameReachability, PreparedVisualMaterializationContract,
-    PreparedVisualNestedDemand, PreparedVisualNestedRange, PreparedVisualNestedRangeDemand,
-    PreparedVisualProgram, PreparedVisualProgramBindError, PreparedVisualProgramBinding,
-    PreparedVisualProgramBindingError, PreparedVisualProgramCache,
+    PreparedClipEffectInputSample, PreparedGradeAssignmentScope,
+    PreparedVisualAuthorFingerprintError, PreparedVisualAuthorSnapshotIdentity,
+    PreparedVisualEffectBlocker, PreparedVisualFrameReachability,
+    PreparedVisualMaterializationContract, PreparedVisualNestedDemand, PreparedVisualNestedRange,
+    PreparedVisualNestedRangeDemand, PreparedVisualProgram, PreparedVisualProgramBindError,
+    PreparedVisualProgramBinding, PreparedVisualProgramBindingError, PreparedVisualProgramCache,
     PreparedVisualProgramCacheConfig, PreparedVisualProgramCacheDiagnostics,
     PreparedVisualProgramDependencyError, PreparedVisualProgramDiagnostics,
     PreparedVisualProgramError, PreparedVisualRangeReachability, PreparedVisualTransitionBlocker,

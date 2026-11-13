@@ -593,6 +593,19 @@ impl PreparedTimelineClipInputPlan {
 }
 
 impl PreparedTimelineFrameExecution {
+    pub(crate) fn for_clip_effect_input(
+        request: TimelineFrameExecutionRequest,
+        execution_plan: TimelineRenderPlan,
+    ) -> Self {
+        Self {
+            request,
+            execution_plan,
+            batches: Vec::new(),
+            temporal_media_inputs: Vec::new(),
+            source_coverage_bytes: 0,
+        }
+    }
+
     /// Original file inputs and their frozen exact time dependencies. Pixel
     /// domains remain producer-owned; no output canvas is used as an input.
     pub fn temporal_media_inputs(&self) -> &[PreparedTimelineTemporalMediaInput] {

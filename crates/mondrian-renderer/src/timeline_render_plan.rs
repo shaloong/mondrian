@@ -670,10 +670,12 @@ trait ClipEffectResolver {
 }
 
 #[derive(Default)]
-struct FrameSceneLighting(Option<(TimelineTime, Arc<mondrian_effects::GlassSceneLighting>)>);
+pub(crate) struct FrameSceneLighting(
+    Option<(TimelineTime, Arc<mondrian_effects::GlassSceneLighting>)>,
+);
 
 impl FrameSceneLighting {
-    fn bind(
+    pub(crate) fn bind(
         &mut self,
         program: &PreparedVisualProgram,
         graph: &Arc<CompiledEffectGraph>,
@@ -795,6 +797,57 @@ struct SessionPreparedClipEffectResolver<'a> {
     program: &'a PreparedVisualProgram,
     session: &'a mut EffectExecutionSession,
     lighting: FrameSceneLighting,
+}
+
+pub(crate) fn compile_clip_effect_input_sample(
+    program: &PreparedVisualProgram,
+    input: &crate::PreparedClipEffectInputSample,
+) -> Result<TimelineRenderPlanElement> {
+    let sample = input.sample();
+    let mut source =
+        sample
+            .source()
+            .cloned()
+            .ok_or_else(|| MondrianError::EffectGraphEvaluationFailed {
+                reason: "historical Clip input has no source picture".into(),
+            })?;
+    let placement = sample.placement();
+    let schedule = program.schedule();
+    let time = schedule.clip_to_sequence_time(placement, placement.clip_time)?;
+    // This plan prepares the source-local value. Placement blending happens
+    // only when the current Clip is composited in its parent.
+    source.opacity = 1.0;
+    source.blend_mode = mondrian_core::BlendMode::Normal;
+    compile_flat_clip(
+        source,
+        placement.endpoint,
+        schedule,
+        VisualEvaluationFrame { time, seed: input.frame_seed() },
+        &mut TimelineEvaluationDiagnostics::default(),
+        &mut BoundClipEffectInput(input.graph()),
+    )?
+    .ok_or_else(|| MondrianError::EffectGraphEvaluationFailed {
+        reason: "historical Clip input is unavailable in the prepared schedule".into(),
+    })
+}
+
+struct BoundClipEffectInput<'a>(&'a Arc<CompiledEffectGraph>);
+
+impl ClipEffectResolver for BoundClipEffectInput<'_> {
+    fn evaluate(&mut self, _: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
+        Ok(Arc::clone(self.0))
+    }
+
+    fn evaluate_timeline_grade(
+        &mut self,
+        _: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        Ok(None)
+    }
+
+    fn admit_transition(&mut self, _: &FlatVideoTransition) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl ClipEffectResolver for SessionPreparedClipEffectResolver<'_> {

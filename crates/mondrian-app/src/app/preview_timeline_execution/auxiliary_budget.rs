@@ -9,6 +9,7 @@ pub(super) fn prepared_auxiliary_working_bytes(
     sources: &PreviewSourcePreparation,
 ) -> Result<usize, PreviewUnavailability> {
     let mut peak = 0usize;
+    let mut retained_history_growth = 0usize;
     for node in closure.nodes() {
         let resolution = node.execution_resolution();
         let canvas = (
@@ -17,6 +18,21 @@ pub(super) fn prepared_auxiliary_working_bytes(
                 .image_sampling(resolution)
                 .map_err(|error| refused(error.to_string()))?,
         );
+        if node.clip_effect_input().is_some() {
+            let (extent, _) = effect_input_domain(closure, node, sources)?;
+            let pixels = |extent: EffectFrameExtent| {
+                (extent.width() as usize)
+                    .checked_mul(extent.height() as usize)
+                    .ok_or_else(|| refused("historical input size overflowed"))
+            };
+            let growth = pixels(extent)?
+                .saturating_sub(pixels(canvas.0)?)
+                .checked_mul(std::mem::size_of::<[f32; 4]>())
+                .ok_or_else(|| refused("historical input size overflowed"))?;
+            retained_history_growth = retained_history_growth
+                .checked_add(growth)
+                .ok_or_else(|| refused("historical input size overflowed"))?;
+        }
         let mut local = 0usize;
         let mut registered = HashSet::new();
         let mut observe = |placement,
@@ -24,25 +40,27 @@ pub(super) fn prepared_auxiliary_working_bytes(
                            primary: ImageDomain|
          -> Result<(), PreviewUnavailability> {
             for spec in graph.auxiliary_inputs() {
-                let binding = graph
-                    .auxiliary_source_binding(spec.slot())
+                let key = PreparedVisualAuxiliaryKey::for_slot(graph, placement, spec.slot())
                     .ok_or_else(|| refused("auxiliary budget lost its frozen source binding"))?;
-                if matches!(
-                    binding.reference(),
-                    VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. }
-                ) {
-                    let (_, evidence, child) = prepared_auxiliary_visual_evidence(
-                        closure,
-                        node,
-                        placement,
-                        graph,
-                        spec.slot(),
-                        binding.reference(),
-                    )?;
+                let PreparedVisualAuxiliaryAddress::Authored(
+                    reference @ VisualSourceReference::Asset { .. },
+                ) = key.address
+                else {
+                    let (evidence, child) = prepared_auxiliary_visual_evidence(closure, node, key)?;
+                    let domain =
+                        if matches!(key.address, PreparedVisualAuxiliaryAddress::InputHistory(_)) {
+                            let child =
+                                child.and_then(|child| closure.node(child)).ok_or_else(|| {
+                                    refused("historical source has no prepared child")
+                                })?;
+                            effect_input_domain(closure, child, sources)?
+                        } else {
+                            evidence.domain
+                        };
                     let bytes = super::super::preview_auxiliary::visual_auxiliary_working_bytes(
                         spec.role(),
                         primary,
-                        evidence.domain,
+                        domain,
                         child.is_some(),
                     )
                     .map_err(|error| error.unavailability())?;
@@ -50,14 +68,9 @@ pub(super) fn prepared_auxiliary_working_bytes(
                         .checked_add(bytes)
                         .ok_or_else(|| refused("auxiliary working pixel size overflowed"))?;
                     continue;
-                }
-                if !matches!(binding.reference(), VisualSourceReference::Asset { .. }) {
-                    return Err(refused(
-                        "unbound auxiliary source escaped frame preparation",
-                    ));
-                }
+                };
                 let request = PreviewAuxiliaryAssetRequest {
-                    reference: binding.reference(),
+                    reference,
                     sequence_time: node.time(),
                     target_resolution: resolution,
                     input_color: node.color_context().media_input(false),
@@ -158,11 +171,91 @@ pub(super) fn prepared_auxiliary_working_bytes(
         // node runs. Retained child outputs are in the existing closure bound.
         peak = peak.max(local);
     }
-    Ok(peak)
+    peak.checked_add(retained_history_growth)
+        .ok_or_else(|| refused("auxiliary working pixel size overflowed"))
 }
 
 fn refused(detail: impl Into<String>) -> PreviewUnavailability {
     PreviewUnavailability::blocked(PreviewOutputStage::InputAdaptation, detail.into())
+}
+
+fn effect_input_domain(
+    closure: &PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
+    node: &PreparedVisualFrameNode<PreparedTimelinePreviewEffectRoutes>,
+    sources: &PreviewSourcePreparation,
+) -> Result<ImageDomain, PreviewUnavailability> {
+    let resolution = node.execution_resolution();
+    let canvas = (
+        EffectFrameExtent::new(resolution.width, resolution.height),
+        node.materialization_contract()
+            .image_sampling(resolution)
+            .map_err(|error| refused(error.to_string()))?,
+    );
+    let [element] = node.evaluation().plan().elements.as_slice() else {
+        return Err(refused("historical input has no single source layer"));
+    };
+    let (graph, (extent, sampling)) = match element {
+        TimelineRenderPlanElement::Media(media) => {
+            let request =
+                preview_node_media_request(node, media).map_err(preview_route_unavailability)?;
+            let Some(PreviewTimelineMediaFrame::Ready(frame)) = sources.media.get(&request) else {
+                return Err(refused(
+                    "historical input budget lost its original Ready media",
+                ));
+            };
+            let domain = frame
+                .cpu_image_domain()
+                .ok_or_else(|| refused("historical input requires a CPU media grid"))?;
+            (&media.effect_graph, domain)
+        }
+        TimelineRenderPlanElement::BasicTitle(title) => {
+            let request = preview_timeline_title_request(
+                node.materialization_contract(),
+                title,
+                resolution,
+                node.color_context().working_color_space(),
+            );
+            let Some(PreviewTimelineTitleFrame::Ready(frame)) =
+                sources.titles.get(&request.identity())
+            else {
+                return Err(refused(
+                    "historical input budget lost its original Ready title",
+                ));
+            };
+            let frame = frame.frame().rgba_f32();
+            (
+                &title.effect_graph,
+                (
+                    EffectFrameExtent::new(frame.width, frame.height),
+                    frame.sampling,
+                ),
+            )
+        }
+        TimelineRenderPlanElement::SolidColor(solid) => (&solid.effect_graph, canvas),
+        TimelineRenderPlanElement::NestedSequence(nested) => {
+            let child = node
+                .nested_child(nested.placement, PreparedVisualNestedSample::Current)
+                .and_then(|child| closure.node(child))
+                .ok_or_else(|| refused("historical input lost its nested source"))?;
+            let resolution = child.execution_resolution();
+            let sampling = child
+                .materialization_contract()
+                .image_sampling(resolution)
+                .map_err(|error| refused(error.to_string()))?;
+            (
+                &nested.effect_graph,
+                (
+                    EffectFrameExtent::new(resolution.width, resolution.height),
+                    sampling,
+                ),
+            )
+        }
+        _ => return Err(refused("unsupported source in historical input budget")),
+    };
+    let bounds = graph
+        .output_raster_bounds(extent)
+        .map_err(|error| refused(format!("{error:?}")))?;
+    Ok((bounds.extent(), sampling))
 }
 
 fn media_domain(
@@ -174,13 +267,7 @@ fn media_domain(
     if media.effect_graph.auxiliary_inputs().is_empty() {
         return Ok(canvas);
     }
-    let request = preview_timeline_media_request(
-        media,
-        node.execution_resolution(),
-        node.color_context(),
-        node.evaluation().payload(),
-    )
-    .map_err(preview_route_unavailability)?;
+    let request = preview_node_media_request(node, media).map_err(preview_route_unavailability)?;
     match sources.media.get(&request) {
         Some(PreviewTimelineMediaFrame::Ready(frame)) => {
             frame.cpu_image_domain().ok_or_else(|| {

@@ -14,7 +14,7 @@ use mondrian_core::timeline_data::{
 use mondrian_core::{
     AssetId, AuthoringList, ClipId, FramePosition, FrameRounding, GradeDefinitionId,
     GradeGraphNodeId, MondrianError, Rational, Resolution, Result, SequenceId, SequenceRevision,
-    TimelineTime, TimelineTimeRange, VideoTransitionId,
+    TimelineTime, TimelineTimeRange, VideoTransitionId, VisualSourceRetime,
 };
 use mondrian_effects::{
     effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
@@ -24,6 +24,7 @@ use mondrian_effects::{
     PreparedGradeGraph,
 };
 use mondrian_timeline::scene_light::{SceneLight, SceneLightSample};
+use mondrian_timeline::visual_schedule::PreparedAuxiliaryClipSample;
 use mondrian_timeline::{Clip, PreparedVisualSchedule, Sequence, VideoTransitionType};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
@@ -411,6 +412,57 @@ pub(crate) struct PreparedAuxiliaryRangeDependency {
     pub(crate) reference: mondrian_core::VisualSourceReference,
     pub(crate) first: TimelineTime,
     pub(crate) last: TimelineTime,
+}
+
+/// Exact historical entering value of one Definition in a prepared Clip.
+#[derive(Debug, Clone)]
+pub struct PreparedClipEffectInputSample {
+    sample: PreparedAuxiliaryClipSample,
+    input: mondrian_effects::PreparedEffectInput,
+    graph: Arc<CompiledEffectGraph>,
+    frame_seed: i64,
+}
+
+impl PreparedClipEffectInputSample {
+    /// The original picture address, source time and boundary decision.
+    pub const fn sample(&self) -> &PreparedAuxiliaryClipSample {
+        &self.sample
+    }
+
+    /// The prefix to run on the picture's actual grid.
+    pub const fn graph(&self) -> &Arc<CompiledEffectGraph> {
+        &self.graph
+    }
+
+    /// Seed on the caller's exact Sequence grid.
+    pub const fn frame_seed(&self) -> i64 {
+        self.frame_seed
+    }
+
+    /// Author-stage identity within the certified Clip program.
+    pub fn origin(&self) -> EffectStageOrigin {
+        self.input.origin()
+    }
+
+    /// Evaluate the same historical prefix in the source view used by this node.
+    pub fn with_program(&self, program: &PreparedVisualProgram) -> Result<Self> {
+        let placement = self.sample.placement();
+        program.schedule().clip_content(placement)?;
+        let input =
+            program
+                .clip_effect_program(placement)?
+                .rebind_input(&self.input)
+                .ok_or_else(|| MondrianError::EffectGraphEvaluationFailed {
+                    reason: "historical input belongs to another prepared Clip program".into(),
+                })?;
+        let time = program.schedule().clip_to_sequence_time(placement, placement.clip_time)?;
+        let graph = input.evaluate(placement.clip_time).map_err(|error| {
+            MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() }
+        })?;
+        let graph = crate::timeline_render_plan::FrameSceneLighting::default()
+            .bind(program, &graph, time)?;
+        Ok(Self { input, graph, ..self.clone() })
+    }
 }
 
 /// Immutable media dependency evidence for one inclusive Sequence window.
@@ -1086,6 +1138,47 @@ impl PreparedVisualProgram {
         self.schedule.sample_clip_source(placement, requested_clip_time)
     }
 
+    /// Resolve the entering graph of a proven Clip stage and its picture
+    /// source at the same exact, boundary-adjusted author time.
+    pub fn prepare_clip_effect_input_sample(
+        &self,
+        placement: TimelineClipExecutionRef,
+        stage: &mondrian_effects::CompiledEffectStageBinding,
+        retime: VisualSourceRetime,
+        grid: Rational,
+    ) -> Result<Option<PreparedClipEffectInputSample>> {
+        let failed = |reason| MondrianError::EffectGraphEvaluationFailed { reason };
+        let sample = self
+            .schedule
+            .sample_clip_effect_input(placement, retime)
+            .map_err(|error| failed(error.to_string()))?;
+        let input =
+            self.clip_effect_program(placement)?.input_for_stage(stage).ok_or_else(|| {
+                failed(format!(
+                    "Clip {} has no entering value for this Effect stage",
+                    placement.clip_id
+                ))
+            })?;
+        if sample.source().is_none() {
+            return Ok(None);
+        }
+        let selected = sample.placement();
+        let sequence_time = self.schedule.clip_to_sequence_time(selected, selected.clip_time)?;
+        let graph =
+            input.evaluate(selected.clip_time).map_err(|error| failed(error.to_string()))?;
+        let graph = crate::timeline_render_plan::FrameSceneLighting::default().bind(
+            self,
+            &graph,
+            sequence_time,
+        )?;
+        Ok(Some(PreparedClipEffectInputSample {
+            sample,
+            input,
+            graph,
+            frame_seed: visual_frame_seed(sequence_time, grid),
+        }))
+    }
+
     /// Freeze one Clip's exact time-expanded Effect execution through the
     /// immutable program and placement snapshot owned here.
     pub(crate) fn prepare_clip_temporal_execution(
@@ -1500,6 +1593,19 @@ impl PreparedVisualProgram {
             if let EffectTemporalSpan::Finite(future) = temporal.future {
                 last_clip_time = last_clip_time.checked_add(future)?;
             }
+            if let Some((history_first, history_last)) = self.clip_input_history_window(&clip)? {
+                let primary = self.clip_effect_program(clip.placement)?;
+                if !primary
+                    .evaluate(TimelineTime::ZERO)
+                    .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                        reason: error.to_string(),
+                    })?
+                    .requires_primary_temporal_execution()
+                {
+                    first_clip_time = clip.first_clip_time.min(history_first);
+                    last_clip_time = clip.last_clip_time.max(history_last);
+                }
+            }
             let first_source = self.sample_clip_source(clip.placement, first_clip_time)?;
             let last_source = self.sample_clip_source(clip.placement, last_clip_time)?;
             reachability.nested_demands.push(PreparedVisualNestedRangeDemand {
@@ -1545,9 +1651,9 @@ impl PreparedVisualProgram {
             };
             let mut references = Vec::new();
             program
-                .visit_authored_visual_sources(|reference| {
-                    if !references.contains(&reference) {
-                        references.push(reference);
+                .visit_visual_source_history(|reference, offset| {
+                    if !references.contains(&(reference, offset)) {
+                        references.push((reference, offset));
                     }
                 })
                 .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
@@ -1558,14 +1664,31 @@ impl PreparedVisualProgram {
             }
             let a = self.schedule.clip_to_sequence_time(clip.placement, clip.first_clip_time)?;
             let b = self.schedule.clip_to_sequence_time(clip.placement, clip.last_clip_time)?;
-            dependencies.extend(references.into_iter().map(|reference| {
-                PreparedAuxiliaryRangeDependency {
+            let lower = if references.iter().any(|(_, offset)| offset.is_negative()) {
+                Some(
+                    self.schedule
+                        .admit_clip_effect_input(clip.placement)
+                        .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                            reason: error.to_string(),
+                        })?
+                        .available()
+                        .start,
+                )
+            } else {
+                None
+            };
+            for (reference, offset) in references {
+                let first = match lower {
+                    Some(lower) if offset.is_negative() => a.min(b).checked_add(offset)?.max(lower),
+                    _ => a.min(b),
+                };
+                dependencies.push(PreparedAuxiliaryRangeDependency {
                     placement: Some(clip.placement),
                     reference,
-                    first: a.min(b),
+                    first,
                     last: a.max(b),
-                }
-            }));
+                });
+            }
         }
         if let PreparedTimelineGrade::Ready(program) = &self.timeline_grade {
             program
@@ -1582,6 +1705,38 @@ impl PreparedVisualProgram {
                 })?;
         }
         Ok(dependencies)
+    }
+
+    fn clip_input_history_window(
+        &self,
+        clip: &mondrian_timeline::visual_schedule::PreparedVisualScheduleRangeClip,
+    ) -> Result<Option<(TimelineTime, TimelineTime)>> {
+        let Some(PreparedClipEffects::Ready { program, .. }) =
+            self.clip_effects.get(&clip.placement.clip_id)
+        else {
+            return Ok(None);
+        };
+        let history = program.input_history_extent().map_err(|error| {
+            MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() }
+        })?;
+        let EffectTemporalSpan::Finite(past) = history.past else {
+            return Ok(None);
+        };
+        let placement =
+            TimelineClipExecutionRef { clip_time: clip.first_clip_time, ..clip.placement };
+        let sample = self
+            .schedule
+            .sample_clip_effect_input(
+                placement,
+                VisualSourceRetime {
+                    time_offset: TimelineTime::ZERO.checked_sub(past)?,
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                reason: error.to_string(),
+            })?;
+        Ok(Some((sample.placement().clip_time, clip.last_clip_time)))
     }
 
     /// Freeze active light values at the consumer's exact Sequence time.
@@ -3286,6 +3441,111 @@ pub(crate) mod tests {
             TimelineRenderPlanElement::SolidColor(solid) => solid.effect_graph.signature_hash(),
             other => panic!("expected solid plan, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn historical_clip_effect_input_uses_the_bound_prefix_and_retimed_source() {
+        use mondrian_core::{Keyframe, SourceSampleTarget, TimeScale, VisualSourceBoundary};
+
+        let mut sequence = Sequence::new("historical Effect input");
+        let grid = sequence.time_base();
+        let time = |frame| tt(frame, grid);
+        let mut clip = Clip::new(AssetId::new(), time(10), time(20)).unwrap();
+        clip.clip_time_in = time(3);
+        clip.set_constant_source_time_map(time(100), TimeScale::new(-3, 2).unwrap())
+            .unwrap();
+        let mut animated = EffectNode::with_defaults(EffectType::BasicCorrection);
+        let exposure = EffectType::BasicCorrection.property_path("exposure");
+        animated
+            .properties
+            .set_keyframe(
+                &exposure,
+                Keyframe::linear(time(3), PropertyValue::Float(1.0)),
+            )
+            .unwrap();
+        animated
+            .properties
+            .set_keyframe(
+                &exposure,
+                Keyframe::linear(time(9), PropertyValue::Float(3.0)),
+            )
+            .unwrap();
+        clip.add_effect_node(animated.clone());
+        clip.add_effect_node(EffectNode::with_defaults(EffectType::VideoCollage));
+        clip.add_effect_node(EffectNode::with_defaults(EffectType::Invert));
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+
+        let program = prepare_stable(&sequence);
+        let placement = TimelineClipExecutionRef {
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            clip_id,
+            clip_time: time(9),
+            endpoint: TimelineClipEndpointContext::Ordinary,
+        };
+        let current = program.evaluate_clip_effects(clip_id, placement.clip_time).unwrap();
+        let stage = &current.stage_bindings()[1];
+        let history = |frames| {
+            program
+                .prepare_clip_effect_input_sample(
+                    placement,
+                    stage,
+                    VisualSourceRetime { time_offset: time(frames), ..Default::default() },
+                    grid,
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let earlier = history(-3);
+        let at_start = history(-20);
+        assert_eq!(earlier.sample().time().requested_time, time(13));
+        assert_eq!(earlier.sample().placement().clip_time, time(6));
+        assert_eq!(earlier.frame_seed(), 13);
+        assert_eq!(
+            earlier.sample().source().unwrap().source_sample,
+            SourceSampleTarget::strict_predecessor(tt(191, Rational::new(grid.num, grid.den * 2)))
+        );
+        assert!(at_start.sample().time().out_of_range);
+        assert_eq!(at_start.sample().placement().clip_time, time(3));
+        assert_eq!(at_start.frame_seed(), 10);
+        assert_eq!(earlier.graph().stage_bindings().len(), 1);
+        let expected = PreparedEffectProgram::prepare(
+            &[animated],
+            &[],
+            sequence.settings.color.working_color_space,
+        )
+        .unwrap()
+        .evaluate(time(6))
+        .unwrap();
+        assert_eq!(
+            earlier.graph().semantic_fingerprint(),
+            expected.semantic_fingerprint()
+        );
+        assert_ne!(
+            earlier.graph().semantic_fingerprint(),
+            at_start.graph().semantic_fingerprint()
+        );
+        assert_eq!(
+            history(-3).graph().semantic_fingerprint(),
+            earlier.graph().semantic_fingerprint()
+        );
+        let foreign = prepare_stable(&sequence);
+        assert!(foreign
+            .prepare_clip_effect_input_sample(placement, stage, VisualSourceRetime::default(), grid)
+            .is_err());
+        assert!(program
+            .prepare_clip_effect_input_sample(
+                placement,
+                stage,
+                VisualSourceRetime {
+                    time_offset: time(-20),
+                    mode: VisualSourceBoundary::Transparent
+                },
+                grid,
+            )
+            .unwrap()
+            .is_none());
     }
 
     #[test]

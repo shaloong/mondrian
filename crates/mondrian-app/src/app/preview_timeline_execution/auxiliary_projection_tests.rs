@@ -270,6 +270,113 @@ fn video_collage_preview_keeps_each_tile_on_its_exact_sequence_sample() {
 }
 
 #[test]
+fn historical_video_collage_preview_clamps_and_reuses_its_bound_prefix_after_seeking() {
+    use mondrian_core::{Color, Keyframe, TimelineTime};
+    let kind = EffectType::VideoCollage;
+    let mut collage = instantiate_effect_node(kind.clone()).unwrap();
+    for (key, value) in [
+        ("columns", PropertyValue::Int(3)),
+        ("rows", PropertyValue::Int(1)),
+        ("spacing", PropertyValue::Float(0.0)),
+        ("tile_delay", PropertyValue::Float(0.25)),
+    ] {
+        collage
+            .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+            .unwrap();
+    }
+    let mut prefix = instantiate_effect_node(EffectType::BasicCorrection).unwrap();
+    let exposure = EffectType::BasicCorrection.property_path("exposure");
+    for (time, stops) in [
+        (TimelineTime::ZERO, 0.0),
+        (TimelineTime::new(1, 2).unwrap(), 2.0),
+    ] {
+        prefix
+            .properties
+            .set_keyframe(
+                &exposure,
+                Keyframe::linear(time, PropertyValue::Float(stops)),
+            )
+            .unwrap();
+    }
+    let mut sequence = super::auxiliary_sequence_with_effect(prefix);
+    sequence.settings.frame_rate = mondrian_core::Rational::new(8, 1);
+    sequence.video_tracks[0].clips[0].content =
+        mondrian_core::timeline_data::ClipContent::SolidColor {
+            asset_id: AssetId::new(),
+            color: Color::from_rgba8(40, 64, 80, 255),
+        };
+    sequence.video_tracks[0].clips[0].add_effect_node(collage);
+    let programs = RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    let cancellation = ExecutionCancellationToken::new();
+    let render = |frame| {
+        let color = sequence.settings.root_program_color_context(&Default::default()).unwrap();
+        output(resolve_preview_timeline_with_graph(
+            PreviewTimelineFrameRequest::new(
+                &sequence,
+                &[],
+                frame,
+                sequence.settings.resolution,
+                PreviewResolutionScale::Full,
+                color,
+            ),
+            PreviewTimelineSourceAdapters::new(
+                &mut |_| panic!("procedural clip has no media"),
+                &mut |_| panic!("procedural clip has no title"),
+            )
+            .with_auxiliary_assets(&mut |_| panic!("no Asset auxiliary")),
+            PreviewTimelineGraph {
+                programs: &programs,
+                scratch: &scratch,
+                dependency_observer: None,
+                generation: 0,
+                cancellation: &cancellation,
+                author_snapshot: None,
+                heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
+            },
+            None,
+        ))
+    };
+    let later = render(4);
+    let later_pixels = pixels(&later);
+    assert!(later_pixels[0][1] > later_pixels[1][1]);
+    assert!(later_pixels[1][1] > later_pixels[2][1]);
+    let early = render(0);
+    let early_pixels = pixels(&early);
+    assert_eq!(early_pixels[0], early_pixels[1]);
+    assert_eq!(early_pixels[0], early_pixels[2]);
+    assert_eq!(later_pixels, pixels(&render(4)));
+    let mut bindings = Vec::new();
+    collect_auxiliary_bindings(&later.plan.elements[0], &mut bindings);
+    let crate::app::preview_auxiliary::PreviewAuxiliaryEvidence::Visual(evidence) =
+        &bindings[0].sources[0].evidence
+    else {
+        panic!("expected a historical picture binding");
+    };
+    assert_eq!(
+        evidence.address,
+        PreparedVisualAuxiliaryAddress::InputHistory(TimelineTime::new(-1, 4).unwrap())
+    );
+    assert_eq!(
+        evidence.time.requested_time,
+        TimelineTime::new(1, 4).unwrap()
+    );
+
+    let mut bindings = Vec::new();
+    collect_auxiliary_bindings(&early.plan.elements[0], &mut bindings);
+    let [first, second] = bindings[0].sources.as_ref() else {
+        panic!("expected both delayed slots to retain evidence");
+    };
+    assert!(first.evidence != second.evidence);
+    let first = first.frame.as_ref().unwrap().working_frame().unwrap();
+    let second = second.frame.as_ref().unwrap().working_frame().unwrap();
+    assert!(std::ptr::eq(
+        first.frame.rgba_f32(),
+        second.frame.rgba_f32()
+    ));
+}
+
+#[test]
 fn a_track_matte_from_an_earlier_layer_renders_in_preview_and_falls_back_after_reordering() {
     use mondrian_core::{Color, SourceSampleTarget, TimelineTime};
     use mondrian_timeline::clip::Clip;
@@ -323,7 +430,10 @@ fn a_track_matte_from_an_earlier_layer_renders_in_preview_and_falls_back_after_r
     else {
         panic!("expected the exact retimed Clip frame");
     };
-    assert_eq!(evidence.reference, reference);
+    assert_eq!(
+        evidence.address,
+        PreparedVisualAuxiliaryAddress::Authored(reference)
+    );
     assert_eq!(evidence.time.requested_time, TimelineTime::ZERO);
     assert_eq!(
         evidence.time.source_sample,

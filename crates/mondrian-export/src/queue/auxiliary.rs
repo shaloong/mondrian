@@ -10,7 +10,8 @@ use mondrian_effects::{
 use mondrian_renderer::{
     register_timeline_auxiliary_raster, timeline_auxiliary_frame_view,
     timeline_auxiliary_registration_geometry, GpuVisualAuxiliaryInput, GpuVisualAuxiliaryPicture,
-    PreparedAuxiliaryVisualSource, PreparedVisualAuxiliaryKey, TimelineAuxiliarySide,
+    PreparedAuxiliaryVisualSource, PreparedVisualAuxiliaryAddress, PreparedVisualAuxiliaryKey,
+    TimelineAuxiliarySide,
 };
 use mondrian_timeline::PictureSourceExtent;
 
@@ -88,8 +89,9 @@ pub(super) fn prepare_gpu_rasters(
 ) -> Result<Vec<GpuVisualAuxiliaryInput>, String> {
     graph.auxiliary_inputs().iter().map(|spec| {
         let key = auxiliary_key_for_slot(graph, Some(placement), spec.slot())?;
-        let (picture, (extent, sampling)) = match key.reference {
-            VisualSourceReference::Asset { asset_id, retime } => {
+        use PreparedVisualAuxiliaryAddress::{Authored, InputHistory};
+        let (picture, (extent, sampling)) = match key.address {
+            Authored(VisualSourceReference::Asset { asset_id, retime }) => {
                 let (source, domain) = plan_asset(inputs.node(), context.media, asset_id, retime)?;
                 match source {
                     Source::Asset(request) => {
@@ -105,17 +107,22 @@ pub(super) fn prepare_gpu_rasters(
                     Source::Visual(Some(_)) => return Err(format!("required export auxiliary Asset {asset_id} resolved a visual child")),
                 }
             }
-            VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. } => {
+            Authored(VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. }) | InputHistory(_) => {
                 match prepared_visual_source(inputs, key)? {
                     PreparedAuxiliaryVisualSource::Child { child, .. } => {
-                        let Some(PreparedExportVisualOutput::NestedGpu(frame)) = inputs.auxiliary_output(key) else {
-                            return Err(format!("required export auxiliary source produced no GPU picture: {key:?}"));
+                        let (frame, native_sampling) = match inputs.auxiliary_output(key) {
+                            Some(PreparedExportVisualOutput::NestedGpu(frame)) => (frame, None),
+                            Some(PreparedExportVisualOutput::EffectInputGpu(frame, sampling)) => (frame, Some(*sampling)),
+                            _ => return Err(format!("required export auxiliary source produced no GPU picture: {key:?}")),
                         };
                         let descriptor = frame.descriptor();
                         let node = inputs.closure().node(*child).ok_or("missing auxiliary GPU picture node")?;
                         let resolution = Resolution { width: descriptor.width, height: descriptor.height };
-                        let sampling = node.materialization_contract().image_sampling(resolution)
-                            .map_err(|error| error.to_string())?;
+                        let sampling = match native_sampling {
+                            Some(sampling) => sampling,
+                            None => node.materialization_contract().image_sampling(resolution)
+                                .map_err(|error| error.to_string())?,
+                        };
                         (GpuVisualAuxiliaryPicture::Gpu(frame.clone()), (EffectFrameExtent::new(descriptor.width, descriptor.height), sampling))
                     }
                     PreparedAuxiliaryVisualSource::Transparent { resolution, sampling, .. } => {
@@ -126,7 +133,7 @@ pub(super) fn prepare_gpu_rasters(
                     }
                 }
             }
-            VisualSourceReference::Unbound => return Err(format!("required export auxiliary slot {} is unbound", key.slot)),
+            Authored(VisualSourceReference::Unbound) => return Err(format!("required export auxiliary slot {} is unbound", key.slot)),
         };
         // Coverage-only mattes can reconstruct their alpha directly. Layers
         // keep the authored grid so the kernel reconstructs each channel once.
@@ -170,20 +177,21 @@ pub(super) fn prepare_rasters(
             if graph.auxiliary_inputs().is_empty() {
                 return Ok(());
             }
-            let side = match placement.map(|placement| placement.endpoint) {
-                None | Some(TimelineClipEndpointContext::Ordinary) => TimelineAuxiliarySide::Element,
-                Some(TimelineClipEndpointContext::TransitionLeft { .. }) => TimelineAuxiliarySide::TransitionLeft,
-                Some(TimelineClipEndpointContext::TransitionRight { .. }) => TimelineAuxiliarySide::TransitionRight,
+            let side = match (node.clip_effect_input(), placement.map(|placement| placement.endpoint)) {
+                (Some(_), _) | (_, None | Some(TimelineClipEndpointContext::Ordinary)) => TimelineAuxiliarySide::Element,
+                (_, Some(TimelineClipEndpointContext::TransitionLeft { .. })) => TimelineAuxiliarySide::TransitionLeft,
+                (_, Some(TimelineClipEndpointContext::TransitionRight { .. })) => TimelineAuxiliarySide::TransitionRight,
             };
             let primary = primary_domain(element, side, graph, canvas)?;
             let mut rasters = Vec::new();
             let mut extents = Vec::new();
             for spec in graph.auxiliary_inputs() {
                 let key = auxiliary_key_for_slot(graph, placement, spec.slot())?;
-                let (source, source_domain) = match key.reference {
-                    VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. } => visual_source(inputs, key)?,
-                    VisualSourceReference::Asset { asset_id, retime } => plan_asset(node, context.media, asset_id, retime)?,
-                    VisualSourceReference::Unbound => return Err(format!("required export auxiliary slot {} is unbound", key.slot)),
+                use PreparedVisualAuxiliaryAddress::{Authored, InputHistory};
+                let (source, source_domain) = match key.address {
+                    Authored(VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. }) | InputHistory(_) => visual_source(inputs, key)?,
+                    Authored(VisualSourceReference::Asset { asset_id, retime }) => plan_asset(node, context.media, asset_id, retime)?,
+                    Authored(VisualSourceReference::Unbound) => return Err(format!("required export auxiliary slot {} is unbound", key.slot)),
                 };
                 let (domain, policy) = timeline_auxiliary_registration_geometry(spec.role(), primary, source_domain);
                 // Source decodes and every possible newly registered plane are
@@ -372,18 +380,7 @@ fn auxiliary_key_for_slot(
     placement: Option<TimelineClipExecutionRef>,
     slot: u32,
 ) -> Result<PreparedVisualAuxiliaryKey, String> {
-    graph
-        .stage_bindings()
-        .iter()
-        .find_map(|stage| {
-            let source = stage.auxiliary_sources().iter().find(|source| source.slot() == slot)?;
-            Some(PreparedVisualAuxiliaryKey {
-                placement,
-                stage_index: stage.stage_index(),
-                slot,
-                reference: source.reference(),
-            })
-        })
+    PreparedVisualAuxiliaryKey::for_slot(graph, placement, slot)
         .ok_or_else(|| format!("required export auxiliary slot {slot} has no frozen source"))
 }
 
@@ -819,6 +816,76 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "real GPU historical Video Collage qualification; run independently"]
+    fn export_historical_video_collage_samples_the_entering_effect_without_a_readback() {
+        use mondrian_core::Keyframe;
+        let kind = EffectType::VideoCollage;
+        let mut collage = instantiate_effect_node(kind.clone()).unwrap();
+        for (key, value) in [
+            ("columns", PropertyValue::Int(2)),
+            ("rows", PropertyValue::Int(1)),
+            ("spacing", PropertyValue::Float(0.0)),
+            ("tile_delay", PropertyValue::Float(0.25)),
+        ] {
+            collage
+                .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+                .unwrap();
+        }
+        let mut timeline = snapshot_with_effect(collage);
+        timeline.sequence.settings.frame_rate = Rational::new(8, 1);
+        let mut prefix = instantiate_effect_node(EffectType::BasicCorrection).unwrap();
+        let exposure = EffectType::BasicCorrection.property_path("exposure");
+        for (time, stops) in [
+            (TimelineTime::ZERO, 0.0),
+            (TimelineTime::new(1, 2).unwrap(), 2.0),
+        ] {
+            prefix
+                .properties
+                .set_keyframe(
+                    &exposure,
+                    Keyframe::linear(time, PropertyValue::Float(stops)),
+                )
+                .unwrap();
+        }
+        let clip = &mut timeline.sequence.video_tracks[1].clips[0];
+        let collage = clip.effects[0].clone();
+        clip.effects = Default::default();
+        clip.content = mondrian_core::timeline_data::ClipContent::SolidColor {
+            asset_id: AssetId::new(),
+            color: Color::from_rgba8(40, 64, 80, 255),
+        };
+        clip.add_effect_node(prefix);
+        let independent = timeline.sequence.clone();
+        timeline.sequence.video_tracks[1].clips[0].add_effect_node(collage);
+        let mut reference = ExportVisualRenderSession::default();
+        let source = TimelineExportSnapshot {
+            sequence: independent,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            color_environment: timeline.color_environment.clone(),
+            prepared_execution: None,
+            range: TimelineExportRange::EntireSequence,
+        };
+        let expected = [4, 2].map(|frame| {
+            render_float_auxiliary_delivery(&source, frame, &mut reference, false)[..4]
+                .try_into()
+                .unwrap()
+        });
+        let (cpu, gpu) = render_export_gpu_auxiliary_pair(&timeline, 4, 1);
+        assert_ne!(expected[0], expected[1]);
+        for row in cpu.chunks_exact(16 * 4) {
+            for (column, pixel) in row.chunks_exact(4).enumerate() {
+                let expected: [f32; 4] = expected[usize::from(column >= 8)];
+                assert!(
+                    pixel.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1.0e-5),
+                    "column {column}: {pixel:?}, expected {expected:?}"
+                );
+            }
+        }
+        assert_auxiliary_float32_parity(&cpu, &gpu);
+    }
+
+    #[test]
     #[ignore = "real GPU Export Video Collage qualification; run independently"]
     fn export_video_collage_resolves_two_distinct_sequence_grids_and_tile_times() {
         let rate = mondrian_core::Rational::new(8, 1);
@@ -1042,6 +1109,57 @@ mod tests {
             false,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn export_historical_video_collage_range_includes_the_prefixs_earlier_clip_dependency() {
+        let source = solid(Color::WHITE, TimelineTime::ZERO);
+        let clip_id = source.id;
+        let mut timeline =
+            snapshot(VisualSourceReference::Clip { clip_id, retime: Default::default() });
+        timeline.sequence.settings.frame_rate = Rational::new(8, 1);
+        timeline.sequence.video_tracks[0].add_clip(source).unwrap();
+        let kind = EffectType::VideoCollage;
+        let mut collage = instantiate_effect_node(kind.clone()).unwrap();
+        for (key, value) in [
+            ("columns", PropertyValue::Int(2)),
+            ("rows", PropertyValue::Int(1)),
+            ("tile_delay", PropertyValue::Float(0.25)),
+        ] {
+            collage
+                .set_static_value_by_parameter(&kind.parameter_id(key).unwrap(), value)
+                .unwrap();
+        }
+        timeline.sequence.video_tracks[1].clips[0].add_effect_node(collage);
+        let preflight = |start_frame| {
+            crate::capture::prepare_timeline_export_dependencies(
+                &timeline.sequence,
+                &[],
+                TimelineExportRange::WorkArea { start_frame, end_frame_exclusive: 5 },
+                false,
+            )
+        };
+        let error = preflight(4).expect_err("prefix needs the earlier auxiliary Clip");
+        assert!(
+            matches!(
+                error,
+                crate::capture::TimelineExportDependencyError::VisualClosure(
+                    mondrian_renderer::PreparedVisualRangeClosureError::AuxiliaryClipOutsideRange {
+                        clip_id: actual, source_first, source_last, ..
+                    }
+                ) if actual == clip_id
+                    && source_first == TimelineTime::new(1, 4).unwrap()
+                    && source_last == TimelineTime::new(1, 2).unwrap()
+            ),
+            "{error}"
+        );
+        crate::capture::prepare_timeline_export_dependencies(
+            &timeline.sequence,
+            &[],
+            TimelineExportRange::EntireSequence,
+            false,
+        )
+        .expect("full range includes the prefix's clamped history");
     }
 
     #[test]

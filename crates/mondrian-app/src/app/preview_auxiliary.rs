@@ -231,7 +231,7 @@ pub(crate) struct ResolvedAuxiliaryAssetEvidence {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ResolvedAuxiliaryVisualEvidence {
-    pub(crate) reference: VisualSourceReference,
+    pub(crate) address: mondrian_renderer::PreparedVisualAuxiliaryAddress,
     pub(crate) sequence_id: mondrian_core::SequenceId,
     pub(crate) revision: mondrian_core::SequenceRevision,
     pub(crate) time: VisualSourceTimeSample,

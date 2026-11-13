@@ -213,7 +213,10 @@ pub(crate) fn canonical_resolved_node_materialization(
                             }
                             PreviewAuxiliaryEvidence::Visual(source) => {
                                 bytes.u8(1);
-                                bytes.json(&source.reference)?;
+                                match source.address {
+                                    mondrian_renderer::PreparedVisualAuxiliaryAddress::Authored(reference) => bytes.json(&reference)?,
+                                    mondrian_renderer::PreparedVisualAuxiliaryAddress::InputHistory(offset) => bytes.json(&("effect_input_history", offset))?,
+                                }
                                 bytes.json(&source.sequence_id)?;
                                 bytes.u64(source.revision.get());
                                 bytes.u32(source.domain.0.width());
@@ -346,7 +349,14 @@ fn canonical_auxiliary_instance_path(
                 canonical_auxiliary_placement(bytes, key.placement)?;
                 bytes.u64(key.stage_index as u64);
                 bytes.u32(key.slot);
-                bytes.json(&key.reference)?;
+                match key.address {
+                    mondrian_renderer::PreparedVisualAuxiliaryAddress::Authored(reference) => {
+                        bytes.json(&reference)?;
+                    }
+                    mondrian_renderer::PreparedVisualAuxiliaryAddress::InputHistory(offset) => {
+                        bytes.json(&("effect_input_history", offset))?;
+                    }
+                }
             }
         }
     }

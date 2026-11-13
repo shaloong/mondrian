@@ -167,10 +167,13 @@ fn record_unavailable_visual_sources(
                         | mondrian_renderer::PreparedAuxiliaryVisualUnavailable::ClipNotIndependent
                 )
             ) {
+                let PreparedVisualAuxiliaryAddress::Authored(reference) = consumer.address else {
+                    continue;
+                };
                 let decisions = unavailable.entry(node.instance_path().into()).or_default();
                 let decision = (
                     consumer.placement.map(|placement| placement.clip_id),
-                    consumer.reference,
+                    reference,
                 );
                 if !decisions.contains(&decision) {
                     decisions.push(decision);
@@ -207,13 +210,26 @@ fn original_queries(
             .get(&node.sequence_id())
             .ok_or_else(|| invalid("active node lost its original frozen program"))?;
         let request = node.evaluation().execution_request();
-        let plan = if let Some(target) = request.auxiliary_clip() {
+        let plan = if let Some(input) = node.clip_effect_input() {
+            let input = input.with_program(program).map_err(|error| invalid(error.to_string()))?;
+            graph
+                .scratch
+                .borrow_mut()
+                .prepare_clip_effect_input_frame_execution(program, request.clone(), &input)
+                .map_err(|error| invalid(error.to_string()))?
+                .execution_plan()
+                .clone()
+        } else if let Some(target) = request.auxiliary_clip() {
             let Some((PreparedVisualInstanceStep::Auxiliary(key), parent_path)) =
                 node.instance_path().split_last()
             else {
                 return Err(invalid("standalone Clip lost its frozen auxiliary path"));
             };
-            let VisualSourceReference::Clip { clip_id, retime } = key.reference else {
+            let PreparedVisualAuxiliaryAddress::Authored(VisualSourceReference::Clip {
+                clip_id,
+                retime,
+            }) = key.address
+            else {
                 return Err(invalid(
                     "standalone Clip has a different frozen source type",
                 ));

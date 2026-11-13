@@ -4892,6 +4892,84 @@ impl GpuFrameCompositor {
         )
     }
 
+    /// Record an uncomposited source-local chain and retain its native output grid.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_spatial_effect_input(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        pipeline: &CompiledEffectGpuPipeline,
+        frame_seed: i64,
+        auxiliary: &[GpuSpatialAuxiliaryRaster<'_>],
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let descriptor = input.descriptor();
+        let working_color_space = descriptor.color_space.working().ok_or_else(|| {
+            GpuCompositeError::SpatialChainFailed {
+                pass: "effect_input",
+                detail: "historical Effect input has no working color space".into(),
+            }
+        })?;
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(input),
+            opacity: 1.0,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform: mondrian_effects::IDENTITY_AFFINE,
+            effect_plan: None,
+            frame_seed,
+        };
+        let request = GpuCompositeSpatialRequest {
+            width: descriptor.width,
+            height: descriptor.height,
+            working_color_space,
+            layers: &[GpuCompositeSpatialLayer { layer, spatial_plan: Some(pipeline) }],
+        };
+        validate_request(&GpuCompositeRequest {
+            width: request.width,
+            height: request.height,
+            working_color_space,
+            layers: &[layer],
+        })?;
+        let chains = prepare_spatial_chains(&request, &[auxiliary], table)?;
+        let chain = chains[0].as_ref().ok_or_else(|| GpuCompositeError::SpatialChainFailed {
+            pass: "effect_input",
+            detail: "historical Effect input has no prepared spatial chain".into(),
+        })?;
+        let resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?.resource();
+        let texture = resource.texture.clone();
+        let view = resource.texture_view.clone();
+        let output = self.record_spatial_chain(
+            device,
+            queue,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            &texture,
+            &view,
+            descriptor,
+            chain,
+            frame_seed,
+            auxiliary,
+        )?;
+        Ok(GpuCompositeRecord {
+            output,
+            diagnostics: GpuCompositingDiagnostics {
+                spatial_effect_layers: 1,
+                spatial_chain_gpu_choices: 1,
+                spatial_effect_passes: u64::from(chain.spatial_passes),
+                spatial_point_stages: u64::from(chain.point_stages),
+                spatial_scratch_textures_peak: chain.scratch_texture_request(),
+                spatial_scratch_bytes_peak: chain.scratch_bytes,
+                ..Default::default()
+            },
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record_layers<'a>(
         &self,

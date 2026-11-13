@@ -428,6 +428,126 @@ impl TimelineCompositeScratch {
         .map_err(crate::TimelineFramePreparationError::Temporal)
     }
 
+    /// Prepare the dependencies of a historical entering value without
+    /// evaluating the current consumer or blending the source into a canvas.
+    pub fn prepare_clip_effect_input_frame_execution(
+        &mut self,
+        program: &crate::PreparedVisualProgram,
+        request: crate::TimelineFrameExecutionRequest,
+        input: &crate::PreparedClipEffectInputSample,
+    ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
+        self.effect_execution.bind_generation(request.generation());
+        if input.graph().requires_primary_temporal_execution() {
+            return Err(crate::TimelineFramePreparationError::Evaluation(
+                mondrian_core::MondrianError::EffectGraphEvaluationFailed {
+                    reason: "historical Clip input prefix requires expanded primary history".into(),
+                },
+            ));
+        }
+        let element = crate::timeline_render_plan::compile_clip_effect_input_sample(program, input)
+            .map_err(crate::TimelineFramePreparationError::Evaluation)?;
+        let evaluation = request.evaluation();
+        let plan = crate::TimelineRenderPlan {
+            position: evaluation.position,
+            intent: evaluation.intent,
+            settings: evaluation.settings,
+            elements: vec![element],
+            diagnostics: Default::default(),
+        };
+        Ok(
+            crate::PreparedTimelineFrameExecution::for_clip_effect_input(
+                request.with_auxiliary_clip(input.sample().placement()),
+                plan,
+            ),
+        )
+    }
+
+    /// Execute a source-local historical prefix on the source's own Float32 grid.
+    pub fn execute_clip_effect_input(
+        &mut self,
+        source: &CpuColorFrame,
+        graph: &Arc<CompiledEffectGraph>,
+        frame_seed: i64,
+        transform: [f32; 6],
+        runtime: TimelineEffectColorRuntime<'_>,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<CpuColorFrame, TimelineCompositeError> {
+        timeline_processor_checkpoint(control)?;
+        if graph.graph().is_identity() {
+            return Ok(source.clone());
+        }
+        let source_view = working_float_view(source.rgba_f32());
+        let extent = source_view.extent();
+        let auxiliary = runtime.auxiliary_for(graph, extent)?;
+        let auxiliary_extents = auxiliary
+            .iter()
+            .map(|input| (input.slot, input.raster.frame.extent()))
+            .collect::<Vec<_>>();
+        let bytes = mondrian_effects::estimate_compiled_float_raster_working_bytes(
+            graph,
+            extent,
+            &auxiliary_extents,
+        )?;
+        let bytes =
+            u64::try_from(bytes).map_err(|_| TimelineCpuWorkingSetError::ArithmeticOverflow)?;
+        self.admit_cpu_active_working_set(bytes, TimelineCpuCompositePrecision::Float32)?;
+        let output = apply_effect_graph_f32(
+            &mut self.effect_execution,
+            &mut self.color_execution,
+            source_view,
+            graph,
+            frame_seed,
+            transform,
+            runtime,
+            control,
+        )?;
+        let (extent, format, sampling, data) = output.into_parts();
+        Ok(CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: extent.width(),
+            height: extent.height(),
+            color_space: source.rgba_f32().color_space,
+            alpha: format.alpha(),
+            sampling,
+            data,
+        }))
+    }
+
+    /// Materialize a procedural input using the actual execution grid.
+    pub fn materialize_effect_input_solid(
+        &self,
+        resolution: mondrian_core::Resolution,
+        sampling: mondrian_core::ImageSampling,
+        color: Color,
+        working_color_space: WorkingColorSpace,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<CpuColorFrame, TimelineCompositeError> {
+        let count = checked_frame_bytes(resolution.width, resolution.height, 16)?;
+        self.admit_cpu_active_working_set(count, TimelineCpuCompositePrecision::Float32)?;
+        let count = usize::try_from(count / 16)
+            .map_err(|_| TimelineCpuWorkingSetError::ArithmeticOverflow)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(count).map_err(|_| {
+            EffectFloatExecutionError::FrameContract(
+                mondrian_effects::EffectFloatFrameError::AllocationUnavailable {
+                    required_bytes: count.saturating_mul(16),
+                },
+            )
+        })?;
+        while data.len() < count {
+            timeline_processor_checkpoint(control)?;
+            let end = count.min(data.len().saturating_add(4096));
+            data.resize(end, [color.r, color.g, color.b, color.a]);
+        }
+        Ok(CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: resolution.width,
+            height: resolution.height,
+            color_space: working_color_space,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            sampling,
+            data,
+        }))
+    }
+
     /// Apply one product resource decision to this Preview/Export-owned Effect
     /// execution Session. Trimming is synchronous and cannot affect another
     /// consumer's residency.
@@ -3708,6 +3828,49 @@ mod tests {
             rgba,
             WorkingColorSpace::LinearRec709,
         ))
+    }
+
+    #[test]
+    fn historical_clip_effect_input_grows_its_native_grid_and_admits_the_actual_peak() {
+        let mut effect = mondrian_effects::instantiate_effect_node(EffectType::GrowBounds).unwrap();
+        effect
+            .set_static_value_by_parameter(
+                &EffectType::GrowBounds.parameter_id("pixels").unwrap(),
+                mondrian_core::PropertyValue::Float(1.0),
+            )
+            .unwrap();
+        let working = WorkingColorSpace::LinearRec709;
+        let graph = PreparedEffectProgram::prepare(&[effect], &[], working)
+            .unwrap()
+            .evaluate(mondrian_core::TimelineTime::ZERO)
+            .unwrap();
+        let source = working_frame(&[64; 3 * 2 * 4], 3, 2);
+        let run = |scratch: &mut TimelineCompositeScratch| {
+            scratch.execute_clip_effect_input(
+                &source,
+                &graph,
+                0,
+                mondrian_effects::IDENTITY_AFFINE,
+                test_color_runtime(working),
+                &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+            )
+        };
+        let mut scratch = TimelineCompositeScratch::default();
+        let output = run(&mut scratch).unwrap();
+        let frame = output.rgba_f32();
+        assert_eq!((frame.width, frame.height), (5, 4));
+        assert_eq!(frame.data[0], [0.0; 4]);
+        assert_eq!(frame.data[6], source.rgba_f32().data[0]);
+        scratch.reconfigure_cpu_working_set(TimelineCpuWorkingSetGrant {
+            max_active_bytes: 3 * 2 * 16,
+            max_retained_scratch_bytes: 0,
+        });
+        assert!(matches!(
+            run(&mut scratch),
+            Err(TimelineCompositeError::CpuWorkingSet(
+                TimelineCpuWorkingSetError::ActiveGrantExceeded { .. }
+            ))
+        ));
     }
 
     fn identity_media<'a>(frame: &'a CpuColorFrame) -> TimelineCompositeElement<'a> {
