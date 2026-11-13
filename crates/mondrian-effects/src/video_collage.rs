@@ -470,6 +470,53 @@ mod tests {
     }
 
     #[test]
+    fn delayed_current_video_collage_cells_bind_to_their_own_entering_stage() {
+        let kind = EffectType::VideoCollage;
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        for (field, value) in [
+            ("columns", PropertyValue::Int(3)),
+            ("rows", PropertyValue::Int(1)),
+            ("tile_delay", PropertyValue::Float(0.125)),
+        ] {
+            effect
+                .set_static_value_by_parameter(&kind.parameter_id(field).unwrap(), value)
+                .unwrap();
+        }
+        let program = PreparedEffectProgram::prepare(
+            &[effect.clone(), effect],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap();
+        let graph = program.evaluate(TimelineTime::ONE).unwrap();
+        assert_eq!(graph.auxiliary_inputs().len(), 4);
+        assert_eq!(graph.auxiliary_source_bindings().count(), 0);
+        assert!(!graph.requires_primary_temporal_execution());
+        for (slot, expected_stage) in [0, 0, 1, 1].into_iter().enumerate() {
+            let (stage, source) = graph.input_history_binding(slot as u32).unwrap();
+            assert_eq!(stage.stage_index(), expected_stage);
+            assert_eq!(
+                source.offset(),
+                TimelineTime::new(-((slot % 2 + 1) as i64), 8).unwrap()
+            );
+            let prefix =
+                program.input_for_stage(stage).unwrap().evaluate(TimelineTime::ZERO).unwrap();
+            assert_eq!(prefix.graph().is_identity(), expected_stage == 0);
+            assert_eq!(prefix.auxiliary_inputs().len(), expected_stage * 2);
+        }
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+        for (index, stage) in pipeline.stages().iter().enumerate() {
+            let EffectGpuStage::Spatial { pass, .. } = stage else {
+                panic!("each collage is one spatial stage");
+            };
+            assert_eq!(
+                pass.external_slots().collect::<Vec<_>>(),
+                [2 * index as u32, 2 * index as u32 + 1]
+            );
+        }
+    }
+
+    #[test]
     fn authored_video_collage_keeps_distinct_exact_slots_and_ignores_hidden_sources() {
         let kind = EffectType::VideoCollage;
         let mut effect = instantiate_effect_node(kind.clone()).unwrap();

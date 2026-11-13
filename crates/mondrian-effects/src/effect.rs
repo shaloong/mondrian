@@ -13106,12 +13106,21 @@ fn video_collage_graph_builder() -> EffectGraphBuilder {
             mondrian_core::ColorFrameAlpha::StraightCoverage,
         );
         let mut producers = HashMap::new();
+        let mut history = HashMap::new();
         let sources = authoring
             .tiles
             .iter()
             .map(|tile| {
                 if tile.reference == mondrian_core::VisualSourceReference::Unbound {
-                    return Ok(None);
+                    if tile.offset == TimelineTime::ZERO {
+                        return Ok(None);
+                    }
+                    if let Some(&producer) = history.get(&tile.offset) {
+                        return Ok(Some(producer));
+                    }
+                    let producer = graph.append_effect_input_history(format, tile.offset)?;
+                    history.insert(tile.offset, producer);
+                    return Ok(Some(producer));
                 }
                 let reference =
                     tile.effective_reference().map_err(|error| invalid(error.to_string()))?;

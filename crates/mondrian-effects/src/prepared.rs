@@ -10,9 +10,10 @@ use crate::{
         EffectGraphNodeKind, EffectRenderGraph, EffectStageOrigin, PreparedEffectGraphTopology,
     },
     mask::MaskComponent,
-    EffectDeterminism, EffectExecutionContract, EffectExecutionEnvelope, EffectExecutionModes,
-    EffectExecutionSession, EffectGraphTopology, EffectResourceLifetime, EffectRoiPropagation,
-    EffectStateModel, EffectTemporalInputExtent, LutPreparationCache,
+    EffectDeterminism, EffectExecutionContract, EffectExecutionContractError,
+    EffectExecutionEnvelope, EffectExecutionModes, EffectExecutionSession, EffectGraphTopology,
+    EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+    LutPreparationCache,
 };
 use mondrian_core::{
     automation::PropertyValue, effect_data::EffectNode, EffectId, GradeGraph, GradeGraphNodeId,
@@ -596,12 +597,18 @@ fn specialize_builtin_definition(
             let temporal_input = sources
                 .tiles
                 .iter()
-                .filter_map(|tile| tile.effective_reference().ok()?.retime())
+                .filter_map(|tile| {
+                    if tile.reference == mondrian_core::VisualSourceReference::Unbound {
+                        Some(tile.offset)
+                    } else {
+                        Some(tile.effective_reference().ok()?.retime()?.time_offset)
+                    }
+                })
                 .fold(
                     EffectTemporalInputExtent::CURRENT_FRAME,
-                    |extent, retime| {
+                    |extent, offset| {
                         extent.merge(crate::graph::temporal_input_extent_for_sample_offset(
-                            retime.time_offset,
+                            offset,
                         ))
                     },
                 );
@@ -715,6 +722,7 @@ fn evaluate_instance_into_builder(
                 staged.node_ids_since(checkpoint),
             )
             .with_auxiliary_sources(auxiliary_sources)
+            .with_input_history(staged.input_history_since(checkpoint))
             .with_native_fill_matte(
                 instance.definition.is_registered_builtin() && fill_may_use_masks(&instance.effect),
             );
@@ -1149,6 +1157,7 @@ struct PreparedEffectProgramInner {
     zero_topology: Arc<PreparedEffectGraphTopology>,
     zero_compiled: Arc<CompiledEffectGraph>,
     auxiliary_unavailable: Arc<[mondrian_core::VisualSourceReference]>,
+    origin_family: Arc<()>,
 }
 
 /// Resource-bound effect and mask program shared by Preview and Export.
@@ -1167,6 +1176,19 @@ pub struct PreparedEffectInput {
 }
 
 impl PreparedEffectInput {
+    /// Exact Definition position, including any shared grade assignment.
+    pub const fn origin(&self) -> EffectStageOrigin {
+        self.origin
+    }
+
+    /// Match this input's exact frozen author program across Preview source views.
+    pub fn belongs_to_author_program(&self, program: &PreparedEffectProgram) -> bool {
+        Arc::ptr_eq(
+            &self.program.inner.origin_family,
+            &program.inner.origin_family,
+        )
+    }
+
     /// Reevaluate only upstream dependencies at exact Clip author time. The
     /// waiting Definition and downstream builders/processors are never called.
     pub fn evaluate(
@@ -1185,6 +1207,26 @@ impl PreparedEffectInput {
 }
 
 impl PreparedEffectProgram {
+    /// Conservative history needed for earlier stages of this Clip.
+    pub fn input_history_extent(
+        &self,
+    ) -> Result<EffectTemporalInputExtent, EffectExecutionContractError> {
+        self.inner.zero_compiled.stage_bindings().iter().try_fold(
+            EffectTemporalInputExtent::CURRENT_FRAME,
+            |total, stage| {
+                let local = stage.input_history().iter().fold(
+                    EffectTemporalInputExtent::CURRENT_FRAME,
+                    |extent, sample| {
+                        extent.merge(crate::graph::temporal_input_extent_for_sample_offset(
+                            sample.offset(),
+                        ))
+                    },
+                );
+                total.accumulate(local)
+            },
+        )
+    }
+
     /// Visit the frozen, bound VisualSource addresses of enabled stages.
     ///
     /// Range capture is conservative across dynamic graph builders. An
@@ -1194,6 +1236,21 @@ impl PreparedEffectProgram {
         &self,
         mut visit: impl FnMut(mondrian_core::VisualSourceReference),
     ) -> Result<(), EffectGraphBuildError> {
+        let mut sources = Vec::new();
+        self.visit_visual_source_history(|reference, _| sources.push(reference))?;
+        // Preserve the established forward author traversal for callers
+        // that only need the selected addresses.
+        for source in sources.into_iter().rev() {
+            visit(source);
+        }
+        Ok(())
+    }
+
+    /// Visit a source and the earliest downstream history offset that may reach it.
+    pub fn visit_visual_source_history(
+        &self,
+        mut visit: impl FnMut(mondrian_core::VisualSourceReference, TimelineTime),
+    ) -> Result<(), EffectGraphBuildError> {
         let inner = &self.inner;
         let stacks = inner
             .grade_before
@@ -1201,32 +1258,37 @@ impl PreparedEffectProgram {
             .map(|grade| &grade.inner.stack)
             .chain(std::iter::once(&inner.stack))
             .chain(inner.grade_after.iter().map(|grade| &grade.inner.stack));
-        for stack in stacks {
-            for instance in stack.instances.iter() {
-                if instance.effect.effect_type == crate::EffectType::VideoCollage {
-                    let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
-                        effect_key: instance.effect.effect_type.key(),
-                        effect_id: instance.effect.id,
-                        reason,
-                    };
-                    let sources = crate::video_collage::video_collage_sources(&instance.effect)
-                        .map_err(|error| invalid(error.to_string()))?;
-                    for tile in sources.tiles {
-                        let reference = tile
-                            .effective_reference()
-                            .map_err(|error| invalid(error.to_string()))?;
-                        if reference != mondrian_core::VisualSourceReference::Unbound {
-                            visit(reference);
-                        }
+        let instances = stacks.flat_map(|stack| stack.instances.iter()).collect::<Vec<_>>();
+        let mut downstream = TimelineTime::ZERO;
+        for instance in instances.into_iter().rev() {
+            if instance.effect.effect_type == crate::EffectType::VideoCollage {
+                let mut local = TimelineTime::ZERO;
+                let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: instance.effect.effect_type.key(),
+                    effect_id: instance.effect.id,
+                    reason,
+                };
+                let sources = crate::video_collage::video_collage_sources(&instance.effect)
+                    .map_err(|error| invalid(error.to_string()))?;
+                for tile in sources.tiles.into_iter().rev() {
+                    let reference =
+                        tile.effective_reference().map_err(|error| invalid(error.to_string()))?;
+                    if reference == mondrian_core::VisualSourceReference::Unbound {
+                        local = local.min(tile.offset);
+                    } else {
+                        visit(reference, downstream);
                     }
-                    continue;
                 }
-                for (_, property) in instance.effect.properties.iter() {
+                downstream =
+                    downstream.checked_add(local).map_err(|error| invalid(error.to_string()))?;
+            } else {
+                let properties = instance.effect.properties.iter().collect::<Vec<_>>();
+                for (_, property) in properties.into_iter().rev() {
                     if let mondrian_core::PropertyValue::VisualSource(reference) =
                         property.static_value()
                         && *reference != mondrian_core::VisualSourceReference::Unbound
                     {
-                        visit(*reference);
+                        visit(*reference, downstream);
                     }
                 }
             }
@@ -1274,6 +1336,21 @@ impl PreparedEffectProgram {
             return None;
         }
         Some(PreparedEffectInput { program: self.clone(), origin })
+    }
+
+    /// Rebind a certified entering value to this source-fact view of the same
+    /// prepared program.
+    pub fn rebind_input(&self, input: &PreparedEffectInput) -> Option<PreparedEffectInput> {
+        if !input.belongs_to_author_program(self) {
+            return None;
+        }
+        let binding = self
+            .inner
+            .zero_compiled
+            .stage_bindings()
+            .iter()
+            .find(|stage| stage.origin() == Some(input.origin))?;
+        self.input_for_stage(binding)
     }
 
     /// Resolve a stage's author position after verifying this program owns its binding.
@@ -1510,6 +1587,7 @@ impl PreparedEffectProgram {
                     zero_topology: topology,
                     zero_compiled,
                     auxiliary_unavailable: Arc::from([]),
+                    origin_family: Arc::new(()),
                 }),
             });
         }
@@ -1538,6 +1616,7 @@ impl PreparedEffectProgram {
                 zero_topology: topology,
                 zero_compiled,
                 auxiliary_unavailable: Arc::from([]),
+                origin_family: Arc::new(()),
             }),
         })
     }
@@ -2150,6 +2229,20 @@ fn append_evaluated_graph(
             .with_auxiliary_sources(
                 binding
                     .auxiliary_sources()
+                    .iter()
+                    .map(|source| {
+                        let slot = slots
+                            .get(&source.slot())
+                            .copied()
+                            .ok_or(EffectGraphBuildError::InvalidGraph)?;
+                        Ok(source.remapped(remap_graph_id(source.producer(), &ids)?, slot))
+                    })
+                    .collect::<Result<Vec<_>, EffectGraphBuildError>>()?
+                    .into(),
+            )
+            .with_input_history(
+                binding
+                    .input_history()
                     .iter()
                     .map(|source| {
                         let slot = slots

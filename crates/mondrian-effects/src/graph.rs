@@ -825,6 +825,35 @@ impl AuxiliarySourceBinding {
     }
 }
 
+/// A host raster from another time on this Definition's entering edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectInputHistoryBinding {
+    producer: EffectGraphNodeId,
+    slot: u32,
+    offset: TimelineTime,
+}
+
+impl EffectInputHistoryBinding {
+    /// ExternalInput producer owned by the consuming stage.
+    pub const fn producer(self) -> EffectGraphNodeId {
+        self.producer
+    }
+
+    /// Required raster slot in the compiled graph.
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+
+    /// Exact offset from the consumer's author time.
+    pub const fn offset(self) -> TimelineTime {
+        self.offset
+    }
+
+    pub(crate) const fn remapped(self, producer: EffectGraphNodeId, slot: u32) -> Self {
+        Self { producer, slot, ..self }
+    }
+}
+
 /// Frozen Definition ownership and host-reference evidence for one graph stage.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CompiledEffectStageBinding {
@@ -836,6 +865,7 @@ pub struct CompiledEffectStageBinding {
     origin: Option<EffectStageOrigin>,
     origin_proof: Option<Arc<()>>,
     auxiliary_sources: Arc<[AuxiliarySourceBinding]>,
+    input_history: Arc<[EffectInputHistoryBinding]>,
     auxiliary_preview_fallback: Option<crate::AuxiliaryPreviewFallback>,
     native_fill_matte: bool,
 }
@@ -887,6 +917,7 @@ impl CompiledEffectStageBinding {
             origin: None,
             origin_proof: None,
             auxiliary_sources: Arc::from([]),
+            input_history: Arc::from([]),
             auxiliary_preview_fallback: None,
             native_fill_matte: false,
         }
@@ -903,6 +934,11 @@ impl CompiledEffectStageBinding {
         self
     }
 
+    pub(crate) fn with_input_history(mut self, history: Arc<[EffectInputHistoryBinding]>) -> Self {
+        self.input_history = history;
+        self
+    }
+
     pub(crate) fn with_native_fill_matte(mut self, native: bool) -> Self {
         self.native_fill_matte = native;
         self
@@ -915,6 +951,11 @@ impl CompiledEffectStageBinding {
     /// Explicit host addresses attached to ExternalInput values emitted by this stage.
     pub fn auxiliary_sources(&self) -> &[AuxiliarySourceBinding] {
         &self.auxiliary_sources
+    }
+
+    /// Historical inputs that must be bound against this exact stage's entering edge.
+    pub fn input_history(&self) -> &[EffectInputHistoryBinding] {
+        &self.input_history
     }
 
     /// Explicit advisory for an identity stage admitted only by Preview policy.
@@ -965,6 +1006,11 @@ impl CompiledEffectStageBinding {
                     .iter()
                     .map(|source| source.parameter_id.storage_owner().capacity())
                     .fold(0usize, usize::saturating_add),
+            )
+            .saturating_add(
+                self.input_history
+                    .len()
+                    .saturating_mul(std::mem::size_of::<EffectInputHistoryBinding>()),
             )
             .saturating_add(if self.origin_proof.is_some() {
                 2 * std::mem::size_of::<usize>()
@@ -1315,6 +1361,17 @@ impl CompiledEffectGraph {
     /// Preview/Export must include these and resolved raster identities in host cache keys.
     pub fn auxiliary_source_bindings(&self) -> impl Iterator<Item = &AuxiliarySourceBinding> {
         self.stage_bindings.iter().flat_map(|stage| stage.auxiliary_sources.iter())
+    }
+
+    /// Exact consuming stage and offset for one historical input slot.
+    pub fn input_history_binding(
+        &self,
+        slot: u32,
+    ) -> Option<(&CompiledEffectStageBinding, EffectInputHistoryBinding)> {
+        self.stage_bindings.iter().find_map(|stage| {
+            let binding = stage.input_history.iter().find(|binding| binding.slot == slot)?;
+            Some((stage, *binding))
+        })
     }
 
     /// Whether primary history/temporal execution remains necessary after the
@@ -1799,6 +1856,7 @@ pub struct EffectGraphBuilderState {
     active_domain_contract: EffectColorDomainContract,
     auxiliary_masks: Arc<[EvaluatedEffectMask]>,
     auxiliary_sources: Vec<AuxiliarySourceBinding>,
+    input_history: Vec<EffectInputHistoryBinding>,
     unavailable_auxiliary_sources: Arc<[mondrian_core::VisualSourceReference]>,
     missing_auxiliary_preview_request:
         Option<crate::auxiliary_preview::MissingAuxiliaryPreviewRequest>,
@@ -1827,6 +1885,7 @@ pub(crate) struct EffectGraphBuilderCheckpoint {
     node_count: usize,
     current_output: EffectGraphNodeId,
     auxiliary_source_count: usize,
+    input_history_count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2058,13 +2117,25 @@ fn compile_node_execution_modes(
         {
             return None;
         }
+        let mut certify_source = |producer, slot, offset| {
+            binding.emitted_nodes.contains(&producer)
+                && source_slots.insert(slot)
+                && matches!(graph.node(producer).map(|node| &node.kind),
+                    Some(EffectGraphNodeKind::ExternalInput { slot: declared, time_offset, .. })
+                    if *declared == slot && *time_offset == offset)
+        };
         for source in binding.auxiliary_sources.iter() {
-            let retime = source.reference.retime()?;
-            if !binding.emitted_nodes.contains(&source.producer)
-                || !source_slots.insert(source.slot)
-                || !matches!(graph.node(source.producer).map(|node| &node.kind),
-                    Some(EffectGraphNodeKind::ExternalInput { slot, time_offset, .. })
-                    if *slot == source.slot && *time_offset == retime.time_offset)
+            if !certify_source(
+                source.producer,
+                source.slot,
+                source.reference.retime()?.time_offset,
+            ) {
+                return None;
+            }
+        }
+        for source in binding.input_history.iter() {
+            if !source.offset.is_negative()
+                || !certify_source(source.producer, source.slot, source.offset)
             {
                 return None;
             }
@@ -2146,6 +2217,7 @@ impl Default for EffectGraphBuilderState {
             active_domain_contract: EffectColorDomainContract::SCENE_LINEAR,
             auxiliary_masks: Arc::from([]),
             auxiliary_sources: Vec::new(),
+            input_history: Vec::new(),
             unavailable_auxiliary_sources: Arc::from([]),
             missing_auxiliary_preview_request: None,
             auxiliary_preview_enabled: false,
@@ -2226,6 +2298,7 @@ impl EffectGraphBuilderState {
             node_count: self.graph.nodes.len(),
             current_output: self.current_output,
             auxiliary_source_count: self.auxiliary_sources.len(),
+            input_history_count: self.input_history.len(),
         }
     }
 
@@ -2234,6 +2307,13 @@ impl EffectGraphBuilderState {
         checkpoint: EffectGraphBuilderCheckpoint,
     ) -> Arc<[AuxiliarySourceBinding]> {
         self.auxiliary_sources[checkpoint.auxiliary_source_count..].to_vec().into()
+    }
+
+    pub(crate) fn input_history_since(
+        &self,
+        checkpoint: EffectGraphBuilderCheckpoint,
+    ) -> Arc<[EffectInputHistoryBinding]> {
+        self.input_history[checkpoint.input_history_count..].to_vec().into()
     }
 
     pub(crate) fn node_ids_since(
@@ -2584,19 +2664,7 @@ impl EffectGraphBuilderState {
         domain: EffectColorDomainContract,
         offset: TimelineTime,
     ) -> Result<EffectGraphNodeId, crate::EffectGraphBuildError> {
-        let used = self
-            .graph
-            .nodes
-            .iter()
-            .filter_map(|node| match node.kind {
-                EffectGraphNodeKind::ExternalInput { slot, .. } => Some(slot),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let slot = (0..=used.len())
-            .filter_map(|slot| u32::try_from(slot).ok())
-            .find(|slot| *slot != UNBOUND_AUXILIARY_SLOT && !used.contains(slot))
-            .ok_or(crate::EffectGraphBuildError::InvalidGraph)?;
+        let slot = self.next_auxiliary_slot()?;
         let invalid = |reason| crate::EffectGraphBuildError::InvalidAuthorState {
             effect_key: effect.effect_type.key(),
             effect_id: effect.id,
@@ -2657,6 +2725,43 @@ impl EffectGraphBuilderState {
             reference,
         });
         Ok(producer)
+    }
+
+    /// Bind a prior sample of this Definition's entering edge as a host raster.
+    pub(crate) fn append_effect_input_history(
+        &mut self,
+        format: crate::EffectValueFormat,
+        offset: TimelineTime,
+    ) -> Result<EffectGraphNodeId, crate::EffectGraphBuildError> {
+        if !offset.is_negative() {
+            return Err(crate::EffectGraphBuildError::InvalidGraph);
+        }
+        let slot = self.next_auxiliary_slot()?;
+        let producer = self.append_external_input_with(
+            slot,
+            format,
+            mondrian_core::ColorFrameAlphaFormats::only(format.alpha()),
+            EffectColorDomainContract::SCENE_LINEAR,
+            offset,
+        );
+        self.input_history.push(EffectInputHistoryBinding { producer, slot, offset });
+        Ok(producer)
+    }
+
+    fn next_auxiliary_slot(&self) -> Result<u32, crate::EffectGraphBuildError> {
+        let used = self
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                EffectGraphNodeKind::ExternalInput { slot, .. } => Some(slot),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        (0..=used.len())
+            .filter_map(|slot| u32::try_from(slot).ok())
+            .find(|slot| *slot != UNBOUND_AUXILIARY_SLOT && !used.contains(slot))
+            .ok_or(crate::EffectGraphBuildError::InvalidGraph)
     }
 
     /// Declare a host auxiliary raster with an explicit alpha set and retime.
