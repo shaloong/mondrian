@@ -27,6 +27,7 @@ pub mod keyframe;
 pub mod overwrite_edit;
 pub mod range_edit;
 pub mod retime;
+pub mod scene_light;
 pub mod sequence;
 mod sequence_dependency;
 mod sequence_time_edit;

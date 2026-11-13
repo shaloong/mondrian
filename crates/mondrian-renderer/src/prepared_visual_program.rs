@@ -12,9 +12,9 @@ use mondrian_core::timeline_data::{
     TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    AssetId, ClipId, FramePosition, FrameRounding, GradeDefinitionId, GradeGraphNodeId,
-    MondrianError, Rational, Resolution, Result, SequenceId, SequenceRevision, TimelineTime,
-    TimelineTimeRange, VideoTransitionId,
+    AssetId, AuthoringList, ClipId, FramePosition, FrameRounding, GradeDefinitionId,
+    GradeGraphNodeId, MondrianError, Rational, Resolution, Result, SequenceId, SequenceRevision,
+    TimelineTime, TimelineTimeRange, VideoTransitionId,
 };
 use mondrian_effects::{
     effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
@@ -23,6 +23,7 @@ use mondrian_effects::{
     LutPreparationCacheConfig, PreparedEffectProgram, PreparedEffectTemporalExecution,
     PreparedGradeGraph,
 };
+use mondrian_timeline::scene_light::{SceneLight, SceneLightSample};
 use mondrian_timeline::{Clip, PreparedVisualSchedule, Sequence, VideoTransitionType};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
@@ -248,8 +249,8 @@ pub struct PreparedVisualAuthorFingerprintError {
 ///
 /// The projection includes the exact video Track/Clip and Transition
 /// containers plus frame geometry, evaluation rate, pixel interpretation,
-/// color workflow, authored Preview raster scale, and Basic Title safe-area
-/// settings. It deliberately
+/// color workflow, authored Preview raster scale, Basic Title safe-area
+/// settings, and the ordered scene lights. It deliberately
 /// includes complete video Track records so a newly introduced visual field
 /// cannot silently evade snapshot validation; changing that projection
 /// requires a domain/version bump.
@@ -269,13 +270,14 @@ pub fn prepared_visual_author_fingerprint(
         &sequence.grade_definitions,
         &sequence.grade_groups,
         sequence.timeline_grade,
+        &sequence.scene_lights,
     ))
     .map_err(|error| PreparedVisualAuthorFingerprintError {
         sequence_id: sequence.id,
         reason: error.to_string(),
     })?;
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.prepared-visual-author-fingerprint.v4");
+    hasher.update(b"mondrian.prepared-visual-author-fingerprint.v5");
     hasher.update((canonical.len() as u64).to_le_bytes());
     hasher.update(canonical);
     Ok(hasher.finalize().into())
@@ -511,6 +513,7 @@ pub struct PreparedVisualProgram {
     clip_effects: HashMap<ClipId, PreparedClipEffects>,
     timeline_grade: PreparedTimelineGrade,
     timeline_grade_definition: Option<GradeDefinitionId>,
+    scene_lights: AuthoringList<SceneLight>,
     transitions: HashMap<VideoTransitionId, PreparedVisualTransition>,
     diagnostics: PreparedVisualProgramDiagnostics,
     retained_bytes_estimate: usize,
@@ -890,6 +893,7 @@ impl PreparedVisualProgram {
             clip_effects,
             timeline_grade,
             timeline_grade_definition: sequence.timeline_grade,
+            scene_lights: sequence.scene_lights.clone(),
             transitions,
             diagnostics: PreparedVisualProgramDiagnostics {
                 sequence_id: sequence.id,
@@ -1572,6 +1576,24 @@ impl PreparedVisualProgram {
         Ok(dependencies)
     }
 
+    /// Freeze active light values at the consumer's exact Sequence time.
+    /// The owning program supplies the correct clock for nested Sequences.
+    pub fn scene_lights_at(&self, sequence_time: TimelineTime) -> Result<Vec<SceneLightSample>> {
+        let mut samples = Vec::new();
+        for light in &self.scene_lights {
+            let sample = light.sample(sequence_time).map_err(|error| {
+                MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!(
+                        "Sequence {} light {}: {error}",
+                        self.key.sequence_id, light.id
+                    ),
+                }
+            })?;
+            samples.extend(sample);
+        }
+        Ok(samples)
+    }
+
     pub(crate) fn evaluate_clip_effects(
         &self,
         clip_id: ClipId,
@@ -1952,11 +1974,14 @@ fn prepared_visual_program_retained_bytes_estimate(
     clip_effects: &HashMap<ClipId, PreparedClipEffects>,
     transitions: &HashMap<VideoTransitionId, PreparedVisualTransition>,
 ) -> usize {
-    let author_payload_bytes =
-        match serde_json::to_vec(&(&sequence.video_tracks, &sequence.video_transitions)) {
-            Ok(payload) => payload.len(),
-            Err(_) => usize::MAX,
-        };
+    let author_payload_bytes = match serde_json::to_vec(&(
+        &sequence.video_tracks,
+        &sequence.video_transitions,
+        &sequence.scene_lights,
+    )) {
+        Ok(payload) => payload.len(),
+        Err(_) => usize::MAX,
+    };
     let mut retained = std::mem::size_of::<PreparedVisualProgram>()
         .saturating_add(author_payload_bytes.saturating_mul(4))
         .saturating_add(
@@ -3075,6 +3100,65 @@ pub(crate) mod tests {
             program.visual_author_fingerprint(),
             "authored Preview scale is part of the exact Program identity"
         );
+    }
+
+    #[test]
+    fn scene_lights_freeze_in_author_order_at_the_programs_own_time() {
+        use mondrian_core::{ExactAutomationCurve, ExactAutomationKeyframe};
+        use mondrian_timeline::scene_light::SceneLightParameter;
+
+        let mut child = Sequence::new("Child");
+        let mut key = SceneLight::new("Key", SceneLightSample::default());
+        let intensity = SceneLightParameter::Intensity;
+        let mut curve = ExactAutomationCurve::new(intensity.parameter_id(), 100.0).unwrap();
+        curve
+            .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, 25.0))
+            .unwrap();
+        curve
+            .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ONE, 75.0))
+            .unwrap();
+        key.automation.insert(intensity, curve);
+        let fill = SceneLight::new(
+            "Fill",
+            SceneLightSample {
+                color: [0.25, 0.5, 0.75],
+                ..SceneLightSample::default()
+            },
+        );
+        let mut hidden = fill.clone();
+        hidden.id = mondrian_core::SceneLightId::new();
+        hidden.enabled = false;
+        child.scene_lights = [key, hidden, fill.clone()].into();
+
+        let mut cache = PreparedVisualProgramCache::new(4);
+        let original = cache.prepare(&child).unwrap();
+        let parent = cache.prepare(&Sequence::new("Parent")).unwrap();
+        let half = TimelineTime::new(1, 2).unwrap();
+        assert!(parent.scene_lights_at(half).unwrap().is_empty());
+        let samples = original.scene_lights_at(half).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].intensity_percent, 50.0);
+        assert_eq!(samples[1], fill.values);
+        assert_eq!(
+            original.scene_lights_at(TimelineTime::ONE).unwrap()[0].intensity_percent,
+            75.0
+        );
+        assert_eq!(original.scene_lights_at(half).unwrap(), samples);
+
+        child.scene_lights[0].name = "Renamed key".into();
+        let renamed = cache.prepare(&child).unwrap();
+        assert_eq!(renamed.scene_lights_at(half).unwrap(), samples);
+        child.scene_lights[0].automation.clear();
+        let edited = cache.prepare(&child).unwrap();
+        assert_ne!(
+            edited.visual_author_fingerprint(),
+            renamed.visual_author_fingerprint()
+        );
+        assert_eq!(
+            edited.scene_lights_at(half).unwrap()[0].intensity_percent,
+            100.0
+        );
+        assert_eq!(original.scene_lights_at(half).unwrap(), samples);
     }
 
     #[test]

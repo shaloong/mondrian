@@ -2910,6 +2910,41 @@ mod tests {
     }
 
     #[test]
+    fn scene_light_creation_and_removal_use_project_undo_redo() {
+        use mondrian_timeline::scene_light::{SceneLight, SceneLightSample};
+
+        let mut session = session_with_two_sequences(true);
+        let light = SceneLight::new("Fill", SceneLightSample::default());
+        let (_, added) = session
+            .edit_active_sequence("Add scene light", |sequence| {
+                sequence.scene_lights.push(light.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert!(added.is_some());
+        assert_eq!(
+            session.active_sequence().unwrap().scene_lights.as_slice(),
+            std::slice::from_ref(&light)
+        );
+        session.undo().unwrap().unwrap();
+        assert!(session.active_sequence().unwrap().scene_lights.is_empty());
+        session.redo().unwrap().unwrap();
+        let (_, removed) = session
+            .edit_active_sequence("Remove scene light", |sequence| {
+                sequence.scene_lights.retain(|candidate| candidate.id != light.id);
+                Ok(())
+            })
+            .unwrap();
+        assert!(removed.is_some());
+        assert!(session.active_sequence().unwrap().scene_lights.is_empty());
+        session.undo().unwrap().unwrap();
+        assert_eq!(
+            session.active_sequence().unwrap().scene_lights.as_slice(),
+            &[light]
+        );
+    }
+
+    #[test]
     fn prepared_sequence_edit_is_invisible_until_install_and_discardable() {
         let mut session = session_with_two_sequences(true);
         let sequence_id = session.active_sequence().expect("active").id;

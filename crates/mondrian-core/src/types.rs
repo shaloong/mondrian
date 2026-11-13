@@ -49,6 +49,7 @@ macro_rules! define_id {
 
 define_id!(ProjectId, "项目 ID");
 define_id!(SequenceId, "序列（时间线）ID");
+define_id!(SceneLightId, "Sequence-owned scene light ID");
 define_id!(TrackId, "轨道 ID");
 define_id!(ClipId, "剪辑片段 ID");
 define_id!(ClipLinkGroupId, "剪辑链接组 ID");

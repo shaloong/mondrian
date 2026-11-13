@@ -2,6 +2,7 @@
 
 use crate::{
     clip::{ActiveClip, Clip},
+    scene_light::SceneLight,
     track::{Track, TrackType},
 };
 pub use mondrian_core::AudioChannelLayout;
@@ -1359,6 +1360,9 @@ pub struct Sequence {
     /// Optional full-composite grade evaluated once after track compositing.
     #[serde(default)]
     pub timeline_grade: Option<mondrian_core::GradeDefinitionId>,
+    /// Ordered lights in this Sequence's own time and coordinate system.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scene_lights: AuthoringList<SceneLight>,
     /// Final Program Output dynamic-metadata authoring and delivery intent.
     pub dynamic_hdr: crate::dynamic_hdr::DynamicHdrAuthorState,
     pub audio_tracks: AuthoringList<Track>,
@@ -1387,6 +1391,7 @@ impl AuthoringFootprint for Sequence {
             grade_definitions,
             grade_groups,
             timeline_grade: _,
+            scene_lights,
             dynamic_hdr,
             audio_tracks,
             audio_roles,
@@ -1402,6 +1407,7 @@ impl AuthoringFootprint for Sequence {
         collector.collect(video_transitions)?;
         collector.collect(grade_definitions)?;
         collector.collect(grade_groups)?;
+        collector.collect(scene_lights)?;
         collector.collect(dynamic_hdr)?;
         collector.collect(audio_tracks)?;
         collector.collect(audio_roles)?;
@@ -1539,6 +1545,14 @@ impl Sequence {
         }
         self.settings.validate_with_color_environment(color_environment)?;
         self.validate_grade_hierarchy()?;
+        for light in &self.scene_lights {
+            light
+                .validate()
+                .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "validate_scene_light".to_owned(),
+                    reason: format!("Sequence {} light {}: {error}", self.id, light.id),
+                })?;
+        }
         self.dynamic_hdr.validate(self.settings.frame_rate)?;
         for (tracks, expected_type, role) in [
             (&self.video_tracks, TrackType::Video, "video"),
@@ -1599,6 +1613,7 @@ impl Sequence {
             grade_definitions,
             grade_groups,
             timeline_grade,
+            scene_lights,
             dynamic_hdr,
             audio_tracks,
             audio_roles,
@@ -1618,6 +1633,7 @@ impl Sequence {
             grade_definitions: other_grade_definitions,
             grade_groups: other_grade_groups,
             timeline_grade: other_timeline_grade,
+            scene_lights: other_scene_lights,
             dynamic_hdr: other_dynamic_hdr,
             audio_tracks: other_audio_tracks,
             audio_roles: other_audio_roles,
@@ -1636,6 +1652,7 @@ impl Sequence {
             && grade_definitions == other_grade_definitions
             && grade_groups == other_grade_groups
             && timeline_grade == other_timeline_grade
+            && scene_lights == other_scene_lights
             && dynamic_hdr == other_dynamic_hdr
             && audio_tracks == other_audio_tracks
             && audio_roles == other_audio_roles
@@ -1668,6 +1685,7 @@ impl Sequence {
             grade_definitions: AuthoringList::new(),
             grade_groups: AuthoringList::new(),
             timeline_grade: None,
+            scene_lights: AuthoringList::new(),
             dynamic_hdr: crate::dynamic_hdr::DynamicHdrAuthorState::default(),
             audio_tracks,
             audio_roles: AuthoringList::new(),
@@ -2348,6 +2366,9 @@ impl Sequence {
         self.fork_audio_identities_for_sequence_duplicate();
         self.fork_clip_link_groups_for_sequence_duplicate();
         self.fork_grade_hierarchy_for_sequence_duplicate();
+        for light in &mut self.scene_lights {
+            light.fork_author_identities();
+        }
         self.dynamic_hdr.fork_author_identities();
     }
 
@@ -2579,6 +2600,13 @@ impl Sequence {
         let mut clip_ids = HashSet::new();
         let mut effect_ids = HashSet::new();
         let mut mask_ids = HashSet::new();
+        let mut light_ids = HashSet::new();
+
+        for light in &self.scene_lights {
+            if !light_ids.insert(light.id) {
+                return Err(duplicate_author_identity("scene light", light.id));
+            }
+        }
 
         for track in self.video_tracks.iter().chain(&self.audio_tracks) {
             if !track_ids.insert(track.id) {
