@@ -381,7 +381,10 @@ fn texel_position(
 /// charged one auxiliary scratch frame; the exact per-operation budget is
 /// refined together with the M4 spatial pass.
 pub const fn render_op_auxiliary_scratch_frames(op: &EffectRenderOp) -> usize {
-    if matches!(op, EffectRenderOp::DisplacementMap { .. }) {
+    if matches!(
+        op,
+        EffectRenderOp::DisplacementMap { .. } | EffectRenderOp::Glass { .. }
+    ) {
         return 0;
     }
     if crate::adjustment::render_op_f32_scratch_frames(op) == 0 {
@@ -399,6 +402,7 @@ pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
             | EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::ChannelCombiner { .. }
             | EffectRenderOp::SetMatte { .. }
+            | EffectRenderOp::Glass { .. }
     )
 }
 

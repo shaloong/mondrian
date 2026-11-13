@@ -726,6 +726,7 @@ fn render_op_retained_bytes_estimate(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Lut3D { lut, .. } => lut.retained_bytes_estimate(),
         EffectRenderOp::Qualifier { qualifier } => qualifier.retained_bytes_estimate(),
         EffectRenderOp::HdrGrading { grade } => grade.retained_bytes_estimate(),
+        EffectRenderOp::Glass { lighting: Some(lighting), .. } => lighting.retained_bytes(),
         EffectRenderOp::Custom { key, params, cache_key, processor, .. } => {
             let params_bytes = serde_json::to_vec(params).map_or(512, |bytes| bytes.len().max(512));
             std::mem::size_of::<EffectRenderOp>()
@@ -1005,6 +1006,64 @@ impl CompiledEffectGraph {
     /// Immutable render graph owned by this compiled IR.
     pub const fn graph(&self) -> &EffectRenderGraph {
         &self.graph
+    }
+
+    /// Whether a reachable Glass operation consumes Sequence lighting.
+    pub fn requires_scene_lighting(&self) -> bool {
+        self.schedule.ordered_nodes.iter().filter_map(|id| self.graph.node(*id)).any(|node| {
+            matches!(
+                node.kind,
+                EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Glass { grade, .. }, .. }
+                | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Glass { grade, .. }, .. }
+                | EffectGraphNodeKind::AuxiliaryEffect { op: EffectRenderOp::Glass { grade, .. }, .. }
+                    if grade.uses_composition_lights()
+            )
+        })
+    }
+
+    /// Bind frame lighting and/or actual layer geometry without changing any
+    /// stage or auxiliary address. New render values receive new pixel keys.
+    pub fn bind_glass_lighting(
+        self: &Arc<Self>,
+        lighting: Option<&Arc<crate::GlassSceneLighting>>,
+        projection: Option<crate::GlassProjection>,
+    ) -> Arc<Self> {
+        if !self.requires_scene_lighting() {
+            return Arc::clone(self);
+        }
+        let mut graph = self.graph.clone();
+        for node in &mut graph.nodes {
+            match &mut node.kind {
+                EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. }
+                | EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
+                    if let EffectRenderOp::Glass { grade, lighting: bound, projection: geometry } =
+                        op
+                        && grade.uses_composition_lights()
+                    {
+                        if let Some(lighting) = lighting {
+                            *bound = Some(Arc::clone(lighting));
+                        }
+                        if let Some(projection) = projection {
+                            *geometry = Some(projection);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut compiled = self.as_ref().clone();
+        let identity = graph.semantic_identity();
+        compiled.signature_hash = identity.diagnostic_hash();
+        compiled.identity = identity;
+        compiled.node_profiles = compile_effect_node_profiles(&graph, &self.schedule)
+            .expect("binding Glass values preserves the validated graph schedule");
+        constrain_cache_profiles_by_execution_envelope(
+            &mut compiled.node_profiles,
+            &self.execution_envelope,
+        );
+        compiled.graph = graph;
+        Arc::new(compiled)
     }
 
     /// Whether a reachable, sealed direct-input processor requests a host source
@@ -2981,7 +3040,8 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::GrowBounds { .. }
         | EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }
-        | EffectRenderOp::DetailPreservingUpscale { .. } => EffectImplementationRequirements {
+        | EffectRenderOp::DetailPreservingUpscale { .. }
+        | EffectRenderOp::Glass { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float

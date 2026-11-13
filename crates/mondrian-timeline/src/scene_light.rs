@@ -7,65 +7,7 @@ use mondrian_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Falloff in the Sequence's physical pixel coordinate system.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum SceneLightFalloff {
-    #[default]
-    None,
-    Smooth {
-        radius: f32,
-        distance: f32,
-    },
-    InverseSquareClamped {
-        radius: f32,
-    },
-}
-
-/// Light geometry in Sequence space. X points right, Y down, and Z toward the
-/// viewer. Positions and points of interest use the same physical pixel units.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum SceneLightSource {
-    #[default]
-    Ambient,
-    Parallel {
-        position: [f32; 3],
-        target: [f32; 3],
-        falloff: SceneLightFalloff,
-    },
-    Point {
-        position: [f32; 3],
-        falloff: SceneLightFalloff,
-    },
-    Spot {
-        position: [f32; 3],
-        target: [f32; 3],
-        cone_angle_degrees: f32,
-        cone_feather_percent: f32,
-        falloff: SceneLightFalloff,
-    },
-}
-
-/// Values consumed by rendering. The color is straight, scene-linear RGB.
-/// Negative intensity subtracts light and 100 percent is unit intensity.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SceneLightSample {
-    pub color: [f32; 3],
-    pub intensity_percent: f32,
-    pub source: SceneLightSource,
-}
-
-impl Default for SceneLightSample {
-    fn default() -> Self {
-        Self {
-            color: [1.0; 3],
-            intensity_percent: 100.0,
-            source: SceneLightSource::Ambient,
-        }
-    }
-}
+pub use mondrian_core::{SceneLightFalloff, SceneLightSample, SceneLightSource};
 
 /// Numeric channels supported by the light's selected geometry and falloff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -126,9 +68,10 @@ impl SceneLightParameter {
         ParameterId::new_static(path)
     }
 
-    fn checked_value(self, value: f64) -> Result<f32, SceneLightError> {
+    /// Inclusive range of an authored static value or keyframe.
+    pub fn hard_range(self) -> std::ops::RangeInclusive<f64> {
         let limit = f64::from(f32::MAX);
-        let range = match self {
+        match self {
             Self::Red | Self::Green | Self::Blue | Self::FalloffRadius | Self::FalloffDistance => {
                 0.0..=limit
             }
@@ -141,8 +84,11 @@ impl SceneLightParameter {
             | Self::TargetX
             | Self::TargetY
             | Self::TargetZ => -limit..=limit,
-        };
-        if !range.contains(&value) {
+        }
+    }
+
+    fn checked_value(self, value: f64) -> Result<f32, SceneLightError> {
+        if !self.hard_range().contains(&value) {
             return Err(SceneLightError::ValueOutOfRange { parameter: self, value });
         }
         // Canonicalize signed zero so equivalent values have one render identity.
@@ -150,65 +96,64 @@ impl SceneLightParameter {
     }
 }
 
-impl SceneLightSample {
-    fn parameter_mut(&mut self, parameter: SceneLightParameter) -> Option<&mut f32> {
-        use SceneLightParameter::*;
-        use SceneLightSource::*;
-        match parameter {
-            Red => Some(&mut self.color[0]),
-            Green => Some(&mut self.color[1]),
-            Blue => Some(&mut self.color[2]),
-            Intensity => Some(&mut self.intensity_percent),
-            PositionX | PositionY | PositionZ => match &mut self.source {
-                Parallel { position, .. } | Point { position, .. } | Spot { position, .. } => {
-                    let axis = parameter as usize - PositionX as usize;
-                    Some(&mut position[axis])
-                }
-                Ambient => None,
-            },
-            TargetX | TargetY | TargetZ => match &mut self.source {
-                Parallel { target, .. } | Spot { target, .. } => {
-                    let axis = parameter as usize - TargetX as usize;
-                    Some(&mut target[axis])
-                }
-                Ambient | Point { .. } => None,
-            },
-            ConeAngle => match &mut self.source {
-                Spot { cone_angle_degrees, .. } => Some(cone_angle_degrees),
-                Ambient | Parallel { .. } | Point { .. } => None,
-            },
-            ConeFeather => match &mut self.source {
-                Spot { cone_feather_percent, .. } => Some(cone_feather_percent),
-                Ambient | Parallel { .. } | Point { .. } => None,
-            },
-            FalloffRadius | FalloffDistance => match &mut self.source {
-                Parallel { falloff, .. } | Point { falloff, .. } | Spot { falloff, .. } => {
-                    match (parameter, falloff) {
-                        (FalloffRadius, SceneLightFalloff::Smooth { radius, .. })
-                        | (FalloffRadius, SceneLightFalloff::InverseSquareClamped { radius }) => {
-                            Some(radius)
-                        }
-                        (FalloffDistance, SceneLightFalloff::Smooth { distance, .. }) => {
-                            Some(distance)
-                        }
-                        _ => None,
-                    }
-                }
-                Ambient => None,
-            },
-        }
-    }
-
-    fn validate_direction(self) -> Result<(), SceneLightError> {
-        match self.source {
-            SceneLightSource::Parallel { position, target, .. }
-            | SceneLightSource::Spot { position, target, .. }
-                if position == target =>
-            {
-                Err(SceneLightError::CoincidentPositionAndTarget)
+fn parameter_mut(
+    sample: &mut SceneLightSample,
+    parameter: SceneLightParameter,
+) -> Option<&mut f32> {
+    use SceneLightParameter::*;
+    use SceneLightSource::*;
+    match parameter {
+        Red => Some(&mut sample.color[0]),
+        Green => Some(&mut sample.color[1]),
+        Blue => Some(&mut sample.color[2]),
+        Intensity => Some(&mut sample.intensity_percent),
+        PositionX | PositionY | PositionZ => match &mut sample.source {
+            Parallel { position, .. } | Point { position, .. } | Spot { position, .. } => {
+                let axis = parameter as usize - PositionX as usize;
+                Some(&mut position[axis])
             }
-            _ => Ok(()),
+            Ambient => None,
+        },
+        TargetX | TargetY | TargetZ => match &mut sample.source {
+            Parallel { target, .. } | Spot { target, .. } => {
+                let axis = parameter as usize - TargetX as usize;
+                Some(&mut target[axis])
+            }
+            Ambient | Point { .. } => None,
+        },
+        ConeAngle => match &mut sample.source {
+            Spot { cone_angle_degrees, .. } => Some(cone_angle_degrees),
+            Ambient | Parallel { .. } | Point { .. } => None,
+        },
+        ConeFeather => match &mut sample.source {
+            Spot { cone_feather_percent, .. } => Some(cone_feather_percent),
+            Ambient | Parallel { .. } | Point { .. } => None,
+        },
+        FalloffRadius | FalloffDistance => match &mut sample.source {
+            Parallel { falloff, .. } | Point { falloff, .. } | Spot { falloff, .. } => {
+                match (parameter, falloff) {
+                    (FalloffRadius, SceneLightFalloff::Smooth { radius, .. })
+                    | (FalloffRadius, SceneLightFalloff::InverseSquareClamped { radius }) => {
+                        Some(radius)
+                    }
+                    (FalloffDistance, SceneLightFalloff::Smooth { distance, .. }) => Some(distance),
+                    _ => None,
+                }
+            }
+            Ambient => None,
+        },
+    }
+}
+
+fn validate_direction(sample: SceneLightSample) -> Result<(), SceneLightError> {
+    match sample.source {
+        SceneLightSource::Parallel { position, target, .. }
+        | SceneLightSource::Spot { position, target, .. }
+            if position == target =>
+        {
+            Err(SceneLightError::CoincidentPositionAndTarget)
         }
+        _ => Ok(()),
     }
 }
 
@@ -238,6 +183,25 @@ impl SceneLight {
         }
     }
 
+    /// Read a supported channel's static author value.
+    pub fn static_parameter(&self, parameter: SceneLightParameter) -> Option<f32> {
+        let mut values = self.values;
+        parameter_mut(&mut values, parameter).copied()
+    }
+
+    /// Change one static channel, leaving multi-channel geometry validation to
+    /// the owner of the complete draft.
+    pub fn set_static_parameter(
+        &mut self,
+        parameter: SceneLightParameter,
+        value: f64,
+    ) -> Result<(), SceneLightError> {
+        let value = parameter.checked_value(value)?;
+        *parameter_mut(&mut self.values, parameter)
+            .ok_or(SceneLightError::InactiveParameter(parameter))? = value;
+        Ok(())
+    }
+
     /// Validate author data at edit and project admission.
     pub fn validate(&self) -> Result<(), SceneLightError> {
         if self.name.trim().is_empty() {
@@ -251,13 +215,13 @@ impl SceneLight {
         }
         let mut values = self.values;
         for parameter in SceneLightParameter::ALL {
-            if let Some(value) = values.parameter_mut(parameter) {
+            if let Some(value) = parameter_mut(&mut values, parameter) {
                 parameter.checked_value(f64::from(*value))?;
             }
         }
-        self.values.validate_direction()?;
+        validate_direction(self.values)?;
         for (&parameter, curve) in &self.automation {
-            if values.parameter_mut(parameter).is_none() {
+            if parameter_mut(&mut values, parameter).is_none() {
                 return Err(SceneLightError::InactiveParameter(parameter));
             }
             if curve.parameter_id != parameter.parameter_id() {
@@ -285,7 +249,7 @@ impl SceneLight {
         }
         let mut values = self.values;
         for parameter in SceneLightParameter::ALL {
-            if let Some(value) = values.parameter_mut(parameter) {
+            if let Some(value) = parameter_mut(&mut values, parameter) {
                 let sampled = self
                     .automation
                     .get(&parameter)
@@ -295,7 +259,7 @@ impl SceneLight {
                 *value = parameter.checked_value(sampled)?;
             }
         }
-        values.validate_direction()?;
+        validate_direction(values)?;
         Ok(Some(values))
     }
 

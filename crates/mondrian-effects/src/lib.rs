@@ -14,7 +14,12 @@ pub use displacement_map::{
     DisplacementMapChannel, DisplacementMapError, DisplacementMapGrade,
     DISPLACEMENT_MAP_MAX_PIXELS,
 };
+pub mod glass;
 pub mod grow_bounds;
+pub use glass::{
+    GlassChannel, GlassEffectLight, GlassError, GlassGpuControls, GlassGrade, GlassHeightPlan,
+    GlassMaterial, GlassProjection, GlassSceneLighting,
+};
 pub use grow_bounds::{
     apply_grow_bounds_controlled, grow_bounds_frame_f32, GrowBoundsError, GrowBoundsGrade,
     GROW_BOUNDS_MAX_PIXELS,

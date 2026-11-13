@@ -216,6 +216,8 @@ pub enum EffectType {
     Reshape,
     /// Enlarge a layer while retaining local edge detail.
     DetailPreservingUpscale,
+    /// Refract a layer through a bump map and shade its surface.
+    Glass,
 }
 
 impl EffectType {
@@ -336,6 +338,7 @@ impl EffectType {
             Self::Smear => "builtin.smear".to_string(),
             Self::Reshape => "builtin.reshape".to_string(),
             Self::DetailPreservingUpscale => "builtin.detail_preserving_upscale".to_string(),
+            Self::Glass => "builtin.glass".to_string(),
             Self::DisplacementMap => "builtin.displacement_map".to_string(),
             Self::GrowBounds => "builtin.grow_bounds".to_string(),
             Self::SmartBlur => "builtin.smart_blur".to_string(),
@@ -465,6 +468,7 @@ impl EffectType {
             "builtin.smear" => Self::Smear,
             "builtin.reshape" => Self::Reshape,
             "builtin.detail_preserving_upscale" => Self::DetailPreservingUpscale,
+            "builtin.glass" => Self::Glass,
             "builtin.displacement_map" => Self::DisplacementMap,
             "builtin.grow_bounds" => Self::GrowBounds,
             "builtin.smart_blur" => Self::SmartBlur,
@@ -594,6 +598,7 @@ impl EffectType {
             Self::Smear => "漩涡条纹",
             Self::Reshape => "改变形状",
             Self::DetailPreservingUpscale => "超分放大",
+            Self::Glass => "玻璃",
             Self::DisplacementMap => "置换图",
             Self::GrowBounds => "范围扩散",
             Self::SmartBlur => "智能模糊",
@@ -723,6 +728,7 @@ impl EffectType {
             Self::GrowBounds => vec!["通道"],
             Self::SmartBlur | Self::BilateralBlur => vec!["模糊与锐化"],
             Self::ChromaticAberrationRemoval | Self::DetailPreservingUpscale => vec!["修复"],
+            Self::Glass => vec!["风格化"],
             Self::Basic3D => vec!["变换"],
             Self::CameraView => vec!["变换"],
             Self::BlankingFill => vec!["变换"],
@@ -847,6 +853,7 @@ impl EffectType {
             Self::Smear => "smear".to_string(),
             Self::Reshape => "reshape".to_string(),
             Self::DetailPreservingUpscale => "detail_preserving_upscale".to_string(),
+            Self::Glass => "glass".to_string(),
             Self::DisplacementMap => "displacement_map".to_string(),
             Self::GrowBounds => "grow_bounds".to_string(),
             Self::SmartBlur => "smart_blur".to_string(),
@@ -1348,7 +1355,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::KeyCleaner => Ok(()),
             Self::ChannelCombiner => Ok(()),
             Self::SetMatte => Ok(()),
-            Self::Smear | Self::Reshape | Self::DetailPreservingUpscale => Ok(()),
+            Self::Smear | Self::Reshape | Self::DetailPreservingUpscale | Self::Glass => Ok(()),
             Self::DisplacementMap => Ok(()),
             Self::GrowBounds => Ok(()),
             // Range-domain blur: it samples and reweights existing pixels, so it

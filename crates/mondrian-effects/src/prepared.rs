@@ -569,9 +569,13 @@ fn specialize_builtin_definition(
             topology: EffectGraphTopology::GeneralDag,
             ..contract
         },
-        crate::EffectType::SetMatte => {
-            let source =
-                effect.effect_type.parameter_id("matte_source").expect("builtin matte source");
+        crate::EffectType::SetMatte | crate::EffectType::Glass => {
+            let parameter = if effect.effect_type == crate::EffectType::Glass {
+                "bump_map"
+            } else {
+                "matte_source"
+            };
+            let source = effect.effect_type.parameter_id(parameter).expect("builtin visual source");
             let Some(retime) = effect
                 .evaluate_visual_source_parameter(&source)
                 .and_then(mondrian_core::VisualSourceReference::retime)

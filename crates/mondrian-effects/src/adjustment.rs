@@ -511,7 +511,8 @@ pub(crate) fn apply_render_op(
         }
         EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }
-        | EffectRenderOp::DetailPreservingUpscale { .. } => {
+        | EffectRenderOp::DetailPreservingUpscale { .. }
+        | EffectRenderOp::Glass { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: crate::execution::effect_render_op_name(op),
                 parameter: "requires_float32",
@@ -1194,6 +1195,9 @@ pub(crate) fn apply_render_op_f32(
 pub(crate) fn render_op_tile_scratch_bytes(op: &EffectRenderOp, width: u32, height: u32) -> usize {
     match op {
         EffectRenderOp::BilateralBlur { grade } => grade.tile_scratch_bytes(width, height),
+        EffectRenderOp::Glass { .. } => {
+            crate::GlassHeightPlan::scratch_bytes(crate::EffectFrameExtent::new(width, height))
+        }
         EffectRenderOp::Smear { grade } | EffectRenderOp::Reshape { grade } => {
             grade.preparation_scratch_bytes(crate::EffectFrameExtent::new(width, height))
         }
@@ -1270,6 +1274,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::GrowBounds { .. } => 0,
         EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 1,
         EffectRenderOp::DetailPreservingUpscale { .. } => 1,
+        EffectRenderOp::Glass { .. } => 1,
         // One intermediate per pass plus the final destination: the design
         // budgets four same-sized frames for the separable morphology chain.
         EffectRenderOp::Minimax { .. } => 4,
@@ -1849,6 +1854,8 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             crate::set_matte::apply_set_matte_self_controlled(working, *grade, checkpoint)
         }
         EffectRenderOp::DisplacementMap { .. } => Ok(false),
+        // Glass uses the complete graph's raster and auxiliary inputs.
+        EffectRenderOp::Glass { .. } => Ok(false),
         EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),
         EffectRenderOp::DetailPreservingUpscale { grade } => {
             if !region.is_full_frame() {

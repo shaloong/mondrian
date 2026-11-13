@@ -1302,6 +1302,14 @@ pub enum EffectRenderOp {
         /// Scale, noise reduction, detail and coverage controls.
         grade: crate::DetailPreservingUpscaleGrade,
     },
+    /// Refract through a source-local or independent bump map.
+    Glass {
+        grade: crate::GlassGrade,
+        /// Only bound for composition-light mode at the exact Sequence time.
+        lighting: Option<Arc<crate::GlassSceneLighting>>,
+        /// Physical projection bound at the actual raster owner.
+        projection: Option<crate::GlassProjection>,
+    },
     /// Counter-shift red and blue around the green reference channel.
     ChromaticAberrationRemoval {
         grade: crate::ChromaticAberrationRemovalGrade,
@@ -1708,6 +1716,12 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::DetailPreservingUpscale { grade } => {
                 formatter.debug_struct("DetailPreservingUpscale").field("grade", grade).finish()
             }
+            Self::Glass { grade, lighting, projection } => formatter
+                .debug_struct("Glass")
+                .field("grade", grade)
+                .field("lighting", lighting)
+                .field("projection", projection)
+                .finish(),
             Self::Lut3D { lut, intensity } => formatter
                 .debug_struct("Lut3D")
                 .field("semantic_fingerprint", lut.semantic_fingerprint())
@@ -2813,6 +2827,18 @@ impl EffectRenderOp {
                 123u8.hash(state);
                 grade.hash_state(state);
             }
+            EffectRenderOp::Glass { grade, lighting, projection } => {
+                124u8.hash(state);
+                grade.hash_state(state);
+                lighting.is_some().hash(state);
+                if let Some(lighting) = lighting {
+                    lighting.hash_state(state);
+                }
+                projection.is_some().hash(state);
+                if let Some(projection) = projection {
+                    projection.hash_state(state);
+                }
+            }
             EffectRenderOp::Lut3D { lut, intensity } => {
                 6u8.hash(state);
                 lut.semantic_fingerprint().hash(state);
@@ -2967,6 +2993,7 @@ impl EffectRenderOp {
             EffectRenderOp::GrowBounds { .. } => 2,
             EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 48,
             EffectRenderOp::DetailPreservingUpscale { .. } => 32,
+            EffectRenderOp::Glass { .. } => 24,
             EffectRenderOp::DustScratches { .. } => 4,
             // Three passes, four when the chatter softening is enabled.
             EffectRenderOp::KeyCleaner { grade } => grade.cost(),
@@ -3526,7 +3553,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 123] {
+fn builtin_effect_types() -> [EffectType; 124] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3645,6 +3672,7 @@ fn builtin_effect_types() -> [EffectType; 123] {
         EffectType::Smear,
         EffectType::Reshape,
         EffectType::DetailPreservingUpscale,
+        EffectType::Glass,
         EffectType::BilateralBlur,
         EffectType::SmartBlur,
         EffectType::ChromaticAberrationRemoval,
@@ -11092,6 +11120,9 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Glass => {
+            define_glass_properties(&mut properties, &effect_type);
+        }
         EffectType::SetMatte => {
             let group = "通道";
             define_builtin_property(
@@ -12774,6 +12805,276 @@ fn define_blanking_fill_properties(properties: &mut PropertyBag, kind: &EffectTy
     }
 }
 
+fn define_glass_properties(properties: &mut PropertyBag, effect_type: &EffectType) {
+    let surface = "玻璃表面";
+    let light = "玻璃灯光";
+    let shading = "玻璃着色";
+    let color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    let enum_options = |parameter, options: &[(&str, &str)]| {
+        options
+            .iter()
+            .map(|(key, label)| {
+                ParameterEnumOption::new(
+                    *key,
+                    *label,
+                    format!("mondrian.effect.glass.{parameter}.{key}"),
+                )
+            })
+            .collect()
+    };
+    define_builtin_property(
+        properties,
+        effect_type,
+        "bump_map",
+        surface,
+        "凹凸图层",
+        PropertyValue::VisualSource(mondrian_core::VisualSourceReference::Unbound),
+        None,
+        None,
+        None,
+    );
+    define_builtin_enum_property(
+        properties,
+        effect_type,
+        "channel",
+        surface,
+        "高度通道",
+        "lightness",
+        enum_options(
+            "channel",
+            &crate::GlassChannel::OPTIONS.map(|(key, label, _)| (key, label)),
+        ),
+    );
+    for (key, label, default, min, max) in [
+        ("softness", "柔化", 20.0, 0.0, 500.0),
+        ("height", "高度", 25.0, -100.0, 100.0),
+        ("displacement", "折射位移", 100.0, -500.0, 500.0),
+    ] {
+        define_builtin_property(
+            properties,
+            effect_type,
+            key,
+            surface,
+            label,
+            PropertyValue::Float(default),
+            Some(min),
+            Some(max),
+            Some(0.1),
+        );
+    }
+    define_builtin_enum_property(
+        properties,
+        effect_type,
+        "lighting",
+        light,
+        "光源",
+        "effect",
+        enum_options(
+            "lighting",
+            &[("effect", "效果灯"), ("composition", "合成灯")],
+        ),
+    );
+    define_builtin_property(
+        properties,
+        effect_type,
+        "light_intensity",
+        light,
+        "灯光强度",
+        PropertyValue::Float(100.0),
+        Some(0.0),
+        Some(1000.0),
+        Some(0.1),
+    );
+    define_builtin_property(
+        properties,
+        effect_type,
+        "light_color",
+        light,
+        "灯光颜色",
+        PropertyValue::Color(color),
+        None,
+        None,
+        None,
+    );
+    define_builtin_enum_property(
+        properties,
+        effect_type,
+        "light_type",
+        light,
+        "灯光类型",
+        "distant",
+        enum_options("light_type", &[("distant", "平行光"), ("point", "点光")]),
+    );
+    define_builtin_property(
+        properties,
+        effect_type,
+        "light_height",
+        light,
+        "灯光高度",
+        PropertyValue::Float(65.0),
+        Some(-100.0),
+        Some(100.0),
+        Some(0.1),
+    );
+    define_builtin_property(
+        properties,
+        effect_type,
+        "light_position",
+        light,
+        "灯光位置",
+        PropertyValue::Vec2(glam::Vec2::splat(0.5)),
+        None,
+        None,
+        None,
+    );
+    define_builtin_property(
+        properties,
+        effect_type,
+        "light_direction",
+        light,
+        "灯光方向",
+        PropertyValue::Float(-45.0),
+        None,
+        None,
+        None,
+    );
+    for (key, label, default, min, max, step) in [
+        ("ambient", "环境光", 50.0, 0.0, 200.0, 0.1),
+        ("diffuse", "漫反射", 50.0, 0.0, 100.0, 0.1),
+        ("specular", "镜面高光", 50.0, 0.0, 100.0, 0.1),
+        (
+            "roughness",
+            "粗糙度",
+            crate::glass::GLASS_ROUGHNESS_DEFAULT,
+            f64::from(crate::glass::GLASS_ROUGHNESS_MIN),
+            0.5,
+            0.0001,
+        ),
+        ("metal", "金属度", 100.0, 0.0, 100.0, 0.1),
+    ] {
+        define_builtin_property(
+            properties,
+            effect_type,
+            key,
+            shading,
+            label,
+            PropertyValue::Float(default),
+            Some(min),
+            Some(max),
+            Some(step),
+        );
+    }
+}
+
+fn glass_graph_builder(effect_type: &EffectType) -> EffectGraphBuilder {
+    let [bump_map, channel, softness, height, displacement, lighting, light_intensity, light_color, light_type, light_height, light_position, light_direction, ambient, diffuse, specular, roughness, metal] =
+        [
+            "bump_map",
+            "channel",
+            "softness",
+            "height",
+            "displacement",
+            "lighting",
+            "light_intensity",
+            "light_color",
+            "light_type",
+            "light_height",
+            "light_position",
+            "light_direction",
+            "ambient",
+            "diffuse",
+            "specular",
+            "roughness",
+            "metal",
+        ]
+        .map(|key| builtin_parameter_id(effect_type, key));
+    Arc::new(move |effect, context, graph| {
+        let invalid = |reason| EffectGraphBuildError::InvalidAuthorState {
+            effect_key: effect.effect_type.key(),
+            effect_id: effect.id,
+            reason,
+        };
+        let number = |id, fallback| effect.evaluate_f32_parameter(id, context.time, fallback);
+        let menu = |id| effect.evaluate_enum_parameter(id, context.time);
+        let channel = menu(&channel)
+            .as_deref()
+            .and_then(crate::GlassChannel::from_key)
+            .ok_or_else(|| invalid("invalid Glass height channel".into()))?;
+        let composition_lights = match menu(&lighting).as_deref() {
+            Some("effect") => false,
+            Some("composition") => true,
+            _ => return Err(invalid("invalid Glass lighting mode".into())),
+        };
+        let light_z = number(&light_height, 65.0);
+        let effect_light = match menu(&light_type).as_deref() {
+            Some("distant") => crate::GlassEffectLight::Distant {
+                direction_degrees: number(&light_direction, -45.0),
+                height: light_z,
+            },
+            Some("point") => {
+                let Some(PropertyValue::Vec2(position)) =
+                    effect.evaluate_parameter(&light_position, context.time)
+                else {
+                    return Err(invalid("invalid Glass light position".into()));
+                };
+                crate::GlassEffectLight::Point { position: position.to_array(), height: light_z }
+            }
+            _ => return Err(invalid("invalid Glass effect light".into())),
+        };
+        let Some(PropertyValue::Color(color)) =
+            effect.evaluate_parameter(&light_color, context.time)
+        else {
+            return Err(invalid("invalid Glass light color".into()));
+        };
+        let grade = crate::GlassGrade::new(
+            channel,
+            number(&softness, 20.0),
+            number(&height, 25.0),
+            number(&displacement, 100.0),
+            number(&light_intensity, 100.0),
+            [color.r, color.g, color.b],
+            effect_light,
+            crate::GlassMaterial {
+                ambient: number(&ambient, 50.0),
+                diffuse: number(&diffuse, 50.0),
+                specular: number(&specular, 50.0),
+                roughness: number(&roughness, crate::glass::GLASS_ROUGHNESS_DEFAULT),
+                metal: number(&metal, 100.0),
+            },
+            composition_lights,
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        let op = EffectRenderOp::Glass { grade, lighting: None, projection: None };
+        match effect.evaluate_visual_source_parameter(&bump_map) {
+            Some(mondrian_core::VisualSourceReference::Unbound) => {
+                graph.append_unary(op);
+            }
+            Some(_) => {
+                let auxiliary = graph.append_visual_source_input(
+                    effect,
+                    &bump_map,
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                )?;
+                let output = graph.add_auxiliary_effect(
+                    graph.current_output(),
+                    auxiliary,
+                    op,
+                    crate::AuxiliaryRole::Map,
+                    crate::AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP,
+                );
+                graph.set_current_output(output);
+            }
+            None => return Err(invalid("invalid Glass bump map".into())),
+        }
+        Ok(())
+    })
+}
+
 fn define_builtin_property(
     properties: &mut PropertyBag,
     effect_type: &EffectType,
@@ -13230,6 +13531,14 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::DetailPreservingUpscale, "scale" | "reduce_noise" | "detail") => {
             ParameterUnit::Percent
         }
+        (EffectType::Glass, "height" | "displacement" | "softness" | "light_height") => {
+            ParameterUnit::Pixels
+        }
+        (EffectType::Glass, "light_direction") => ParameterUnit::Degrees,
+        (EffectType::Glass, "light_position") => ParameterUnit::Normalized,
+        (EffectType::Glass, "light_intensity" | "ambient" | "diffuse" | "specular" | "metal") => {
+            ParameterUnit::Percent
+        }
         (EffectType::Colorama, "phase_shift") => ParameterUnit::Degrees,
         (EffectType::Colorama, "blend_with_original") => ParameterUnit::Percent,
         (
@@ -13275,6 +13584,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::ChannelCombiner
                 | EffectType::SetMatte
                 | EffectType::DisplacementMap
+                | EffectType::Glass
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -13538,7 +13848,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
-        EffectType::DisplacementMap => EffectExecutionContract {
+        EffectType::DisplacementMap | EffectType::Glass => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_propagation: EffectRoiPropagation::FullFrame,
             topology: EffectGraphTopology::GeneralDag,
@@ -19447,6 +19757,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Glass => Some(glass_graph_builder(effect_type)),
         EffectType::SetMatte => {
             let source = builtin_parameter_id(effect_type, "matte_source");
             let channel = builtin_parameter_id(effect_type, "channel");
@@ -21231,6 +21542,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Smear => "漩涡条纹",
         EffectType::Reshape => "改变形状",
         EffectType::DetailPreservingUpscale => "超分放大",
+        EffectType::Glass => "玻璃",
         EffectType::SmartBlur => "智能模糊",
         EffectType::BilateralBlur => "双向模糊",
         EffectType::ChromaticAberrationRemoval => "色差校正",
@@ -22634,6 +22946,7 @@ mod tests {
             EffectType::Smear,
             EffectType::Reshape,
             EffectType::DetailPreservingUpscale,
+            EffectType::Glass,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -31783,7 +32096,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 123);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 124);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -32311,7 +32624,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 123);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 124);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -35270,7 +35583,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 123);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 124);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -36406,7 +36719,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 123);
+        assert_eq!(builtin_effect_types().len(), 124);
     }
 
     #[test]

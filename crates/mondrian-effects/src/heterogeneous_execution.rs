@@ -2137,6 +2137,16 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Fixed-grid native displacement pass.
         pass: crate::EffectGpuSpatialPass,
     },
+    /// Refract the primary through a graph-local height source.
+    GlassMap {
+        node: EffectGraphNodeId,
+        input: EffectMaterializationId,
+        auxiliary: EffectMaterializationId,
+        output: EffectMaterializationId,
+        waits: Arc<[EffectCompletionToken]>,
+        signal: EffectCompletionToken,
+        pass: crate::EffectGpuSpatialPass,
+    },
     /// Combine two AlphaMask-domain materializations.
     MaskCombine {
         node: EffectGraphNodeId,
@@ -2174,6 +2184,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::ChannelCombinerLayer { output, .. }
             | Self::SetMatte { output, .. }
             | Self::DisplacementMap { output, .. }
+            | Self::GlassMap { output, .. }
             | Self::MaskCombine { output, .. }
             | Self::MatteMix { output, .. } => *output,
         }
@@ -2193,6 +2204,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::ChannelCombinerLayer { waits, .. }
             | Self::SetMatte { waits, .. }
             | Self::DisplacementMap { waits, .. }
+            | Self::GlassMap { waits, .. }
             | Self::MaskCombine { waits, .. }
             | Self::MatteMix { waits, .. } => waits,
         }
@@ -2212,6 +2224,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::ChannelCombinerLayer { signal, .. }
             | Self::SetMatte { signal, .. }
             | Self::DisplacementMap { signal, .. }
+            | Self::GlassMap { signal, .. }
             | Self::MaskCombine { signal, .. }
             | Self::MatteMix { signal, .. } => *signal,
         }
@@ -2230,6 +2243,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::ChannelCombinerLayer { node, .. }
             | Self::SetMatte { node, .. }
             | Self::DisplacementMap { node, .. }
+            | Self::GlassMap { node, .. }
             | Self::MaskCombine { node, .. }
             | Self::MatteMix { node, .. } => output.push(*node),
         }
@@ -2257,7 +2271,8 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::FillMatte { input, mask, .. }
             | Self::ChannelCombinerLayer { input, auxiliary: mask, .. }
             | Self::SetMatte { input, auxiliary: mask, .. }
-            | Self::DisplacementMap { input, auxiliary: mask, .. } => {
+            | Self::DisplacementMap { input, auxiliary: mask, .. }
+            | Self::GlassMap { input, auxiliary: mask, .. } => {
                 visit(*input)?;
                 visit(*mask)?;
             }
@@ -2492,6 +2507,9 @@ pub enum PreparedHeterogeneousEffectWorkError {
     /// A bound custom Float32 processor failed without publishing staged pixels.
     #[error(transparent)]
     CustomProcessor(#[from] crate::EffectExecutionError),
+    /// A Glass node failed while producing its complete CPU materialization.
+    #[error("heterogeneous Glass execution failed: {0:?}")]
+    Glass(crate::EffectFloatExecutionError),
     /// The selected graph route is valid but outside the executable vertical slice.
     #[error(
         "effect heterogeneous route is not the supported CPU-F32 DAG to GPU-F32 DAG-suffix shape: {reason}"
@@ -2789,7 +2807,7 @@ fn hash_effect_operation_shape(
             ..
         }
         | EffectGraphNodeKind::AuxiliaryEffect {
-            op: op @ EffectRenderOp::DisplacementMap { .. },
+            op: op @ (EffectRenderOp::DisplacementMap { .. } | EffectRenderOp::Glass { .. }),
             role: crate::AuxiliaryRole::Map,
             sampling,
             ..
@@ -2909,6 +2927,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::Smear { .. } => 122,
         EffectRenderOp::Reshape { .. } => 123,
         EffectRenderOp::DetailPreservingUpscale { .. } => 124,
+        EffectRenderOp::Glass { .. } => 125,
         EffectRenderOp::Choker { .. } => 77,
         EffectRenderOp::TestSignals { .. } => 78,
         EffectRenderOp::ColorBalance { .. } => 79,
@@ -3740,6 +3759,24 @@ fn execute_cpu_dag_prefix(
             .collect::<Result<Vec<_>, _>>()?;
 
         let output = match node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Glass { grade, lighting, projection },
+                ..
+            } => {
+                let primary = take_single_cpu_input(&mut inputs, dispatch.node)?;
+                let result = crate::glass::execute_glass_node(
+                    primary,
+                    grade,
+                    lighting.as_deref(),
+                    projection,
+                    extent,
+                    None,
+                    dispatch.node,
+                    control,
+                );
+                heterogeneous_processor_checkpoint(control, generation)?;
+                result.map_err(PreparedHeterogeneousEffectWorkError::Glass)?
+            }
             EffectGraphNodeKind::UnaryEffect { op, .. }
             | EffectGraphNodeKind::DomainEffect { op, .. } => {
                 let mut output = take_single_cpu_input(&mut inputs, dispatch.node)?;
@@ -4019,6 +4056,34 @@ fn execute_cpu_dag_prefix(
                 )?
             }
             EffectGraphNodeKind::AuxiliaryEffect {
+                op: EffectRenderOp::Glass { grade, lighting, projection },
+                role: crate::AuxiliaryRole::Map,
+                sampling,
+                ..
+            } => {
+                let [primary, auxiliary]: [crate::EffectFloatFrame; 2] = inputs
+                    .try_into()
+                    .map_err(|_| PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                let raster = crate::AuxiliaryFloatFrame::new(
+                    auxiliary.view(),
+                    crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
+                );
+                let result = crate::glass::execute_glass_node(
+                    primary,
+                    grade,
+                    lighting.as_deref(),
+                    projection,
+                    extent,
+                    Some((raster, sampling)),
+                    dispatch.node,
+                    control,
+                );
+                heterogeneous_processor_checkpoint(control, generation)?;
+                result.map_err(PreparedHeterogeneousEffectWorkError::Glass)?
+            }
+            EffectGraphNodeKind::AuxiliaryEffect {
                 op: op @ EffectRenderOp::Fill { .. },
                 role: crate::AuxiliaryRole::Matte,
                 sampling,
@@ -4267,7 +4332,8 @@ fn cpu_prefix_working_bytes(
             .ok_or(PreparedHeterogeneousEffectWorkError::InputSizeOverflow)?;
         let tile_scratch = match &node.kind {
             EffectGraphNodeKind::UnaryEffect { op, .. }
-            | EffectGraphNodeKind::DomainEffect { op, .. } => {
+            | EffectGraphNodeKind::DomainEffect { op, .. }
+            | EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
                 crate::adjustment::render_op_tile_scratch_bytes(op, extent.width(), extent.height())
             }
             _ => 0,
@@ -4707,6 +4773,17 @@ fn prepare_gpu_suffix(
                                 }
                                 crate::EffectGpuSpatialPass::DisplacementMap { .. } => {
                                     PreparedHeterogeneousGpuDispatch::DisplacementMap {
+                                        node: *node_id,
+                                        input: *input,
+                                        auxiliary: *auxiliary,
+                                        output: *output,
+                                        waits: Arc::clone(waits),
+                                        signal: *signal,
+                                        pass,
+                                    }
+                                }
+                                crate::EffectGpuSpatialPass::Glass { .. } => {
+                                    PreparedHeterogeneousGpuDispatch::GlassMap {
                                         node: *node_id,
                                         input: *input,
                                         auxiliary: *auxiliary,
@@ -5199,6 +5276,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Smear { .. }
             | crate::EffectRenderOp::Reshape { .. }
             | crate::EffectRenderOp::DetailPreservingUpscale { .. }
+            | crate::EffectRenderOp::Glass { .. }
             | crate::EffectRenderOp::DisplacementMap { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::SetMatte { .. }

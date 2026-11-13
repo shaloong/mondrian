@@ -249,6 +249,11 @@ pub enum EffectFloatExecutionError {
     CustomProcessor(EffectExecutionError),
     /// A required auxiliary raster is absent or violates its declaration.
     AuxiliaryInput(EffectExecutionError),
+    /// The consumer's Glass scene or sampled layer geometry was unavailable.
+    GlassFailed {
+        node_id: EffectGraphNodeId,
+        source: crate::GlassError,
+    },
     /// The graph contains a node shape or render op that cannot execute in float.
     UnsupportedNode {
         /// Unsupported node id.
@@ -1671,15 +1676,30 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 } else {
                     borrowed.expect("the sampled auxiliary raster is borrowed or owned")
                 };
-                source = crate::materialize_straight_coverage(
-                    source,
-                    crate::EffectAlphaConsumer::StraightCoverageOperation,
-                )?;
-                source.set_format_after_write(
-                    source.format().with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
-                );
+                if !matches!(op, EffectRenderOp::Glass { .. }) {
+                    source = crate::materialize_straight_coverage(
+                        source,
+                        crate::EffectAlphaConsumer::StraightCoverageOperation,
+                    )?;
+                    source.set_format_after_write(
+                        source
+                            .format()
+                            .with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                    );
+                }
                 let source_extent = source.extent();
-                let source = if let EffectRenderOp::DisplacementMap { grade } = op
+                let source = if let EffectRenderOp::Glass { grade, lighting, projection } = op {
+                    crate::glass::execute_glass_node(
+                        source,
+                        *grade,
+                        lighting.as_deref(),
+                        *projection,
+                        extent,
+                        Some((raster, *sampling)),
+                        node.id,
+                        control,
+                    )?
+                } else if let EffectRenderOp::DisplacementMap { grade } = op
                     && grade.output_outset() != [0, 0]
                 {
                     let bounds = crate::EffectRasterBounds::from_extent(source_extent)
@@ -1852,6 +1872,20 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 if let EffectRenderOp::DetailPreservingUpscale { grade } = op {
                     let output =
                         crate::apply_detail_preserving_upscale_controlled(source, *grade, control)?;
+                    outputs.insert(node.id, output);
+                    continue;
+                }
+                if let EffectRenderOp::Glass { grade, lighting, projection } = op {
+                    let output = crate::glass::execute_glass_node(
+                        source,
+                        *grade,
+                        lighting.as_deref(),
+                        *projection,
+                        extent,
+                        None,
+                        node.id,
+                        control,
+                    )?;
                     outputs.insert(node.id, output);
                     continue;
                 }
@@ -3115,6 +3149,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Smear { .. } => "smear",
         EffectRenderOp::Reshape { .. } => "reshape",
         EffectRenderOp::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
+        EffectRenderOp::Glass { .. } => "glass",
         EffectRenderOp::LensDistortion { .. } => "lens_distortion",
         EffectRenderOp::LensFlare { .. } => "lens_flare",
         EffectRenderOp::Bulge { .. } => "bulge",

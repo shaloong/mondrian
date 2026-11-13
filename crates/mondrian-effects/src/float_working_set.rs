@@ -230,7 +230,8 @@ pub(crate) fn reservations(
                 .resize_scratch_bytes(taken.first().ok_or_else(|| missing(*id))?.extent)
                 .ok_or(EffectFloatFrameError::ExtentOverflow)?,
             EffectGraphNodeKind::UnaryEffect { op, .. }
-            | EffectGraphNodeKind::DomainEffect { op, .. } => {
+            | EffectGraphNodeKind::DomainEffect { op, .. }
+            | EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
                 crate::adjustment::render_op_tile_scratch_bytes(
                     op,
                     raster.extent.width(),

@@ -342,6 +342,15 @@ pub enum EffectGpuSpatialPass {
         /// Scale and reconstruction controls.
         grade: crate::DetailPreservingUpscaleGrade,
     },
+    /// Source-local Glass with an optional independently registered height map.
+    Glass {
+        grade: crate::GlassGrade,
+        lighting: Option<Arc<crate::GlassSceneLighting>>,
+        projection: Option<crate::GlassProjection>,
+        sampling: Option<mondrian_core::ImageSampling>,
+        auxiliary: Option<crate::AuxiliarySampling>,
+        external_slot: Option<u32>,
+    },
 }
 
 impl EffectGpuSpatialPass {
@@ -372,7 +381,8 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { external_slot, .. }
             | Self::ChannelCombinerLayer { external_slot, .. }
             | Self::SetMatte { sampling: Some(_), external_slot, .. }
-            | Self::DisplacementMap { external_slot, .. } => Some(external_slot),
+            | Self::DisplacementMap { external_slot, .. }
+            | Self::Glass { auxiliary: Some(_), external_slot, .. } => Some(external_slot),
             _ => None,
         }
     }
@@ -441,6 +451,7 @@ impl EffectGpuSpatialPass {
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
             Self::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
+            Self::Glass { .. } => "glass",
         }
     }
 
@@ -531,7 +542,7 @@ impl EffectGpuSpatialPass {
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
-            Self::DisplacementMap { .. } => u32::MAX,
+            Self::DisplacementMap { .. } | Self::Glass { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[0],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -612,7 +623,7 @@ impl EffectGpuSpatialPass {
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
-            Self::DisplacementMap { .. } => u32::MAX,
+            Self::DisplacementMap { .. } | Self::Glass { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[1],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -647,6 +658,16 @@ pub(crate) fn lower_auxiliary_spatial_pass(
         }
         (EffectRenderOp::DisplacementMap { grade }, crate::AuxiliaryRole::Map) => {
             Some(EffectGpuSpatialPass::DisplacementMap { grade: *grade, sampling, external_slot })
+        }
+        (EffectRenderOp::Glass { grade, lighting, projection }, crate::AuxiliaryRole::Map) => {
+            Some(EffectGpuSpatialPass::Glass {
+                grade: *grade,
+                lighting: lighting.clone(),
+                projection: *projection,
+                sampling: None,
+                auxiliary: Some(sampling),
+                external_slot,
+            })
         }
         _ => None,
     }
@@ -738,7 +759,9 @@ impl CompiledEffectGpuPipeline {
             matches!(
                 stage,
                 EffectGpuStage::Spatial {
-                    pass: EffectGpuSpatialPass::Smear { .. } | EffectGpuSpatialPass::Reshape { .. },
+                    pass: EffectGpuSpatialPass::Smear { .. }
+                        | EffectGpuSpatialPass::Reshape { .. }
+                        | EffectGpuSpatialPass::Glass { .. },
                     ..
                 }
             )
@@ -753,11 +776,40 @@ impl CompiledEffectGpuPipeline {
             if let EffectGpuStage::Spatial {
                 pass:
                     EffectGpuSpatialPass::Smear { sampling: value, .. }
-                    | EffectGpuSpatialPass::Reshape { sampling: value, .. },
+                    | EffectGpuSpatialPass::Reshape { sampling: value, .. }
+                    | EffectGpuSpatialPass::Glass { sampling: value, .. },
                 ..
             } = stage
             {
                 *value = Some(sampling);
+            }
+        }
+        pipeline
+    }
+
+    /// Whether any stage uses the materialized layer's composition geometry.
+    pub fn requires_scene_projection(&self) -> bool {
+        self.stages.iter().any(|stage| {
+            matches!(
+                stage,
+                EffectGpuStage::Spatial {
+                    pass: EffectGpuSpatialPass::Glass { grade, .. }, ..
+                } if grade.uses_composition_lights()
+            )
+        })
+    }
+
+    /// Bind the same physical layer projection used by the CPU compositor.
+    pub fn with_glass_projection(&self, projection: Option<crate::GlassProjection>) -> Self {
+        let mut pipeline = self.clone();
+        for stage in &mut pipeline.stages {
+            if let EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::Glass { grade, projection: value, .. },
+                ..
+            } = stage
+                && grade.uses_composition_lights()
+            {
+                *value = projection;
             }
         }
         pipeline
@@ -1113,6 +1165,16 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::DetailPreservingUpscale { grade } => {
             Some(EffectGpuSpatialPass::DetailPreservingUpscale { grade: *grade })
+        }
+        EffectRenderOp::Glass { grade, lighting, projection } => {
+            Some(EffectGpuSpatialPass::Glass {
+                grade: *grade,
+                lighting: lighting.clone(),
+                projection: *projection,
+                sampling: None,
+                auxiliary: None,
+                external_slot: None,
+            })
         }
         EffectRenderOp::SetMatte { grade } => Some(EffectGpuSpatialPass::SetMatte {
             grade: *grade,

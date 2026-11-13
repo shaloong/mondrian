@@ -219,6 +219,17 @@ impl EffectRasterBounds {
         Self { extent, origin_half_pixels: [0, 0] }
     }
 
+    /// Recover the current origin after any combination of centered grid changes.
+    pub fn centered_on(primary: EffectFrameExtent, extent: EffectFrameExtent) -> Option<Self> {
+        Self::from_extent(primary).with_extent_and_shift(
+            extent,
+            [
+                i64::from(primary.width()) - i64::from(extent.width()),
+                i64::from(primary.height()) - i64::from(extent.height()),
+            ],
+        )
+    }
+
     /// Dimensions of the addressable raster.
     pub const fn extent(self) -> EffectFrameExtent {
         self.extent
