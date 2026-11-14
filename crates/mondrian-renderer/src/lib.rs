@@ -65,6 +65,7 @@ mod resolved_visual_identity;
 pub mod shot_match;
 pub mod signal_monitor;
 pub mod source_frame_preparation;
+pub mod temporal_gpu;
 pub mod timeline_composite;
 mod timeline_effect_routes;
 pub mod timeline_render_plan;

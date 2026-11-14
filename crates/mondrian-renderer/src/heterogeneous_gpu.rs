@@ -1603,6 +1603,49 @@ impl HeterogeneousGpuContinuationRuntime {
         self.poisoned
     }
 
+    /// Execute one frozen temporal schedule on this runtime's device.
+    ///
+    /// This shares the allocator, resource table and texture pool with every
+    /// other pass this runtime records, so a time-expanded graph and the ordinary
+    /// continuation path can never disagree about resource ownership.
+    pub fn execute_temporal_schedule(
+        &mut self,
+        schedule: &mondrian_effects::PreparedEffectTemporalGpuExecution,
+        frames: &mut dyn mondrian_effects::EffectTemporalFrameProvider,
+        auxiliary: &mut dyn mondrian_effects::EffectTemporalAuxiliaryProvider,
+        working_color_space: WorkingColorSpace,
+        deadline: Instant,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<
+        crate::temporal_gpu::TemporalGpuExecution,
+        crate::temporal_gpu::TemporalGpuExecutionError,
+    > {
+        if self.poisoned {
+            return Err(crate::temporal_gpu::TemporalGpuExecutionError::RuntimePoisoned);
+        }
+        crate::temporal_gpu::execute_temporal_schedule(
+            self.temporal_gpu_device(),
+            schedule,
+            frames,
+            auxiliary,
+            working_color_space,
+            deadline,
+            cancellation,
+        )
+    }
+
+    /// Borrow this runtime's device state for one temporal schedule.
+    pub(crate) fn temporal_gpu_device(&mut self) -> crate::temporal_gpu::TemporalGpuDevice<'_> {
+        crate::temporal_gpu::TemporalGpuDevice {
+            device: &self.context.device,
+            queue: &self.context.queue,
+            compositor: &self.compositor,
+            ids: &mut self.ids,
+            table: &mut self.table,
+            resource_pool: &self.resource_pool,
+        }
+    }
+
     /// Execute upload plus exact GPU suffix, wait for that submission, and
     /// read the working Float32 output back to CPU.
     ///

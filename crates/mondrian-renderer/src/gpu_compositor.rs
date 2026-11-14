@@ -6239,6 +6239,72 @@ impl GpuFrameCompositor {
         Ok(handle)
     }
 
+    /// Combine two graph-local working frames across instants.
+    ///
+    /// `mix` is the weight of `sample`, matching the scalar
+    /// `mix_straight_rgba` contract: both coverages are clamped, the result keeps
+    /// straight coverage, and a fully transparent result clears the pixel instead
+    /// of leaking either side's colour.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_temporal_blend_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        sample: &GpuColorFrameHandle,
+        mix: f32,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
+        let expected = ColorFrameDescriptor {
+            color_space: working_color_space.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            ..input.descriptor()
+        };
+        for frame in [input, sample] {
+            let actual = frame.descriptor();
+            if actual != expected {
+                return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
+            }
+            if frame.texture_format() != product_gpu_working_texture_format() {
+                return Err(GpuCompositeError::SpatialChainFailed {
+                    pass: "temporal_blend",
+                    detail: "expected working Float32 textures".to_owned(),
+                });
+            }
+        }
+        let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
+        let sample_resource = table.get(sample).map_err(GpuCompositeError::ResourceTable)?;
+        let output = create_working_resource(
+            device,
+            ids,
+            input.descriptor(),
+            "gpu-temporal-blend-output",
+            resource_pool,
+        )?;
+        self.spatial
+            .record_temporal_blend(
+                device,
+                encoder,
+                &input_resource.resource().texture,
+                &sample_resource.resource().texture,
+                &output.resource().texture,
+                mix,
+            )
+            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                pass: spatial_failure_pass(&error),
+                detail: error.to_string(),
+            })?;
+        let handle = output.handle().clone();
+        table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(handle)
+    }
+
     /// Combine two AlphaMask-domain textures without crossing into picture RGB.
     #[allow(clippy::too_many_arguments)]
     pub fn record_alpha_mask_combine_pass(

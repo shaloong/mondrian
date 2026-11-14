@@ -739,6 +739,15 @@ impl TimelineTemporalDemandBatch {
         self.execution.auxiliary_demands()
     }
 
+    /// Exact frozen temporal execution these demands were prepared from.
+    ///
+    /// Hosts that can run the same frozen graph on the device lower this
+    /// execution to a device schedule; the scalar executor remains the
+    /// semantic reference and the fallback.
+    pub const fn execution(&self) -> &mondrian_effects::PreparedEffectTemporalExecution {
+        &self.execution
+    }
+
     /// Execute this batch with both already resolved source sets.
     pub(crate) fn execute_with_auxiliary(
         &self,

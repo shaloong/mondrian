@@ -1356,6 +1356,82 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "real GPU Export temporal schedule qualification; run independently"]
+    fn export_gpu_echo_temporal_schedule_matches_cpu_float32() {
+        let half = TimelineTime::new(1, 2).unwrap();
+        let mut child = Sequence::new("temporal matte");
+        child.settings.resolution = Resolution { width: 16, height: 16 };
+        child.settings.frame_rate = Rational::new(8, 1);
+        for (start, color) in [
+            (TimelineTime::ZERO, Color::WHITE),
+            (half, Color::TRANSPARENT),
+        ] {
+            child.video_tracks[0]
+                .add_clip(Clip::new_solid_color(AssetId::new(), color, start, half).unwrap())
+                .unwrap();
+        }
+        let mut matte = instantiate_effect_node(EffectType::SetMatte).unwrap();
+        for (field, value) in [
+            (
+                "matte_source",
+                PropertyValue::VisualSource(VisualSourceReference::Sequence {
+                    sequence_id: child.id,
+                    retime: Default::default(),
+                }),
+            ),
+            ("stretch", PropertyValue::Bool(true)),
+        ] {
+            matte
+                .set_static_value_by_parameter(
+                    &EffectType::SetMatte.parameter_id(field).unwrap(),
+                    value,
+                )
+                .unwrap();
+        }
+        let mut echo = instantiate_effect_node(EffectType::Echo).unwrap();
+        for (field, value) in [
+            ("echo_time", PropertyValue::Float(-0.25)),
+            ("operator", PropertyValue::Enum("normal".to_owned())),
+            ("starting_intensity", PropertyValue::Float(0.5)),
+        ] {
+            echo.set_static_value_by_parameter(
+                &EffectType::Echo.parameter_id(field).unwrap(),
+                value,
+            )
+            .unwrap();
+        }
+        let mut timeline = snapshot_with_effect(matte);
+        timeline.sequence.settings.frame_rate = child.settings.frame_rate;
+        timeline.sequences.push(child);
+        let clip = &mut timeline.sequence.video_tracks[1].clips[0];
+        clip.set_solid_color(Color::WHITE).unwrap();
+        clip.add_effect_node(echo);
+
+        let _gpu = GpuVisualExecutionGuard::activate();
+        let mut session = ExportVisualRenderSession::default();
+        let cpu = render_float_auxiliary_delivery(&timeline, 4, &mut session, false);
+        let cpu_diagnostics = session.visual_diagnostics();
+        assert_eq!(cpu_diagnostics.temporal_gpu_schedules, 0);
+        assert_eq!(cpu_diagnostics.temporal_gpu_cpu_fallbacks, 0);
+        // The historical instant is opaque white, the current instant is empty,
+        // so a schedule that reuses one auxiliary raster cannot reach this mix.
+        assert!(
+            cpu.chunks_exact(4).all(|pixel| (pixel[3] - 0.5).abs() < 1.0e-6),
+            "CPU mixed alpha {}",
+            cpu[3]
+        );
+
+        let gpu = render_float_auxiliary_delivery(&timeline, 4, &mut session, true);
+        let diagnostics = session.visual_diagnostics();
+        assert!(diagnostics.temporal_gpu_schedules >= 1);
+        assert!(diagnostics.temporal_gpu_dispatches >= 1);
+        assert_eq!(diagnostics.temporal_gpu_readbacks, 1);
+        assert_eq!(diagnostics.temporal_gpu_cpu_fallbacks, 0);
+        assert_eq!(gpu.len(), cpu.len());
+        assert_auxiliary_float32_parity(&cpu, &gpu);
+    }
+
+    #[test]
     fn export_historical_video_collage_range_includes_the_prefixs_earlier_clip_dependency() {
         let source = solid(Color::WHITE, TimelineTime::ZERO);
         let clip_id = source.id;

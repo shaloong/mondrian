@@ -126,6 +126,7 @@ pub(crate) struct EffectSpatialGpu {
     channel_combiner_layer: wgpu::RenderPipeline,
     set_matte: wgpu::RenderPipeline,
     displacement_map: wgpu::RenderPipeline,
+    temporal_blend: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
     fractal_noise_bindings: wgpu::BindGroupLayout,
@@ -1377,6 +1378,10 @@ impl EffectSpatialGpu {
             "mondrian.effect-spatial.displacement-map",
             "fs_displacement_map",
         );
+        let temporal_blend = auxiliary_pipeline(
+            "mondrian.effect-spatial.temporal-blend",
+            "fs_temporal_blend",
+        );
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
             layout: Some(&composite_layout),
@@ -2260,6 +2265,7 @@ impl EffectSpatialGpu {
             channel_combiner_layer,
             set_matte,
             displacement_map,
+            temporal_blend,
             bindings,
             composite_bindings,
             fractal_noise_bindings,
@@ -2936,6 +2942,55 @@ impl EffectSpatialGpu {
             device, encoder, pipeline, &primary, &auxiliary, &output, &uniforms,
         );
         Ok(destination.clone())
+    }
+
+    /// Records a straight-alpha blend of two same-grid frames from different
+    /// instants in time.
+    ///
+    /// The CPU reference is `mix_straight_rgba`: the weight and both coverages
+    /// are clamped, colour moves through premultiplied coverage, and only an
+    /// exactly-zero result canonicalizes the hidden RGB. Both frames must
+    /// already share the destination grid, because a cross-time sample never
+    /// changes the raster extent.
+    pub(crate) fn record_temporal_blend(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        left: &wgpu::Texture,
+        right: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        mix: f32,
+    ) -> Result<(), EffectSpatialGpuError> {
+        let extent = (left.width(), left.height());
+        if extent.0 == 0
+            || extent.1 == 0
+            || (right.width(), right.height()) != extent
+            || (destination.width(), destination.height()) != extent
+        {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "temporal_blend_extent",
+            ));
+        }
+        let uniforms = SpatialPassUniform {
+            size: [extent.0 as f32, extent.1 as f32, 0.0, 0.0],
+            params: [mix, 0.0, 0.0, 0.0],
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let left_view = left.create_view(&wgpu::TextureViewDescriptor::default());
+        let right_view = right.create_view(&wgpu::TextureViewDescriptor::default());
+        let output = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.temporal_blend,
+            &left_view,
+            &right_view,
+            &output,
+            &uniforms,
+        );
+        Ok(())
     }
 
     /// Number of texture passes one spatial pass expands into.
@@ -9321,6 +9376,27 @@ fn unpremultiply(sample: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(sample.rgb / alpha, alpha);
 }
 
+// Blend two instants of the same value. The CPU reference is
+// `mix_straight_rgba`: the weight and both coverages are clamped, colour
+// moves through premultiplied coverage, and only an exactly-zero result
+// canonicalizes the hidden RGB.
+@fragment
+fn fs_temporal_blend(input: VsOut) -> @location(0) vec4<f32> {
+    let index = vec2<i32>(floor(input.position.xy));
+    let left = textureLoad(original_texture, index, 0);
+    let right = textureLoad(auxiliary_texture, index, 0);
+    let weight = clamp(uniforms.params.x, 0.0, 1.0);
+    let left_alpha = clamp(left.a, 0.0, 1.0);
+    let right_alpha = clamp(right.a, 0.0, 1.0);
+    let alpha = left_alpha * (1.0 - weight) + right_alpha * weight;
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let colour = (left.rgb * left_alpha * (1.0 - weight)
+        + right.rgb * right_alpha * weight) / alpha;
+    return vec4<f32>(colour, alpha);
+}
+
 // The CPU hash is wrapping `u32` arithmetic, so the shader mirrors it bit for
 // bit: same salts, same shifts, same multipliers.
 fn deband_hash(x: u32, y: u32, salt: u32) -> u32 {
@@ -12081,6 +12157,88 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                         "split {point_a:?} pixel {index} channel {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_temporal_blend_matches_the_cpu_kernel() {
+        let Ok(context) = block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU temporal blend parity test: no GPU adapter available");
+            return;
+        };
+        let width = 17_u32;
+        let height = 11_u32;
+        let mut left = Vec::with_capacity((width * height) as usize);
+        let mut right = Vec::with_capacity((width * height) as usize);
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let step = (x + 3 * y) as f32;
+                left.push([
+                    0.05 * step,
+                    0.9 - 0.03 * step,
+                    0.2 + 0.02 * step,
+                    1.0 - 0.05 * (x % 5) as f32,
+                ]);
+                right.push([
+                    0.8 - 0.02 * step,
+                    0.1 + 0.04 * step,
+                    0.45 - 0.01 * step,
+                    0.1 + 0.04 * (y % 6) as f32,
+                ]);
+            }
+        }
+        // Both sides empty: the result must canonicalise the hidden RGB.
+        left[9] = [0.0, 0.0, 0.0, 0.0];
+        right[9] = [0.0, 0.0, 0.0, 0.0];
+        // Hidden colour behind zero coverage must never leak into the blend.
+        left[37] = [2.5, -0.5, 0.75, 0.0];
+        right[37] = [0.25, 0.5, 0.125, 0.0];
+        // Different coverages: the blend is premultiplied, not a straight average.
+        left[60] = [0.3, 0.6, 0.9, 0.25];
+        right[60] = [0.9, 0.45, 0.15, 0.75];
+        let executor = EffectSpatialGpu::new(&context.device);
+        let left_texture = upload(&context, &left, width, height);
+        let right_texture = upload(&context, &right, width, height);
+        let destination = scratch(&context, width, height, 1);
+        for mix in [0.0_f32, 0.25, 1.0, -0.5, 1.5] {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.effect-spatial.temporal-blend-encoder"),
+                });
+            executor
+                .record_temporal_blend(
+                    &context.device,
+                    &mut encoder,
+                    &left_texture,
+                    &right_texture,
+                    &destination[0],
+                    mix,
+                )
+                .expect("recorded temporal blend");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = readback(&context, &destination[0], width, height);
+            for (index, ((left_pixel, right_pixel), gpu_pixel)) in
+                left.iter().zip(right.iter()).zip(gpu.iter()).enumerate()
+            {
+                let cpu = mondrian_effects::mix_straight_rgba(*left_pixel, *right_pixel, mix);
+                for channel in 0..4 {
+                    let difference = (cpu[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-5,
+                        "temporal blend {mix} pixel {index} channel {channel}: \
+                         cpu {cpu:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+            // A non-identity mix has to move a visible pixel, so a pass that
+            // ignored the uniform cannot pass this test.
+            if mix == 0.25 {
+                let sample = mondrian_effects::mix_straight_rgba(left[60], right[60], mix);
+                assert!(
+                    (sample[0] - left[60][0]).abs() > 0.05,
+                    "the temporal blend must not be an identity at mix 0.25"
+                );
             }
         }
     }

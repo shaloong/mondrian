@@ -496,6 +496,41 @@ impl ExportGpuExecutionRuntime {
         Err(ExportGpuOutputFallbackReason::ContextUnavailable)
     }
 
+    /// Record one frozen temporal schedule on the shared Export device.
+    ///
+    /// The scalar executor stays the semantic reference: any refusal here is
+    /// reported as a fallback reason and the caller keeps the CPU route for
+    /// this batch instead of publishing a partially recorded frame.
+    fn execute_temporal_schedule(
+        &mut self,
+        schedule: &mondrian_effects::PreparedEffectTemporalGpuExecution,
+        frames: &mut dyn mondrian_effects::EffectTemporalFrameProvider,
+        auxiliary: &mut dyn mondrian_effects::EffectTemporalAuxiliaryProvider,
+        working_color_space: mondrian_core::WorkingColorSpace,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<mondrian_renderer::temporal_gpu::TemporalGpuExecution, ExportGpuOutputFallbackReason>
+    {
+        #[cfg(test)]
+        if !ENABLE_GPU_VISUAL_EXECUTION.with(|cell| cell.get()) {
+            return Err(ExportGpuOutputFallbackReason::ContextUnavailable);
+        }
+        self.ensure_ready()?;
+        let ExportGpuExecutionRuntimeState::Ready { backend, .. } = &mut self.state else {
+            return Err(ExportGpuOutputFallbackReason::ContextUnavailable);
+        };
+        backend
+            .heterogeneous_runtime
+            .execute_temporal_schedule(
+                schedule,
+                frames,
+                auxiliary,
+                working_color_space,
+                Instant::now() + EXPORT_GPU_READBACK_TIMEOUT,
+                cancellation,
+            )
+            .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)
+    }
+
     fn discard_visual_frame(&mut self) {
         if let ExportGpuExecutionRuntimeState::Ready { backend, .. } = &mut self.state {
             if let Some(visual) = backend.visual.as_ref() {
@@ -1437,6 +1472,18 @@ pub struct ExportJobVisualDiagnostics {
     pub heterogeneous_upload_bytes: u64,
     /// Aggregate completed GPU-to-CPU readback bytes.
     pub heterogeneous_readback_bytes: u64,
+    /// Temporal demand batches completed as one device schedule.
+    #[serde(default)]
+    pub temporal_gpu_schedules: u64,
+    /// Device passes recorded for completed temporal schedules.
+    #[serde(default)]
+    pub temporal_gpu_dispatches: u64,
+    /// Temporal roots read back exactly once at the host boundary.
+    #[serde(default)]
+    pub temporal_gpu_readbacks: u64,
+    /// Temporal batches that kept the scalar executor after a device refusal.
+    #[serde(default)]
+    pub temporal_gpu_cpu_fallbacks: u64,
     /// Most recent bounded completion summary. Exact upload tokens remain in
     /// the renderer-owned completion for the live attempt.
     pub last_heterogeneous_completion: Option<ExportHeterogeneousCompletionEvidence>,
@@ -10750,6 +10797,83 @@ fn render_export_basic_title_plan(
     Ok(ResolvedExportTitle { frame: raster.into_frame(), transform })
 }
 
+/// Device attempt for one frozen temporal demand batch.
+///
+/// The host keeps the scalar executor whenever this refuses. Nothing is
+/// published from a partially recorded schedule, so a device refusal and a
+/// missing auxiliary raster both degrade to the exact CPU route.
+fn try_export_temporal_device_schedule(
+    context: &mut ExportFrameRenderContext<'_>,
+    batch: &TimelineTemporalDemandBatch,
+    frames: &mut PreparedTemporalFrameSet,
+    auxiliary: Option<&mut mondrian_effects::PreparedTemporalAuxiliarySet>,
+    working_color_space: mondrian_core::WorkingColorSpace,
+) -> Option<mondrian_effects::EffectTemporalExecutionOutput> {
+    use mondrian_effects::{EffectTemporalFrameProvider, PreparedTemporalAuxiliarySet};
+
+    if !context.visual_session.resource_policy.opportunistic_gpu_acceleration {
+        return None;
+    }
+    let schedule = match batch.execution().plan_gpu_execution() {
+        Ok(schedule) => schedule,
+        Err(blocker) => {
+            tracing::debug!(reason = %blocker, "Export temporal batch keeps the scalar executor");
+            record_temporal_cpu_fallback(context);
+            return None;
+        }
+    };
+    let mut empty_auxiliary;
+    let auxiliary = match auxiliary {
+        Some(auxiliary) => auxiliary,
+        None => match PreparedTemporalAuxiliarySet::prepare(
+            frames.source_identity(),
+            schedule.request().generation(),
+            std::iter::empty(),
+        ) {
+            Ok(empty) => {
+                empty_auxiliary = empty;
+                &mut empty_auxiliary
+            }
+            Err(error) => {
+                tracing::debug!(reason = %error, "Export temporal batch has no auxiliary set");
+                record_temporal_cpu_fallback(context);
+                return None;
+            }
+        },
+    };
+    match context.visual_session.gpu_output.execute_temporal_schedule(
+        &schedule,
+        frames,
+        auxiliary,
+        working_color_space,
+        context.cancellation,
+    ) {
+        Ok(executed) => {
+            let dispatches = executed.dispatches() as u64;
+            let readbacks = executed.readbacks() as u64;
+            let diagnostics = &mut context.visual_session.visual_diagnostics;
+            diagnostics.temporal_gpu_schedules =
+                diagnostics.temporal_gpu_schedules.saturating_add(1);
+            diagnostics.temporal_gpu_dispatches =
+                diagnostics.temporal_gpu_dispatches.saturating_add(dispatches);
+            diagnostics.temporal_gpu_readbacks =
+                diagnostics.temporal_gpu_readbacks.saturating_add(readbacks);
+            Some(executed.into_output())
+        }
+        Err(reason) => {
+            tracing::debug!(?reason, "Export temporal batch keeps the scalar executor");
+            record_temporal_cpu_fallback(context);
+            None
+        }
+    }
+}
+
+fn record_temporal_cpu_fallback(context: &mut ExportFrameRenderContext<'_>) {
+    let diagnostics = &mut context.visual_session.visual_diagnostics;
+    diagnostics.temporal_gpu_cpu_fallbacks =
+        diagnostics.temporal_gpu_cpu_fallbacks.saturating_add(1);
+}
+
 fn resolve_export_temporal_batches(
     context: &mut ExportFrameRenderContext<'_>,
     inputs: &ExportNodeInputs<'_>,
@@ -10835,50 +10959,77 @@ fn resolve_export_temporal_batches(
             &mut control,
         )?;
         control.bind_observation(context.visual_session.composite_scratch.processor_observation());
-        let session = &mut context.visual_session;
-        let scratch = &mut session.composite_scratch;
-        let mut run = |control: &mut EffectProcessorControl<'_>| {
-            if let Some(auxiliary) = &mut auxiliary {
-                scratch.execute_temporal_batch_with_auxiliary(
-                    batch,
-                    &mut prepared,
-                    auxiliary,
-                    control,
-                )
-            } else {
-                scratch.execute_prepared_temporal_batch_with_control(batch, &mut prepared, control)
+        let working_color_space = color_context.working_color_space();
+        let device_requested =
+            context.visual_session.resource_policy.opportunistic_gpu_acceleration;
+        let device_output = if plan.is_some() {
+            // A batch that resolves its upstream input lazily during execution
+            // has no frozen source set to upload; keep the scalar route.
+            if device_requested {
+                record_temporal_cpu_fallback(context);
             }
+            None
+        } else {
+            try_export_temporal_device_schedule(
+                context,
+                batch,
+                &mut prepared,
+                auxiliary.as_mut(),
+                working_color_space,
+            )
         };
-        let output = if let Some(plan) = plan {
-            let mut sources = ExportProcessorSources::new(
-                owner,
-                context.media,
-                &color_context,
-                decode_cache,
-                context.input_color_counts.as_deref_mut(),
-                context.stage_diagnostics.as_deref_mut(),
-            );
-            let authority = sources.authority.clone();
-            let mut resolve =
-                |batch: &TimelineTemporalDemandBatch,
-                 admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
-                 control: &mut EffectProcessorControl<'_>| {
-                    sources.resolve(
-                        &mut session.decode_context,
-                        &plan,
+        let output = if let Some(output) = device_output {
+            output
+        } else {
+            let session = &mut context.visual_session;
+            let scratch = &mut session.composite_scratch;
+            let mut run = |control: &mut EffectProcessorControl<'_>| {
+                if let Some(auxiliary) = &mut auxiliary {
+                    scratch.execute_temporal_batch_with_auxiliary(
                         batch,
-                        None,
-                        color_context.working_color_space(),
-                        admit,
+                        &mut prepared,
+                        auxiliary,
                         control,
                     )
-                };
-            plan.with_input_service(&authority, &mut resolve, &mut control, run)
-                .map_err(|error| format!("export temporal input service failed: {error}"))?
-        } else {
-            run(&mut control)
-        }
-        .map_err(|error| format!("export temporal Effect execution failed: {error}"))?;
+                } else {
+                    scratch.execute_prepared_temporal_batch_with_control(
+                        batch,
+                        &mut prepared,
+                        control,
+                    )
+                }
+            };
+            let executed = if let Some(plan) = plan {
+                let mut sources = ExportProcessorSources::new(
+                    owner,
+                    context.media,
+                    &color_context,
+                    decode_cache,
+                    context.input_color_counts.as_deref_mut(),
+                    context.stage_diagnostics.as_deref_mut(),
+                );
+                let authority = sources.authority.clone();
+                let mut resolve =
+                    |batch: &TimelineTemporalDemandBatch,
+                     admit: &mut dyn FnMut(usize) -> Result<(), EffectTemporalExecutionError>,
+                     control: &mut EffectProcessorControl<'_>| {
+                        sources.resolve(
+                            &mut session.decode_context,
+                            &plan,
+                            batch,
+                            None,
+                            working_color_space,
+                            admit,
+                            control,
+                        )
+                    };
+                plan.with_input_service(&authority, &mut resolve, &mut control, run)
+                    .map_err(|error| format!("export temporal input service failed: {error}"))?
+            } else {
+                run(&mut control)
+            };
+            executed.map_err(|error| format!("export temporal Effect execution failed: {error}"))?
+        };
         let tile = output.tile();
         if tile.roi() != tile.frame_extent().full_frame_roi() {
             return Err(
