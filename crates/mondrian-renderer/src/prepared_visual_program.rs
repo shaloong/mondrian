@@ -1651,9 +1651,9 @@ impl PreparedVisualProgram {
             };
             let mut references = Vec::new();
             program
-                .visit_visual_source_history(|reference, offset| {
-                    if !references.contains(&(reference, offset)) {
-                        references.push((reference, offset));
+                .visit_visual_source_history(|reference, offset, temporal| {
+                    if !references.contains(&(reference, offset, temporal)) {
+                        references.push((reference, offset, temporal));
                     }
                 })
                 .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
@@ -1664,7 +1664,7 @@ impl PreparedVisualProgram {
             }
             let a = self.schedule.clip_to_sequence_time(clip.placement, clip.first_clip_time)?;
             let b = self.schedule.clip_to_sequence_time(clip.placement, clip.last_clip_time)?;
-            let lower = if references.iter().any(|(_, offset)| offset.is_negative()) {
+            let lower = if references.iter().any(|(_, offset, _)| offset.is_negative()) {
                 Some(
                     self.schedule
                         .admit_clip_effect_input(clip.placement)
@@ -1677,16 +1677,24 @@ impl PreparedVisualProgram {
             } else {
                 None
             };
-            for (reference, offset) in references {
-                let first = match lower {
+            for (reference, offset, temporal) in references {
+                let clamped_first = match lower {
                     Some(lower) if offset.is_negative() => a.min(b).checked_add(offset)?.max(lower),
                     _ => a.min(b),
+                };
+                let first = match temporal.past {
+                    EffectTemporalSpan::Finite(past) => clamped_first.checked_sub(past)?,
+                    _ => clamped_first,
+                };
+                let last = match temporal.future {
+                    EffectTemporalSpan::Finite(future) => a.max(b).checked_add(future)?,
+                    _ => a.max(b),
                 };
                 dependencies.push(PreparedAuxiliaryRangeDependency {
                     placement: Some(clip.placement),
                     reference,
                     first,
-                    last: a.max(b),
+                    last,
                 });
             }
         }

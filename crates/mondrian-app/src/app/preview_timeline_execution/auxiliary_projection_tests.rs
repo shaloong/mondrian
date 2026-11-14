@@ -270,6 +270,107 @@ fn video_collage_preview_keeps_each_tile_on_its_exact_sequence_sample() {
 }
 
 #[test]
+fn echo_preview_uses_each_temporal_auxiliary_context_after_seeking() {
+    use mondrian_core::{Color, TimelineTime};
+    let half = TimelineTime::new(1, 2).unwrap();
+    let mut child = Sequence::new("animated matte");
+    child.settings.resolution = Resolution { width: 5, height: 3 };
+    child.settings.frame_rate = mondrian_core::Rational::new(8, 1);
+    for (start, color) in [
+        (TimelineTime::ZERO, Color::WHITE),
+        (half, Color::TRANSPARENT),
+    ] {
+        child.video_tracks[0]
+            .add_clip(
+                mondrian_timeline::Clip::new_solid_color(AssetId::new(), color, start, half)
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    let mut matte = instantiate_effect_node(EffectType::SetMatte).unwrap();
+    for (field, value) in [
+        (
+            "matte_source",
+            PropertyValue::VisualSource(VisualSourceReference::Sequence {
+                sequence_id: child.id,
+                retime: Default::default(),
+            }),
+        ),
+        ("stretch", PropertyValue::Bool(true)),
+    ] {
+        matte
+            .set_static_value_by_parameter(
+                &EffectType::SetMatte.parameter_id(field).unwrap(),
+                value,
+            )
+            .unwrap();
+    }
+    let mut echo = instantiate_effect_node(EffectType::Echo).unwrap();
+    for (field, value) in [
+        ("echo_time", PropertyValue::Float(-0.25)),
+        ("operator", PropertyValue::Enum("normal".to_owned())),
+        ("starting_intensity", PropertyValue::Float(0.5)),
+    ] {
+        echo.set_static_value_by_parameter(&EffectType::Echo.parameter_id(field).unwrap(), value)
+            .unwrap();
+    }
+    let mut sequence = super::auxiliary_sequence_with_effect(matte);
+    sequence.settings.frame_rate = child.settings.frame_rate;
+    let clip = &mut sequence.video_tracks[0].clips[0];
+    let matte_id = clip.effects[0].id;
+    clip.set_solid_color(Color::WHITE).unwrap();
+    clip.add_effect_node(echo);
+    let programs = RefCell::new(PreparedVisualProgramCache::for_auxiliary_preview());
+    let scratch = RefCell::new(TimelineCompositeScratch::default());
+    let cancellation = ExecutionCancellationToken::new();
+    let render = |frame, children: &[Sequence]| {
+        let color = sequence.settings.root_program_color_context(&Default::default()).unwrap();
+        output(resolve_preview_timeline_with_graph(
+            PreviewTimelineFrameRequest::new(
+                &sequence,
+                children,
+                frame,
+                sequence.settings.resolution,
+                PreviewResolutionScale::Full,
+                color,
+            ),
+            PreviewTimelineSourceAdapters::new(&mut |_| panic!("no media"), &mut |_| {
+                panic!("no title")
+            }),
+            PreviewTimelineGraph {
+                programs: &programs,
+                scratch: &scratch,
+                dependency_observer: None,
+                generation: 0,
+                cancellation: &cancellation,
+                author_snapshot: None,
+                heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
+            },
+            None,
+        ))
+    };
+    let children = std::slice::from_ref(&child);
+    let mixed = pixels(&render(4, children));
+    assert!(
+        mixed.iter().all(|pixel| (pixel[3] - 0.5).abs() < 1e-6),
+        "{mixed:?}"
+    );
+    let earlier = pixels(&render(2, children));
+    assert!(
+        earlier.iter().all(|pixel| (pixel[3] - 1.0).abs() < 1e-6),
+        "{earlier:?}"
+    );
+    assert_eq!(pixels(&render(4, children)), mixed);
+    let missing = render(4, &[]);
+    assert!(pixels(&missing).iter().all(|pixel| (pixel[3] - 1.0).abs() < 1e-6));
+    assert!(contexts(&missing)
+        .iter()
+        .flat_map(|context| context.notices.iter())
+        .any(|notice| notice.fallback.effect_id() == matte_id));
+    assert_eq!(pixels(&render(4, children)), mixed);
+}
+
+#[test]
 fn historical_video_collage_preview_clamps_and_reuses_its_bound_prefix_after_seeking() {
     use mondrian_core::{Color, Keyframe, TimelineTime};
     let kind = EffectType::VideoCollage;

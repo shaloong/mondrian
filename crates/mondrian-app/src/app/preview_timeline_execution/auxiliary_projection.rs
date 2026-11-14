@@ -259,8 +259,32 @@ fn original_queries(
                 .execution_plan()
                 .clone()
         } else {
-            mondrian_renderer::evaluate_prepared_visual_program(program, *request.evaluation())
-                .map_err(|error| invalid(error.to_string()))?
+            let frame = graph
+                .scratch
+                .borrow_mut()
+                .prepare_timeline_frame_execution(program, request.clone())
+                .map_err(|error| invalid(error.to_string()))?;
+            mondrian_renderer::PreparedVisualFrameEvaluation::new(frame.clone(), ())
+                .visit_temporal_auxiliary_demands(
+                    |key, _, _| {
+                        if let Some(query) = temporal_preview_asset_request(node, key)
+                            .map_err(PreviewTimelineAbort::Unavailable)?
+                        {
+                            if seen.insert(query.clone()) {
+                                requests.push(PreparedPreviewSourceDemand::Auxiliary(query));
+                            }
+                        }
+                        Ok(())
+                    },
+                    |demand| {
+                        invalid(format!(
+                            "temporal auxiliary slot {} at {:?} has no original binding",
+                            demand.slot(),
+                            demand.context_time()
+                        ))
+                    },
+                )?;
+            frame.execution_plan().clone()
         };
         visit_graphs(&plan, |_, graph| {
             for source in graph.auxiliary_source_bindings() {

@@ -69,12 +69,37 @@ pub(super) fn validate_assets(
             element.visit_effect_graphs(|_, graph| {
                 for source in graph.auxiliary_source_bindings() {
                     if let VisualSourceReference::Asset { asset_id, retime } = source.reference() {
-                        plan_asset(node, media, asset_id, retime)?;
+                        plan_asset(node, media, asset_id, retime, node.time())?;
                     }
                 }
                 Ok::<(), String>(())
             })?;
         }
+        node.evaluation().visit_temporal_auxiliary_demands(
+            |key, _, _| {
+                if let PreparedVisualAuxiliaryAddress::Authored(VisualSourceReference::Asset {
+                    asset_id,
+                    retime,
+                }) = key.address
+                {
+                    plan_asset(
+                        node,
+                        media,
+                        asset_id,
+                        retime,
+                        temporal_consumer_time(node, key)?,
+                    )?;
+                }
+                Ok(())
+            },
+            |demand| {
+                format!(
+                    "temporal auxiliary slot {} at {:?} has no binding",
+                    demand.slot(),
+                    demand.context_time()
+                )
+            },
+        )?;
     }
     Ok(())
 }
@@ -92,7 +117,7 @@ pub(super) fn prepare_gpu_rasters(
         use PreparedVisualAuxiliaryAddress::{Authored, InputHistory};
         let (picture, (extent, sampling)) = match key.address {
             Authored(VisualSourceReference::Asset { asset_id, retime }) => {
-                let (source, domain) = plan_asset(inputs.node(), context.media, asset_id, retime)?;
+                let (source, domain) = plan_asset(inputs.node(), context.media, asset_id, retime, inputs.node().time())?;
                 match source {
                     Source::Asset(request) => {
                         let (cache_key, request) = *request;
@@ -190,7 +215,7 @@ pub(super) fn prepare_rasters(
                 use PreparedVisualAuxiliaryAddress::{Authored, InputHistory};
                 let (source, source_domain) = match key.address {
                     Authored(VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. }) | InputHistory(_) => visual_source(inputs, key)?,
-                    Authored(VisualSourceReference::Asset { asset_id, retime }) => plan_asset(node, context.media, asset_id, retime)?,
+                    Authored(VisualSourceReference::Asset { asset_id, retime }) => plan_asset(node, context.media, asset_id, retime, node.time())?,
                     Authored(VisualSourceReference::Unbound) => return Err(format!("required export auxiliary slot {} is unbound", key.slot)),
                 };
                 let (domain, policy) = timeline_auxiliary_registration_geometry(spec.role(), primary, source_domain);
@@ -389,6 +414,7 @@ fn plan_asset<'a>(
     media: &'a Media,
     asset_id: AssetId,
     retime: VisualSourceRetime,
+    consumer_time: TimelineTime,
 ) -> Result<(Source<'a>, ImageDomain), String> {
     let dependency = media
         .get(&asset_id)
@@ -400,12 +426,14 @@ fn plan_asset<'a>(
     }
     let (sample, proof_sample) = match dependency.picture_source_extent {
         Some(PictureSourceExtent::Still) => {
-            node.time().checked_add(retime.time_offset).map_err(|error| error.to_string())?;
+            consumer_time
+                .checked_add(retime.time_offset)
+                .map_err(|error| error.to_string())?;
             let sample = SourceSampleTarget::covering(TimelineTime::ZERO);
             (Some(sample), sample)
         }
         Some(PictureSourceExtent::TimelineRange(range)) => {
-            let time = retime.sample(node.time(), range).map_err(|error| error.to_string())?;
+            let time = retime.sample(consumer_time, range).map_err(|error| error.to_string())?;
             (
                 time.source_sample,
                 SourceSampleTarget::covering(range.start),
@@ -449,6 +477,131 @@ fn plan_asset<'a>(
         None => Source::Visual(None),
     };
     Ok((source, domain))
+}
+
+fn temporal_consumer_time(
+    node: &PreparedVisualFrameNode<Vec<PreparedExportHeterogeneousElement>>,
+    key: PreparedVisualAuxiliaryKey,
+) -> Result<TimelineTime, String> {
+    let placement = key.placement.ok_or("temporal auxiliary has no Clip placement")?;
+    node.program()
+        .schedule()
+        .clip_to_sequence_time(placement, placement.clip_time)
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn prepare_temporal_rasters(
+    inputs: &ExportNodeInputs<'_>,
+    batch: &TimelineTemporalDemandBatch,
+    context: &mut ExportFrameRenderContext<'_>,
+    cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+    control: &mut EffectProcessorControl<'_>,
+) -> Result<Option<mondrian_effects::PreparedTemporalAuxiliarySet>, String> {
+    let demands = batch.auxiliary_demands();
+    if demands.is_empty() {
+        return Ok(None);
+    }
+    let node = inputs.node();
+    let request = batch.execution_request();
+    let primary = (request.frame_extent(), request.sampling());
+    let mut planned = Vec::with_capacity(demands.demands().len());
+    let mut bytes = inputs
+        .closure()
+        .conservative_cpu_materialization_active_bytes()
+        .map_err(|error| error.to_string())?;
+    batch.visit_auxiliary_demands(
+        |key, graph, demand| {
+            let (source, domain) = match key.address {
+                PreparedVisualAuxiliaryAddress::Authored(VisualSourceReference::Asset {
+                    asset_id,
+                    retime,
+                }) => plan_asset(
+                    node,
+                    context.media,
+                    asset_id,
+                    retime,
+                    temporal_consumer_time(node, key)?,
+                )?,
+                _ => visual_source(inputs, key)?,
+            };
+            let spec = graph
+                .auxiliary_inputs()
+                .iter()
+                .find(|spec| spec.slot() == key.slot)
+                .ok_or_else(|| format!("temporal auxiliary lost slot: {key:?}"))?;
+            let (registered, _) =
+                timeline_auxiliary_registration_geometry(spec.role(), primary, domain);
+            bytes = add_bytes(
+                bytes,
+                add_bytes(frame_bytes(registered.0)?, frame_bytes(registered.0)?)?,
+            )?;
+            if matches!(source, Source::Asset(_)) {
+                bytes = add_bytes(bytes, frame_bytes(domain.0)?)?;
+            }
+            planned.push((demand, source, registered));
+            Ok(())
+        },
+        |demand| {
+            format!(
+                "temporal auxiliary slot {} at {:?} has no binding",
+                demand.slot(),
+                demand.context_time()
+            )
+        },
+    )?;
+    context
+        .visual_session
+        .composite_scratch
+        .admit_cpu_active_working_set(bytes, TimelineCpuCompositePrecision::Float32)
+        .map_err(|error| error.to_string())?;
+    let mut resolved = Vec::with_capacity(planned.len());
+    for (demand, source, (extent, sampling)) in planned {
+        control.check().map_err(|error| error.to_string())?;
+        let decoded;
+        let frame = match source {
+            Source::Visual(frame) => frame,
+            Source::Asset(request) => {
+                let (key, request) = *request;
+                decoded = decode_export_picture(
+                    key,
+                    request,
+                    cache,
+                    context.stage_diagnostics.as_deref_mut(),
+                    context.visual_session,
+                    context.cancellation,
+                    ExportDecodedSourceRoute::CpuWorking,
+                )?;
+                Some(decoded.cpu_frame()?)
+            }
+        };
+        let registered = register_timeline_auxiliary_raster(
+            frame,
+            extent,
+            sampling,
+            node.color_context().working_color_space(),
+            control,
+        )
+        .map_err(|error| error.to_string())?;
+        let view = timeline_auxiliary_frame_view(&registered);
+        let raster = mondrian_effects::EffectFloatFrame::from_pixels(
+            view.extent(),
+            view.format(),
+            view.sampling(),
+            view.pixels().to_vec(),
+        )
+        .map_err(|error| error.to_string())?;
+        resolved.push((
+            demand.request(demands.generation(), extent, sampling),
+            raster,
+        ));
+    }
+    mondrian_effects::PreparedTemporalAuxiliarySet::prepare(
+        EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([0; 32]),
+        demands.generation(),
+        resolved,
+    )
+    .map(Some)
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -1109,6 +1262,97 @@ mod tests {
             false,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn echo_export_uses_each_temporal_auxiliary_context_and_extends_clip_preflight() {
+        let half = TimelineTime::new(1, 2).unwrap();
+        let mut child = Sequence::new("animated matte");
+        child.settings.resolution = Resolution { width: 16, height: 16 };
+        child.settings.frame_rate = Rational::new(8, 1);
+        for (start, color) in [
+            (TimelineTime::ZERO, Color::WHITE),
+            (half, Color::TRANSPARENT),
+        ] {
+            child.video_tracks[0]
+                .add_clip(Clip::new_solid_color(AssetId::new(), color, start, half).unwrap())
+                .unwrap();
+        }
+        let mut matte = instantiate_effect_node(EffectType::SetMatte).unwrap();
+        for (field, value) in [
+            (
+                "matte_source",
+                PropertyValue::VisualSource(VisualSourceReference::Sequence {
+                    sequence_id: child.id,
+                    retime: Default::default(),
+                }),
+            ),
+            ("stretch", PropertyValue::Bool(true)),
+        ] {
+            matte
+                .set_static_value_by_parameter(
+                    &EffectType::SetMatte.parameter_id(field).unwrap(),
+                    value,
+                )
+                .unwrap();
+        }
+        let mut echo = instantiate_effect_node(EffectType::Echo).unwrap();
+        for (field, value) in [
+            ("echo_time", PropertyValue::Float(-0.25)),
+            ("operator", PropertyValue::Enum("normal".to_owned())),
+            ("starting_intensity", PropertyValue::Float(0.5)),
+        ] {
+            echo.set_static_value_by_parameter(
+                &EffectType::Echo.parameter_id(field).unwrap(),
+                value,
+            )
+            .unwrap();
+        }
+        let mut timeline = snapshot_with_effect(matte);
+        timeline.sequence.settings.frame_rate = child.settings.frame_rate;
+        timeline.sequences.push(child);
+        let clip = &mut timeline.sequence.video_tracks[1].clips[0];
+        clip.set_solid_color(Color::WHITE).unwrap();
+        clip.add_effect_node(echo);
+        let mut session = ExportVisualRenderSession::default();
+        let mixed = render_float_auxiliary_delivery(&timeline, 4, &mut session, false);
+        assert!(
+            mixed.chunks_exact(4).all(|pixel| (pixel[3] - 0.5).abs() < 1e-6),
+            "mixed alpha {}",
+            mixed[3]
+        );
+        let earlier = render_float_auxiliary_delivery(&timeline, 2, &mut session, false);
+        assert!(earlier.chunks_exact(4).all(|pixel| (pixel[3] - 1.0).abs() < 1e-6));
+        assert_eq!(
+            render_float_auxiliary_delivery(&timeline, 4, &mut session, false),
+            mixed
+        );
+
+        let earlier_clip = solid(Color::WHITE, TimelineTime::ZERO);
+        let earlier_clip_id = earlier_clip.id;
+        timeline.sequence.video_tracks[0].add_clip(earlier_clip).unwrap();
+        timeline.sequence.video_tracks[1].clips[0].effects[0]
+            .set_static_value_by_parameter(
+                &EffectType::SetMatte.parameter_id("matte_source").unwrap(),
+                PropertyValue::VisualSource(VisualSourceReference::Clip {
+                    clip_id: earlier_clip_id,
+                    retime: Default::default(),
+                }),
+            )
+            .unwrap();
+        let result = crate::capture::prepare_timeline_export_dependencies(
+            &timeline.sequence,
+            &timeline.sequences,
+            TimelineExportRange::WorkArea { start_frame: 4, end_frame_exclusive: 5 },
+            false,
+        );
+        assert!(
+            matches!(result, Err(crate::capture::TimelineExportDependencyError::VisualClosure(
+            mondrian_renderer::PreparedVisualRangeClosureError::AuxiliaryClipOutsideRange {
+                clip_id, source_first, ..
+            }
+        )) if clip_id == earlier_clip_id && source_first == TimelineTime::new(1, 4).unwrap())
+        );
     }
 
     #[test]

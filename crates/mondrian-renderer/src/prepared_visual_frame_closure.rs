@@ -212,6 +212,31 @@ impl<T> PreparedVisualFrameEvaluation<T> {
         self.frame.batches()
     }
 
+    /// Visit exact auxiliary bindings before or after Media image-domain binding.
+    pub fn visit_temporal_auxiliary_demands<E>(
+        &self,
+        mut visit: impl FnMut(
+            PreparedVisualAuxiliaryKey,
+            &Arc<CompiledEffectGraph>,
+            mondrian_effects::EffectTemporalAuxiliaryDemand,
+        ) -> Result<(), E>,
+        missing: impl Fn(mondrian_effects::EffectTemporalAuxiliaryDemand) -> E,
+    ) -> Result<(), E> {
+        for batch in self.temporal_batches() {
+            batch.visit_auxiliary_demands(&mut visit, &missing)?;
+        }
+        for input in self.frame.temporal_media_inputs() {
+            if !self
+                .temporal_batches()
+                .iter()
+                .any(|batch| batch.placement() == input.media().placement)
+            {
+                input.visit_auxiliary_demands(&mut visit, &missing)?;
+            }
+        }
+        Ok(())
+    }
+
     /// File inputs retained until their producer supplies an actual image domain.
     pub fn temporal_media_inputs(&self) -> &[crate::PreparedTimelineTemporalMediaInput] {
         self.frame.temporal_media_inputs()
@@ -989,8 +1014,41 @@ where
                 program
             };
             let demands = collect_nested_demands(evaluation.plan(), evaluation.temporal_batches());
-            let auxiliary_keys = collect_auxiliary_visual_keys(evaluation.plan());
+            let mut auxiliary_keys = collect_auxiliary_visual_keys(evaluation.plan());
             let intent = evaluation.plan().intent;
+            let temporal_missing = |demand: mondrian_effects::EffectTemporalAuxiliaryDemand| {
+                PreparedVisualFrameClosureError::Evaluation {
+                    sequence_id: sequence.id,
+                    frame: position.frame,
+                    reason: format!(
+                        "temporal auxiliary slot {} at {:?} has no frozen binding",
+                        demand.slot(),
+                        demand.context_time()
+                    ),
+                }
+            };
+            let mut temporal_times = HashMap::new();
+            evaluation.visit_temporal_auxiliary_demands(
+                |key, graph, demand| {
+                    let consumer = key.placement.ok_or_else(|| temporal_missing(demand))?;
+                    let sample_time = program
+                        .schedule()
+                        .clip_to_sequence_time(consumer, consumer.clip_time)
+                        .map_err(|error| invalid_time(error.to_string()))?;
+                    if !matches!(
+                        key.address,
+                        PreparedVisualAuxiliaryAddress::Authored(
+                            VisualSourceReference::Asset { .. }
+                        )
+                    ) && temporal_times.insert(key, sample_time).is_none()
+                        && !auxiliary_keys.iter().any(|(candidate, _)| *candidate == key)
+                    {
+                        auxiliary_keys.push((key, Arc::clone(graph)));
+                    }
+                    Ok(())
+                },
+                temporal_missing,
+            )?;
             let node_index = u32::try_from(self.nodes.len())
                 .map_err(|_| PreparedVisualFrameClosureError::NodeCapacityExceeded)?;
             let id = PreparedVisualFrameNodeId(node_index);
@@ -1124,7 +1182,7 @@ where
                     Authored(VisualSourceReference::Sequence { .. }) => self
                         .prepare_auxiliary_sequence(
                             key,
-                            time,
+                            temporal_times.get(&key).copied().unwrap_or(time),
                             &color_context,
                             &instance_path,
                             depth,

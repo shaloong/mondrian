@@ -1814,6 +1814,7 @@ enum PreviewTemporalSourceResolution {
 struct ReadyPreviewTemporalBatch {
     batch_index: usize,
     prepared: PreparedTemporalFrameSet,
+    auxiliary: Option<mondrian_effects::PreparedTemporalAuxiliarySet>,
     logical_resolution: Resolution,
     source_to_display_affine: [f32; 6],
     presentation_quality: FramePresentationQuality,
@@ -1876,6 +1877,136 @@ fn preview_temporal_media_image_domain(
         }
     }
     selected.ok_or_else(|| invalid("frozen Media program has no source image metadata"))
+}
+
+fn prepare_preview_temporal_auxiliary<MediaFrame, TitleFrame>(
+    execution: &mut PreviewTimelineExecutionAdapter<'_, '_, '_, MediaFrame, TitleFrame>,
+    inputs: &PreviewNodeInputs<'_>,
+    batch: &TimelineTemporalDemandBatch,
+) -> Result<Option<mondrian_effects::PreparedTemporalAuxiliarySet>, PreviewTimelineAbort> {
+    let demands = batch.auxiliary_demands();
+    if demands.is_empty() {
+        return Ok(None);
+    }
+    let node = inputs.node();
+    let request = batch.execution_request();
+    let mut resolved = Vec::with_capacity(demands.demands().len());
+    let refused = |detail: String| {
+        PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+            PreviewOutputStage::InputAdaptation,
+            detail,
+        ))
+    };
+    let mut bytes = 0u64;
+    let mut scratch = execution.scratch.borrow_mut();
+    batch.visit_auxiliary_demands(
+        |key, graph, demand| {
+            let frame = if let Some(asset_request) = temporal_preview_asset_request(node, key)
+                .map_err(PreviewTimelineAbort::Unavailable)?
+            {
+                let plan = execution.sources.auxiliary.get(&asset_request).ok_or_else(|| {
+                    refused(format!("temporal auxiliary has no source plan: {key:?}"))
+                })?;
+                match &plan.media_request {
+                    Some(media) => match execution.sources.media.get(media) {
+                        Some(PreviewTimelineMediaFrame::Ready(frame))
+                            if frame.presentation_quality() == FramePresentationQuality::Ready
+                                && frame.source_key() == Some(&plan.validated_key) =>
+                        {
+                            Some(frame)
+                        }
+                        _ => {
+                            return Err(refused(format!(
+                                "temporal auxiliary has no exact ready Asset: {key:?}"
+                            )))
+                        }
+                    },
+                    None if plan.time.source_sample.is_none() => None,
+                    None => {
+                        return Err(refused(format!(
+                            "temporal auxiliary Asset lost its decode: {key:?}"
+                        )))
+                    }
+                }
+            } else {
+                let (_, child) = prepared_auxiliary_visual_evidence(inputs.closure(), node, key)
+                    .map_err(PreviewTimelineAbort::Unavailable)?;
+                match (child, inputs.auxiliary_output(key)) {
+                    (None, _) => None,
+                    (Some(_), Some(PreparedPreviewVisualOutput::Nested(frame))) => Some(frame),
+                    _ => {
+                        return Err(refused(format!(
+                            "temporal auxiliary has no materialized child: {key:?}"
+                        )))
+                    }
+                }
+            };
+            let primary = (request.frame_extent(), request.sampling());
+            let source_domain =
+                frame.and_then(MediaPreviewFrame::cpu_image_domain).unwrap_or(primary);
+            let spec = graph
+                .auxiliary_inputs()
+                .iter()
+                .find(|spec| spec.slot() == key.slot)
+                .ok_or_else(|| refused(format!("temporal auxiliary lost slot: {key:?}")))?;
+            let ((extent, sampling), _) =
+                mondrian_renderer::timeline_auxiliary_registration_geometry(
+                    spec.role(),
+                    primary,
+                    source_domain,
+                );
+            bytes = u64::from(extent.width())
+                .checked_mul(u64::from(extent.height()))
+                .and_then(|pixels| pixels.checked_mul(32))
+                .and_then(|charge| bytes.checked_add(charge))
+                .ok_or_else(|| refused("temporal auxiliary byte count overflowed".to_owned()))?;
+            scratch
+                .admit_cpu_active_working_set(
+                    bytes,
+                    mondrian_renderer::TimelineCpuCompositePrecision::Float32,
+                )
+                .map_err(|error| refused(error.to_string()))?;
+            let frame = frame
+                .map(|frame| frame.working_frame_with_session(scratch.color_execution_mut()))
+                .transpose()
+                .map_err(|error| refused(error.to_string()))?;
+            let registered = mondrian_renderer::register_timeline_auxiliary_raster(
+                frame.as_ref().map(|frame| &frame.frame),
+                extent,
+                sampling,
+                node.color_context().working_color_space(),
+                execution.control,
+            )
+            .map_err(|error| refused(error.to_string()))?;
+            let view = mondrian_renderer::timeline_auxiliary_frame_view(&registered);
+            let raster = mondrian_effects::EffectFloatFrame::from_pixels(
+                view.extent(),
+                view.format(),
+                view.sampling(),
+                view.pixels().to_vec(),
+            )
+            .map_err(|error| refused(error.to_string()))?;
+            resolved.push((
+                demand.request(demands.generation(), extent, sampling),
+                raster,
+            ));
+            Ok(())
+        },
+        |demand| {
+            refused(format!(
+                "temporal auxiliary slot {} at {:?} has no binding",
+                demand.slot(),
+                demand.context_time()
+            ))
+        },
+    )?;
+    mondrian_effects::PreparedTemporalAuxiliarySet::prepare(
+        EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([0; 32]),
+        demands.generation(),
+        resolved,
+    )
+    .map(Some)
+    .map_err(|error| refused(error.to_string()))
 }
 
 fn resolve_preview_temporal_batches<MediaFrame, TitleFrame>(
@@ -1983,9 +2114,11 @@ where
                 format!("Preview temporal frame set is invalid: {error}"),
             ))
         })?;
+        let auxiliary = prepare_preview_temporal_auxiliary(execution, inputs, batch)?;
         ready_batches.push(ReadyPreviewTemporalBatch {
             batch_index,
             prepared,
+            auxiliary,
             logical_resolution: logical_resolution.unwrap_or(target_resolution),
             source_to_display_affine: source_to_display_affine
                 .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
@@ -2031,11 +2164,20 @@ where
             })?;
         let mut scratch = execution.scratch.borrow_mut();
         let mut run = |control: &mut mondrian_effects::EffectProcessorControl<'_>| {
-            scratch.execute_prepared_temporal_batch_with_control(
-                batch,
-                &mut ready.prepared,
-                control,
-            )
+            if let Some(auxiliary) = &mut ready.auxiliary {
+                scratch.execute_temporal_batch_with_auxiliary(
+                    batch,
+                    &mut ready.prepared,
+                    auxiliary,
+                    control,
+                )
+            } else {
+                scratch.execute_prepared_temporal_batch_with_control(
+                    batch,
+                    &mut ready.prepared,
+                    control,
+                )
+            }
         };
         let result = if let (Some(plan), Some(inputs)) =
             (plan.as_ref(), execution.processor_inputs.as_deref_mut())
@@ -3074,17 +3216,26 @@ fn collect_prepared_auxiliary_source_demands(
 ) -> Result<(), PreviewUnavailability> {
     let mut seen = HashSet::new();
     for node in closure.nodes() {
-        if node
-            .evaluation()
-            .temporal_batches()
-            .iter()
-            .any(|batch| !batch.graph().auxiliary_inputs().is_empty())
-        {
-            return Err(PreviewUnavailability::blocked(
-                PreviewOutputStage::TimelineEvaluation,
-                "primary temporal auxiliary inputs require time-expanded source bindings",
-            ));
-        }
+        node.evaluation().visit_temporal_auxiliary_demands(
+            |key, _, _| {
+                if let Some(request) = temporal_preview_asset_request(node, key)? {
+                    if seen.insert(request.clone()) {
+                        demands.push(PreparedPreviewSourceDemand::Auxiliary(request));
+                    }
+                }
+                Ok(())
+            },
+            |demand| {
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineEvaluation,
+                    format!(
+                        "temporal auxiliary slot {} at {:?} has no frozen source",
+                        demand.slot(),
+                        demand.context_time()
+                    ),
+                )
+            },
+        )?;
         for element in &node.evaluation().plan().elements {
             element.visit_effect_graphs(
                 |placement, graph| -> Result<(), PreviewUnavailability> {
@@ -3122,6 +3273,34 @@ fn collect_prepared_auxiliary_source_demands(
         }
     }
     Ok(())
+}
+
+fn temporal_preview_asset_request(
+    node: &PreparedVisualFrameNode<PreparedTimelinePreviewEffectRoutes>,
+    key: PreparedVisualAuxiliaryKey,
+) -> Result<Option<PreviewAuxiliaryAssetRequest>, PreviewUnavailability> {
+    let PreparedVisualAuxiliaryAddress::Authored(reference @ VisualSourceReference::Asset { .. }) =
+        key.address
+    else {
+        return Ok(None);
+    };
+    let placement = key.placement.expect("temporal auxiliary has a Clip placement");
+    let sequence_time = node
+        .program()
+        .schedule()
+        .clip_to_sequence_time(placement, placement.clip_time)
+        .map_err(|error| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                error.to_string(),
+            )
+        })?;
+    Ok(Some(PreviewAuxiliaryAssetRequest {
+        reference,
+        sequence_time,
+        target_resolution: node.execution_resolution(),
+        input_color: node.color_context().media_input(false),
+    }))
 }
 
 fn standalone_preview_heterogeneous_graph_budget() -> EffectGraphExecutionBudget {

@@ -645,6 +645,20 @@ impl TimelineCompositeScratch {
         )
     }
 
+    /// Run a temporal batch on this compositor's session with its frozen auxiliary rasters.
+    pub fn execute_temporal_batch_with_auxiliary(
+        &mut self,
+        batch: &crate::TimelineTemporalDemandBatch,
+        source: &mut mondrian_effects::PreparedTemporalFrameSet,
+        auxiliary: &mut mondrian_effects::PreparedTemporalAuxiliarySet,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<
+        mondrian_effects::EffectTemporalExecutionOutput,
+        mondrian_effects::EffectTemporalExecutionError,
+    > {
+        batch.execute_with_auxiliary(&mut self.effect_execution, source, auxiliary, control)
+    }
+
     /// Close disappeared actual native GUIs on the existing execution owner.
     pub fn reconcile_processor_guis(&mut self) -> usize {
         self.effect_execution.reconcile_processor_guis()

@@ -167,6 +167,79 @@ pub(super) fn prepared_auxiliary_working_bytes(
                 }
             }
         }
+        for batch in node.evaluation().temporal_batches() {
+            let request = batch.execution_request();
+            let primary = (request.frame_extent(), request.sampling());
+            batch.visit_auxiliary_demands(
+                |key, graph, _| {
+                    let spec = graph
+                        .auxiliary_inputs()
+                        .iter()
+                        .find(|spec| spec.slot() == key.slot)
+                        .ok_or_else(|| refused("temporal auxiliary budget lost its slot"))?;
+                    let (domain, has_pixels) = if let Some(request) =
+                        temporal_preview_asset_request(node, key)?
+                    {
+                        let plan = sources.auxiliary.get(&request).ok_or_else(|| {
+                            refused("temporal auxiliary budget lost its Asset plan")
+                        })?;
+                        match &plan.media_request {
+                            Some(media) => match sources.media.get(media) {
+                                Some(PreviewTimelineMediaFrame::Ready(frame)) => (
+                                    frame.cpu_image_domain().ok_or_else(|| {
+                                        refused("temporal auxiliary requires a CPU grid")
+                                    })?,
+                                    true,
+                                ),
+                                _ => {
+                                    return Err(refused(
+                                        "temporal auxiliary budget lost its ready Asset",
+                                    ))
+                                }
+                            },
+                            None => (primary, false),
+                        }
+                    } else {
+                        let (evidence, child) =
+                            prepared_auxiliary_visual_evidence(closure, node, key)?;
+                        let domain = if matches!(
+                            key.address,
+                            PreparedVisualAuxiliaryAddress::InputHistory(_)
+                        ) {
+                            let child = child
+                                .and_then(|child| closure.node(child))
+                                .ok_or_else(|| refused("temporal historical input has no child"))?;
+                            effect_input_domain(closure, child, sources)?
+                        } else {
+                            evidence.domain
+                        };
+                        (domain, child.is_some())
+                    };
+                    let charge = super::super::preview_auxiliary::visual_auxiliary_working_bytes(
+                        spec.role(),
+                        primary,
+                        domain,
+                        has_pixels,
+                    )
+                    .map_err(|error| error.unavailability())?;
+                    let (registered, _) =
+                        mondrian_renderer::timeline_auxiliary_registration_geometry(
+                            spec.role(),
+                            primary,
+                            domain,
+                        );
+                    let copy = (registered.0.width() as usize)
+                        .checked_mul(registered.0.height() as usize)
+                        .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()));
+                    local = copy
+                        .and_then(|copy| local.checked_add(copy))
+                        .and_then(|local| local.checked_add(charge))
+                        .ok_or_else(|| refused("temporal auxiliary budget overflowed"))?;
+                    Ok(())
+                },
+                |_| refused("temporal auxiliary budget lost its binding"),
+            )?;
+        }
         // Each child composite retires its registered planes before the next
         // node runs. Retained child outputs are in the existing closure bound.
         peak = peak.max(local);

@@ -8221,7 +8221,8 @@ fn prepare_export_visual_frame_closure(
         },
         |sequence| {
             let program = visual_session.borrow_mut().prepare_program(sequence)?;
-            PreparedVisualProgramBinding::checked(sequence, program).map_err(|error| error.to_string())
+            PreparedVisualProgramBinding::checked(sequence, program)
+                .map_err(|error| error.to_string())
         },
         |program, invocation| {
             if cancellation.is_canceled() {
@@ -8242,11 +8243,17 @@ fn prepare_export_visual_frame_closure(
             );
             let scratch = &mut visual_session.composite_scratch;
             let prepared_frame = match invocation.target {
-                PreparedVisualFrameTarget::Sequence => scratch.prepare_timeline_frame_execution(program, request),
-                PreparedVisualFrameTarget::AuxiliaryClip(sample) => scratch.prepare_auxiliary_clip_frame_execution(program, request, sample),
-                PreparedVisualFrameTarget::ClipEffectInput(input) => scratch.prepare_clip_effect_input_frame_execution(program, request, input),
+                PreparedVisualFrameTarget::Sequence => {
+                    scratch.prepare_timeline_frame_execution(program, request)
+                }
+                PreparedVisualFrameTarget::AuxiliaryClip(sample) => {
+                    scratch.prepare_auxiliary_clip_frame_execution(program, request, sample)
+                }
+                PreparedVisualFrameTarget::ClipEffectInput(input) => {
+                    scratch.prepare_clip_effect_input_frame_execution(program, request, input)
+                }
             }
-                .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?;
             for batch in prepared_frame.batches() {
                 if batch.graph().image_scale_requirement()
                     == mondrian_effects::EffectImageScaleRequirement::Unit
@@ -8274,9 +8281,6 @@ fn prepare_export_visual_frame_closure(
             } else {
                 prepared_frame
             };
-            if prepared_frame.batches().iter().any(|batch| !batch.graph().auxiliary_inputs().is_empty()) {
-                return Err("primary temporal export effects require time-expanded auxiliary source bindings".into());
-            }
             if prepared_frame.execution_plan().is_empty() {
                 return Ok(PreparedVisualFrameEvaluation::new(
                     prepared_frame,
@@ -10823,11 +10827,27 @@ fn resolve_export_temporal_batches(
                 .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
         };
         let mut control = EffectProcessorControl::new(&mut checkpoint);
+        let mut auxiliary = auxiliary::prepare_temporal_rasters(
+            inputs,
+            batch,
+            context,
+            decode_cache,
+            &mut control,
+        )?;
         control.bind_observation(context.visual_session.composite_scratch.processor_observation());
         let session = &mut context.visual_session;
         let scratch = &mut session.composite_scratch;
         let mut run = |control: &mut EffectProcessorControl<'_>| {
-            scratch.execute_prepared_temporal_batch_with_control(batch, &mut prepared, control)
+            if let Some(auxiliary) = &mut auxiliary {
+                scratch.execute_temporal_batch_with_auxiliary(
+                    batch,
+                    &mut prepared,
+                    auxiliary,
+                    control,
+                )
+            } else {
+                scratch.execute_prepared_temporal_batch_with_control(batch, &mut prepared, control)
+            }
         };
         let output = if let Some(plan) = plan {
             let mut sources = ExportProcessorSources::new(

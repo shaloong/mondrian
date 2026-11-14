@@ -97,6 +97,24 @@ impl PreparedTimelineTemporalMediaInput {
         &self.media
     }
 
+    pub(crate) fn visit_auxiliary_demands<E>(
+        &self,
+        visit: impl FnMut(
+            crate::PreparedVisualAuxiliaryKey,
+            &Arc<CompiledEffectGraph>,
+            mondrian_effects::EffectTemporalAuxiliaryDemand,
+        ) -> Result<(), E>,
+        missing: impl Fn(mondrian_effects::EffectTemporalAuxiliaryDemand) -> E,
+    ) -> Result<(), E> {
+        visit_temporal_auxiliary_demands(
+            self.media.placement,
+            self.program.auxiliary_demands(),
+            |time| self.program.graph_at(time),
+            visit,
+            missing,
+        )
+    }
+
     /// Exact Clip instants and original mapped source samples, in DSP order.
     pub fn source_samples(
         &self,
@@ -697,6 +715,45 @@ impl PreparedTimelineFrameExecution {
 }
 
 impl TimelineTemporalDemandBatch {
+    /// Visit only the auxiliaries used by the expanded graph, preserving author time.
+    pub fn visit_auxiliary_demands<E>(
+        &self,
+        visit: impl FnMut(
+            crate::PreparedVisualAuxiliaryKey,
+            &Arc<CompiledEffectGraph>,
+            mondrian_effects::EffectTemporalAuxiliaryDemand,
+        ) -> Result<(), E>,
+        missing: impl Fn(mondrian_effects::EffectTemporalAuxiliaryDemand) -> E,
+    ) -> Result<(), E> {
+        visit_temporal_auxiliary_demands(
+            self.placement,
+            self.execution.auxiliary_demands(),
+            |time| self.execution.graph_at(time),
+            visit,
+            missing,
+        )
+    }
+
+    /// Generation shared by the prepared main and auxiliary rasters.
+    pub const fn auxiliary_demands(&self) -> &mondrian_effects::EffectTemporalAuxiliaryDemandBatch {
+        self.execution.auxiliary_demands()
+    }
+
+    /// Execute this batch with both already resolved source sets.
+    pub(crate) fn execute_with_auxiliary(
+        &self,
+        session: &mut EffectExecutionSession,
+        source: &mut PreparedTemporalFrameSet,
+        auxiliary: &mut mondrian_effects::PreparedTemporalAuxiliarySet,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
+    ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        session.execute_prepared_temporal_f32_with_auxiliary(
+            &self.execution,
+            source,
+            auxiliary,
+            control,
+        )
+    }
     /// Execute a processor's upstream input on the waiting invocation's bank,
     /// Control and remaining grant. Source work must already have been resolved
     /// by the original Preview/Export scheduler into `prepared`; no decode or
@@ -736,6 +793,28 @@ impl TimelineTemporalDemandBatch {
     pub fn source_demands(&self) -> &[TimelineTemporalSourceDemand] {
         &self.source_demands
     }
+}
+
+fn visit_temporal_auxiliary_demands<'a, E>(
+    placement: TimelineClipExecutionRef,
+    demands: &mondrian_effects::EffectTemporalAuxiliaryDemandBatch,
+    graph_at: impl Fn(TimelineTime) -> Option<&'a Arc<CompiledEffectGraph>>,
+    mut visit: impl FnMut(
+        crate::PreparedVisualAuxiliaryKey,
+        &Arc<CompiledEffectGraph>,
+        mondrian_effects::EffectTemporalAuxiliaryDemand,
+    ) -> Result<(), E>,
+    missing: impl Fn(mondrian_effects::EffectTemporalAuxiliaryDemand) -> E,
+) -> Result<(), E> {
+    for &demand in demands.demands() {
+        let placement = TimelineClipExecutionRef { clip_time: demand.context_time(), ..placement };
+        let graph = graph_at(demand.context_time()).ok_or_else(|| missing(demand))?;
+        let key =
+            crate::PreparedVisualAuxiliaryKey::for_slot(graph, Some(placement), demand.slot())
+                .ok_or_else(|| missing(demand))?;
+        visit(key, graph, demand)?;
+    }
+    Ok(())
 }
 
 impl PreparedVisualProgram {
