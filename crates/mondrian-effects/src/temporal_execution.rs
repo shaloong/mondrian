@@ -9,6 +9,12 @@ mod gpu;
 mod program;
 mod schedule;
 
+pub use gpu::{
+    EffectTemporalGpuPlanBlocker, PreparedEffectTemporalGpuExecution, TemporalGpuContext,
+    TemporalGpuLeaf, TemporalGpuLeafRequest, TemporalGpuStep, TemporalGpuStepOperation,
+    TemporalGpuValue,
+};
+
 use crate::adjustment::{
     apply_custom_render_op_f32_on_bank, apply_render_op_f32_region_controlled,
     render_op_f32_scratch_frames, EffectRasterRegion,

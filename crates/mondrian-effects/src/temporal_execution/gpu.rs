@@ -43,6 +43,29 @@ impl TemporalGpuValue {
     }
 }
 
+/// One frozen graph instant the device schedule reads.
+///
+/// Passes that need a frame seed (blend modes and noise passes do) must be
+/// recorded with the seed of the context whose value they produce, which is not
+/// necessarily the output context's seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TemporalGpuContext {
+    time: TimelineTime,
+    frame_seed: i64,
+}
+
+impl TemporalGpuContext {
+    /// Timeline instant this context was compiled and demanded at.
+    pub const fn time(self) -> TimelineTime {
+        self.time
+    }
+
+    /// Frame seed every pass of this context must be recorded with.
+    pub const fn frame_seed(self) -> i64 {
+        self.frame_seed
+    }
+}
+
 /// Exact host request for one leaf value.
 #[derive(Debug, Clone, Copy)]
 pub enum TemporalGpuLeafRequest {
@@ -257,6 +280,7 @@ impl std::error::Error for EffectTemporalGpuPlanBlocker {}
 /// a backend may record the passes in array order and materialize the root once.
 #[derive(Debug, Clone)]
 pub struct PreparedEffectTemporalGpuExecution {
+    contexts: Arc<[TemporalGpuContext]>,
     leaves: Arc<[TemporalGpuLeaf]>,
     steps: Arc<[TemporalGpuStep]>,
     root: TemporalGpuValue,
@@ -266,6 +290,23 @@ pub struct PreparedEffectTemporalGpuExecution {
 }
 
 impl PreparedEffectTemporalGpuExecution {
+    /// Frozen graph instants, indexed by [`TemporalGpuValue::Graph`] contexts.
+    pub fn contexts(&self) -> &[TemporalGpuContext] {
+        &self.contexts
+    }
+
+    /// Frame seed a step's producing context was frozen with.
+    ///
+    /// Returns `None` for a leaf value, which carries no frame seed of its own.
+    pub fn frame_seed(&self, value: TemporalGpuValue) -> Option<i64> {
+        match value {
+            TemporalGpuValue::Graph { context, .. } => {
+                self.contexts.get(context).map(|context| context.frame_seed())
+            }
+            TemporalGpuValue::Source(_) | TemporalGpuValue::Auxiliary { .. } => None,
+        }
+    }
+
     /// Exact host rasters this schedule needs, in demand order.
     pub fn leaves(&self) -> &[TemporalGpuLeaf] {
         &self.leaves
@@ -355,6 +396,14 @@ impl PreparedEffectTemporalExecution {
         }
         let program = self.program.as_ref();
         let extent = request.frame_extent();
+        let contexts: Arc<[TemporalGpuContext]> = program
+            .contexts()
+            .iter()
+            .map(|context| TemporalGpuContext {
+                time: context.time,
+                frame_seed: context.frame_seed,
+            })
+            .collect();
         let mut leaves = Vec::new();
         let mut steps = Vec::new();
         for address in program.ordered_values() {
@@ -496,6 +545,7 @@ impl PreparedEffectTemporalExecution {
         }
         let root = gpu_value(program, program.root())?;
         Ok(PreparedEffectTemporalGpuExecution {
+            contexts,
             leaves: leaves.into(),
             steps: steps.into(),
             root,
@@ -660,6 +710,30 @@ mod tests {
             auxiliary.iter().all(|(time, slot)| *slot == 0 && *time <= now),
             "{auxiliary:?}"
         );
+
+        // Each frozen context keeps the instant and the frame seed its passes
+        // must record with; leaves belong to no context.
+        let contexts = plan.contexts();
+        assert_eq!(contexts.len(), 2, "{contexts:?}");
+        assert_eq!(contexts[0].time(), now);
+        assert!(contexts[1].time() <= now);
+        // The root context keeps the request's output seed; a sampled context
+        // keeps the seed its evaluator produced, exactly like the scalar
+        // executor, so a noise pass records the same instant on either path.
+        assert_eq!(contexts[0].frame_seed(), plan.request().output_frame_seed());
+        assert_eq!(contexts[1].frame_seed(), 1);
+        for step in plan.steps() {
+            let TemporalGpuValue::Graph { context, .. } = step.value() else {
+                panic!("a step must produce a graph value: {step:?}");
+            };
+            assert_eq!(
+                plan.frame_seed(step.value()),
+                Some(contexts[context].frame_seed())
+            );
+        }
+        for leaf in leaves {
+            assert_eq!(plan.frame_seed(leaf.value()), None, "{leaf:?}");
+        }
 
         // Set Matte is a spatial pass with no host slot: the auxiliary raster is
         // a resident value inside the schedule.

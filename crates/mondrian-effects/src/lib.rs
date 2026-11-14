@@ -611,9 +611,11 @@ pub use temporal_execution::{
     EffectTemporalAuxiliaryProvider, EffectTemporalAuxiliaryRequest, EffectTemporalExecutionError,
     EffectTemporalExecutionOutput, EffectTemporalExecutionRequest, EffectTemporalFrameDemandBatch,
     EffectTemporalFrameProvider, EffectTemporalFrameProviderError, EffectTemporalFrameRequest,
-    EffectTemporalSourceIdentity, PreparedEffectTemporalExecution, PreparedEffectTemporalProgram,
+    EffectTemporalGpuPlanBlocker, EffectTemporalSourceIdentity, PreparedEffectTemporalExecution,
+    PreparedEffectTemporalGpuExecution, PreparedEffectTemporalProgram,
     PreparedTemporalAuxiliarySet, PreparedTemporalAuxiliarySetError, PreparedTemporalFrameSet,
-    PreparedTemporalFrameSetError,
+    PreparedTemporalFrameSetError, TemporalGpuContext, TemporalGpuLeaf, TemporalGpuLeafRequest,
+    TemporalGpuStep, TemporalGpuStepOperation, TemporalGpuValue,
 };
 pub use threshold::{ThresholdError, ThresholdGrade, THRESHOLD_MAX_LEVEL, THRESHOLD_MIN_LEVEL};
 pub use tint::{tint_frame_f32, TintError, TintGrade};
