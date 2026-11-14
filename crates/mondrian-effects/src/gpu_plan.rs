@@ -1018,7 +1018,7 @@ pub(crate) fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
     }
 }
 
-fn operation_name(op: &EffectRenderOp) -> &'static str {
+pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
     match op {
         EffectRenderOp::ColorAdjust { .. } => "color_adjust",
         EffectRenderOp::WhiteBalance { .. } => "white_balance",

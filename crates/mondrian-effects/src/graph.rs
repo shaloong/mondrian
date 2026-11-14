@@ -3444,7 +3444,13 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         },
         EffectRenderOp::TemporalFrameBlend { sample_offset, .. } => {
             EffectImplementationRequirements {
-                execution_modes: EffectExecutionModes::CPU_F32,
+                // The cross-time edge itself is not a pixel operation, so no
+                // single-frame GPU plan can record it: the fused point and
+                // spatial lowerings refuse this operation by name. GPU Float32
+                // is admitted only because the finite temporal device schedule
+                // evaluates the edge on the device, while the scalar CPU
+                // executor stays the semantic reference.
+                execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
                 temporal_input: temporal_input_extent_for_sample_offset(*sample_offset),
                 ..cpu_float
             }

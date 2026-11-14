@@ -13983,7 +13983,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::Echo => EffectExecutionContract {
-            execution_modes: EffectExecutionModes::CPU_F32,
+            // GPU Float32 is admitted only through the finite temporal device
+            // executor, which supplies the cross-time edge of every tap. A
+            // single-frame GPU plan still refuses `TemporalFrameBlend`, so this
+            // admission never turns a history read into a current-frame read.
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             temporal_input: EffectTemporalInputExtent::UNBOUNDED,
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear

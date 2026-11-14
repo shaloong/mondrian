@@ -5,6 +5,7 @@
 //! directly; it does not introduce a second graph or reinterpret definition
 //! contracts.
 
+mod gpu;
 mod program;
 mod schedule;
 
