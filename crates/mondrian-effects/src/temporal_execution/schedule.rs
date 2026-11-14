@@ -11,6 +11,7 @@ pub(super) fn temporal_scalar_required_bytes(
     temporal_program: &PreparedTemporalValueProgram,
     demand: &EffectExecutionDemand,
     mask_rasters: &HashMap<usize, Arc<PreparedMaskRasterSet>>,
+    auxiliary_bytes: &HashMap<TemporalValueAddress, usize>,
 ) -> Result<TemporalScalarFootprint, EffectTemporalExecutionError> {
     let frame_bytes = checked_pixel_count(demand.input_roi().region())
         .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
@@ -36,6 +37,9 @@ pub(super) fn temporal_scalar_required_bytes(
         let mut processor_charge = 0usize;
         match *address {
             TemporalValueAddress::Source(_) => working.reserve_frame()?,
+            TemporalValueAddress::Auxiliary { .. } => {
+                working.reserve_bytes(auxiliary_bytes[address])?;
+            }
             TemporalValueAddress::Graph { context, node_id } => {
                 let context_ref = temporal_program.context(context)?;
                 let node = context_ref.graph.graph().node(node_id).ok_or(
@@ -49,13 +53,25 @@ pub(super) fn temporal_scalar_required_bytes(
                         })
                     }
                     EffectGraphNodeKind::ExternalInput { .. } => {
-                        return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                            node_id,
-                            kind: "external_input",
+                        return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+                            reason: "external input was not normalized in the time-expanded plan",
                         })
                     }
-                    EffectGraphNodeKind::AuxiliaryEffect { .. }
-                    | EffectGraphNodeKind::VideoCollage { .. } => {
+                    EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
+                        let input = temporal_program.address_for_input(context, *input)?;
+                        let auxiliary = temporal_program.address_for_input(context, *auxiliary)?;
+                        plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
+                        let bytes = auxiliary_bytes[&auxiliary];
+                        plan_take_sized_value(
+                            auxiliary,
+                            &mut live,
+                            &mut remaining_uses,
+                            &mut working,
+                            bytes,
+                        )?;
+                        working.release_bytes(bytes)?;
+                    }
+                    EffectGraphNodeKind::VideoCollage { .. } => {
                         return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
                             node_id,
                             kind: crate::gpu_plan::node_kind_name(&node.kind),
@@ -195,6 +211,16 @@ fn plan_take_value(
     remaining_uses: &mut HashMap<TemporalValueAddress, usize>,
     working: &mut ScalarWorkingSet,
 ) -> Result<(), EffectTemporalExecutionError> {
+    plan_take_sized_value(address, live, remaining_uses, working, working.frame_bytes)
+}
+
+fn plan_take_sized_value(
+    address: TemporalValueAddress,
+    live: &mut HashSet<TemporalValueAddress>,
+    remaining_uses: &mut HashMap<TemporalValueAddress, usize>,
+    working: &mut ScalarWorkingSet,
+    bytes: usize,
+) -> Result<(), EffectTemporalExecutionError> {
     if !live.contains(&address) {
         return Err(missing_temporal_value(address));
     }
@@ -212,7 +238,7 @@ fn plan_take_value(
     if *remaining == 0 {
         live.remove(&address);
     } else {
-        working.reserve_frame()?;
+        working.reserve_bytes(bytes)?;
     }
     Ok(())
 }
@@ -227,6 +253,7 @@ pub(super) fn plan_temporal_tiles(
     tile_budget: usize,
     total_budget: usize,
     mask_rasters: &HashMap<usize, Arc<PreparedMaskRasterSet>>,
+    auxiliary_bytes: &HashMap<TemporalValueAddress, usize>,
 ) -> Result<Vec<EffectPixelRoi>, EffectTemporalExecutionError> {
     let mut pending = vec![output_roi];
     let mut tiles = Vec::new();
@@ -247,7 +274,12 @@ pub(super) fn plan_temporal_tiles(
             tile_request.frame_extent,
             tile_request.output_roi,
         )?;
-        let required = temporal_scalar_required_bytes(temporal_program, &demand, mask_rasters)?;
+        let required = temporal_scalar_required_bytes(
+            temporal_program,
+            &demand,
+            mask_rasters,
+            auxiliary_bytes,
+        )?;
         if required.required_bytes <= tile_budget {
             tiles.push(candidate);
             if tiles.len() > MAX_TEMPORAL_SCALAR_TILES {

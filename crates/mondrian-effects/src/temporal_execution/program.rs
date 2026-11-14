@@ -13,6 +13,14 @@ const MAX_TEMPORAL_EXPANDED_VALUES: usize = 65_536;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum TemporalValueAddress {
     Source(TimelineTime),
+    /// One host-supplied auxiliary raster for an exact evaluation context.
+    ///
+    /// Two contexts may declare the same compiled slot; they are distinct
+    /// values because the raster is sampled at the context's own author time.
+    Auxiliary {
+        context: usize,
+        slot: u32,
+    },
     Graph {
         context: usize,
         node_id: EffectGraphNodeId,
@@ -94,10 +102,14 @@ impl PreparedTemporalValueProgram {
         let node = graph.graph().node(node_id).ok_or(
             EffectTemporalExecutionError::UnsupportedGraphNode { node_id, kind: "missing" },
         )?;
-        Ok(if matches!(node.kind, EffectGraphNodeKind::Source) {
-            TemporalValueAddress::Source(self.context(context)?.time)
-        } else {
-            TemporalValueAddress::Graph { context, node_id }
+        Ok(match node.kind {
+            EffectGraphNodeKind::Source => {
+                TemporalValueAddress::Source(self.context(context)?.time)
+            }
+            EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                TemporalValueAddress::Auxiliary { context, slot }
+            }
+            _ => TemporalValueAddress::Graph { context, node_id },
         })
     }
 }
@@ -190,6 +202,12 @@ impl TemporalProgramBuilder<'_> {
         if matches!(node.kind, EffectGraphNodeKind::Source) {
             return self.visit_source(context_ref.time);
         }
+        if matches!(node.kind, EffectGraphNodeKind::ExternalInput { .. }) {
+            return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                node_id,
+                kind: "external input used as a primary temporal value",
+            });
+        }
         let address = TemporalValueAddress::Graph { context, node_id };
         match self.visit.get(&address) {
             Some(VisitState::Complete) => return Ok(address),
@@ -209,20 +227,43 @@ impl TemporalProgramBuilder<'_> {
         self.visit.insert(address, VisitState::Visiting);
         match node.kind {
             EffectGraphNodeKind::Source => unreachable!("source was normalized above"),
+            EffectGraphNodeKind::ExternalInput { .. } => {
+                unreachable!("external input was normalized above")
+            }
             EffectGraphNodeKind::CustomSource { .. } => {
                 return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
                     node_id,
                     kind: "custom_source",
                 })
             }
-            EffectGraphNodeKind::ExternalInput { .. } => {
-                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                    node_id,
-                    kind: "external_input",
-                })
+            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, ref op, .. } => {
+                let input_address = self.visit_graph_value(context, input)?;
+                let auxiliary_address =
+                    self.contexts[context].graph.graph().node(auxiliary).and_then(
+                        |node| match node.kind {
+                            EffectGraphNodeKind::ExternalInput { slot, .. } => Some(slot),
+                            _ => None,
+                        },
+                    );
+                if auxiliary_address.is_none()
+                    || !matches!(
+                        op,
+                        crate::EffectRenderOp::SetMatte { .. }
+                            | crate::EffectRenderOp::ChannelCombiner { .. }
+                            | crate::EffectRenderOp::Fill { .. }
+                    )
+                {
+                    return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
+                        node_id,
+                        kind: "temporal auxiliary operation",
+                    });
+                }
+                let auxiliary_address = self
+                    .visit_auxiliary(context, auxiliary_address.expect("checked external slot"))?;
+                self.add_use(input_address)?;
+                self.add_use(auxiliary_address)?;
             }
-            EffectGraphNodeKind::AuxiliaryEffect { .. }
-            | EffectGraphNodeKind::VideoCollage { .. } => {
+            EffectGraphNodeKind::VideoCollage { .. } => {
                 return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
                     node_id,
                     kind: crate::gpu_plan::node_kind_name(&node.kind),
@@ -336,6 +377,31 @@ impl TemporalProgramBuilder<'_> {
         Ok(address)
     }
 
+    /// Admit one host auxiliary raster for the exact evaluation context.
+    ///
+    /// The value is addressed by `(context, slot)`, so two Echo taps that reuse
+    /// one compiled slot number in different contexts stay distinct values and
+    /// each is materialized from its own author time.
+    fn visit_auxiliary(
+        &mut self,
+        context: usize,
+        slot: u32,
+    ) -> Result<TemporalValueAddress, EffectTemporalExecutionError> {
+        let address = TemporalValueAddress::Auxiliary { context, slot };
+        if self.visit.contains_key(&address) {
+            return Ok(address);
+        }
+        if self.visit.len() >= MAX_TEMPORAL_EXPANDED_VALUES {
+            return Err(EffectTemporalExecutionError::TemporalProgramLimitExceeded {
+                kind: "expanded values",
+                limit: MAX_TEMPORAL_EXPANDED_VALUES,
+            });
+        }
+        self.visit.insert(address, VisitState::Complete);
+        self.ordered_values.push(address);
+        Ok(address)
+    }
+
     fn add_use(
         &mut self,
         address: TemporalValueAddress,
@@ -430,7 +496,7 @@ fn fingerprint_program(
     root: TemporalValueAddress,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.effect-temporal-value-program.v1");
+    hasher.update(b"mondrian.effect-temporal-value-program.v2");
     hasher.update((contexts.len() as u64).to_le_bytes());
     for context in contexts {
         hash_time(&mut hasher, context.time);
@@ -461,6 +527,11 @@ fn hash_address(hasher: &mut Sha256, address: TemporalValueAddress) {
         TemporalValueAddress::Source(time) => {
             hasher.update([0]);
             hash_time(hasher, time);
+        }
+        TemporalValueAddress::Auxiliary { context, slot } => {
+            hasher.update([2]);
+            hasher.update((context as u64).to_le_bytes());
+            hasher.update(slot.to_le_bytes());
         }
         TemporalValueAddress::Graph { context, node_id } => {
             hasher.update([1]);

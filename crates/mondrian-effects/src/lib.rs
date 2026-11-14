@@ -607,10 +607,13 @@ pub use stroke::{
 pub use temporal_execution::{
     collect_temporal_frame_demands, prepare_temporal_frame_execution,
     prepare_temporal_frame_program, EffectExecutionContinuity, EffectFrameTileF32,
-    EffectTemporalExecutionError, EffectTemporalExecutionOutput, EffectTemporalExecutionRequest,
-    EffectTemporalFrameDemandBatch, EffectTemporalFrameProvider, EffectTemporalFrameProviderError,
-    EffectTemporalFrameRequest, EffectTemporalSourceIdentity, PreparedEffectTemporalExecution,
-    PreparedEffectTemporalProgram, PreparedTemporalFrameSet, PreparedTemporalFrameSetError,
+    EffectTemporalAuxiliaryDemand, EffectTemporalAuxiliaryDemandBatch,
+    EffectTemporalAuxiliaryProvider, EffectTemporalAuxiliaryRequest, EffectTemporalExecutionError,
+    EffectTemporalExecutionOutput, EffectTemporalExecutionRequest, EffectTemporalFrameDemandBatch,
+    EffectTemporalFrameProvider, EffectTemporalFrameProviderError, EffectTemporalFrameRequest,
+    EffectTemporalSourceIdentity, PreparedEffectTemporalExecution, PreparedEffectTemporalProgram,
+    PreparedTemporalAuxiliarySet, PreparedTemporalAuxiliarySetError, PreparedTemporalFrameSet,
+    PreparedTemporalFrameSetError,
 };
 pub use threshold::{ThresholdError, ThresholdGrade, THRESHOLD_MAX_LEVEL, THRESHOLD_MIN_LEVEL};
 pub use tint::{tint_frame_f32, TintError, TintGrade};

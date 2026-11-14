@@ -426,21 +426,61 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
             primary, width, height, frame, sampling, grade, checkpoint,
         );
     }
+    apply_auxiliary_effect_f32_region(
+        primary,
+        crate::adjustment::EffectRasterRegion::new(width, height, 0, 0, width, height),
+        op,
+        frame,
+        sampling,
+        checkpoint,
+    )
+}
+
+/// Apply the operation's own auxiliary formula over one retained frame region.
+///
+/// The buffer holds only `region`'s pixels, while `uv` keeps complete-frame
+/// coordinates. This is the temporal executor's entry point: a tiled execution
+/// must sample the same auxiliary position a full-frame run would.
+pub(crate) fn apply_auxiliary_effect_f32_region<E>(
+    primary: &mut [[f32; 4]],
+    region: crate::adjustment::EffectRasterRegion,
+    op: &EffectRenderOp,
+    frame: AuxiliaryFloatFrame<'_>,
+    sampling: AuxiliarySampling,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    if !region.is_valid_for(primary.len()) {
+        return Ok(false);
+    }
+    let frame_width = region.frame_width();
+    let frame_height = region.frame_height();
+    if let EffectRenderOp::SetMatte { grade } = op {
+        return crate::set_matte::apply_set_matte_auxiliary_region_controlled(
+            primary, region, frame, *grade, sampling, checkpoint,
+        );
+    }
+    if matches!(op, EffectRenderOp::DisplacementMap { .. }) {
+        // Displacement reads complete-frame coordinates and may outset its
+        // output, so a partial region cannot be lowered exactly here. Fail
+        // closed exactly like the other full-frame-only operations.
+        return Ok(false);
+    }
+    let width = region.width();
+    let (origin_x, origin_y) = (region.x(), region.y());
     if let EffectRenderOp::ChannelCombiner { grade } = op {
         checkpoint()?;
         for (index, pixel) in primary.iter_mut().enumerate() {
             if index % 4096 == 0 {
                 checkpoint()?;
             }
-            let x = index as u32 % width;
-            let y = index as u32 / width;
+            let x = origin_x + index as u32 % width;
+            let y = origin_y + index as u32 / width;
             let uv = [
-                (x as f32 + PIXEL_CENTRE) / width as f32,
-                (y as f32 + PIXEL_CENTRE) / height as f32,
+                (x as f32 + PIXEL_CENTRE) / frame_width as f32,
+                (y as f32 + PIXEL_CENTRE) / frame_height as f32,
             ];
             *pixel = grade.apply_pixel_from(*pixel, sample_auxiliary_f32(frame, uv, sampling));
-            // The auxiliary graph publishes a coverage plane. A color channel
-            // can be HDR or negative when it is copied into alpha.
+            // HDR or negative RGB copied into alpha must stay in the coverage range.
             pixel[3] = pixel[3].clamp(0.0, 1.0);
         }
         checkpoint()?;
@@ -462,14 +502,14 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
         if index % 4096 == 0 {
             checkpoint()?;
         }
-        let x = index as u32 % width;
-        let y = index as u32 / width;
+        let x = origin_x + index as u32 % width;
+        let y = origin_y + index as u32 / width;
         let uv = [
-            (x as f32 + PIXEL_CENTRE) / width as f32,
-            (y as f32 + PIXEL_CENTRE) / height as f32,
+            (x as f32 + PIXEL_CENTRE) / frame_width as f32,
+            (y as f32 + PIXEL_CENTRE) / frame_height as f32,
         ];
         let mask = sample_auxiliary_f32(frame, uv, sampling)[3].clamp(0.0, 1.0);
-        let coverage = mask * unmasked.coverage(x, y, width, height);
+        let coverage = mask * unmasked.coverage(x, y, frame_width, frame_height);
         let coverage = if grade.invert() {
             1.0 - coverage
         } else {

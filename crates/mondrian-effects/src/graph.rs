@@ -1379,43 +1379,57 @@ impl CompiledEffectGraph {
     /// can declare an unbounded auxiliary retime without requesting primary
     /// Echo history. Opaque processors retain their declared temporal debt.
     pub fn requires_primary_temporal_execution(&self) -> bool {
-        self.stage_bindings.iter().any(|stage| {
-            let mut external = false;
-            let mut closed_current = true;
-            let mut temporal_kernel = false;
-            for id in stage.emitted_nodes() {
-                let Some(node) = self.graph.node(*id) else {
-                    return true;
-                };
-                match &node.kind {
-                    EffectGraphNodeKind::ExternalInput { .. } => external = true,
-                    EffectGraphNodeKind::UnaryEffect { op, .. }
-                    | EffectGraphNodeKind::DomainEffect { op, .. }
-                    | EffectGraphNodeKind::CustomSource { op, .. }
-                    | EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
-                        temporal_kernel |= matches!(op, EffectRenderOp::TemporalFrameBlend { .. });
-                        closed_current &= !matches!(
-                            op,
-                            EffectRenderOp::Custom { .. }
-                                | EffectRenderOp::TemporalFrameBlend { .. }
-                        ) && raw_render_op_execution_requirements(op)
-                            .temporal_input
-                            == EffectTemporalInputExtent::CURRENT_FRAME;
-                    }
-                    EffectGraphNodeKind::Source
-                    | EffectGraphNodeKind::Blend { .. }
-                    | EffectGraphNodeKind::Mask { .. }
-                    | EffectGraphNodeKind::MaskSource { .. }
-                    | EffectGraphNodeKind::MaskCombine { .. }
-                    | EffectGraphNodeKind::MatteMix { .. }
-                    | EffectGraphNodeKind::VideoCollage { .. }
-                    | EffectGraphNodeKind::MultiInput { .. } => {}
+        self.stage_bindings
+            .iter()
+            .any(|stage| self.stage_requires_primary_history(stage))
+    }
+
+    /// Bound the primary pictures required independently of authored auxiliary retimes.
+    pub fn primary_temporal_input_extent(
+        &self,
+    ) -> Result<EffectTemporalInputExtent, crate::EffectExecutionContractError> {
+        self.stage_bindings
+            .iter()
+            .filter(|stage| self.stage_requires_primary_history(stage))
+            .try_fold(EffectTemporalInputExtent::CURRENT_FRAME, |extent, stage| {
+                extent.accumulate(stage.contract.temporal_input)
+            })
+    }
+
+    fn stage_requires_primary_history(&self, stage: &CompiledEffectStageBinding) -> bool {
+        let mut external = false;
+        let mut closed_current = true;
+        let mut temporal_kernel = false;
+        for id in stage.emitted_nodes() {
+            let Some(node) = self.graph.node(*id) else {
+                return true;
+            };
+            match &node.kind {
+                EffectGraphNodeKind::ExternalInput { .. } => external = true,
+                EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. }
+                | EffectGraphNodeKind::CustomSource { op, .. }
+                | EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
+                    temporal_kernel |= matches!(op, EffectRenderOp::TemporalFrameBlend { .. });
+                    closed_current &= !matches!(
+                        op,
+                        EffectRenderOp::Custom { .. } | EffectRenderOp::TemporalFrameBlend { .. }
+                    ) && raw_render_op_execution_requirements(op).temporal_input
+                        == EffectTemporalInputExtent::CURRENT_FRAME;
                 }
+                EffectGraphNodeKind::Source
+                | EffectGraphNodeKind::Blend { .. }
+                | EffectGraphNodeKind::Mask { .. }
+                | EffectGraphNodeKind::MaskSource { .. }
+                | EffectGraphNodeKind::MaskCombine { .. }
+                | EffectGraphNodeKind::MatteMix { .. }
+                | EffectGraphNodeKind::VideoCollage { .. }
+                | EffectGraphNodeKind::MultiInput { .. } => {}
             }
-            temporal_kernel
-                || (stage.contract.temporal_input != EffectTemporalInputExtent::CURRENT_FRAME
-                    && !(external && closed_current))
-        })
+        }
+        temporal_kernel
+            || (stage.contract.temporal_input != EffectTemporalInputExtent::CURRENT_FRAME
+                && !(external && closed_current))
     }
 
     /// Admit the backend after external source time has been resolved by the

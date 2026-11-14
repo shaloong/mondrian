@@ -565,6 +565,10 @@ fn specialize_builtin_definition(
 ) -> Arc<EffectDefinition> {
     let contract = definition.execution_contract();
     let specialized = match effect.effect_type {
+        crate::EffectType::Echo => EffectExecutionContract {
+            temporal_input: echo_author_time_extent(effect),
+            ..contract
+        },
         crate::EffectType::Fill if fill_may_use_masks(effect) => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             topology: EffectGraphTopology::GeneralDag,
@@ -620,6 +624,42 @@ fn specialize_builtin_definition(
         return definition;
     }
     Arc::new(definition.as_ref().clone().with_execution_contract(specialized))
+}
+
+fn echo_author_time_extent(effect: &EffectNode) -> EffectTemporalInputExtent {
+    let id = |key| effect.effect_type.parameter_id(key).expect("builtin Echo parameter");
+    let time = id("echo_time");
+    let count = id("echo_count");
+    let animated = |parameter| {
+        effect.properties.iter().any(|(_, property)| {
+            property.descriptor.parameter_id() == parameter
+                && property.is_enabled()
+                && property.is_animated()
+        })
+    };
+    let count = if animated(&count) {
+        crate::ECHO_MAX_TAPS
+    } else {
+        effect
+            .evaluate_f32_parameter(&count, TimelineTime::ZERO, crate::ECHO_DEFAULT_COUNT as f32)
+            .round()
+            .max(0.0)
+            .min(crate::ECHO_MAX_TAPS as f32) as u32
+    };
+    let extent = |step: f32| {
+        crate::echo_offset(f64::from(step) * f64::from(count))
+            .map(crate::graph::temporal_input_extent_for_sample_offset)
+            .unwrap_or(EffectTemporalInputExtent::UNBOUNDED)
+    };
+    if animated(&time) {
+        extent(-crate::ECHO_MAX_TIME_SECONDS).merge(extent(crate::ECHO_MAX_TIME_SECONDS))
+    } else {
+        extent(effect.evaluate_f32_parameter(
+            &time,
+            TimelineTime::ZERO,
+            crate::ECHO_DEFAULT_TIME_SECONDS,
+        ))
+    }
 }
 
 fn evaluate_instances(
@@ -1237,7 +1277,7 @@ impl PreparedEffectProgram {
         mut visit: impl FnMut(mondrian_core::VisualSourceReference),
     ) -> Result<(), EffectGraphBuildError> {
         let mut sources = Vec::new();
-        self.visit_visual_source_history(|reference, _| sources.push(reference))?;
+        self.visit_visual_source_history(|reference, _, _| sources.push(reference))?;
         // Preserve the established forward author traversal for callers
         // that only need the selected addresses.
         for source in sources.into_iter().rev() {
@@ -1249,7 +1289,11 @@ impl PreparedEffectProgram {
     /// Visit a source and the earliest downstream history offset that may reach it.
     pub fn visit_visual_source_history(
         &self,
-        mut visit: impl FnMut(mondrian_core::VisualSourceReference, TimelineTime),
+        mut visit: impl FnMut(
+            mondrian_core::VisualSourceReference,
+            TimelineTime,
+            EffectTemporalInputExtent,
+        ),
     ) -> Result<(), EffectGraphBuildError> {
         let inner = &self.inner;
         let stacks = inner
@@ -1260,6 +1304,7 @@ impl PreparedEffectProgram {
             .chain(inner.grade_after.iter().map(|grade| &grade.inner.stack));
         let instances = stacks.flat_map(|stack| stack.instances.iter()).collect::<Vec<_>>();
         let mut downstream = TimelineTime::ZERO;
+        let mut echo = EffectTemporalInputExtent::CURRENT_FRAME;
         for instance in instances.into_iter().rev() {
             if instance.effect.effect_type == crate::EffectType::VideoCollage {
                 let mut local = TimelineTime::ZERO;
@@ -1276,7 +1321,7 @@ impl PreparedEffectProgram {
                     if reference == mondrian_core::VisualSourceReference::Unbound {
                         local = local.min(tile.offset);
                     } else {
-                        visit(reference, downstream);
+                        visit(reference, downstream, echo);
                     }
                 }
                 downstream =
@@ -1288,8 +1333,17 @@ impl PreparedEffectProgram {
                         property.static_value()
                         && *reference != mondrian_core::VisualSourceReference::Unbound
                     {
-                        visit(*reference, downstream);
+                        visit(*reference, downstream, echo);
                     }
+                }
+                if instance.effect.effect_type == crate::EffectType::Echo {
+                    echo = echo.accumulate(echo_author_time_extent(&instance.effect)).map_err(
+                        |error| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: instance.effect.effect_type.key(),
+                            effect_id: instance.effect.id,
+                            reason: error.to_string(),
+                        },
+                    )?;
                 }
             }
         }

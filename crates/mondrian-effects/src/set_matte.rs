@@ -214,6 +214,32 @@ pub(crate) fn apply_set_matte_auxiliary_controlled<E>(
     sampling: AuxiliarySampling,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<bool, E> {
+    apply_set_matte_auxiliary_region_controlled(
+        primary,
+        crate::adjustment::EffectRasterRegion::new(width, height, 0, 0, width, height),
+        matte,
+        grade,
+        sampling,
+        checkpoint,
+    )
+}
+
+/// Apply Set Matte over one retained frame region.
+///
+/// The buffer holds only `region`'s pixels while sampling keeps complete-frame
+/// coordinates, so a tiled temporal run matches a full-frame run.
+pub(crate) fn apply_set_matte_auxiliary_region_controlled<E>(
+    primary: &mut [[f32; 4]],
+    region: crate::adjustment::EffectRasterRegion,
+    matte: AuxiliaryFloatFrame<'_>,
+    grade: SetMatteGrade,
+    sampling: AuxiliarySampling,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    if !region.is_valid_for(primary.len()) {
+        return Ok(false);
+    }
+    let (width, height) = (region.width(), region.height());
     if width == 0 || height == 0 {
         return Ok(false);
     }
@@ -223,20 +249,22 @@ pub(crate) fn apply_set_matte_auxiliary_controlled<E>(
     {
         return Ok(false);
     }
+    let frame_width = region.frame_width();
+    let frame_height = region.frame_height();
     let matte_width = i64::from(matte_extent.width());
     let matte_height = i64::from(matte_extent.height());
-    let offset_x = (i64::from(width) - matte_width + 1).div_euclid(2);
-    let offset_y = (i64::from(height) - matte_height + 1).div_euclid(2);
+    let offset_x = (i64::from(frame_width) - matte_width + 1).div_euclid(2);
+    let offset_y = (i64::from(frame_height) - matte_height + 1).div_euclid(2);
     for (index, pixel) in primary.iter_mut().enumerate() {
         if index % 4096 == 0 {
             checkpoint()?;
         }
-        let x = (index % width as usize) as i64;
-        let y = (index / width as usize) as i64;
+        let x = i64::from(region.x()) + (index % width as usize) as i64;
+        let y = i64::from(region.y()) + (index / width as usize) as i64;
         let sample = if grade.stretch {
             let uv = [
-                (x as f32 + PIXEL_CENTRE) / width as f32,
-                (y as f32 + PIXEL_CENTRE) / height as f32,
+                (x as f32 + PIXEL_CENTRE) / frame_width as f32,
+                (y as f32 + PIXEL_CENTRE) / frame_height as f32,
             ];
             let associated = sample_auxiliary_associated_f32(matte, uv, sampling);
             if grade.premultiply {

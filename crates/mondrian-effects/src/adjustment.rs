@@ -1431,6 +1431,22 @@ impl EffectRasterRegion {
         self.width as usize
     }
 
+    pub(crate) const fn x(self) -> u32 {
+        self.x
+    }
+
+    pub(crate) const fn y(self) -> u32 {
+        self.y
+    }
+
+    pub(crate) const fn width(self) -> u32 {
+        self.width
+    }
+
+    pub(crate) const fn height(self) -> u32 {
+        self.height
+    }
+
     pub(crate) fn global_row_start(self, local_y: usize) -> u64 {
         (u64::from(self.y) + local_y as u64) * u64::from(self.frame_width) + u64::from(self.x)
     }

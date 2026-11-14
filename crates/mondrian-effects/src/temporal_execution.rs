@@ -220,6 +220,7 @@ pub struct PreparedEffectTemporalExecution {
     request: EffectTemporalExecutionRequest,
     program: Arc<PreparedTemporalValueProgram>,
     demands: EffectTemporalFrameDemandBatch,
+    auxiliary_demands: EffectTemporalAuxiliaryDemandBatch,
 }
 
 /// Frozen time-expanded values and exact source instants, before an image
@@ -229,12 +230,27 @@ pub struct PreparedEffectTemporalExecution {
 pub struct PreparedEffectTemporalProgram {
     graph: Arc<CompiledEffectGraph>,
     program: Arc<PreparedTemporalValueProgram>,
+    auxiliary_demands: EffectTemporalAuxiliaryDemandBatch,
 }
 
 impl PreparedEffectTemporalProgram {
     /// Exact, ordered source instants for early scheduling without a pixel ROI.
     pub fn source_times(&self) -> &[TimelineTime] {
         self.program.source_times()
+    }
+
+    /// Exact auxiliary rasters this program reads, by context and slot.
+    pub const fn auxiliary_demands(&self) -> &EffectTemporalAuxiliaryDemandBatch {
+        &self.auxiliary_demands
+    }
+
+    /// Frozen evaluation graph at the author's exact instant.
+    pub fn graph_at(&self, time: TimelineTime) -> Option<&Arc<CompiledEffectGraph>> {
+        self.program
+            .contexts()
+            .iter()
+            .find(|context| context.time == time)
+            .map(|context| &context.graph)
     }
 
     /// Bind the producer-selected image domain without evaluating author state
@@ -244,9 +260,13 @@ impl PreparedEffectTemporalProgram {
         request: &EffectTemporalExecutionRequest,
     ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
         let root = self.program.context(0)?;
-        if root.time != request.output_time || root.frame_seed != request.output_frame_seed {
+        if root.time != request.output_time
+            || root.frame_seed != request.output_frame_seed
+            || self.auxiliary_demands.generation() != request.generation
+        {
             return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
-                reason: "image-domain binding changed the frozen temporal time or seed",
+                reason:
+                    "image-domain binding changed the frozen temporal time, seed, or generation",
             });
         }
         bind_temporal_image_domain(self, request)
@@ -267,6 +287,20 @@ impl PreparedEffectTemporalExecution {
     /// Exact raw-source dependencies of the complete expanded execution.
     pub const fn demands(&self) -> &EffectTemporalFrameDemandBatch {
         &self.demands
+    }
+
+    /// Exact auxiliary rasters this execution reads, by context and slot.
+    pub const fn auxiliary_demands(&self) -> &EffectTemporalAuxiliaryDemandBatch {
+        &self.auxiliary_demands
+    }
+
+    /// Frozen evaluation graph at the author's exact instant.
+    pub fn graph_at(&self, time: TimelineTime) -> Option<&Arc<CompiledEffectGraph>> {
+        self.program
+            .contexts()
+            .iter()
+            .find(|context| context.time == time)
+            .map(|context| &context.graph)
     }
 }
 
@@ -669,6 +703,421 @@ pub enum PreparedTemporalFrameSetError {
     },
 }
 
+/// One host auxiliary raster demanded by an exact temporal evaluation context.
+///
+/// Two Echo taps may reuse the same compiled slot number in different
+/// contexts. The context's own author time is part of the request, so each tap
+/// is materialized from its own instant instead of sharing one raster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectTemporalAuxiliaryRequest {
+    generation: u64,
+    context_time: TimelineTime,
+    frame_seed: i64,
+    slot: u32,
+    extent: EffectFrameExtent,
+    format: crate::EffectValueFormat,
+    sampling: mondrian_core::ImageSampling,
+}
+
+impl EffectTemporalAuxiliaryRequest {
+    /// Scheduler generation that owns this raster.
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    /// Exact author time of the evaluation context that reads this slot.
+    pub const fn context_time(self) -> TimelineTime {
+        self.context_time
+    }
+
+    /// Deterministic frame seed of that same context.
+    pub const fn frame_seed(self) -> i64 {
+        self.frame_seed
+    }
+
+    /// Graph-declared external slot.
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+
+    /// Complete authored raster extent.
+    pub const fn extent(self) -> EffectFrameExtent {
+        self.extent
+    }
+
+    /// Declared sample representation of the delivered raster.
+    pub const fn format(self) -> crate::EffectValueFormat {
+        self.format
+    }
+
+    /// Original sample shape and X/Y density of the raster.
+    pub const fn sampling(self) -> mondrian_core::ImageSampling {
+        self.sampling
+    }
+}
+
+/// Adapter that delivers complete auxiliary rasters per evaluation context.
+///
+/// Unlike [`EffectTemporalFrameProvider`], this seam never copies a subregion:
+/// an auxiliary raster is sampled by normalized `uv`, so the kernel needs the
+/// complete authored image. Implementations must not decode, convert color, or
+/// allocate hidden state here; production freezes the rasters first.
+pub trait EffectTemporalAuxiliaryProvider {
+    /// Complete immutable identity of every raster this provider can deliver.
+    fn source_identity(&self) -> EffectTemporalSourceIdentity;
+
+    /// Exact immutable bytes retained by the frozen rasters.
+    fn retained_coverage_bytes(&self) -> usize;
+
+    /// Authored extent of one slot, or `None` when this provider has no raster.
+    fn auxiliary_image(
+        &self,
+        context_time: TimelineTime,
+        slot: u32,
+    ) -> Option<(
+        EffectFrameExtent,
+        mondrian_core::ImageSampling,
+        crate::EffectValueFormat,
+    )>;
+
+    /// Copy exactly one complete raster in row-major order.
+    fn copy_auxiliary(
+        &mut self,
+        request: EffectTemporalAuxiliaryRequest,
+        cancellation: &ExecutionCancellationToken,
+        destination: &mut Vec<[f32; 4]>,
+    ) -> Result<(), EffectTemporalFrameProviderError>;
+}
+
+/// A fully resolved immutable auxiliary batch.
+///
+/// Construction validates each supplied raster and rejects duplicate keys.
+/// The executor checks completeness against its own frozen demands before DSP.
+#[derive(Debug, Clone)]
+pub struct PreparedTemporalAuxiliarySet {
+    source_identity: EffectTemporalSourceIdentity,
+    generation: u64,
+    rasters: HashMap<(TimelineTime, u32), crate::EffectFloatFrame>,
+    retained_coverage_bytes: usize,
+}
+
+impl PreparedTemporalAuxiliarySet {
+    /// Freeze one completely resolved auxiliary demand set.
+    pub fn prepare(
+        source_identity: EffectTemporalSourceIdentity,
+        generation: u64,
+        resolved: impl IntoIterator<Item = (EffectTemporalAuxiliaryRequest, crate::EffectFloatFrame)>,
+    ) -> Result<Self, PreparedTemporalAuxiliarySetError> {
+        let mut rasters = HashMap::new();
+        let mut retained = 0usize;
+        let mut digest = Sha256::new();
+        digest.update(b"mondrian.effect-temporal-auxiliary-pixels.v1");
+        digest.update(source_identity.semantic_fingerprint());
+        digest.update(generation.to_le_bytes());
+        for (request, frame) in resolved {
+            if request.generation != generation {
+                return Err(PreparedTemporalAuxiliarySetError::GenerationMismatch {
+                    expected: generation,
+                    actual: request.generation,
+                });
+            }
+            if frame.extent() != request.extent {
+                return Err(PreparedTemporalAuxiliarySetError::ExtentMismatch {
+                    slot: request.slot,
+                    expected: request.extent,
+                    actual: frame.extent(),
+                });
+            }
+            if frame.format() != request.format || frame.sampling() != request.sampling {
+                return Err(PreparedTemporalAuxiliarySetError::FormatMismatch {
+                    slot: request.slot,
+                });
+            }
+            retained = retained
+                .checked_add(frame.retained_bytes())
+                .ok_or(PreparedTemporalAuxiliarySetError::SizeOverflow)?;
+            hash_time(&mut digest, request.context_time);
+            digest.update(request.slot.to_le_bytes());
+            digest.update(request.frame_seed.to_le_bytes());
+            digest.update(frame.extent().width().to_le_bytes());
+            digest.update(frame.extent().height().to_le_bytes());
+            let par = frame.sampling().sample_aspect_ratio();
+            digest.update(par.numerator().to_le_bytes());
+            digest.update(par.denominator().to_le_bytes());
+            for scale in frame.sampling().render_scale() {
+                digest.update(scale.num.to_le_bytes());
+                digest.update(scale.den.to_le_bytes());
+            }
+            let mut staging = [0_u8; 4096];
+            for band in frame.pixels().chunks(256) {
+                for (bytes, channel) in staging.chunks_exact_mut(4).zip(band.iter().flatten()) {
+                    bytes.copy_from_slice(&channel.to_bits().to_le_bytes());
+                }
+                digest.update(&staging[..band.len() * 16]);
+            }
+            if rasters.insert((request.context_time, request.slot), frame).is_some() {
+                return Err(PreparedTemporalAuxiliarySetError::DuplicateRaster {
+                    slot: request.slot,
+                });
+            }
+        }
+        Ok(Self {
+            source_identity: EffectTemporalSourceIdentity::from_complete_semantic_fingerprint(
+                digest.finalize().into(),
+            ),
+            generation,
+            rasters,
+            retained_coverage_bytes: retained,
+        })
+    }
+
+    /// Exact number of retained rasters.
+    pub fn len(&self) -> usize {
+        self.rasters.len()
+    }
+
+    /// Whether no raster is retained.
+    pub fn is_empty(&self) -> bool {
+        self.rasters.is_empty()
+    }
+}
+
+impl EffectTemporalAuxiliaryProvider for PreparedTemporalAuxiliarySet {
+    fn source_identity(&self) -> EffectTemporalSourceIdentity {
+        self.source_identity
+    }
+
+    fn retained_coverage_bytes(&self) -> usize {
+        self.retained_coverage_bytes
+    }
+
+    fn auxiliary_image(
+        &self,
+        context_time: TimelineTime,
+        slot: u32,
+    ) -> Option<(
+        EffectFrameExtent,
+        mondrian_core::ImageSampling,
+        crate::EffectValueFormat,
+    )> {
+        let frame = self.rasters.get(&(context_time, slot))?;
+        Some((frame.extent(), frame.sampling(), frame.format()))
+    }
+
+    fn copy_auxiliary(
+        &mut self,
+        request: EffectTemporalAuxiliaryRequest,
+        cancellation: &ExecutionCancellationToken,
+        destination: &mut Vec<[f32; 4]>,
+    ) -> Result<(), EffectTemporalFrameProviderError> {
+        if cancellation.is_canceled() {
+            return Err(EffectTemporalFrameProviderError::Canceled);
+        }
+        if request.generation != self.generation {
+            return Err(EffectTemporalFrameProviderError::Unavailable {
+                reason: format!(
+                    "prepared auxiliary set belongs to generation {}, not {}",
+                    self.generation, request.generation
+                ),
+            });
+        }
+        if !destination.is_empty() {
+            return Err(EffectTemporalFrameProviderError::InvalidTile {
+                reason: "auxiliary destination was not empty at the provider seam".to_owned(),
+            });
+        }
+        let frame = self.rasters.get(&(request.context_time, request.slot)).ok_or(
+            EffectTemporalFrameProviderError::Unavailable {
+                reason: format!(
+                    "prepared auxiliary set has no raster for slot {} at {}",
+                    request.slot,
+                    request.context_time.numerator()
+                ),
+            },
+        )?;
+        if (frame.extent(), frame.sampling(), frame.format())
+            != (request.extent, request.sampling, request.format)
+        {
+            return Err(EffectTemporalFrameProviderError::InvalidTile {
+                reason: format!(
+                    "temporal auxiliary slot {} changed image domain",
+                    request.slot
+                ),
+            });
+        }
+        for band in frame.pixels().chunks(4096) {
+            provider_cancellation_checkpoint(cancellation)?;
+            destination.extend_from_slice(band);
+        }
+        Ok(())
+    }
+}
+
+/// Invalid or incomplete input while freezing an auxiliary set.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PreparedTemporalAuxiliarySetError {
+    /// A resolved raster belongs to another scheduler generation.
+    #[error("temporal auxiliary generation mismatch: expected {expected}, received {actual}")]
+    GenerationMismatch {
+        /// Batch generation.
+        expected: u64,
+        /// Resolved raster generation.
+        actual: u64,
+    },
+    /// A raster did not have the extent its request declared.
+    #[error("temporal auxiliary slot {slot} delivered {actual:?} but {expected:?} was demanded")]
+    ExtentMismatch {
+        /// Graph-declared slot.
+        slot: u32,
+        /// Demanded extent.
+        expected: EffectFrameExtent,
+        /// Delivered extent.
+        actual: EffectFrameExtent,
+    },
+    /// A raster did not have the declared sample representation.
+    #[error("temporal auxiliary slot {slot} delivered an undeclared sample format")]
+    FormatMismatch {
+        /// Graph-declared slot.
+        slot: u32,
+    },
+    /// The same context and slot were resolved twice.
+    #[error("temporal auxiliary slot {slot} was resolved more than once for one context")]
+    DuplicateRaster {
+        /// Graph-declared slot.
+        slot: u32,
+    },
+    /// The retained raster bytes overflowed the address space.
+    #[error("temporal auxiliary retained byte size overflowed")]
+    SizeOverflow,
+}
+
+/// One auxiliary raster demand, addressed by evaluation context and slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectTemporalAuxiliaryDemand {
+    context_time: TimelineTime,
+    frame_seed: i64,
+    slot: u32,
+    format: crate::EffectValueFormat,
+}
+
+impl EffectTemporalAuxiliaryDemand {
+    /// Bind a host-provided raster's actual grid to this exact demand.
+    pub const fn request(
+        self,
+        generation: u64,
+        extent: EffectFrameExtent,
+        sampling: mondrian_core::ImageSampling,
+    ) -> EffectTemporalAuxiliaryRequest {
+        EffectTemporalAuxiliaryRequest {
+            generation,
+            context_time: self.context_time,
+            frame_seed: self.frame_seed,
+            slot: self.slot,
+            extent,
+            format: self.format,
+            sampling,
+        }
+    }
+
+    /// Exact author time of the context that reads this slot.
+    pub const fn context_time(self) -> TimelineTime {
+        self.context_time
+    }
+
+    /// Deterministic frame seed of that same context.
+    pub const fn frame_seed(self) -> i64 {
+        self.frame_seed
+    }
+
+    /// Graph-declared external slot.
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+
+    /// Declared sample representation.
+    pub const fn format(self) -> crate::EffectValueFormat {
+        self.format
+    }
+}
+
+/// Immutable auxiliary demand set collected from one frozen temporal program.
+///
+/// Preview and Export resolve exactly these demands, so a per-frame prepare and
+/// a range preflight cannot disagree about which instants feed which slot.
+#[derive(Debug, Clone)]
+pub struct EffectTemporalAuxiliaryDemandBatch {
+    generation: u64,
+    demands: Arc<[EffectTemporalAuxiliaryDemand]>,
+}
+
+impl EffectTemporalAuxiliaryDemandBatch {
+    /// Scheduler generation that owns every demand.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Exact, de-duplicated demands in deterministic evaluation order.
+    pub fn demands(&self) -> &[EffectTemporalAuxiliaryDemand] {
+        &self.demands
+    }
+
+    /// Whether this batch has no auxiliary dependency.
+    pub fn is_empty(&self) -> bool {
+        self.demands.is_empty()
+    }
+
+    /// Distinct slots this batch reads, in ascending order.
+    pub fn slots(&self) -> Vec<u32> {
+        let mut slots = self.demands.iter().map(|demand| demand.slot).collect::<Vec<_>>();
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }
+}
+
+/// Provider used when a graph declares no auxiliary input.
+///
+/// It fails closed: any auxiliary demand reaching it is a real contract
+/// violation, never a silent zero raster.
+pub(crate) struct NoAuxiliaryProvider;
+
+impl EffectTemporalAuxiliaryProvider for NoAuxiliaryProvider {
+    fn source_identity(&self) -> EffectTemporalSourceIdentity {
+        EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([0; 32])
+    }
+
+    fn retained_coverage_bytes(&self) -> usize {
+        0
+    }
+
+    fn auxiliary_image(
+        &self,
+        _context_time: TimelineTime,
+        _slot: u32,
+    ) -> Option<(
+        EffectFrameExtent,
+        mondrian_core::ImageSampling,
+        crate::EffectValueFormat,
+    )> {
+        None
+    }
+
+    fn copy_auxiliary(
+        &mut self,
+        request: EffectTemporalAuxiliaryRequest,
+        _cancellation: &ExecutionCancellationToken,
+        _destination: &mut Vec<[f32; 4]>,
+    ) -> Result<(), EffectTemporalFrameProviderError> {
+        Err(EffectTemporalFrameProviderError::Unavailable {
+            reason: format!(
+                "no auxiliary provider was supplied for slot {} at {}",
+                request.slot,
+                request.context_time.numerator()
+            ),
+        })
+    }
+}
+
 /// One completed exact ROI execution.
 #[derive(Debug, Clone)]
 pub struct EffectTemporalExecutionOutput {
@@ -805,6 +1254,14 @@ pub enum EffectTemporalExecutionError {
     /// A concrete source or nested Sequence Adapter failed.
     #[error(transparent)]
     Provider(#[from] EffectTemporalFrameProviderError),
+    /// A required auxiliary raster was not supplied for this execution.
+    #[error("effect temporal execution requires auxiliary slot {slot} at {time:?}")]
+    AuxiliaryFrameMissing {
+        /// Exact author time of the missing value.
+        time: TimelineTime,
+        /// Graph-declared external slot.
+        slot: u32,
+    },
     /// Execution was canceled at a cooperative checkpoint.
     #[error("effect temporal execution was canceled")]
     Canceled,
@@ -1009,7 +1466,7 @@ fn prepare_temporal_program_inner(
     }
     let window = crate::execution_planning::plan_temporal_window(
         request.output_time,
-        compiled.execution_envelope().aggregate().temporal_input,
+        temporal_primary_extent(&compiled)?,
     )?;
     ensure_bounded_temporal_window(window)?;
     let (earliest, latest) = finite_temporal_bounds(window)?;
@@ -1029,11 +1486,58 @@ fn prepare_temporal_program_inner(
     for context in program.contexts() {
         let window = crate::execution_planning::plan_temporal_window(
             context.time,
-            context.graph.execution_envelope().aggregate().temporal_input,
+            temporal_primary_extent(&context.graph)?,
         )?;
         ensure_bounded_temporal_window(window)?;
     }
-    Ok(PreparedEffectTemporalProgram { graph: compiled, program: Arc::new(program) })
+    let auxiliary_demands = collect_auxiliary_demands(&program, request.generation)?;
+    Ok(PreparedEffectTemporalProgram {
+        graph: compiled,
+        program: Arc::new(program),
+        auxiliary_demands,
+    })
+}
+
+/// Freeze every auxiliary raster this program reads, addressed by the exact
+/// evaluation context that reads it.
+///
+/// The slot's declared format comes from the compiled node, so a context that
+/// reuses a slot number still carries its own author-time identity.
+fn collect_auxiliary_demands(
+    program: &PreparedTemporalValueProgram,
+    generation: u64,
+) -> Result<EffectTemporalAuxiliaryDemandBatch, EffectTemporalExecutionError> {
+    let mut demands = Vec::new();
+    for address in program.ordered_values() {
+        let TemporalValueAddress::Auxiliary { context, slot } = *address else {
+            continue;
+        };
+        let context_ref = program.context(context)?;
+        let format = context_ref
+            .graph
+            .graph()
+            .nodes
+            .iter()
+            .find_map(|node| match node.kind {
+                EffectGraphNodeKind::ExternalInput { slot: declared, format, .. }
+                    if declared == slot =>
+                {
+                    Some(format)
+                }
+                _ => None,
+            })
+            .ok_or(EffectTemporalExecutionError::UnsupportedGraphNode {
+                node_id: EffectGraphNodeId(0),
+                kind: "external_input",
+            })?;
+        demands.push(EffectTemporalAuxiliaryDemand {
+            context_time: context_ref.time,
+            frame_seed: context_ref.frame_seed,
+            slot,
+            format,
+        });
+    }
+    Ok(EffectTemporalAuxiliaryDemandBatch { generation, demands: demands.into() })
 }
 
 fn bind_temporal_image_domain(
@@ -1050,15 +1554,17 @@ fn bind_temporal_image_domain(
         request.frame_extent,
         request.output_roi,
     )?;
-    ensure_bounded_temporal_window(demand.temporal_window())?;
-    let (earliest, latest) = finite_temporal_bounds(demand.temporal_window())?;
+    let window = crate::execution_planning::plan_temporal_window(
+        request.output_time,
+        temporal_primary_extent(compiled)?,
+    )?;
+    let (earliest, latest) = finite_temporal_bounds(window)?;
     for context in program.contexts() {
         let sampled = context.graph.plan_execution_demand(
             context.time,
             request.frame_extent,
             request.output_roi,
         )?;
-        ensure_bounded_temporal_window(sampled.temporal_window())?;
         if !roi_contains(demand.input_roi().region(), sampled.input_roi().region()) {
             return Err(EffectTemporalExecutionError::SampledSpatialDemandEscaped {
                 time: context.time,
@@ -1102,6 +1608,7 @@ fn bind_temporal_image_domain(
         request: request.clone(),
         program: Arc::clone(program),
         demands,
+        auxiliary_demands: frozen.auxiliary_demands.clone(),
     })
 }
 
@@ -1115,6 +1622,16 @@ fn ensure_temporal_program(
     } else {
         Ok(())
     }
+}
+
+fn temporal_primary_extent(
+    graph: &CompiledEffectGraph,
+) -> Result<crate::EffectTemporalInputExtent, EffectTemporalExecutionError> {
+    graph.primary_temporal_input_extent().map_err(|_| {
+        EffectTemporalExecutionError::InvalidTemporalOperation {
+            reason: "primary temporal extent overflowed",
+        }
+    })
 }
 
 fn finite_temporal_bounds(
@@ -1135,8 +1652,9 @@ struct PreparedScalarTemporalRequest {
     cache_identity: [u8; 32],
     retained_coverage_bytes: usize,
     mask_rasters: HashMap<usize, Arc<PreparedMaskRasterSet>>,
+    /// Exact authored byte size of every auxiliary slot this execution reads.
+    auxiliary_bytes: HashMap<TemporalValueAddress, usize>,
 }
-
 impl PreparedScalarTemporalRequest {
     fn prepare_mask_rasters(
         mut self,
@@ -1305,6 +1823,25 @@ impl EffectExecutionSession {
         provider: &mut dyn EffectTemporalFrameProvider,
         control: &mut crate::EffectProcessorControl<'_>,
     ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+        self.execute_prepared_temporal_f32_with_auxiliary(
+            execution,
+            provider,
+            &mut NoAuxiliaryProvider,
+            control,
+        )
+    }
+
+    /// Execute the prepared temporal program with explicit auxiliary rasters.
+    ///
+    /// Auxiliary rasters are addressed by evaluation context, so two Echo taps
+    /// that reuse one compiled slot number each read their own author time.
+    pub fn execute_prepared_temporal_f32_with_auxiliary(
+        &mut self,
+        execution: &PreparedEffectTemporalExecution,
+        provider: &mut dyn EffectTemporalFrameProvider,
+        auxiliary: &mut dyn EffectTemporalAuxiliaryProvider,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
         let request = scoped_input_request(&execution.request, control);
         processor_input_checkpoint(&request, control)?;
         let compiled = execution.graph.as_ref();
@@ -1313,6 +1850,7 @@ impl EffectExecutionSession {
             &request,
             Arc::clone(&execution.program),
             provider,
+            auxiliary,
         )?;
         self.bind_generation(request.generation);
         // Dynamic Source requests are not part of the frozen provider's
@@ -1332,6 +1870,7 @@ impl EffectExecutionSession {
             compiled,
             &request,
             provider,
+            auxiliary,
             prepared,
         )?;
         processor_input_checkpoint(&request, control)?;
@@ -1395,6 +1934,7 @@ impl EffectExecutionSession {
             request,
             Arc::clone(&execution.program),
             provider,
+            &NoAuxiliaryProvider,
         )?;
         self.bind_generation(request.generation);
         if let Some(output) = self.cached_or_empty_temporal_output(compiled, request, &prepared)? {
@@ -1422,6 +1962,7 @@ impl EffectExecutionSession {
             &mut control,
             request,
             provider,
+            &mut NoAuxiliaryProvider,
             prepared,
             available,
         )?;
@@ -1491,6 +2032,22 @@ pub(crate) fn execute_prepared_input_on_bank(
     scope: &mut crate::processor_residency::FloatProcessorExecution<'_>,
     control: &mut crate::EffectProcessorControl<'_>,
 ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
+    execute_prepared_input_on_bank_with_auxiliary(
+        execution,
+        provider,
+        &mut NoAuxiliaryProvider,
+        scope,
+        control,
+    )
+}
+
+pub(crate) fn execute_prepared_input_on_bank_with_auxiliary(
+    execution: &PreparedEffectTemporalExecution,
+    provider: &mut dyn EffectTemporalFrameProvider,
+    auxiliary: &mut dyn EffectTemporalAuxiliaryProvider,
+    scope: &mut crate::processor_residency::FloatProcessorExecution<'_>,
+    control: &mut crate::EffectProcessorControl<'_>,
+) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
     let request = scoped_input_request(&execution.request, control);
     processor_input_checkpoint(&request, control)?;
     let compiled = execution.graph.as_ref();
@@ -1499,11 +2056,14 @@ pub(crate) fn execute_prepared_input_on_bank(
         &request,
         Arc::clone(&execution.program),
         provider,
+        auxiliary,
     )?;
     if let Some(output) = empty_temporal_output(&request, &prepared)? {
         return Ok(output);
     }
-    execute_prepared_scalar_on_bank(scope, control, compiled, &request, provider, prepared)
+    execute_prepared_scalar_on_bank(
+        scope, control, compiled, &request, provider, auxiliary, prepared,
+    )
 }
 
 fn prepare_temporal_scalar_request(
@@ -1511,6 +2071,7 @@ fn prepare_temporal_scalar_request(
     request: &EffectTemporalExecutionRequest,
     temporal_program: Arc<PreparedTemporalValueProgram>,
     provider: &dyn EffectTemporalFrameProvider,
+    auxiliary: &dyn EffectTemporalAuxiliaryProvider,
 ) -> Result<PreparedScalarTemporalRequest, EffectTemporalExecutionError> {
     if request.cancellation.is_canceled() {
         return Err(EffectTemporalExecutionError::Canceled);
@@ -1542,15 +2103,41 @@ fn prepare_temporal_scalar_request(
         request.frame_extent,
         request.output_roi,
     )?;
-    ensure_bounded_temporal_window(demand.temporal_window())?;
     let source_identity = provider.source_identity();
-    let retained_coverage_bytes = provider.retained_coverage_bytes();
+    let retained_coverage_bytes = provider
+        .retained_coverage_bytes()
+        .checked_add(auxiliary.retained_coverage_bytes())
+        .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+            required_bytes: usize::MAX,
+            budget_bytes: usize::MAX,
+        })?;
+    // Each auxiliary slot is charged at its authored size, and every distinct
+    // (context, slot) value that stays resident is charged again by the
+    // schedule, so simultaneously live historical rasters are counted.
+    let mut auxiliary_bytes = HashMap::new();
+    for &address in temporal_program.ordered_values() {
+        let TemporalValueAddress::Auxiliary { context, slot } = address else {
+            continue;
+        };
+        let time = temporal_program.context(context)?.time;
+        let (authored, _, _) = auxiliary
+            .auxiliary_image(time, slot)
+            .ok_or(EffectTemporalExecutionError::AuxiliaryFrameMissing { time, slot })?;
+        let bytes = checked_pixel_count(authored)
+            .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
+            .ok_or(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: usize::MAX,
+            })?;
+        auxiliary_bytes.insert(address, bytes);
+    }
     let cache_identity = temporal_cache_identity(
         compiled,
         request,
         demand.input_roi(),
         source_identity,
         temporal_program.fingerprint(),
+        (!auxiliary_bytes.is_empty()).then(|| auxiliary.source_identity()),
     );
     Ok(PreparedScalarTemporalRequest {
         temporal_program,
@@ -1558,6 +2145,7 @@ fn prepare_temporal_scalar_request(
         cache_identity,
         retained_coverage_bytes,
         mask_rasters: HashMap::new(),
+        auxiliary_bytes,
     })
 }
 
@@ -1591,6 +2179,7 @@ fn execute_prepared_scalar_on_bank(
     compiled: &CompiledEffectGraph,
     request: &EffectTemporalExecutionRequest,
     provider: &mut dyn EffectTemporalFrameProvider,
+    auxiliary: &mut dyn EffectTemporalAuxiliaryProvider,
     prepared: PreparedScalarTemporalRequest,
 ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
     let budget = scope.working_bytes;
@@ -1608,6 +2197,7 @@ fn execute_prepared_scalar_on_bank(
         &prepared.temporal_program,
         &prepared.demand,
         &prepared.mask_rasters,
+        &prepared.auxiliary_bytes,
     )?;
     let retained_execution_bytes = prepared.retained_execution_bytes()?;
     let direct_required = retained_execution_bytes
@@ -1622,6 +2212,7 @@ fn execute_prepared_scalar_on_bank(
             control,
             request,
             provider,
+            auxiliary,
             prepared,
             budget - retained_execution_bytes,
         )?;
@@ -1631,7 +2222,7 @@ fn execute_prepared_scalar_on_bank(
     }
 
     execute_tiled_temporal_f32(
-        scope, control, compiled, request, provider, prepared, budget,
+        scope, control, compiled, request, provider, auxiliary, prepared, budget,
     )
 }
 
@@ -1640,6 +2231,7 @@ fn execute_prepared_temporal_tile_f32(
     control: &mut crate::EffectProcessorControl<'_>,
     request: &EffectTemporalExecutionRequest,
     provider: &mut dyn EffectTemporalFrameProvider,
+    auxiliary: &mut dyn EffectTemporalAuxiliaryProvider,
     prepared: PreparedScalarTemporalRequest,
     working_budget: usize,
 ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
@@ -1647,6 +2239,7 @@ fn execute_prepared_temporal_tile_f32(
         &prepared.temporal_program,
         &prepared.demand,
         &prepared.mask_rasters,
+        &prepared.auxiliary_bytes,
     )?;
     if footprint.required_bytes > working_budget {
         return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
@@ -1662,6 +2255,8 @@ fn execute_prepared_temporal_tile_f32(
         Arc::clone(&prepared.temporal_program),
         mask_rasters,
         provider,
+        auxiliary,
+        &prepared.auxiliary_bytes,
         working_budget,
     )?;
     let output = evaluator.execute(scope, control, &footprint.pixel_reservations)?;
@@ -1718,6 +2313,7 @@ fn execute_tiled_temporal_f32(
     compiled: &CompiledEffectGraph,
     request: &EffectTemporalExecutionRequest,
     provider: &mut dyn EffectTemporalFrameProvider,
+    auxiliary: &mut dyn EffectTemporalAuxiliaryProvider,
     prepared: PreparedScalarTemporalRequest,
     budget: usize,
 ) -> Result<EffectTemporalExecutionOutput, EffectTemporalExecutionError> {
@@ -1764,6 +2360,7 @@ fn execute_tiled_temporal_f32(
         tile_budget,
         budget,
         &mask_rasters,
+        &prepared.auxiliary_bytes,
     )?;
     scope.bank.trim_working(tile_budget);
     let mut assembled = vec![[0.0_f32; 4]; output_pixels];
@@ -1788,6 +2385,7 @@ fn execute_tiled_temporal_f32(
             &tile_request,
             Arc::clone(&prepared.temporal_program),
             provider,
+            auxiliary,
         )?;
         if tile_prepared.retained_coverage_bytes != prepared.retained_coverage_bytes {
             return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
@@ -1804,6 +2402,7 @@ fn execute_tiled_temporal_f32(
             control,
             &tile_request,
             provider,
+            auxiliary,
             tile_prepared,
             tile_budget,
         )?;
@@ -1866,11 +2465,9 @@ fn admit_temporal_scalar(
     if aggregate.resource_lifetime == EffectResourceLifetime::ContinuitySession {
         return Err(EffectTemporalExecutionError::ContinuityResourceUnsupported);
     }
-    if matches!(aggregate.temporal_input.past, EffectTemporalSpan::Unbounded)
-        || matches!(
-            aggregate.temporal_input.future,
-            EffectTemporalSpan::Unbounded
-        )
+    let primary_extent = temporal_primary_extent(compiled)?;
+    if matches!(primary_extent.past, EffectTemporalSpan::Unbounded)
+        || matches!(primary_extent.future, EffectTemporalSpan::Unbounded)
     {
         return Err(EffectTemporalExecutionError::UnboundedTemporalInput);
     }
@@ -1948,13 +2545,16 @@ struct ScalarTemporalEvaluator<'a> {
     temporal_program: Arc<PreparedTemporalValueProgram>,
     mask_rasters: HashMap<usize, Arc<PreparedMaskRasterSet>>,
     provider: &'a mut dyn EffectTemporalFrameProvider,
+    auxiliary_provider: &'a mut dyn EffectTemporalAuxiliaryProvider,
     outputs: HashMap<TemporalValueAddress, Vec<[f32; 4]>>,
     remaining_uses: HashMap<TemporalValueAddress, usize>,
     provider_requests: usize,
+    auxiliary_bytes: &'a HashMap<TemporalValueAddress, usize>,
     working: ScalarWorkingSet,
 }
 
 impl<'a> ScalarTemporalEvaluator<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         request: &'a EffectTemporalExecutionRequest,
         input_roi: EffectInputRoi,
@@ -1962,6 +2562,8 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         temporal_program: Arc<PreparedTemporalValueProgram>,
         mask_rasters: HashMap<usize, Arc<PreparedMaskRasterSet>>,
         provider: &'a mut dyn EffectTemporalFrameProvider,
+        auxiliary_provider: &'a mut dyn EffectTemporalAuxiliaryProvider,
+        auxiliary_bytes: &'a HashMap<TemporalValueAddress, usize>,
         working_budget: usize,
     ) -> Result<Self, EffectTemporalExecutionError> {
         let input_region = input_roi.region();
@@ -1994,9 +2596,11 @@ impl<'a> ScalarTemporalEvaluator<'a> {
             temporal_program,
             mask_rasters,
             provider,
+            auxiliary_provider,
             outputs: HashMap::with_capacity(output_capacity),
             remaining_uses,
             provider_requests: 0,
+            auxiliary_bytes,
             working: ScalarWorkingSet::new(working_budget, frame_bytes),
         })
     }
@@ -2022,6 +2626,9 @@ impl<'a> ScalarTemporalEvaluator<'a> {
             processor_input_checkpoint(self.request, control)?;
             let output = match address {
                 TemporalValueAddress::Source(time) => self.fetch_source(time, control)?,
+                TemporalValueAddress::Auxiliary { context, slot } => {
+                    self.fetch_auxiliary(context, slot, control)?
+                }
                 TemporalValueAddress::Graph { context, node_id } => {
                     let context_ref = self.temporal_program.context(context)?;
                     let frame_seed = context_ref.frame_seed;
@@ -2040,13 +2647,55 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                             })
                         }
                         EffectGraphNodeKind::ExternalInput { .. } => {
-                            return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                                node_id,
-                                kind: "external_input",
-                            })
+                            unreachable!(
+                                "external input was normalized in the time-expanded schedule"
+                            )
                         }
-                        EffectGraphNodeKind::AuxiliaryEffect { .. }
-                        | EffectGraphNodeKind::VideoCollage { .. } => {
+                        EffectGraphNodeKind::AuxiliaryEffect {
+                            input: input_id,
+                            auxiliary: auxiliary_id,
+                            op,
+                            sampling,
+                            ..
+                        } => {
+                            let input =
+                                self.temporal_program.address_for_input(context, input_id)?;
+                            let auxiliary =
+                                self.temporal_program.address_for_input(context, auxiliary_id)?;
+                            let mut output = self.take_value(input)?;
+                            let raster = self.take_value(auxiliary)?;
+                            let (extent, image_sampling, format) =
+                                self.auxiliary_image(auxiliary)?;
+                            let frame = crate::EffectFloatFrameView::new(
+                                extent,
+                                format,
+                                image_sampling,
+                                &raster,
+                            );
+                            let applied = crate::auxiliary::apply_auxiliary_effect_f32_region(
+                                &mut output,
+                                self.raster_region,
+                                &op,
+                                crate::AuxiliaryFloatFrame::new(
+                                    frame,
+                                    crate::AuxiliaryPolicy::new(
+                                        crate::AuxiliaryResolution::Authored,
+                                    ),
+                                ),
+                                sampling,
+                                &mut || processor_input_checkpoint(self.request, control),
+                            )?;
+                            if !applied {
+                                return Err(
+                                    EffectTemporalExecutionError::UnsupportedRenderOperation {
+                                        op: render_op_name(&op),
+                                    },
+                                );
+                            }
+                            self.working.release_bytes(self.auxiliary_bytes[&auxiliary])?;
+                            output
+                        }
+                        EffectGraphNodeKind::VideoCollage { .. } => {
                             return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
                                 node_id,
                                 kind: crate::gpu_plan::node_kind_name(&node.kind),
@@ -2411,6 +3060,101 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         Ok(pixels)
     }
 
+    fn fetch_auxiliary(
+        &mut self,
+        context: usize,
+        slot: u32,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
+        processor_input_checkpoint(self.request, control)?;
+        let context_ref = self.temporal_program.context(context)?;
+        let declared_format = context_ref
+            .graph
+            .graph()
+            .nodes
+            .iter()
+            .find_map(|node| match node.kind {
+                EffectGraphNodeKind::ExternalInput { slot: declared, format, .. }
+                    if declared == slot =>
+                {
+                    Some(format)
+                }
+                _ => None,
+            })
+            .ok_or(EffectTemporalExecutionError::UnsupportedGraphNode {
+                node_id: EffectGraphNodeId(0),
+                kind: "external_input",
+            })?;
+        let address = TemporalValueAddress::Auxiliary { context, slot };
+        let (authored, sampling, format) = self.auxiliary_image(address)?;
+        if format != declared_format {
+            return Err(EffectTemporalFrameProviderError::InvalidTile {
+                reason: format!(
+                    "temporal auxiliary slot {slot} does not match its declared format"
+                ),
+            }
+            .into());
+        }
+        let pixel_count = checked_pixel_count(authored).ok_or(
+            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: self.working.budget,
+            },
+        )?;
+        let bytes = pixel_count.checked_mul(std::mem::size_of::<[f32; 4]>()).ok_or(
+            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: self.working.budget,
+            },
+        )?;
+        self.working.reserve_bytes(bytes)?;
+        let request = EffectTemporalAuxiliaryRequest {
+            generation: self.request.generation,
+            context_time: context_ref.time,
+            frame_seed: context_ref.frame_seed,
+            slot,
+            extent: authored,
+            format,
+            sampling,
+        };
+        let mut pixels = Vec::with_capacity(pixel_count);
+        self.auxiliary_provider
+            .copy_auxiliary(request, &self.request.cancellation, &mut pixels)?;
+        processor_input_checkpoint(self.request, control)?;
+        if pixels.len() != pixel_count {
+            return Err(EffectTemporalFrameProviderError::InvalidTile {
+                reason: format!(
+                    "auxiliary provider copied {} pixels but the raster requires {pixel_count}",
+                    pixels.len()
+                ),
+            }
+            .into());
+        }
+        Ok(pixels)
+    }
+
+    fn auxiliary_image(
+        &self,
+        address: TemporalValueAddress,
+    ) -> Result<
+        (
+            EffectFrameExtent,
+            mondrian_core::ImageSampling,
+            crate::EffectValueFormat,
+        ),
+        EffectTemporalExecutionError,
+    > {
+        let TemporalValueAddress::Auxiliary { context, slot } = address else {
+            return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+                reason: "temporal auxiliary raster must be a host input",
+            });
+        };
+        let time = self.temporal_program.context(context)?.time;
+        self.auxiliary_provider
+            .auxiliary_image(time, slot)
+            .ok_or(EffectTemporalExecutionError::AuxiliaryFrameMissing { time, slot })
+    }
+
     fn temporal_blend(
         &mut self,
         input: TemporalValueAddress,
@@ -2454,7 +3198,8 @@ impl<'a> ScalarTemporalEvaluator<'a> {
             return self.outputs.remove(&address).ok_or_else(|| missing_temporal_value(address));
         }
 
-        self.working.reserve_frame()?;
+        let bytes = self.auxiliary_bytes.get(&address).copied().unwrap_or(self.working.frame_bytes);
+        self.working.reserve_bytes(bytes)?;
         self.outputs
             .get(&address)
             .cloned()
@@ -2467,9 +3212,11 @@ fn missing_temporal_value(address: TemporalValueAddress) -> EffectTemporalExecut
         TemporalValueAddress::Graph { node_id, .. } => {
             EffectTemporalExecutionError::MissingGraphValue { node_id }
         }
-        TemporalValueAddress::Source(_) => EffectTemporalExecutionError::InvalidGraphLiveness {
-            reason: "time-expanded source value is missing",
-        },
+        TemporalValueAddress::Source(_) | TemporalValueAddress::Auxiliary { .. } => {
+            EffectTemporalExecutionError::InvalidGraphLiveness {
+                reason: "time-expanded source value is missing",
+            }
+        }
     }
 }
 
@@ -2504,7 +3251,33 @@ impl ScalarWorkingSet {
     }
 
     fn release_frame(&mut self) -> Result<(), EffectTemporalExecutionError> {
-        self.resident_bytes = self.resident_bytes.checked_sub(self.frame_bytes).ok_or(
+        self.release_bytes(self.frame_bytes)
+    }
+
+    /// Reserve one value whose exact size is not a primary frame.
+    ///
+    /// Auxiliary rasters are sampled by normalized `uv`, so their authored
+    /// extent, not the primary ROI, decides how many bytes they occupy.
+    fn reserve_bytes(&mut self, bytes: usize) -> Result<(), EffectTemporalExecutionError> {
+        let required = self.resident_bytes.checked_add(bytes).ok_or(
+            EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: usize::MAX,
+                budget_bytes: self.budget,
+            },
+        )?;
+        if required > self.budget {
+            return Err(EffectTemporalExecutionError::WorkingSetBudgetExceeded {
+                required_bytes: required,
+                budget_bytes: self.budget,
+            });
+        }
+        self.resident_bytes = required;
+        self.peak = self.peak.max(required);
+        Ok(())
+    }
+
+    fn release_bytes(&mut self, bytes: usize) -> Result<(), EffectTemporalExecutionError> {
+        self.resident_bytes = self.resident_bytes.checked_sub(bytes).ok_or(
             EffectTemporalExecutionError::InvalidGraphLiveness {
                 reason: "working-set ledger released a non-resident frame",
             },
@@ -2563,12 +3336,20 @@ fn temporal_cache_identity(
     input_roi: EffectInputRoi,
     source_identity: EffectTemporalSourceIdentity,
     temporal_program_fingerprint: [u8; 32],
+    auxiliary_identity: Option<EffectTemporalSourceIdentity>,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.effect-temporal-roi-execution.v4");
+    hasher.update(b"mondrian.effect-temporal-roi-execution.v5");
     hasher.update(compiled.semantic_fingerprint());
     hasher.update(temporal_program_fingerprint);
     hasher.update(source_identity.semantic_fingerprint());
+    match auxiliary_identity {
+        Some(identity) => {
+            hasher.update([1]);
+            hasher.update(identity.semantic_fingerprint());
+        }
+        None => hasher.update([0]),
+    }
     hasher.update(request.generation.to_le_bytes());
     hash_time(&mut hasher, request.output_time);
     hasher.update(request.output_frame_seed.to_le_bytes());
@@ -3203,6 +3984,104 @@ mod tests {
             resource_lifetime: EffectResourceLifetime::Frame,
             topology: EffectGraphTopology::GeneralDag,
         }
+    }
+
+    #[test]
+    fn echo_binds_raster_extent_and_pixels_by_temporal_auxiliary_context() {
+        use crate::EffectType;
+        use mondrian_core::{AssetId, PropertyValue, VisualSourceReference, WorkingColorSpace};
+        let mut matte = crate::instantiate_effect_node(EffectType::SetMatte).unwrap();
+        matte
+            .set_static_value_by_parameter(
+                &EffectType::SetMatte.parameter_id("matte_source").unwrap(),
+                PropertyValue::VisualSource(VisualSourceReference::Asset {
+                    asset_id: AssetId::new(),
+                    retime: Default::default(),
+                }),
+            )
+            .unwrap();
+        let mut echo = crate::instantiate_effect_node(EffectType::Echo).unwrap();
+        for (key, value) in [
+            ("echo_time", PropertyValue::Float(-0.25)),
+            ("operator", PropertyValue::Enum("normal".to_owned())),
+            ("starting_intensity", PropertyValue::Float(0.5)),
+        ] {
+            echo.set_static_value_by_parameter(&EffectType::Echo.parameter_id(key).unwrap(), value)
+                .unwrap();
+        }
+        let program =
+            PreparedEffectProgram::prepare(&[matte, echo], &[], WorkingColorSpace::LinearRec709)
+                .unwrap();
+        let extent = EffectFrameExtent::new(3, 2);
+        let now = TimelineTime::new(1, 2).unwrap();
+        let historical = TimelineTime::new(1, 4).unwrap();
+        let request = EffectTemporalExecutionRequest::new(
+            1,
+            EffectExecutionContinuity::Discontinuous,
+            now,
+            extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        let execution = prepare_temporal_frame_execution(&program, &request, |_| Ok(1)).unwrap();
+        let demands = execution.auxiliary_demands();
+        assert_eq!(
+            demands
+                .demands()
+                .iter()
+                .map(|demand| (demand.context_time(), demand.slot()))
+                .collect::<Vec<_>>(),
+            [(now, 0), (historical, 0)]
+        );
+        let freeze = |history_alpha, skip_history| {
+            PreparedTemporalAuxiliarySet::prepare(
+                EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([4; 32]),
+                demands.generation(),
+                demands.demands().iter().filter_map(|&demand| {
+                    let current = demand.context_time() == now;
+                    if !current && skip_history {
+                        return None;
+                    }
+                    let (extent, alpha) = if current {
+                        (EffectFrameExtent::new(1, 3), 0.0)
+                    } else {
+                        (EffectFrameExtent::new(5, 2), history_alpha)
+                    };
+                    let domain = mondrian_core::ImageSampling::UNIT_SQUARE;
+                    let request = demand.request(demands.generation(), extent, domain);
+                    let pixels = vec![[1.0, 1.0, 1.0, alpha]; checked_pixel_count(extent).unwrap()];
+                    Some((
+                        request,
+                        crate::EffectFloatFrame::from_pixels(
+                            extent,
+                            request.format(),
+                            domain,
+                            pixels,
+                        )
+                        .unwrap(),
+                    ))
+                }),
+            )
+            .unwrap()
+        };
+        let mut session = EffectExecutionSession::default();
+        let mut run = |history_alpha, skip_history| {
+            session.execute_prepared_temporal_f32_with_auxiliary(
+                &execution,
+                &mut GradientProvider::new(extent),
+                &mut freeze(history_alpha, skip_history),
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+        };
+        let mixed = run(1.0, false).unwrap();
+        assert!(mixed.tile().pixels().iter().all(|pixel| (pixel[3] - 0.5).abs() < 1e-6));
+        let disabled = run(0.0, false).unwrap();
+        assert_ne!(mixed.cache_identity(), disabled.cache_identity());
+        assert!(disabled.tile().pixels().iter().all(|pixel| pixel[3] == 0.0));
+        assert!(
+            matches!(run(1.0, true), Err(EffectTemporalExecutionError::AuxiliaryFrameMissing { time, slot: 0 }) if time == historical)
+        );
     }
 
     #[test]
@@ -4265,9 +5144,13 @@ mod tests {
         let output_bytes = 3_840 * 2_160 * std::mem::size_of::<[f32; 4]>();
         let base_resident_bytes = source_coverage_bytes + output_bytes;
         let budget = 384 * 1024 * 1024;
-        let direct_working =
-            temporal_scalar_required_bytes(&temporal_program, &demand, &mask_rasters)
-                .expect("direct proof");
+        let direct_working = temporal_scalar_required_bytes(
+            &temporal_program,
+            &demand,
+            &mask_rasters,
+            &HashMap::new(),
+        )
+        .expect("direct proof");
         assert!(base_resident_bytes <= budget);
         assert!(source_coverage_bytes + direct_working.required_bytes > budget);
 
@@ -4280,6 +5163,7 @@ mod tests {
             budget - base_resident_bytes,
             budget,
             &mask_rasters,
+            &HashMap::new(),
         )
         .expect("bounded UHD tile schedule");
         assert_eq!(tiles.len(), 64);
