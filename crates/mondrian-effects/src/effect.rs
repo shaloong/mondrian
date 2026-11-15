@@ -1285,6 +1285,12 @@ pub enum EffectRenderOp {
         /// Authored guide channel and smoothness.
         grade: crate::WatercolorGrade,
     },
+    /// Scanlines: a coordinate-driven CRT band pattern with per-channel
+    /// phase offsets and a selectable composite operator.
+    Scanlines {
+        /// Authored band geometry, colours and composite controls.
+        grade: crate::ScanlinesGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1707,6 +1713,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Watercolor { grade } => {
                 formatter.debug_struct("Watercolor").field("grade", grade).finish()
+            }
+            Self::Scanlines { grade } => {
+                formatter.debug_struct("Scanlines").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2812,6 +2821,12 @@ impl EffectRenderOp {
                 // the whole identity of the kernel.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Scanlines { grade } => {
+                128u8.hash(state);
+                // The band pattern is a pure function of the whole authored
+                // configuration, so the grade hashes every value it carries.
+                grade.hash_state(state);
+            }
             EffectRenderOp::Watercolor { grade } => {
                 127u8.hash(state);
                 // The channel tag and the raw smoothness bits select the
@@ -3062,6 +3077,7 @@ impl EffectRenderOp {
             EffectRenderOp::SmartBlur { .. } => 3,
             EffectRenderOp::Deinterlace { .. } => 1,
             EffectRenderOp::Watercolor { .. } => 2,
+            EffectRenderOp::Scanlines { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3596,7 +3612,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 128] {
+fn builtin_effect_types() -> [EffectType; 129] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3726,6 +3742,7 @@ fn builtin_effect_types() -> [EffectType; 128] {
         EffectType::PosterizeTime,
         EffectType::Deinterlace,
         EffectType::Watercolor,
+        EffectType::Scanlines,
     ]
 }
 
@@ -12363,6 +12380,229 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::Scanlines => {
+            // The nineteen authored values mirror Resolve's ScanlineV2: the band
+            // geometry, the two band colours, the per-channel phase offsets and
+            // the composite controls. The frame size enters the phase at render
+            // time, so no value here depends on a pixel position.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "appearance",
+                "扫描线",
+                "外观",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_APPEARANCE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "frequency",
+                "扫描线",
+                "扫描线频率",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_FREQUENCY),
+                Some(crate::SCANLINES_MIN_FREQUENCY as f64),
+                Some(crate::SCANLINES_MAX_FREQUENCY as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sharpness",
+                "扫描线",
+                "扫描线锐度",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_SHARPNESS),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "angle",
+                "扫描线",
+                "扫描线角度",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_ANGLE_DEGREES),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "line_width",
+                "扫描线",
+                "线条宽度",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_LINE_WIDTH),
+                Some(crate::SCANLINES_MIN_LINE_WIDTH as f64),
+                Some(crate::SCANLINES_MAX_LINE_WIDTH as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shift",
+                "扫描线",
+                "扫描线移位",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_SHIFT),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "colour",
+                "扫描线",
+                "色彩",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_COLOUR),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color1_red",
+                "扫描线",
+                "色彩1 红",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_COLOR1[0]),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color1_green",
+                "扫描线",
+                "色彩1 绿",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_COLOR1[1]),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color1_blue",
+                "扫描线",
+                "色彩1 蓝",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_COLOR1[2]),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color2_red",
+                "扫描线",
+                "色彩2 红",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_COLOR2[0]),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color2_green",
+                "扫描线",
+                "色彩2 绿",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_COLOR2[1]),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color2_blue",
+                "扫描线",
+                "色彩2 蓝",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_COLOR2[2]),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "red_offset",
+                "扫描线",
+                "红色偏移",
+                PropertyValue::Float(0.0),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "green_offset",
+                "扫描线",
+                "绿色偏移",
+                PropertyValue::Float(0.0),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blue_offset",
+                "扫描线",
+                "蓝色偏移",
+                PropertyValue::Float(0.0),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "composite",
+                "扫描线",
+                "合成",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_COMPOSITE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "lines_only",
+                "扫描线",
+                "仅显示扫描线",
+                PropertyValue::Float(crate::SCANLINES_DEFAULT_LINES_ONLY),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "composite_type",
+                "扫描线",
+                "合成类型",
+                crate::ScanlinesComposite::Overlay.as_key(),
+                crate::ScanlinesComposite::ALL
+                    .iter()
+                    .map(|composite| {
+                        let key = composite.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            composite.label(),
+                            format!("mondrian.effect.scanlines.composite_type.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::BlankingFill => define_blanking_fill_properties(&mut properties, &effect_type),
         EffectType::SmartBlur => {
             // The documented default (radius 3 at threshold 25 %) already
@@ -14279,6 +14519,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The window reaches up to four pixels out in every direction, so
             // the definition-level envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Scanlines => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The band pattern reads only the pixel's own frame coordinate, so
+            // every output pixel depends on exactly one input pixel.
+            roi_propagation: EffectRoiPropagation::PixelLocal,
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -20559,6 +20806,99 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Scanlines => {
+            let composite_type_id = builtin_parameter_id(effect_type, "composite_type");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("扫描线的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                let defaults = crate::ScanlinesParameters::default();
+                let mut parameters = defaults;
+                parameters.appearance =
+                    read(effect, context, &invalid, "appearance", defaults.appearance)?;
+                parameters.frequency =
+                    read(effect, context, &invalid, "frequency", defaults.frequency)?;
+                parameters.sharpness =
+                    read(effect, context, &invalid, "sharpness", defaults.sharpness)?;
+                parameters.angle_degrees =
+                    read(effect, context, &invalid, "angle", defaults.angle_degrees)?;
+                parameters.line_width =
+                    read(effect, context, &invalid, "line_width", defaults.line_width)?;
+                parameters.shift = read(effect, context, &invalid, "shift", defaults.shift)?;
+                parameters.colour = read(effect, context, &invalid, "colour", defaults.colour)?;
+                parameters.color1 = [
+                    read(effect, context, &invalid, "color1_red", defaults.color1[0])?,
+                    read(
+                        effect,
+                        context,
+                        &invalid,
+                        "color1_green",
+                        defaults.color1[1],
+                    )?,
+                    read(effect, context, &invalid, "color1_blue", defaults.color1[2])?,
+                ];
+                parameters.color2 = [
+                    read(effect, context, &invalid, "color2_red", defaults.color2[0])?,
+                    read(
+                        effect,
+                        context,
+                        &invalid,
+                        "color2_green",
+                        defaults.color2[1],
+                    )?,
+                    read(effect, context, &invalid, "color2_blue", defaults.color2[2])?,
+                ];
+                parameters.red_offset =
+                    read(effect, context, &invalid, "red_offset", defaults.red_offset)?;
+                parameters.green_offset = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "green_offset",
+                    defaults.green_offset,
+                )?;
+                parameters.blue_offset = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "blue_offset",
+                    defaults.blue_offset,
+                )?;
+                parameters.composite =
+                    read(effect, context, &invalid, "composite", defaults.composite)?;
+                parameters.lines_only =
+                    read(effect, context, &invalid, "lines_only", defaults.lines_only)?;
+                parameters.composite_type =
+                    match effect.evaluate_enum_parameter(&composite_type_id, context.time) {
+                        Some(key) => crate::ScanlinesComposite::from_key(&key)
+                            .ok_or_else(|| invalid("扫描线的合成类型未知".to_string()))?,
+                        None => defaults.composite_type,
+                    };
+                let grade = crate::ScanlinesGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Scanlines { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Watercolor => {
             let channel_id = builtin_parameter_id(effect_type, "channel");
             let smoothness_id = builtin_parameter_id(effect_type, "smoothness");
@@ -21959,6 +22299,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BlankingFill => "遮幅填充",
         EffectType::Deinterlace => "去交错",
         EffectType::Watercolor => "水彩",
+        EffectType::Scanlines => "扫描线与老电视",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -23361,6 +23702,7 @@ mod tests {
             EffectType::PosterizeTime,
             EffectType::Deinterlace,
             EffectType::Watercolor,
+            EffectType::Scanlines,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -32657,7 +32999,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 128);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 129);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33185,7 +33527,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 128);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 129);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -36144,7 +36486,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 128);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 129);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -37280,7 +37622,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 128);
+        assert_eq!(builtin_effect_types().len(), 129);
     }
 
     #[test]
@@ -37779,6 +38121,232 @@ mod tests {
         let reason = format!("{error:?}");
         assert!(
             reason.contains("smart_blur.radius"),
+            "the persisted value contract names the parameter: {reason}"
+        );
+    }
+
+    fn scanlines_op(graph: &EffectRenderGraph) -> Option<crate::ScanlinesGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Scanlines { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Scanlines { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_scanlines(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Scanlines)
+            .expect("the scanlines effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Scanlines.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the scanlines parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn scanlines_defaults_match_the_dump() {
+        let effect_type = EffectType::Scanlines;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("appearance", "外观"),
+            ("frequency", "扫描线频率"),
+            ("sharpness", "扫描线锐度"),
+            ("angle", "扫描线角度"),
+            ("line_width", "线条宽度"),
+            ("shift", "扫描线移位"),
+            ("colour", "色彩"),
+            ("color1_red", "色彩1 红"),
+            ("color1_green", "色彩1 绿"),
+            ("color1_blue", "色彩1 蓝"),
+            ("color2_red", "色彩2 红"),
+            ("color2_green", "色彩2 绿"),
+            ("color2_blue", "色彩2 蓝"),
+            ("red_offset", "红色偏移"),
+            ("green_offset", "绿色偏移"),
+            ("blue_offset", "蓝色偏移"),
+            ("composite", "合成"),
+            ("lines_only", "仅显示扫描线"),
+            ("composite_type", "合成类型"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("扫描线")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "scanlines",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["胶片质感"]);
+
+        let defaults = [
+            ("appearance", crate::SCANLINES_DEFAULT_APPEARANCE, 0.0, 1.0),
+            (
+                "frequency",
+                crate::SCANLINES_DEFAULT_FREQUENCY,
+                crate::SCANLINES_MIN_FREQUENCY as f64,
+                crate::SCANLINES_MAX_FREQUENCY as f64,
+            ),
+            ("sharpness", crate::SCANLINES_DEFAULT_SHARPNESS, 0.0, 1.0),
+            (
+                "angle",
+                crate::SCANLINES_DEFAULT_ANGLE_DEGREES,
+                -180.0,
+                180.0,
+            ),
+            (
+                "line_width",
+                crate::SCANLINES_DEFAULT_LINE_WIDTH,
+                crate::SCANLINES_MIN_LINE_WIDTH as f64,
+                crate::SCANLINES_MAX_LINE_WIDTH as f64,
+            ),
+            ("shift", crate::SCANLINES_DEFAULT_SHIFT, -1.0, 1.0),
+            ("colour", crate::SCANLINES_DEFAULT_COLOUR, 0.0, 1.0),
+            ("composite", crate::SCANLINES_DEFAULT_COMPOSITE, 0.0, 1.0),
+            ("lines_only", crate::SCANLINES_DEFAULT_LINES_ONLY, 0.0, 1.0),
+        ];
+        for (parameter, (default, min, max)) in
+            defaults.into_iter().map(|entry| (entry.0, (entry.1, entry.2, entry.3)))
+        {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(default));
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .expect("every numeric parameter declares a range");
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, min, "{parameter} minimum");
+            assert_eq!(contract.hard_range.max, max, "{parameter} maximum");
+        }
+
+        let composite_type = properties
+            .property(&effect_type.property_path("composite_type"))
+            .expect("the composite type is defined");
+        assert_eq!(
+            composite_type.evaluate(tt(0)),
+            PropertyValue::Enum("overlay".to_owned())
+        );
+        assert_eq!(
+            crate::ScanlinesComposite::ALL.map(|composite| composite.as_key()),
+            ["overlay", "screen", "add", "multiply", "normal"]
+        );
+        assert_eq!(
+            crate::ScanlinesGrade::documented_defaults().parameters().frequency,
+            crate::SCANLINES_DEFAULT_FREQUENCY
+        );
+    }
+
+    #[test]
+    fn scanlines_defaults_build_one_point_op_without_scratch() {
+        let effect = instantiate_effect_node(EffectType::Scanlines)
+            .expect("the scanlines effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default scanlines should compile");
+        let grade = scanlines_op(&graph).expect("the default parameters emit the pattern");
+        assert_eq!(grade, crate::ScanlinesGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one scanlines node"
+        );
+        let op = EffectRenderOp::Scanlines { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the pattern is computed from the pixel's own coordinate"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "scanlines is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            129
+        );
+    }
+
+    #[test]
+    fn scanlines_zero_appearance_builds_no_node() {
+        let effect = author_scanlines(&[("appearance", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the zero appearance should compile");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(scanlines_op(&graph), None);
+    }
+
+    #[test]
+    fn scanlines_parameters_round_trip() {
+        let effect = author_scanlines(&[
+            ("frequency", PropertyValue::Float(30.0)),
+            ("angle", PropertyValue::Float(90.0)),
+            ("color2_red", PropertyValue::Float(0.25)),
+            ("composite_type", PropertyValue::Enum("screen".to_owned())),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened scanlines should compile");
+        let mut parameters = crate::ScanlinesParameters::default();
+        parameters.frequency = 30.0;
+        parameters.angle_degrees = 90.0;
+        parameters.color2[0] = 0.25;
+        parameters.composite_type = crate::ScanlinesComposite::Screen;
+        assert_eq!(
+            scanlines_op(&graph),
+            Some(crate::ScanlinesGrade::new(parameters).expect("the authored values are in range"))
+        );
+    }
+
+    #[test]
+    fn scanlines_invalid_frequency_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::Scanlines)
+            .expect("the scanlines effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "scanlines.frequency",
+            serde_json::json!({"Float": 200.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a frequency past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("scanlines.frequency"),
             "the persisted value contract names the parameter: {reason}"
         );
     }

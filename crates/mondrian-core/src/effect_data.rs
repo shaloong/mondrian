@@ -209,6 +209,9 @@ pub enum EffectType {
     Deinterlace,
     /// Watercolor: a guide-gated diffusion that keeps edges sharp.
     Watercolor,
+    /// Scanlines: a coordinate-driven CRT band pattern with per-channel
+    /// phase offsets and a selectable composite operator.
+    Scanlines,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -359,6 +362,7 @@ impl EffectType {
             Self::BlankingFill => "builtin.blanking_fill".to_string(),
             Self::Deinterlace => "builtin.deinterlace".to_string(),
             Self::Watercolor => "builtin.watercolor".to_string(),
+            Self::Scanlines => "builtin.scanlines".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -493,6 +497,7 @@ impl EffectType {
             "builtin.blanking_fill" => Self::BlankingFill,
             "builtin.deinterlace" => Self::Deinterlace,
             "builtin.watercolor" => Self::Watercolor,
+            "builtin.scanlines" => Self::Scanlines,
             other => Self::External(other.to_string()),
         }
     }
@@ -627,6 +632,7 @@ impl EffectType {
             Self::BlankingFill => "遮幅填充",
             Self::Deinterlace => "去交错",
             Self::Watercolor => "水彩",
+            Self::Scanlines => "扫描线与老电视",
             Self::External(name) => name,
         }
     }
@@ -756,6 +762,7 @@ impl EffectType {
             Self::BlankingFill => vec!["变换"],
             Self::Deinterlace => vec!["修复"],
             Self::Watercolor => vec!["风格化"],
+            Self::Scanlines => vec!["胶片质感"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -890,6 +897,7 @@ impl EffectType {
             Self::BlankingFill => "blanking_fill".to_string(),
             Self::Deinterlace => "deinterlace".to_string(),
             Self::Watercolor => "watercolor".to_string(),
+            Self::Scanlines => "scanlines".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1397,7 +1405,13 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::BilateralBlur
             | Self::ChromaticAberrationRemoval
             | Self::Basic3D => Ok(()),
-            Self::CameraView | Self::BlankingFill | Self::Deinterlace | Self::Watercolor => Ok(()),
+            // Scanlines only reads its own pixel's coordinate and writes back the
+            // same pixel, so it cannot paint a region the source left empty.
+            Self::CameraView
+            | Self::BlankingFill
+            | Self::Deinterlace
+            | Self::Watercolor
+            | Self::Scanlines => Ok(()),
         }
     }
 }

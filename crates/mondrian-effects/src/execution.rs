@@ -3241,6 +3241,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::BlankingFill { .. } => "blanking_fill",
         EffectRenderOp::Deinterlace { .. } => "deinterlace",
         EffectRenderOp::Watercolor { .. } => "watercolor",
+        EffectRenderOp::Scanlines { .. } => "scanlines",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",

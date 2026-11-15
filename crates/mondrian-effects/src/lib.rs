@@ -186,6 +186,7 @@ pub mod posterize_time;
 pub mod qualifier;
 pub mod ramp;
 pub mod remove_color_matting;
+pub mod scanlines;
 pub mod scatter;
 pub mod selective_color;
 pub mod shift_channels;
@@ -581,6 +582,15 @@ pub use ramp::{
 };
 pub use remove_color_matting::{
     remove_color_matting_frame_f32, RemoveColorMattingError, RemoveColorMattingGrade,
+};
+
+pub use scanlines::{
+    scanlines_frame_f32, ScanlinesComposite, ScanlinesError, ScanlinesGrade, ScanlinesParameters,
+    SCANLINES_DEFAULT_ANGLE_DEGREES, SCANLINES_DEFAULT_APPEARANCE, SCANLINES_DEFAULT_COLOR1,
+    SCANLINES_DEFAULT_COLOR2, SCANLINES_DEFAULT_COLOUR, SCANLINES_DEFAULT_COMPOSITE,
+    SCANLINES_DEFAULT_FREQUENCY, SCANLINES_DEFAULT_LINES_ONLY, SCANLINES_DEFAULT_LINE_WIDTH,
+    SCANLINES_DEFAULT_SHARPNESS, SCANLINES_DEFAULT_SHIFT, SCANLINES_MAX_FREQUENCY,
+    SCANLINES_MAX_LINE_WIDTH, SCANLINES_MIN_FREQUENCY, SCANLINES_MIN_LINE_WIDTH,
 };
 pub use scatter::{
     scatter_frame_f32, ScatterError, ScatterGrade, SCATTER_MAX_AMOUNT_PIXELS, SCATTER_MAX_COPIES,

@@ -549,6 +549,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Scanlines { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "scanlines",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Basic3D { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "basic_3d",
@@ -1383,6 +1389,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::Invert { .. }
         | EffectRenderOp::Crop { .. }
         | EffectRenderOp::TemporalFrameBlend { .. }
+        | EffectRenderOp::Scanlines { .. }
         | EffectRenderOp::Lut3D { .. } => 0,
     }
 }
@@ -1913,6 +1920,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             )
         }
         EffectRenderOp::Watercolor { grade } => crate::watercolor::apply_watercolor_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            grade,
+            checkpoint,
+        ),
+        EffectRenderOp::Scanlines { grade } => crate::scanlines::apply_scanlines_f32_controlled(
             working,
             region.width as usize,
             region.height as usize,

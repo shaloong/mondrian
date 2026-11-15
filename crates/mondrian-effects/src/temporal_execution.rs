@@ -3670,6 +3670,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::BlankingFill { .. } => "blanking_fill",
         crate::EffectRenderOp::Deinterlace { .. } => "deinterlace",
         crate::EffectRenderOp::Watercolor { .. } => "watercolor",
+        crate::EffectRenderOp::Scanlines { .. } => "scanlines",
         crate::EffectRenderOp::SetMatte { .. } => "set_matte",
         crate::EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         crate::EffectRenderOp::GrowBounds { .. } => "grow_bounds",

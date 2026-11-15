@@ -242,6 +242,11 @@ pub enum EffectGpuPointOp {
         /// Blend from the unbounded source RGB to the domain-clamped LUT sample.
         intensity: f32,
     },
+    /// CRT scanlines: a coordinate-driven band pattern carried whole, so the
+    /// shader reads the exact packed controls and never re-derives them.
+    Scanlines {
+        grade: crate::ScanlinesGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -958,6 +963,7 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::ChannelCombiner { grade } => {
             Ok(EffectGpuPointOp::ChannelCombiner { grade: *grade })
         }
+        EffectRenderOp::Scanlines { grade } => Ok(EffectGpuPointOp::Scanlines { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1100,6 +1106,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::BlankingFill { .. } => "blanking_fill",
         EffectRenderOp::Deinterlace { .. } => "deinterlace",
         EffectRenderOp::Watercolor { .. } => "watercolor",
+        EffectRenderOp::Scanlines { .. } => "scanlines",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",
