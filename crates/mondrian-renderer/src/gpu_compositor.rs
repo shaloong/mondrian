@@ -19015,6 +19015,151 @@ mod tests {
         pixels
     }
 
+    fn abstraction_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let mut colour = [0.15 + 0.6 * u, 0.55 - 0.4 * v, 0.2 + 0.5 * (1.0 - u) * v];
+                if (u - 0.45).abs() < 0.18 && (v - 0.5).abs() < 0.25 {
+                    colour = [(colour[0] + 0.3).min(1.0), colour[1] * 0.4, colour[2] + 0.2];
+                }
+                if u > 0.72 {
+                    colour = [colour[0] * 0.3, colour[1] + 0.3, colour[2] * 0.5];
+                }
+                // Partial coverage only: the straight-to-premultiplied round trip
+                // normalises fully transparent pixels, so the fixture avoids zero.
+                let alpha = if x == 3 { 0.35 } else { 1.0 };
+                pixels.push([
+                    colour[0].min(1.0),
+                    colour[1].min(1.0),
+                    colour[2].min(1.0),
+                    alpha,
+                ]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_abstraction_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            abstraction_frame_f32, AbstractionGrade, AbstractionParameters, EffectGpuSpatialPass,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping abstraction parity test: no GPU adapter available");
+            return;
+        };
+        let width = 15;
+        let height = 12;
+        let pixels = abstraction_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+
+        let cases: [(&str, AbstractionParameters); 5] = [
+            ("documented defaults", AbstractionParameters::default()),
+            (
+                "wide blur and coarse bins",
+                AbstractionParameters {
+                    blur: 0.5,
+                    bins: 4.0,
+                    iterations: 4.0,
+                    quantize: 1.0,
+                    quantize_control: 1.0,
+                    smoothness: 1.0,
+                    softness: 0.0,
+                    ..AbstractionParameters::default()
+                },
+            ),
+            (
+                "edges only",
+                AbstractionParameters {
+                    blur: 0.2,
+                    quantize: 0.0,
+                    draw_edges: 1.0,
+                    edge_strength: 6.0,
+                    edge_threshold: 0.05,
+                    ..AbstractionParameters::default()
+                },
+            ),
+            (
+                "half quantise control",
+                AbstractionParameters {
+                    blur: 0.3,
+                    bins: 2.0,
+                    iterations: 2.0,
+                    quantize: 1.0,
+                    quantize_control: 0.5,
+                    edge_control: 0.4,
+                    ..AbstractionParameters::default()
+                },
+            ),
+            (
+                "no blur no edges",
+                AbstractionParameters {
+                    blur: 0.0,
+                    quantize: 0.0,
+                    draw_edges: 0.0,
+                    ..AbstractionParameters::default()
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = AbstractionGrade::new(parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let mut cpu = pixels.clone();
+            assert!(
+                abstraction_frame_f32(&mut cpu, width as usize, height as usize, &grade),
+                "{label}: the CPU kernel must accept the frame"
+            );
+
+            let pass = EffectGpuSpatialPass::Abstraction { grade };
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 3, "{label}: two blur passes then the redraw");
+            let source = key_cleaner_upload(&context, &pixels, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, passes as usize);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.abstraction.encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label} record: {error}"));
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+
+            assert_eq!(gpu.len(), cpu.len(), "{label}: pixel count");
+            if grade.radius() > 0 {
+                assert!(
+                    cpu.iter().zip(pixels.iter()).any(|(after, before)| {
+                        (0..3).any(|channel| (after[channel] - before[channel]).abs() > 1.0e-4)
+                    }),
+                    "{label}: the fixture must actually move"
+                );
+            }
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 2.0e-4,
+                        "abstraction case {label} pixel {pixel_index} channel {channel}: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gpu_smart_blur_matches_the_cpu_kernel() {
         use mondrian_effects::{

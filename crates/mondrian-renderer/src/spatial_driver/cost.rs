@@ -384,6 +384,8 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // A nine by nine window at the radius ceiling: eighty-one clamped
         // loads, two guide evaluations and one write per pixel.
         "watercolor" => 6.0,
+        // Two 17-tap separable passes and a five-read redraw.
+        "abstraction" => 3.2,
         "bilateral_blur" => 70.0,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
@@ -453,6 +455,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "chromatic_aberration_removal" => 2.6,
         "deinterlace" => 2.4,
         "watercolor" => 9.0,
+        "abstraction" => 5.0,
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,

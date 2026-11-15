@@ -85,6 +85,9 @@ pub(crate) struct EffectSpatialGpu {
     chromatic_aberration_removal: wgpu::RenderPipeline,
     deinterlace: wgpu::RenderPipeline,
     watercolor: wgpu::RenderPipeline,
+    abstraction_horizontal: wgpu::RenderPipeline,
+    abstraction_vertical: wgpu::RenderPipeline,
+    abstraction: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
     grow_bounds: wgpu::RenderPipeline,
@@ -875,6 +878,94 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_watercolor"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let abstraction_horizontal =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mondrian.effect-spatial.abstraction_horizontal"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_abstraction_horizontal"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+        let abstraction_vertical = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.abstraction_vertical"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_abstraction_vertical"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let abstraction = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.abstraction"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_abstraction"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -2278,6 +2369,9 @@ impl EffectSpatialGpu {
             chromatic_aberration_removal,
             deinterlace,
             watercolor,
+            abstraction_horizontal,
+            abstraction_vertical,
+            abstraction,
             basic_3d,
             camera_view,
             grow_bounds,
@@ -2921,6 +3015,75 @@ impl EffectSpatialGpu {
         destination.clone()
     }
 
+    fn record_abstraction(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::AbstractionGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        // Two blur planes plus the finished frame: the vertical pass reads the
+        // horizontal plane, and the redraw needs both the vertical plane and its
+        // four neighbours, so none of them can be reused in place.
+        if scratch.len() < 3 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "abstraction_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        let (params, color, extra) = grade.gpu_controls();
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let horizontal_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        let vertical_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+        let destination_view = scratch[2].create_view(&wgpu::TextureViewDescriptor::default());
+
+        let blur_uniform = SpatialPassUniform {
+            size,
+            params: [params[0], 0.0, 0.0, 0.0],
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        self.record_pass(
+            device,
+            encoder,
+            &self.abstraction_horizontal,
+            &source_view,
+            &horizontal_view,
+            &blur_uniform,
+        );
+        self.record_pass(
+            device,
+            encoder,
+            &self.abstraction_vertical,
+            &horizontal_view,
+            &vertical_view,
+            &blur_uniform,
+        );
+
+        // `SpatialPassUniform` has five cells: the authored params, the colour
+        // group in `extra`, the edge group in `aces`.
+        let redraw_uniform = SpatialPassUniform {
+            size,
+            params,
+            extra: color,
+            aces: extra,
+            extra1: [0.0; 4],
+        };
+        self.record_pass(
+            device,
+            encoder,
+            &self.abstraction,
+            &vertical_view,
+            &destination_view,
+            &redraw_uniform,
+        );
+        Ok(scratch[2].clone())
+    }
+
     /// Records the lens flare stage.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_flare(
@@ -3238,6 +3401,11 @@ impl EffectSpatialGpu {
             // The diffusion is one full-screen draw over the same source
             // and destination pair.
             EffectGpuSpatialPass::Watercolor { .. } => Ok(1),
+            // Two separable blur passes plus the redraw. Three planes plus
+            // the source is four textures, so UHD (530,841,600 bytes) fits the
+            // 512 MiB spatial scratch budget while DCI 4K (566,231,040 bytes)
+            // does not; the limit is identical to the key cleaner chain.
+            EffectGpuSpatialPass::Abstraction { .. } => Ok(3),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
@@ -3281,6 +3449,10 @@ impl EffectSpatialGpu {
         }
         // Single-pass kernels write one texture and need no scratch pool.
         match pass {
+            EffectGpuSpatialPass::Abstraction { grade } => {
+                return self
+                    .record_abstraction(device, encoder, *grade, source, scratch, width, height);
+            }
             EffectGpuSpatialPass::BilateralBlur { grade } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 self.record_bilateral(device, encoder, source, output, *grade)?;
@@ -8731,6 +8903,85 @@ fn watercolor_guide(sample: vec4<f32>, channel: f32) -> f32 {
 // `1 / (1 + d^2)` times `1 / (1 + (delta guide / edge scale)^2)` and the
 // diffusion is mixed over the centre by the authored smoothness, exactly like
 // the CPU kernel. `params` is `[channel tag, radius, edge scale, smoothness]`.
+// One separable tent pass over `params.x` pixels; `axis` is 0 for rows and 1
+// for columns. The weights are `1 / (1 + d^2)`, premultiplied, then normalised.
+fn abstraction_blur(pixel: vec2<i32>, axis: f32) -> vec4<f32> {
+    let radius = i32(round(uniforms.params.x));
+    if (radius <= 0) {
+        return load_clamped(pixel);
+    }
+    var sum = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var offset = -radius; offset <= radius; offset = offset + 1) {
+        var at = pixel;
+        if (axis < 0.5) {
+            at.x = at.x + offset;
+        } else {
+            at.y = at.y + offset;
+        }
+        let weight = 1.0 / (1.0 + f32(offset * offset));
+        sum += premultiply(load_clamped(at)) * weight;
+        weight_sum += weight;
+    }
+    if (weight_sum <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return unpremultiply(sum / weight_sum);
+}
+
+fn abstraction_luma(sample: vec4<f32>) -> f32 {
+    return 0.2126 * sample.r + 0.7152 * sample.g + 0.0722 * sample.b;
+}
+
+@fragment
+fn fs_abstraction_horizontal(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return abstraction_blur(vec2<i32>(floor(position.xy)), 0.0);
+}
+
+@fragment
+fn fs_abstraction_vertical(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return abstraction_blur(vec2<i32>(floor(position.xy)), 1.0);
+}
+
+// `params` is `[radius, bins, iterations, quantize control]`, `extra` is
+// `[smoothness, softness, quantize flag, edge control]` and `aces` is
+// `[draw edges, edge strength, edge threshold, 0]`.
+@fragment
+fn fs_abstraction(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let centre = load_clamped(pixel);
+    let alpha = clamp(centre.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    var result = centre.rgb;
+    if (uniforms.extra.z > 0.5) {
+        let bins = uniforms.params.y;
+        let iterations = i32(round(uniforms.params.z));
+        let control = uniforms.params.w;
+        var quantised = clamp(centre.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        for (var step = 0; step < iterations; step = step + 1) {
+            let snapped = floor(quantised * bins + vec3<f32>(0.5)) / bins;
+            quantised = quantised + (snapped - quantised) * control;
+        }
+        result = result + (quantised - result) * uniforms.extra.x;
+        result = result + (centre.rgb - result) * uniforms.extra.y;
+    }
+    if (uniforms.aces.x > 0.5) {
+        let left = load_clamped(pixel + vec2<i32>(-1, 0));
+        let right = load_clamped(pixel + vec2<i32>(1, 0));
+        let above = load_clamped(pixel + vec2<i32>(0, -1));
+        let below = load_clamped(pixel + vec2<i32>(0, 1));
+        let gradient_x = abstraction_luma(right) - abstraction_luma(left);
+        let gradient_y = abstraction_luma(below) - abstraction_luma(above);
+        let magnitude = abs(gradient_x) + abs(gradient_y);
+        let mask = smoothstep(uniforms.aces.z, uniforms.aces.z + 0.1, magnitude);
+        let darken = clamp(uniforms.aces.y * mask, 0.0, 1.0) * uniforms.extra.w;
+        result = result * (1.0 - darken);
+    }
+    return vec4<f32>(result, alpha);
+}
+
 @fragment
 fn fs_watercolor(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));
