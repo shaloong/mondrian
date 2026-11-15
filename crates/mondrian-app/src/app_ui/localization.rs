@@ -408,6 +408,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "填充外观" => Some("parameter-group-blanking-fill-appearance"),
         "下拉阴影" => Some("parameter-group-blanking-fill-shadow"),
         "边缘拉伸" => Some("parameter-group-blanking-fill-edge-stretch"),
+        "抽帧" => Some("parameter-group-posterize-time"),
         _ => None,
     }
 }

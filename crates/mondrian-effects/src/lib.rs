@@ -180,6 +180,7 @@ pub(crate) mod parallel;
 pub mod photo_filter;
 pub mod polar_coordinates;
 pub mod posterize;
+pub mod posterize_time;
 pub mod qualifier;
 pub mod ramp;
 pub mod remove_color_matting;
@@ -549,6 +550,10 @@ pub use polar_coordinates::{
 };
 pub use posterize::{
     posterize_frame_f32, PosterizeError, PosterizeGrade, POSTERIZE_MAX_LEVELS, POSTERIZE_MIN_LEVELS,
+};
+pub use posterize_time::{
+    PosterizeTimeError, PosterizeTimeGrade, POSTERIZE_TIME_DEFAULT_RATE, POSTERIZE_TIME_MAX_RATE,
+    POSTERIZE_TIME_MIN_RATE, POSTERIZE_TIME_TIMESCALE,
 };
 pub use prepared::{
     EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectInput,

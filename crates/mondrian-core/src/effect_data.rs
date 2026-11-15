@@ -219,6 +219,8 @@ pub enum EffectType {
     /// Refract a layer through a bump map and shade its surface.
     Glass,
     VideoCollage,
+    /// Hold each output on a reduced frame rate by sampling an earlier instant.
+    PosterizeTime,
 }
 
 impl EffectType {
@@ -296,6 +298,7 @@ impl EffectType {
             Self::Keylight => "builtin.keylight".to_string(),
             Self::MatteRefine => "builtin.matte_refine".to_string(),
             Self::Echo => "builtin.echo".to_string(),
+            Self::PosterizeTime => "builtin.posterize_time".to_string(),
             Self::Arithmetic => "builtin.arithmetic".to_string(),
             Self::LeaveColor => "builtin.leave_color".to_string(),
             Self::BroadcastSafe => "builtin.broadcast_safe".to_string(),
@@ -427,6 +430,7 @@ impl EffectType {
             "builtin.keylight" => Self::Keylight,
             "builtin.matte_refine" => Self::MatteRefine,
             "builtin.echo" => Self::Echo,
+            "builtin.posterize_time" => Self::PosterizeTime,
             "builtin.arithmetic" => Self::Arithmetic,
             "builtin.leave_color" => Self::LeaveColor,
             "builtin.broadcast_safe" => Self::BroadcastSafe,
@@ -558,6 +562,7 @@ impl EffectType {
             Self::Keylight => "专业抠像",
             Self::MatteRefine => "遮罩精修",
             Self::Echo => "残影",
+            Self::PosterizeTime => "抽帧",
             Self::Arithmetic => "算术",
             Self::LeaveColor => "保留颜色",
             Self::BroadcastSafe => "广播安全",
@@ -688,6 +693,7 @@ impl EffectType {
             Self::Keylight => vec!["抠像"],
             Self::MatteRefine => vec!["抠像"],
             Self::Echo => vec!["时间"],
+            Self::PosterizeTime => vec!["时间"],
             Self::Arithmetic => vec!["通道"],
             Self::LeaveColor => vec!["颜色"],
             Self::BroadcastSafe => vec!["颜色"],
@@ -815,6 +821,7 @@ impl EffectType {
             Self::Keylight => "keylight".to_string(),
             Self::MatteRefine => "matte_refine".to_string(),
             Self::Echo => "echo".to_string(),
+            Self::PosterizeTime => "posterize_time".to_string(),
             Self::Arithmetic => "arithmetic".to_string(),
             Self::LeaveColor => "leave_color".to_string(),
             Self::BroadcastSafe => "broadcast_safe".to_string(),
@@ -1320,6 +1327,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Keylight => Ok(()),
             Self::MatteRefine => Ok(()),
             Self::Echo => Ok(()),
+            Self::PosterizeTime => Ok(()),
             Self::Arithmetic => Ok(()),
             Self::LeaveColor => Ok(()),
             Self::BroadcastSafe => Ok(()),

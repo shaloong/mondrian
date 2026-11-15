@@ -3565,7 +3565,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 125] {
+fn builtin_effect_types() -> [EffectType; 126] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3692,6 +3692,7 @@ fn builtin_effect_types() -> [EffectType; 125] {
         EffectType::Basic3D,
         EffectType::CameraView,
         EffectType::BlankingFill,
+        EffectType::PosterizeTime,
     ]
 }
 
@@ -8758,6 +8759,19 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::PosterizeTime => {
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "frame_rate",
+                "抽帧",
+                "帧速率",
+                PropertyValue::Float(crate::POSTERIZE_TIME_DEFAULT_RATE as f32),
+                Some(crate::POSTERIZE_TIME_MIN_RATE),
+                Some(crate::POSTERIZE_TIME_MAX_RATE),
+                Some(0.001),
+            );
+        }
         EffectType::Arithmetic => {
             define_builtin_enum_property(
                 &mut properties,
@@ -13770,6 +13784,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::LumaKey
                 | EffectType::ChromaKey
                 | EffectType::Echo
+                | EffectType::PosterizeTime
                 | EffectType::ChannelCombiner
                 | EffectType::SetMatte
                 | EffectType::DisplacementMap
@@ -13987,6 +14002,18 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // executor, which supplies the cross-time edge of every tap. A
             // single-frame GPU plan still refuses `TemporalFrameBlend`, so this
             // admission never turns a history read into a current-frame read.
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            temporal_input: EffectTemporalInputExtent::UNBOUNDED,
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::PosterizeTime => EffectExecutionContract {
+            // The held instant is a cross-time read, so the same admission rule
+            // as Echo applies: GPU Float32 only through the finite temporal
+            // device executor, which supplies the sampled instant. The base
+            // extent stays unbounded and is narrowed per instance to the
+            // authored step, because the finite executor refuses an unbounded
+            // primary temporal extent.
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             temporal_input: EffectTemporalInputExtent::UNBOUNDED,
             topology: EffectGraphTopology::GeneralDag,
@@ -18177,6 +18204,39 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::PosterizeTime => {
+            let frame_rate_id = builtin_parameter_id(effect_type, "frame_rate");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let grade =
+                    crate::PosterizeTimeGrade::new(f64::from(effect.evaluate_f32_parameter(
+                        &frame_rate_id,
+                        context.time,
+                        crate::POSTERIZE_TIME_DEFAULT_RATE as f32,
+                    )))
+                    .map_err(|error| invalid(error.to_string()))?;
+                let offset = grade
+                    .sample_offset(context.time)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if offset.is_zero() {
+                    // Already on the held grid: the pass-through chain is the
+                    // effect, and emitting a zero-offset read would only add a
+                    // device dispatch that copies a frame onto itself.
+                    return Ok(());
+                }
+                let source = graph.current_output();
+                let held = graph.add_unary_from(
+                    source,
+                    EffectRenderOp::TemporalFrameBlend { sample_offset: offset, mix: 1.0 },
+                );
+                graph.set_current_output(held);
+                Ok(())
+            }))
+        }
         EffectType::Arithmetic => {
             let operator_id = builtin_parameter_id(effect_type, "operator");
             let red_id = builtin_parameter_id(effect_type, "red");
@@ -21696,6 +21756,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Keylight => "专业抠像",
         EffectType::MatteRefine => "遮罩精修",
         EffectType::Echo => "残影",
+        EffectType::PosterizeTime => "抽帧",
         EffectType::Arithmetic => "算术",
         EffectType::LeaveColor => "保留颜色",
         EffectType::BroadcastSafe => "广播安全",
@@ -23146,6 +23207,7 @@ mod tests {
             EffectType::DetailPreservingUpscale,
             EffectType::Glass,
             EffectType::VideoCollage,
+            EffectType::PosterizeTime,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -30752,6 +30814,153 @@ mod tests {
         assert!(echo_blend_steps(&graph).is_empty());
     }
 
+    fn author_posterize_time(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::PosterizeTime)
+            .expect("the posterize time effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::PosterizeTime.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the posterize time parameter should be assignable");
+        }
+        effect
+    }
+
+    fn posterize_time_mixes(graph: &EffectRenderGraph) -> Vec<f32> {
+        graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::TemporalFrameBlend { mix, .. },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::TemporalFrameBlend { mix, .. },
+                    ..
+                } => Some(*mix),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn posterize_time_holds_the_sample_off_the_grid() {
+        let effect = author_posterize_time(&[("frame_rate", PropertyValue::Float(24.0))]);
+        let now = TimelineTime::new(51, 100).expect("valid test time");
+        let graph = build_effect_render_graph(&[effect], now, TEST_WORKING_SPACE)
+            .expect("a posterized frame should compile");
+        let offsets = echo_sample_offsets(&graph);
+        assert_eq!(offsets.len(), 1, "{offsets:?}");
+        // 24 fps holds 0.51 s at 0.5 s, so the frame one step back is the held one.
+        assert!((offsets[0] + 0.01).abs() < 1e-6, "{}", offsets[0]);
+        assert!(offsets[0] < 0.0, "posterize time only ever reads backwards");
+        assert_eq!(posterize_time_mixes(&graph), vec![1.0]);
+    }
+
+    #[test]
+    fn posterize_time_on_the_grid_compiles_to_no_sample() {
+        let effect = author_posterize_time(&[("frame_rate", PropertyValue::Float(24.0))]);
+        let now = TimelineTime::new(1, 2).expect("valid test time");
+        let graph = build_effect_render_graph(&[effect], now, TEST_WORKING_SPACE)
+            .expect("a kept frame should compile");
+        assert!(echo_sample_offsets(&graph).is_empty());
+        assert!(
+            graph.nodes.iter().all(|node| matches!(&node.kind, EffectGraphNodeKind::Source)),
+            "a kept frame is the graded source alone: {:?}",
+            graph.nodes.len()
+        );
+    }
+
+    #[test]
+    fn posterize_time_contract_admits_gpu_temporal_execution() {
+        let definition =
+            effect_definition(&EffectType::PosterizeTime).expect("posterize time definition");
+        let contract = definition.execution_contract();
+        assert!(
+            contract.execution_modes.contains(
+                crate::EffectProcessingBackend::Cpu,
+                crate::EffectWorkingPrecision::Float32
+            ),
+            "posterize time keeps the scalar executor"
+        );
+        assert!(
+            contract.execution_modes.contains(
+                crate::EffectProcessingBackend::Gpu,
+                crate::EffectWorkingPrecision::Float32
+            ),
+            "posterize time is admitted to the device temporal executor"
+        );
+        assert_eq!(contract.topology, crate::EffectGraphTopology::GeneralDag);
+        assert_eq!(
+            contract.temporal_input,
+            crate::EffectTemporalInputExtent::UNBOUNDED,
+            "the definition declares the unbounded base; instances narrow it"
+        );
+    }
+
+    fn posterize_time_past_extent(rate: f32) -> f64 {
+        let effect = author_posterize_time(&[("frame_rate", PropertyValue::Float(rate))]);
+        let program = crate::PreparedEffectProgram::prepare(&[effect], &[], TEST_WORKING_SPACE)
+            .expect("prepare the posterize time program");
+        let compiled = program
+            .evaluate(TimelineTime::ZERO)
+            .expect("evaluate the posterize time program");
+        let extent = compiled
+            .primary_temporal_input_extent()
+            .expect("posterize time declares a bounded extent");
+        match extent.past {
+            crate::EffectTemporalSpan::Finite(past) => past.to_f64(),
+            other => panic!("posterize time must declare a finite past, {other:?}"),
+        }
+    }
+
+    #[test]
+    fn posterize_time_specializes_the_contract_to_the_held_step() {
+        let fast = posterize_time_past_extent(24.0);
+        assert!((fast - 1.0 / 24.0).abs() < 1e-6, "{fast}");
+        let slow = posterize_time_past_extent(crate::POSTERIZE_TIME_MIN_RATE as f32);
+        assert!(
+            (slow - 100.05).abs() < 0.01,
+            "the slowest rate holds for {slow} s"
+        );
+        assert!(slow > fast, "a slower rate reads further back");
+    }
+
+    #[test]
+    fn posterize_time_animated_rate_reserves_the_slowest_step() {
+        let mut effect = author_posterize_time(&[("frame_rate", PropertyValue::Float(24.0))]);
+        let path = EffectType::PosterizeTime.property_path("frame_rate");
+        for (frame, rate) in [(0_i64, 24.0_f32), (10, 60.0)] {
+            effect
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: path.clone(),
+                    keyframe: Keyframe::linear(tt(frame), PropertyValue::Float(rate)),
+                })
+                .expect("animate the frame rate");
+        }
+        let program = crate::PreparedEffectProgram::prepare(&[effect], &[], TEST_WORKING_SPACE)
+            .expect("prepare the animated posterize time program");
+        let compiled = program
+            .evaluate(TimelineTime::ZERO)
+            .expect("evaluate the animated posterize time program");
+        let extent = compiled
+            .primary_temporal_input_extent()
+            .expect("the animated rate still reserves a finite extent");
+        match extent.past {
+            crate::EffectTemporalSpan::Finite(past) => {
+                assert!(
+                    (past.to_f64() - 100.05).abs() < 0.01,
+                    "an animated rate reserves the slowest step, got {} s",
+                    past.to_f64()
+                );
+            }
+            other => panic!("an animated rate must stay finite, {other:?}"),
+        }
+    }
+
     #[test]
     fn echo_authoring_ranges_fail_closed() {
         for (parameter, value, expected) in [
@@ -32295,7 +32504,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 125);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 126);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -32823,7 +33032,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 125);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 126);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -35782,7 +35991,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 125);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 126);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -36918,7 +37127,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 125);
+        assert_eq!(builtin_effect_types().len(), 126);
     }
 
     #[test]

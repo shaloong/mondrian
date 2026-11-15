@@ -569,6 +569,10 @@ fn specialize_builtin_definition(
             temporal_input: echo_author_time_extent(effect),
             ..contract
         },
+        crate::EffectType::PosterizeTime => EffectExecutionContract {
+            temporal_input: posterize_time_author_time_extent(effect),
+            ..contract
+        },
         crate::EffectType::Fill if fill_may_use_masks(effect) => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32,
             topology: EffectGraphTopology::GeneralDag,
@@ -624,6 +628,39 @@ fn specialize_builtin_definition(
         return definition;
     }
     Arc::new(definition.as_ref().clone().with_execution_contract(specialized))
+}
+
+fn posterize_time_author_time_extent(effect: &EffectNode) -> EffectTemporalInputExtent {
+    let frame_rate = effect
+        .effect_type
+        .parameter_id("frame_rate")
+        .expect("builtin posterize time parameter");
+    let animated = effect.properties.iter().any(|(_, property)| {
+        *property.descriptor.parameter_id() == frame_rate
+            && property.is_enabled()
+            && property.is_animated()
+    });
+    // An animated rate can ask for any held step, and the slowest authored rate
+    // is the largest one, so it is the worst case the contract must cover.
+    let frames_per_second = if animated {
+        crate::POSTERIZE_TIME_MIN_RATE
+    } else {
+        f64::from(effect.evaluate_f32_parameter(
+            &frame_rate,
+            TimelineTime::ZERO,
+            crate::POSTERIZE_TIME_DEFAULT_RATE as f32,
+        ))
+    };
+    let Ok(grade) = crate::PosterizeTimeGrade::new(frames_per_second) else {
+        return EffectTemporalInputExtent::UNBOUNDED;
+    };
+    let Ok(step) = grade.step() else {
+        return EffectTemporalInputExtent::UNBOUNDED;
+    };
+    let Ok(lookback) = TimelineTime::new(-step.numerator(), step.denominator()) else {
+        return EffectTemporalInputExtent::UNBOUNDED;
+    };
+    crate::graph::temporal_input_extent_for_sample_offset(lookback)
 }
 
 fn echo_author_time_extent(effect: &EffectNode) -> EffectTemporalInputExtent {

@@ -3674,3 +3674,8 @@ parameter-mondrian-effect-builtin-video-collage-tile-source-61-label = 第 8 行
 parameter-mondrian-effect-builtin-video-collage-tile-source-62-label = 第 8 行第 6 列
 parameter-mondrian-effect-builtin-video-collage-tile-source-63-label = 第 8 行第 7 列
 parameter-mondrian-effect-builtin-video-collage-tile-source-64-label = 第 8 行第 8 列
+
+## Posterize Time 抽帧
+effect-posterize-time = 抽帧
+parameter-group-posterize-time = 抽帧
+parameter-mondrian-effect-builtin-posterize-time-frame-rate-label = 帧速率

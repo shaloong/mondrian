@@ -838,4 +838,57 @@ mod tests {
             "{spatial}"
         );
     }
+
+    #[test]
+    fn posterize_time_schedules_one_held_frame_on_the_device() {
+        let mut effect = crate::instantiate_effect_node(EffectType::PosterizeTime).unwrap();
+        effect
+            .set_static_value_by_parameter(
+                &EffectType::PosterizeTime.parameter_id("frame_rate").unwrap(),
+                PropertyValue::Float(24.0),
+            )
+            .unwrap();
+        let program =
+            PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709)
+                .unwrap();
+        let now = TimelineTime::new(51, 100).unwrap();
+        let held = TimelineTime::new(1, 2).unwrap();
+        let execution = frozen(&program, now, extent().full_frame_roi());
+        let schedule = execution.plan_gpu_execution().unwrap();
+        let mut times = schedule
+            .leaves()
+            .iter()
+            .filter_map(|leaf| match leaf.request() {
+                TemporalGpuLeafRequest::Source(request) => Some(request.time()),
+                TemporalGpuLeafRequest::Auxiliary(_) => None,
+            })
+            .collect::<Vec<_>>();
+        times.sort();
+        let mut expected = vec![now, held];
+        expected.sort();
+        assert_eq!(
+            times, expected,
+            "the current and the held frame are the leaves"
+        );
+        assert_eq!(schedule.step_count(), 1, "one hold is one sampled frame");
+        let step = schedule.steps().first().expect("the hold is a step");
+        match step.operation() {
+            TemporalGpuStepOperation::TemporalBlend { input, sample, mix } => {
+                assert_eq!(*mix, 1.0, "the held frame replaces the current one");
+                assert_ne!(input, sample, "the hold reads a different address");
+            }
+            other => panic!("posterize time must lower to a temporal blend, {other:?}"),
+        }
+        assert_eq!(schedule.root(), step.value());
+        assert_eq!(
+            schedule.contexts().len(),
+            1,
+            "a hold stays inside one instant graph"
+        );
+        assert_eq!(schedule.contexts()[0].time(), now);
+        assert_eq!(
+            schedule.frame_seed(step.value()),
+            Some(schedule.request().output_frame_seed())
+        );
+    }
 }

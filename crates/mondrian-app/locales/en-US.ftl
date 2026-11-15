@@ -3746,3 +3746,8 @@ parameter-mondrian-effect-builtin-video-collage-tile-source-61-label = Row 8, Co
 parameter-mondrian-effect-builtin-video-collage-tile-source-62-label = Row 8, Column 6
 parameter-mondrian-effect-builtin-video-collage-tile-source-63-label = Row 8, Column 7
 parameter-mondrian-effect-builtin-video-collage-tile-source-64-label = Row 8, Column 8
+
+## Posterize Time 抽帧
+effect-posterize-time = Posterize Time
+parameter-group-posterize-time = Posterize Time
+parameter-mondrian-effect-builtin-posterize-time-frame-rate-label = Frame Rate
