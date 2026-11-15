@@ -3751,3 +3751,6 @@ parameter-mondrian-effect-builtin-video-collage-tile-source-64-label = Row 8, Co
 effect-posterize-time = Posterize Time
 parameter-group-posterize-time = Posterize Time
 parameter-mondrian-effect-builtin-posterize-time-frame-rate-label = Frame Rate
+effect-deinterlace = Deinterlace
+parameter-group-deinterlace = Deinterlace
+parameter-mondrian-effect-builtin-deinterlace-softness-label = Softness

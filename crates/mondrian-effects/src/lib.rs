@@ -76,6 +76,7 @@ pub mod convolution;
 pub mod corner_pin;
 pub mod coverage;
 pub mod deband;
+pub mod deinterlace;
 pub mod dent;
 pub mod detail_preserving_upscale;
 pub mod directional_blur;
@@ -336,6 +337,11 @@ pub use coverage::{has_positive_coverage, mix_straight_rgba, straight_rgba_from_
 pub use deband::{
     deband_frame_f32, DebandError, DebandGrade, DEBAND_DITHER_SALT_A, DEBAND_DITHER_SALT_B,
     DEBAND_MAX_EDGE_THRESHOLD, DEBAND_MAX_POST_OPTIMIZATION, DEBAND_MAX_RADIUS, DEBAND_MIN_RADIUS,
+};
+pub use deinterlace::{
+    deinterlace_frame_f32, DeinterlaceError, DeinterlaceGrade, DEINTERLACE_DEFAULT_SOFTNESS,
+    DEINTERLACE_MAX_SOFTNESS, DEINTERLACE_MAX_TAPS, DEINTERLACE_MIN_SOFTNESS,
+    DEINTERLACE_SOFTNESS_PER_TAP,
 };
 pub use dent::{
     dent_frame_f32, DentEdge, DentError, DentGrade, DentKind, DENT_DEFAULT_CENTRE_PIXELS,

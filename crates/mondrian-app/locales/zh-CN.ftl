@@ -3679,3 +3679,6 @@ parameter-mondrian-effect-builtin-video-collage-tile-source-64-label = 第 8 行
 effect-posterize-time = 抽帧
 parameter-group-posterize-time = 抽帧
 parameter-mondrian-effect-builtin-posterize-time-frame-rate-label = 帧速率
+effect-deinterlace = 去交错
+parameter-group-deinterlace = 去交错
+parameter-mondrian-effect-builtin-deinterlace-softness-label = 柔和度

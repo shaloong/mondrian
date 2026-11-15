@@ -1274,6 +1274,12 @@ pub enum EffectRenderOp {
         /// Authored radius, luminance threshold and output mode.
         grade: crate::SmartBlurGrade,
     },
+    /// Deinterlace: rebuilds the odd rows from their retained even-row
+    /// neighbours with a symmetric vertical tap window.
+    Deinterlace {
+        /// Authored softness, which widens the vertical tap window.
+        grade: crate::DeinterlaceGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1690,6 +1696,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::SmartBlur { grade } => {
                 formatter.debug_struct("SmartBlur").field("grade", grade).finish()
+            }
+            Self::Deinterlace { grade } => {
+                formatter.debug_struct("Deinterlace").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2789,6 +2798,12 @@ impl EffectRenderOp {
                 // they are hashed as raw bits rather than as a rounded packing.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Deinterlace { grade } => {
+                126u8.hash(state);
+                // The softness alone selects the tap count, so its raw bits are
+                // the whole identity of the kernel.
+                grade.hash_state(state);
+            }
             EffectRenderOp::SetMatte { grade } => {
                 120u8.hash(state);
                 grade.hash(state);
@@ -3031,6 +3046,7 @@ impl EffectRenderOp {
             EffectRenderOp::Colorama { .. } => 2,
             EffectRenderOp::ChannelCombiner { .. } => 1,
             EffectRenderOp::SmartBlur { .. } => 3,
+            EffectRenderOp::Deinterlace { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3565,7 +3581,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 126] {
+fn builtin_effect_types() -> [EffectType; 127] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3693,6 +3709,7 @@ fn builtin_effect_types() -> [EffectType; 126] {
         EffectType::CameraView,
         EffectType::BlankingFill,
         EffectType::PosterizeTime,
+        EffectType::Deinterlace,
     ]
 }
 
@@ -12278,6 +12295,22 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Deinterlace => {
+            // The documented default (softness 0) rebuilds every odd row from
+            // the single nearest retained row, which already changes pixels, so
+            // the builder always appends the node.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "softness",
+                "去交错",
+                "柔和度",
+                PropertyValue::Float(crate::DEINTERLACE_DEFAULT_SOFTNESS),
+                Some(crate::DEINTERLACE_MIN_SOFTNESS as f64),
+                Some(crate::DEINTERLACE_MAX_SOFTNESS as f64),
+                Some(1.0),
+            );
+        }
         EffectType::BlankingFill => define_blanking_fill_properties(&mut properties, &effect_type),
         EffectType::SmartBlur => {
             // The documented default (radius 3 at threshold 25 %) already
@@ -14179,6 +14212,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The radius reaches 100 pixels in every direction and the gate
             // reads the source frame during both passes, so the definition-level
             // envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Deinterlace => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The tap window reaches four retained rows out in both directions,
+            // so the definition-level envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -20438,6 +20478,28 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Deinterlace => {
+            let softness_id = builtin_parameter_id(effect_type, "softness");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let softness = match effect.evaluate_parameter(&softness_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value,
+                    Some(PropertyValue::Int(value)) => value as f32,
+                    Some(_) => return Err(invalid("去交错的柔和度必须是数值".to_string())),
+                    None => crate::DEINTERLACE_DEFAULT_SOFTNESS,
+                };
+                let grade = crate::DeinterlaceGrade::new(softness)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // Even the zero softness rebuilds the odd rows, so there is no
+                // identity configuration to elide.
+                graph.append_unary(EffectRenderOp::Deinterlace { grade });
+                Ok(())
+            }))
+        }
         EffectType::SelectiveColor => {
             let method_id = builtin_parameter_id(effect_type, "method");
             let colors_id = builtin_parameter_id(effect_type, "colors");
@@ -21808,6 +21870,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Basic3D => "基本 3D",
         EffectType::CameraView => "摄像机视图",
         EffectType::BlankingFill => "遮幅填充",
+        EffectType::Deinterlace => "去交错",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -23208,6 +23271,7 @@ mod tests {
             EffectType::Glass,
             EffectType::VideoCollage,
             EffectType::PosterizeTime,
+            EffectType::Deinterlace,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -32504,7 +32568,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 126);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 127);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33032,7 +33096,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 126);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 127);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -35991,7 +36055,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 126);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 127);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -37127,7 +37191,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 126);
+        assert_eq!(builtin_effect_types().len(), 127);
     }
 
     #[test]
@@ -37630,6 +37694,141 @@ mod tests {
         );
     }
 
+    fn deinterlace_op(graph: &EffectRenderGraph) -> Option<crate::DeinterlaceGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Deinterlace { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Deinterlace { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_deinterlace(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Deinterlace)
+            .expect("the deinterlace effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Deinterlace.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the deinterlace parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn deinterlace_defaults_match_the_dump() {
+        let effect_type = EffectType::Deinterlace;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [("softness", "柔和度", ParameterUnit::Unitless)];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("去交错")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(0.0));
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .expect("the softness declares a range");
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, 0.0);
+            assert_eq!(contract.hard_range.max, 1000.0);
+        }
+        assert_eq!(effect_type.property_namespace(), "deinterlace");
+        assert_eq!(effect_type.category_path(), vec!["修复"]);
+        assert_eq!(crate::DeinterlaceGrade::documented_defaults().taps(), 1);
+    }
+
+    #[test]
+    fn deinterlace_defaults_build_one_op_without_scratch() {
+        let effect = instantiate_effect_node(EffectType::Deinterlace)
+            .expect("the deinterlace effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default deinterlace should compile");
+        let grade = deinterlace_op(&graph).expect("the default parameters emit the rebuild");
+        assert_eq!(grade, crate::DeinterlaceGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one deinterlace node"
+        );
+        let op = EffectRenderOp::Deinterlace { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the rebuild only writes odd rows and only reads even rows"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        let pass = crate::spatial_pass_for(&op).expect("the rebuild runs as a spatial pass");
+        assert_eq!(pass.name(), "deinterlace");
+        assert_eq!(pass.horizontal_halo(), 0);
+        assert_eq!(pass.vertical_halo(), 1);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            127
+        );
+    }
+
+    #[test]
+    fn deinterlace_parameters_round_trip() {
+        let effect = author_deinterlace(&[("softness", PropertyValue::Float(640.0))]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened deinterlace should compile");
+        let grade = deinterlace_op(&graph).expect("the authored softness emits the rebuild");
+        assert_eq!(grade.softness(), 640.0);
+        assert_eq!(grade.taps(), 3, "640 crosses the third tap step");
+        assert_eq!(grade.halo(), 5);
+    }
+
+    #[test]
+    fn deinterlace_invalid_softness_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::Deinterlace)
+            .expect("the deinterlace effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "deinterlace.softness",
+            serde_json::json!({"Float": 1000.5}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("softness past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("deinterlace.softness"),
+            "the persisted value contract names the parameter: {reason}"
+        );
+    }
     fn chromatic_aberration_removal_op(graph: &EffectRenderGraph) -> Option<&EffectRenderOp> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {

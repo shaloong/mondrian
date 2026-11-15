@@ -262,6 +262,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored radius, threshold and the output mode.
         grade: crate::SmartBlurGrade,
     },
+    /// Rebuild the odd rows from the retained even-row neighbours.
+    Deinterlace {
+        /// Authored softness, which selects the vertical tap count.
+        grade: crate::DeinterlaceGrade,
+    },
     /// Radial correction around the green reference channel.
     ChromaticAberrationRemoval {
         /// Authored amounts, edge scale, and normalized centre.
@@ -456,6 +461,7 @@ impl EffectGpuSpatialPass {
             Self::DustScratches { .. } => "dust_scratches",
             Self::KeyCleaner { .. } => "key_cleaner",
             Self::SmartBlur { .. } => "smart_blur",
+            Self::Deinterlace { .. } => "deinterlace",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
             Self::Basic3D { .. } => "basic_3d",
@@ -557,6 +563,8 @@ impl EffectGpuSpatialPass {
             // The blur window is the authored radius plus the one fractional
             // tap, so it is bounded by the authoring ceiling of 100.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            // The rebuild reads only the same column, so it never leaves it.
+            Self::Deinterlace { .. } => 0,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
@@ -640,6 +648,8 @@ impl EffectGpuSpatialPass {
             Self::KeyCleaner { .. } => u32::MAX,
             // Same reach as the horizontal halo.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            // The rebuild reads only the same column, so it never leaves it.
+            Self::Deinterlace { grade } => grade.halo(),
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
@@ -1220,6 +1230,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::SmartBlur { grade } => {
             Some(EffectGpuSpatialPass::SmartBlur { grade: *grade })
         }
+        EffectRenderOp::Deinterlace { grade } => {
+            Some(EffectGpuSpatialPass::Deinterlace { grade: *grade })
+        }
         EffectRenderOp::ChromaticAberrationRemoval { grade } => {
             Some(EffectGpuSpatialPass::ChromaticAberrationRemoval { grade: *grade })
         }
@@ -1484,6 +1497,37 @@ mod tests {
             pipeline.stages(),
             &[EffectGpuStage::Spatial {
                 pass: EffectGpuSpatialPass::SmartBlur { grade },
+                node_id: pipeline.output_value(),
+            }]
+        );
+    }
+
+    #[test]
+    fn deinterlace_maps_to_the_dedicated_spatial_pass() {
+        let grade = crate::DeinterlaceGrade::new(250.0).expect("valid grade");
+        let op = EffectRenderOp::Deinterlace { grade };
+        let pass = spatial_pass_for(&op).expect("deinterlace runs as a spatial pass");
+        assert_eq!(pass, EffectGpuSpatialPass::Deinterlace { grade });
+        assert_eq!(pass.name(), "deinterlace");
+        // The rebuild reads two retained rows per tap and never leaves the
+        // column, so the reach is purely vertical.
+        assert_eq!(pass.horizontal_halo(), 0);
+        assert_eq!(pass.vertical_halo(), 3);
+        let wide = crate::DeinterlaceGrade::new(1000.0).expect("valid grade");
+        assert_eq!(wide.taps(), 4);
+        assert_eq!(
+            EffectGpuSpatialPass::Deinterlace { grade: wide }.vertical_halo(),
+            7
+        );
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("deinterlace pipeline");
+        assert_eq!(
+            pipeline.stages(),
+            &[EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::Deinterlace { grade },
                 node_id: pipeline.output_value(),
             }]
         );
