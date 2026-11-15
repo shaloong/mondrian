@@ -2672,6 +2672,77 @@ fn cineon_converter_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> 
     return vec4<f32>(result, pixel.a);
 }
 
+fn chromatic_adaptation_signed_pow(value: f32, exponent: f32) -> f32 {
+    if (value < 0.0) {
+        return -pow(-value, exponent);
+    }
+    return pow(value, exponent);
+}
+
+fn chromatic_adaptation_decode(value: f32, tag: u32) -> f32 {
+    if (tag == 1u) {
+        if (value <= 0.04045) {
+            return value / 12.92;
+        }
+        return pow((value + 0.055) / 1.055, 2.4);
+    }
+    if (tag == 2u) {
+        if (value < 0.081) {
+            return value / 4.5;
+        }
+        return pow((value + 0.099) / 1.099, 1.0 / 0.45);
+    }
+    if (tag == 3u) {
+        return chromatic_adaptation_signed_pow(value, 2.2);
+    }
+    if (tag == 4u) {
+        return chromatic_adaptation_signed_pow(value, 2.4);
+    }
+    return value;
+}
+
+fn chromatic_adaptation_encode(value: f32, tag: u32) -> f32 {
+    if (tag == 1u) {
+        if (value <= 0.0031308) {
+            return value * 12.92;
+        }
+        return 1.055 * chromatic_adaptation_signed_pow(value, 1.0 / 2.4) - 0.055;
+    }
+    if (tag == 2u) {
+        if (value < 0.018) {
+            return value * 4.5;
+        }
+        return 1.099 * chromatic_adaptation_signed_pow(value, 0.45) - 0.099;
+    }
+    if (tag == 3u) {
+        return chromatic_adaptation_signed_pow(value, 1.0 / 2.2);
+    }
+    if (tag == 4u) {
+        return chromatic_adaptation_signed_pow(value, 1.0 / 2.4);
+    }
+    return value;
+}
+
+fn chromatic_adaptation_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> {
+    let tag = u32(effect.params.w + 0.5);
+    let decoded = vec3<f32>(
+        chromatic_adaptation_decode(pixel.r, tag),
+        chromatic_adaptation_decode(pixel.g, tag),
+        chromatic_adaptation_decode(pixel.b, tag),
+    );
+    let adapted = vec3<f32>(
+        dot(vec3<f32>(effect.params.x, effect.params.y, effect.params.z), decoded),
+        dot(vec3<f32>(effect.color.x, effect.color.y, effect.color.z), decoded),
+        dot(vec3<f32>(effect.extra0.x, effect.extra0.y, effect.extra0.z), decoded),
+    );
+    return vec4<f32>(
+        chromatic_adaptation_encode(adapted.r, tag),
+        chromatic_adaptation_encode(adapted.g, tag),
+        chromatic_adaptation_encode(adapted.b, tag),
+        pixel.a,
+    );
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -3743,6 +3814,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = color_difference_key_apply(pixel, effect);
         } else if (effect.header.x == 51u) {
             pixel = cineon_converter_apply(pixel, effect);
+        } else if (effect.header.x == 52u) {
+            pixel = chromatic_adaptation_apply(pixel, effect);
         }
     }
     return pixel;
@@ -8281,6 +8354,18 @@ fn effect_uniforms_for_ops(
                     header: [51, 0, 0, 0],
                     params,
                     color: [0.0; 4],
+                    extra0,
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::ChromaticAdaptation { grade } => {
+                let (params, color, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [52, 0, 0, 0],
+                    params,
+                    color,
                     extra0,
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
@@ -13399,6 +13484,159 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU Cineon converter accuracy budget exceeded for {label}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_chromatic_adaptation_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ChromaticAdaptationGamma, ChromaticAdaptationGrade,
+            ChromaticAdaptationParameters, ChromaticAdaptationSpace, EffectGraphBuilderState,
+            EffectRenderOp, IlluminantMode, StandardIlluminant,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU chromatic adaptation parity test: no GPU adapter available");
+            return;
+        };
+        const WIDTH: u32 = 12;
+        const HEIGHT: u32 = 9;
+        let mut data = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        for row in 0..HEIGHT {
+            for column in 0..WIDTH {
+                let u = column as f32 / (WIDTH - 1) as f32;
+                let v = row as f32 / (HEIGHT - 1) as f32;
+                // The adaptation only remaps colour, but a never-zero coverage
+                // keeps the straight to premultiplied round trip comparable.
+                let alpha = if column == 2 { 0.3 } else { 0.55 };
+                data.push([0.05 + 0.85 * u, 0.10 + 0.70 * v, 0.35 - 0.30 * u, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let cases = [
+            (
+                "D50 to D65 through CAT02",
+                ChromaticAdaptationParameters {
+                    source_preset: StandardIlluminant::D50,
+                    target_preset: StandardIlluminant::D65,
+                    ..ChromaticAdaptationParameters::default()
+                },
+            ),
+            (
+                "D65 to D50 through CAT02",
+                ChromaticAdaptationParameters {
+                    source_preset: StandardIlluminant::D65,
+                    target_preset: StandardIlluminant::D50,
+                    ..ChromaticAdaptationParameters::default()
+                },
+            ),
+            (
+                "D55 to D75 through Bradford",
+                ChromaticAdaptationParameters {
+                    method: mondrian_effects::ChromaticAdaptationMethod::Bradford,
+                    source_preset: StandardIlluminant::D55,
+                    target_preset: StandardIlluminant::D75,
+                    ..ChromaticAdaptationParameters::default()
+                },
+            ),
+            (
+                "Kelvin with a green tint",
+                ChromaticAdaptationParameters {
+                    source_mode: IlluminantMode::Kelvin,
+                    source_kelvin: 3200.0,
+                    source_tint: 0.2,
+                    target_mode: IlluminantMode::Kelvin,
+                    target_kelvin: 8000.0,
+                    ..ChromaticAdaptationParameters::default()
+                },
+            ),
+            (
+                "authored chromaticity coordinates",
+                ChromaticAdaptationParameters {
+                    source_mode: IlluminantMode::Chromatic,
+                    source_x: 0.42,
+                    source_y: 0.40,
+                    target_mode: IlluminantMode::Chromatic,
+                    target_x: 0.29,
+                    target_y: 0.31,
+                    target_weight: 0.75,
+                    ..ChromaticAdaptationParameters::default()
+                },
+            ),
+            (
+                "sRGB transfer inside P3 D65",
+                ChromaticAdaptationParameters {
+                    source_preset: StandardIlluminant::D50,
+                    target_preset: StandardIlluminant::D65,
+                    colour_space: ChromaticAdaptationSpace::P3D65,
+                    gamma: ChromaticAdaptationGamma::Srgb,
+                    use_colour_space: true,
+                    ..ChromaticAdaptationParameters::default()
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = ChromaticAdaptationGrade::new(parameters).expect("valid adaptation grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::ChromaticAdaptation { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(WIDTH, HEIGHT),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(5.0e-5, 5.0e-5, 5.0e-5),
+                    alpha: LinearAccuracyBudget::finite(5.0e-5, 5.0e-5, 5.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU chromatic adaptation accuracy budget exceeded for {label}: {report:#?}"
             );
         }
     }
