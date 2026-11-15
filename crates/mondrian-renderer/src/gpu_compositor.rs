@@ -2489,6 +2489,61 @@ fn test_signals_safe_frame(column: u32, row: u32, width: u32, height: u32) -> bo
         || test_signals_safe_rect(column, row, width, height, 0.90);
 }
 
+// Scanlines reads only its own pixel's frame coordinate: the band profile is a
+// function of the position, and the composite operator folds the pattern into
+// the source colour. Every branch mirrors `mondrian-effects/src/scanlines.rs`.
+fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
+    // Appearance zero leaves the source untouched; the CPU kernel short-circuits
+    // the same configuration, so both paths return the pixel bit for bit.
+    if (effect.params.x <= 0.0 && effect.extra1.w <= 0.5) {
+        return pixel;
+    }
+    let centre = position + vec2<f32>(0.5);
+    let u = centre.x / uniforms.geometry.z;
+    let v = centre.y / uniforms.geometry.w;
+    let along = v * effect.color.y + u * effect.color.z;
+    let phase_base = along * effect.params.y + effect.color.x;
+    let soften = 0.5 - 0.48 * effect.params.z;
+    let soften_start = 1.0 - soften;
+    var scan = vec3<f32>(0.0);
+    for (var channel = 0u; channel < 3u; channel = channel + 1u) {
+        let phase = phase_base + effect.extra2[channel];
+        let centred = fract(phase);
+        let t = min(centred / effect.params.w, 1.0);
+        let profile = 1.0 - smoothstep(soften_start, 1.0, t);
+        let first = effect.extra0[channel];
+        let second = effect.extra1[channel];
+        scan[channel] = first + (second - first) * profile;
+    }
+    let luma = dot(scan, vec3<f32>(0.2126, 0.7152, 0.0722));
+    scan = vec3<f32>(luma) + (scan - vec3<f32>(luma)) * effect.color.w;
+    if (effect.extra1.w > 0.5) {
+        return vec4<f32>(scan, pixel.a);
+    }
+    let composite_index = effect.extra2.w;
+    var result = pixel.rgb;
+    for (var channel = 0u; channel < 3u; channel = channel + 1u) {
+        let base = result[channel];
+        let pattern = 1.0 + (scan[channel] - 1.0) * effect.params.x;
+        var composited = pattern;
+        if (composite_index < 0.5) {
+            composited = select(
+                1.0 - 2.0 * (1.0 - base) * (1.0 - pattern),
+                2.0 * base * pattern,
+                base < 0.5,
+            );
+        } else if (composite_index < 1.5) {
+            composited = 1.0 - (1.0 - base) * (1.0 - pattern);
+        } else if (composite_index < 2.5) {
+            composited = base + pattern;
+        } else if (composite_index < 3.5) {
+            composited = base * pattern;
+        }
+        result[channel] = base + (composited - base) * effect.extra0.w;
+    }
+    return vec4<f32>(result, pixel.a);
+}
+
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
     if (input.a <= 0.0 && !effects_author_coverage()) { return input; }
     var pixel = input;
@@ -3500,6 +3555,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = channel_combiner_apply(
                 pixel, pixel, effect.header.y, effect.header.z, effect.params,
             );
+        } else if (effect.header.x == 48u) {
+            pixel = scanlines_apply(pixel, position, effect);
         }
     }
     return pixel;
@@ -8008,6 +8065,18 @@ fn effect_uniforms_for_ops(
                     extra3: [0.0; 4],
                 }
             }
+            EffectGpuPointOp::Scanlines { grade } => {
+                let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [48, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2,
+                    extra3,
+                }
+            }
             EffectGpuPointOp::Lut3D { lut, intensity } => {
                 let effective_intensity = intensity.clamp(0.0, 1.0);
                 let location = if effective_intensity <= 1.0e-4 {
@@ -12511,6 +12580,188 @@ mod tests {
     /// phase/mode lanes, the five-stop palette, the matching weight, the mask
     /// and the composite. The 64x8 frame spans several palette cycles and
     /// includes zero-coverage pixels, which both sides must leave untouched.
+
+    #[test]
+    fn scanlines_uniforms_pack_the_authored_slots() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp, ScanlinesComposite, ScanlinesGrade,
+            ScanlinesParameters,
+        };
+
+        let parameters = ScanlinesParameters {
+            frequency: 12.0,
+            angle_degrees: 30.0,
+            shift: 0.25,
+            composite_type: ScanlinesComposite::Screen,
+            ..ScanlinesParameters::default()
+        };
+        let grade = ScanlinesGrade::new(parameters).expect("valid scanlines grade");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Scanlines { grade });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+        let uniforms = effect_uniforms(Some(&plan), None).expect("uniforms");
+        assert_eq!(uniforms[0].header, [48, 0, 0, 0]);
+        let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+        assert_eq!(uniforms[0].params, params);
+        assert_eq!(uniforms[0].color, color);
+        assert_eq!(uniforms[0].extra0, extra0);
+        assert_eq!(uniforms[0].extra1, extra1);
+        assert_eq!(uniforms[0].extra2, extra2);
+        assert_eq!(uniforms[0].extra3, extra3);
+        // The rotation is resolved on the CPU so the point shader never calls a
+        // trigonometric function per pixel.
+        let angle = 30.0_f32.to_radians();
+        assert_eq!(color[1], angle.cos());
+        assert_eq!(color[2], angle.sin());
+    }
+
+    #[tokio::test]
+    async fn gpu_scanlines_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            ScanlinesComposite, ScanlinesGrade, ScanlinesParameters,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU scanlines parity test: no GPU adapter available");
+            return;
+        };
+        // 16x9: at the documented frequency one cycle lasts 1.8 rows, so
+        // neighbouring rows land on opposite halves of the profile. Alpha is
+        // never zero: the GPU straight-to-premultiplied round trip canonicalises
+        // fully transparent pixels, and the kernel's zero-coverage skip is
+        // covered by the unit tests.
+        const WIDTH: u32 = 16;
+        const HEIGHT: u32 = 9;
+        let mut data = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        for row in 0..HEIGHT {
+            for column in 0..WIDTH {
+                let u = column as f32 / (WIDTH - 1) as f32;
+                let v = row as f32 / (HEIGHT - 1) as f32;
+                let alpha = if column == 2 || u > 0.8 { 0.4 } else { 1.0 };
+                data.push([0.1 + 0.8 * u, 0.15 + 0.7 * v, 0.5 - 0.3 * u, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let cases = [
+            ("documented defaults", ScanlinesParameters::default()),
+            (
+                "rotated warm bands",
+                ScanlinesParameters {
+                    angle_degrees: 30.0,
+                    frequency: 12.0,
+                    shift: 0.25,
+                    color1: [1.0, 0.7, 0.2],
+                    color2: [0.1, 0.2, 0.6],
+                    ..ScanlinesParameters::default()
+                },
+            ),
+            (
+                "lines only",
+                ScanlinesParameters {
+                    lines_only: 1.0,
+                    color1: [0.9, 0.2, 0.1],
+                    ..ScanlinesParameters::default()
+                },
+            ),
+            (
+                "screen blend of the luminance pattern",
+                ScanlinesParameters {
+                    composite_type: ScanlinesComposite::Screen,
+                    composite: 0.5,
+                    colour: 0.0,
+                    ..ScanlinesParameters::default()
+                },
+            ),
+            (
+                "vertical narrow bands",
+                ScanlinesParameters {
+                    angle_degrees: 90.0,
+                    frequency: 2.0,
+                    line_width: 0.25,
+                    ..ScanlinesParameters::default()
+                },
+            ),
+            (
+                "channel fringes",
+                ScanlinesParameters {
+                    composite_type: ScanlinesComposite::Multiply,
+                    color1: [0.2, 0.9, 0.4],
+                    color2: [0.8, 0.1, 0.5],
+                    red_offset: 0.33,
+                    green_offset: -0.21,
+                    blue_offset: 0.5,
+                    ..ScanlinesParameters::default()
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = ScanlinesGrade::new(parameters).expect("valid scanlines grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Scanlines { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(WIDTH, HEIGHT),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU scanlines accuracy budget exceeded for {label}: {report:#?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn gpu_colorama_matches_the_cpu_kernel() {
         use crate::color_accuracy::{
