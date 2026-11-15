@@ -164,6 +164,7 @@ pub mod bevel;
 pub mod bezier_warp;
 pub mod broadcast_safe;
 pub mod brush_strokes;
+pub mod cineon_converter;
 pub mod color_difference_key;
 pub mod colorama;
 pub mod jpeg_damage;
@@ -318,6 +319,16 @@ pub use brush_strokes::{
 pub use bulge::{
     bulge_frame_f32, BulgeError, BulgeGrade, BULGE_MAX_HEIGHT, BULGE_MAX_RADIUS_PIXELS,
     BULGE_MAX_TAPER_PIXELS, BULGE_MIN_HEIGHT, BULGE_MIN_RADIUS_PIXELS, BULGE_MIN_TAPER_PIXELS,
+};
+pub use cineon_converter::{
+    cineon_converter_frame_f32, CineonConversion, CineonConverterError, CineonConverterGrade,
+    CineonConverterParameters, CINEON_CONVERTER_DEFAULT_BLACK_POINT,
+    CINEON_CONVERTER_DEFAULT_GAMMA, CINEON_CONVERTER_DEFAULT_HIGHLIGHT,
+    CINEON_CONVERTER_DEFAULT_INTERNAL_BLACK, CINEON_CONVERTER_DEFAULT_INTERNAL_WHITE,
+    CINEON_CONVERTER_DEFAULT_WHITE_POINT, CINEON_CONVERTER_MAX_BLACK_POINT,
+    CINEON_CONVERTER_MAX_GAMMA, CINEON_CONVERTER_MAX_HIGHLIGHT, CINEON_CONVERTER_MAX_WHITE_POINT,
+    CINEON_CONVERTER_MIN_BLACK_POINT, CINEON_CONVERTER_MIN_GAMMA, CINEON_CONVERTER_MIN_HIGHLIGHT,
+    CINEON_CONVERTER_MIN_WHITE_POINT,
 };
 pub use circle_ellipse::{
     circle_ellipse_frame_f32, circle_ellipse_pixel, CircleEllipseControls, CircleEllipseError,

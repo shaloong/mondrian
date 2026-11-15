@@ -223,6 +223,9 @@ pub enum EffectType {
     Highlight,
     /// Color difference key: builds a matte from the colour distance between
     /// each pixel and an authored key colour, with two partial mattes.
+    /// Decodes 10-bit Cineon log code values into an internal linear range and
+    /// encodes them back again.
+    CineonConverter,
     ColorDifferenceKey,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
@@ -378,6 +381,7 @@ impl EffectType {
             Self::Abstraction => "builtin.abstraction".to_string(),
             Self::LightLeak => "builtin.light_leak".to_string(),
             Self::Highlight => "builtin.highlight".to_string(),
+            Self::CineonConverter => "builtin.cineon_converter".to_string(),
             Self::ColorDifferenceKey => "builtin.color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -517,6 +521,7 @@ impl EffectType {
             "builtin.abstraction" => Self::Abstraction,
             "builtin.light_leak" => Self::LightLeak,
             "builtin.highlight" => Self::Highlight,
+            "builtin.cineon_converter" => Self::CineonConverter,
             "builtin.color_difference_key" => Self::ColorDifferenceKey,
             other => Self::External(other.to_string()),
         }
@@ -656,6 +661,7 @@ impl EffectType {
             Self::Abstraction => "抽象画",
             Self::LightLeak => "漏光",
             Self::Highlight => "高光提取",
+            Self::CineonConverter => "对数转换",
             Self::ColorDifferenceKey => "颜色差值键",
             Self::External(name) => name,
         }
@@ -688,6 +694,7 @@ impl EffectType {
             }
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
             Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
+            Self::CineonConverter => vec!["颜色"],
             Self::ColorDifferenceKey => vec!["抠像"],
             Self::Invert => vec!["通道"],
             Self::DropShadow => vec!["光效"],
@@ -929,6 +936,7 @@ impl EffectType {
             Self::Abstraction => "abstraction".to_string(),
             Self::LightLeak => "light_leak".to_string(),
             Self::Highlight => "highlight".to_string(),
+            Self::CineonConverter => "cineon_converter".to_string(),
             Self::ColorDifferenceKey => "color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -1447,7 +1455,8 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::Abstraction
             | Self::LightLeak
             | Self::Highlight
-            | Self::ColorDifferenceKey => Ok(()),
+            | Self::CineonConverter => Ok(()),
+            Self::ColorDifferenceKey => Ok(()),
         }
     }
 }

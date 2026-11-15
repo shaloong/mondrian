@@ -3674,6 +3674,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Abstraction { .. } => "abstraction",
         crate::EffectRenderOp::LightLeak { .. } => "light_leak",
         crate::EffectRenderOp::ColorDifferenceKey { .. } => "color_difference_key",
+        crate::EffectRenderOp::CineonConverter { .. } => "cineon_converter",
         crate::EffectRenderOp::Highlight { .. } => "highlight",
         crate::EffectRenderOp::SetMatte { .. } => "set_matte",
         crate::EffectRenderOp::DisplacementMap { .. } => "displacement_map",

@@ -3245,6 +3245,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Abstraction { .. } => "abstraction",
         EffectRenderOp::LightLeak { .. } => "light_leak",
         EffectRenderOp::ColorDifferenceKey { .. } => "color_difference_key",
+        EffectRenderOp::CineonConverter { .. } => "cineon_converter",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

@@ -1315,6 +1315,12 @@ pub enum EffectRenderOp {
         /// Authored key colour, accuracy, partial mattes and mask levels.
         grade: crate::ColorDifferenceKeyGrade,
     },
+    /// Cineon converter: decodes or encodes the frame between 10-bit Cineon
+    /// log code values and the authored internal range.
+    CineonConverter {
+        /// Authored direction, points, gamma and highlight roll-off.
+        grade: crate::CineonConverterGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1752,6 +1758,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ColorDifferenceKey { grade } => {
                 formatter.debug_struct("ColorDifferenceKey").field("grade", grade).finish()
+            }
+            Self::CineonConverter { grade } => {
+                formatter.debug_struct("CineonConverter").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2869,6 +2878,13 @@ impl EffectRenderOp {
                 // all read the authored values, so the grade hashes them all.
                 grade.hash_state(state);
             }
+            EffectRenderOp::CineonConverter { grade } => {
+                133u8.hash(state);
+                // The direction, the four points, the gamma and the highlight
+                // roll-off all read the authored values, so the grade hashes
+                // them all.
+                grade.hash_state(state);
+            }
             EffectRenderOp::Highlight { grade } => {
                 131u8.hash(state);
                 // The threshold window, the streak ray and the merge controls
@@ -3142,6 +3158,7 @@ impl EffectRenderOp {
             EffectRenderOp::LightLeak { .. } => 1,
             EffectRenderOp::Highlight { .. } => 4,
             EffectRenderOp::ColorDifferenceKey { .. } => 1,
+            EffectRenderOp::CineonConverter { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3676,7 +3693,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 133] {
+fn builtin_effect_types() -> [EffectType; 134] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3811,6 +3828,7 @@ fn builtin_effect_types() -> [EffectType; 133] {
         EffectType::LightLeak,
         EffectType::Highlight,
         EffectType::ColorDifferenceKey,
+        EffectType::CineonConverter,
     ]
 }
 
@@ -12751,6 +12769,99 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::CineonConverter => {
+            // The seven authored values mirror the specified converter: the
+            // direction, the 10-bit black and white points, the internal range
+            // they map onto, the gamma and the highlight roll-off.
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "conversion",
+                "对数转换",
+                "转换类型",
+                "log_to_linear",
+                [
+                    ("log_to_linear", "Log to linear"),
+                    ("linear_to_log", "Linear to log"),
+                    ("linear_to_linear", "Linear to linear"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.cineon_converter.conversion.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "black_point",
+                "对数转换",
+                "10 位黑场",
+                PropertyValue::Int(crate::CINEON_CONVERTER_DEFAULT_BLACK_POINT as i64),
+                Some(crate::CINEON_CONVERTER_MIN_BLACK_POINT as f64),
+                Some(crate::CINEON_CONVERTER_MAX_BLACK_POINT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "internal_black",
+                "对数转换",
+                "内部黑场",
+                PropertyValue::Float(crate::CINEON_CONVERTER_DEFAULT_INTERNAL_BLACK),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "white_point",
+                "对数转换",
+                "10 位白场",
+                PropertyValue::Int(crate::CINEON_CONVERTER_DEFAULT_WHITE_POINT as i64),
+                Some(crate::CINEON_CONVERTER_MIN_WHITE_POINT as f64),
+                Some(crate::CINEON_CONVERTER_MAX_WHITE_POINT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "internal_white",
+                "对数转换",
+                "内部白场",
+                PropertyValue::Float(crate::CINEON_CONVERTER_DEFAULT_INTERNAL_WHITE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "gamma",
+                "对数转换",
+                "灰度系数",
+                PropertyValue::Float(crate::CINEON_CONVERTER_DEFAULT_GAMMA),
+                Some(crate::CINEON_CONVERTER_MIN_GAMMA as f64),
+                Some(crate::CINEON_CONVERTER_MAX_GAMMA as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "highlight",
+                "对数转换",
+                "高光滤除",
+                PropertyValue::Float(crate::CINEON_CONVERTER_DEFAULT_HIGHLIGHT),
+                Some(crate::CINEON_CONVERTER_MIN_HIGHLIGHT as f64),
+                Some(crate::CINEON_CONVERTER_MAX_HIGHLIGHT as f64),
+                Some(1.0),
+            );
+        }
         EffectType::LightLeak => {
             // The seven authored values mirror the specified leak: the
             // intensity and tint of the added light, its streak geometry, the
@@ -15167,6 +15278,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The matte is an algebraic function of the pixel's own colour, so
             // no neighbour or history enters the result.
+            ..cpu_linear
+        },
+        EffectType::CineonConverter => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Each channel is remapped from its own code value, so no neighbour
+            // or history enters the result.
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -21588,6 +21705,72 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::CineonConverter => {
+            let conversion_id = builtin_parameter_id(effect_type, "conversion");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("对数转换的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                let defaults = crate::CineonConverterParameters::default();
+                let mut parameters = defaults;
+                match effect.evaluate_parameter(&conversion_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        match crate::CineonConversion::from_key(&key) {
+                            Some(conversion) => parameters.conversion = conversion,
+                            None => {
+                                return Err(invalid(format!(
+                                    "对数转换的转换类型没有对应的菜单项 {key}"
+                                )))
+                            }
+                        }
+                    }
+                    Some(_) => return Err(invalid("对数转换的转换类型必须是菜单项".to_string())),
+                    None => {}
+                }
+                for (parameter, fallback) in [
+                    ("black_point", defaults.black_point),
+                    ("internal_black", defaults.internal_black),
+                    ("white_point", defaults.white_point),
+                    ("internal_white", defaults.internal_white),
+                    ("gamma", defaults.gamma),
+                    ("highlight", defaults.highlight),
+                ] {
+                    let value = read(effect, context, &invalid, parameter, fallback)?;
+                    match parameter {
+                        "black_point" => parameters.black_point = value,
+                        "internal_black" => parameters.internal_black = value,
+                        "white_point" => parameters.white_point = value,
+                        "internal_white" => parameters.internal_white = value,
+                        "gamma" => parameters.gamma = value,
+                        "highlight" => parameters.highlight = value,
+                        _ => {}
+                    }
+                }
+                let grade = crate::CineonConverterGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::CineonConverter { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LightLeak => {
             let colour_id = builtin_parameter_id(effect_type, "colour");
             let position_id = builtin_parameter_id(effect_type, "position");
@@ -23236,6 +23419,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::LightLeak => "漏光",
         EffectType::Highlight => "高光提取",
         EffectType::ColorDifferenceKey => "颜色差值键",
+        EffectType::CineonConverter => "对数转换",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -24643,6 +24827,7 @@ mod tests {
             EffectType::LightLeak,
             EffectType::Highlight,
             EffectType::ColorDifferenceKey,
+            EffectType::CineonConverter,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -33939,7 +34124,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 133);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 134);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -34467,7 +34652,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 133);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 134);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -37426,7 +37611,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 133);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 134);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -38562,7 +38747,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 133);
+        assert_eq!(builtin_effect_types().len(), 134);
     }
 
     #[test]
@@ -39817,6 +40002,238 @@ mod tests {
         assert!(
             reason.contains("color_difference_key.gamma_a"),
             "the persisted value contract names the parameter: {reason}"
+        );
+    }
+
+    fn cineon_converter_op(graph: &EffectRenderGraph) -> Option<crate::CineonConverterGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::CineonConverter { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::CineonConverter { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_cineon_converter(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::CineonConverter)
+            .expect("the Cineon converter should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::CineonConverter.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the Cineon converter parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn cineon_converter_defaults_match_the_dump() {
+        let effect_type = EffectType::CineonConverter;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("conversion", "转换类型"),
+            ("black_point", "10 位黑场"),
+            ("internal_black", "内部黑场"),
+            ("white_point", "10 位白场"),
+            ("internal_white", "内部白场"),
+            ("gamma", "灰度系数"),
+            ("highlight", "高光滤除"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("对数转换")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "cineon_converter",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["颜色"]);
+
+        let conversion = properties
+            .property(&effect_type.property_path("conversion"))
+            .expect("the conversion menu is defined");
+        assert_eq!(
+            conversion.evaluate(tt(0)),
+            PropertyValue::Enum("log_to_linear".to_owned())
+        );
+        let options = &conversion.descriptor.schema.enum_options;
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].key, "log_to_linear");
+        assert_eq!(options[1].key, "linear_to_log");
+        assert_eq!(options[2].key, "linear_to_linear");
+        assert_eq!(
+            options[1].message_id,
+            "builtin.cineon_converter.conversion.linear_to_log"
+        );
+
+        let numeric = [
+            ("black_point", 95.0),
+            ("internal_black", 0.0),
+            ("white_point", 685.0),
+            ("internal_white", 1.0),
+            ("gamma", 1.7),
+            ("highlight", 20.0),
+        ];
+        for (parameter, default) in numeric {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            let evaluated = match property.evaluate(tt(0)) {
+                PropertyValue::Float(value) => value,
+                PropertyValue::Int(value) => value as f32,
+                other => panic!("{parameter} evaluated to {other:?}"),
+            };
+            assert!((evaluated - default).abs() < 1.0e-6, "{parameter}");
+        }
+    }
+
+    #[test]
+    fn cineon_converter_defaults_build_one_point_op_without_scratch() {
+        let effect = instantiate_effect_node(EffectType::CineonConverter)
+            .expect("the Cineon converter should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default Cineon converter should compile");
+        let grade = cineon_converter_op(&graph).expect("the defaults always convert");
+        assert_eq!(grade, crate::CineonConverterGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one Cineon converter node"
+        );
+        let op = EffectRenderOp::CineonConverter { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the converter remaps each pixel in place"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the Cineon converter is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            134
+        );
+    }
+
+    #[test]
+    fn cineon_converter_identity_authoring_appends_no_node() {
+        let effect = author_cineon_converter(&[
+            ("black_point", PropertyValue::Int(0)),
+            ("white_point", PropertyValue::Int(1023)),
+            ("gamma", PropertyValue::Float(1.0)),
+            ("highlight", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("an identity converter should compile");
+        assert!(cineon_converter_op(&graph).is_none());
+        assert_eq!(graph.nodes.len(), 1, "only the source node remains");
+    }
+
+    #[test]
+    fn cineon_converter_parameters_round_trip() {
+        let effect = author_cineon_converter(&[
+            (
+                "conversion",
+                PropertyValue::Enum("linear_to_log".to_owned()),
+            ),
+            ("black_point", PropertyValue::Int(120)),
+            ("internal_black", PropertyValue::Float(0.05)),
+            ("white_point", PropertyValue::Int(940)),
+            ("internal_white", PropertyValue::Float(0.9)),
+            ("gamma", PropertyValue::Float(2.2)),
+            ("highlight", PropertyValue::Float(60.0)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened Cineon converter should compile");
+        let parameters = crate::CineonConverterParameters {
+            conversion: crate::CineonConversion::LinearToLog,
+            black_point: 120.0,
+            internal_black: 0.05,
+            white_point: 940.0,
+            internal_white: 0.9,
+            gamma: 2.2,
+            highlight: 60.0,
+        };
+        assert_eq!(
+            cineon_converter_op(&graph),
+            Some(
+                crate::CineonConverterGrade::new(parameters)
+                    .expect("the authored values are in range")
+            )
+        );
+    }
+
+    #[test]
+    fn cineon_converter_invalid_gamma_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::CineonConverter)
+            .expect("the Cineon converter should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "cineon_converter.gamma",
+            serde_json::json!({"Float": 9.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a gamma past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("cineon_converter.gamma"),
+            "the persisted value contract names the parameter: {reason}"
+        );
+    }
+
+    #[test]
+    fn cineon_converter_unknown_menu_key_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::CineonConverter)
+            .expect("the Cineon converter should instantiate");
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "cineon_converter.conversion",
+            serde_json::json!({"Enum": "log_to_video"}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("an unknown menu key must not reach a graph");
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("log_to_video"),
+            "the error names the rejected menu key: {reason}"
         );
     }
 
