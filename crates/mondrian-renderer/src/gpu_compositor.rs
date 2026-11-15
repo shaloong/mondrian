@@ -2993,6 +2993,236 @@ fn color_space_transform_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<
     );
 }
 
+fn aces_transform_signed_pow(value: f32, exponent: f32) -> f32 {
+    // Signed power: keep the sign of the base so negative scene values survive
+    // the transfer functions instead of producing a NaN like pow() would.
+    if (value < 0.0) {
+        return -pow(-value, exponent);
+    }
+    return pow(value, exponent);
+}
+
+fn aces_transform_decode_srgb(value: f32) -> f32 {
+    if (value <= 0.04045) {
+        return value / 12.92;
+    }
+    return aces_transform_signed_pow((value + 0.055) / 1.055, 2.4);
+}
+
+fn aces_transform_decode_rec709(value: f32) -> f32 {
+    if (value < 0.081) {
+        return value / 4.5;
+    }
+    return aces_transform_signed_pow((value + 0.099) / 1.099, 1.0 / 0.45);
+}
+
+fn aces_transform_decode_acescc(value: f32) -> f32 {
+    return exp2(max(value * 17.52 - 9.72, -16.0));
+}
+
+fn aces_transform_decode_acescct(value: f32) -> f32 {
+    if (value <= 0.15525114) {
+        return (value - 0.07290553) / 10.540237;
+    }
+    return exp2(value * 17.52 - 9.72);
+}
+
+fn aces_transform_decode_input(colour: vec3<f32>, tag: u32) -> vec3<f32> {
+    if (tag == 1u) {
+        return aces_transform_rec709_to_ap1(vec3<f32>(
+            aces_transform_decode_srgb(colour.r),
+            aces_transform_decode_srgb(colour.g),
+            aces_transform_decode_srgb(colour.b),
+        ));
+    }
+    if (tag == 2u) {
+        return aces_transform_rec709_to_ap1(vec3<f32>(
+            aces_transform_decode_rec709(colour.r),
+            aces_transform_decode_rec709(colour.g),
+            aces_transform_decode_rec709(colour.b),
+        ));
+    }
+    if (tag == 3u) {
+        return vec3<f32>(
+            aces_transform_decode_acescc(colour.r),
+            aces_transform_decode_acescc(colour.g),
+            aces_transform_decode_acescc(colour.b),
+        );
+    }
+    if (tag == 4u) {
+        return vec3<f32>(
+            aces_transform_decode_acescct(colour.r),
+            aces_transform_decode_acescct(colour.g),
+            aces_transform_decode_acescct(colour.b),
+        );
+    }
+    return colour;
+}
+
+fn aces_transform_encode_rec709(value: f32) -> f32 {
+    if (value < 0.018) {
+        return value * 4.5;
+    }
+    return 1.099 * aces_transform_signed_pow(value, 0.45) - 0.099;
+}
+
+fn aces_transform_encode_srgb(value: f32) -> f32 {
+    if (value <= 0.0031308) {
+        return value * 12.92;
+    }
+    return 1.055 * aces_transform_signed_pow(value, 1.0 / 2.4) - 0.055;
+}
+
+fn aces_transform_rec709_to_ap1(colour: vec3<f32>) -> vec3<f32> {
+    // The row-major CPU matrix is transposed into WGSL's column-major cells.
+    let matrix = mat3x3<f32>(
+        vec3<f32>(0.61309741, 0.07019370, 0.02061561),
+        vec3<f32>(0.33952322, 0.91635379, 0.10956981),
+        vec3<f32>(0.04737937, 0.01345247, 0.86981463),
+    );
+    return matrix * colour;
+}
+
+fn aces_transform_ap1_to_rec709(colour: vec3<f32>) -> vec3<f32> {
+    // The row-major CPU matrix is transposed into WGSL's column-major cells.
+    let matrix = mat3x3<f32>(
+        vec3<f32>(1.70505097, -0.13025638, -0.02400338),
+        vec3<f32>(-0.62179233, 1.14080486, -0.12896902),
+        vec3<f32>(-0.08325865, -0.01054843, 1.15297235),
+    );
+    return matrix * colour;
+}
+
+fn aces_transform_ap1_to_p3d65(colour: vec3<f32>) -> vec3<f32> {
+    // The row-major CPU matrix is transposed into WGSL's column-major cells.
+    let matrix = mat3x3<f32>(
+        vec3<f32>(1.37921411, -0.06933482, -0.00215903),
+        vec3<f32>(-0.30886429, 1.08229686, -0.04545936),
+        vec3<f32>(-0.07034982, -0.01296199, 1.04761834),
+    );
+    return matrix * colour;
+}
+
+fn aces_transform_ap1_to_rec2020(colour: vec3<f32>) -> vec3<f32> {
+    // The row-major CPU matrix is transposed into WGSL's column-major cells.
+    let matrix = mat3x3<f32>(
+        vec3<f32>(1.02582474, -0.00223434, -0.00501337),
+        vec3<f32>(-0.02005328, 1.00458660, -0.02529011),
+        vec3<f32>(-0.00577145, -0.00235222, 1.03030343),
+    );
+    return matrix * colour;
+}
+
+fn aces_transform_encode_output(colour: vec3<f32>, tag: u32) -> vec3<f32> {
+    var linear = colour;
+    if (tag == 2u) {
+        linear = aces_transform_ap1_to_p3d65(colour);
+    } else if (tag == 3u) {
+        linear = aces_transform_ap1_to_rec2020(colour);
+    } else {
+        linear = aces_transform_ap1_to_rec709(colour);
+    }
+    if (tag == 1u) {
+        return vec3<f32>(
+            aces_transform_encode_srgb(linear.r),
+            aces_transform_encode_srgb(linear.g),
+            aces_transform_encode_srgb(linear.b),
+        );
+    }
+    return vec3<f32>(
+        aces_transform_encode_rec709(linear.r),
+        aces_transform_encode_rec709(linear.g),
+        aces_transform_encode_rec709(linear.b),
+    );
+}
+
+fn aces_transform_gamut_excess(colour: vec3<f32>) -> vec3<f32> {
+    // Cyan, magenta and yellow excess in the order the CPU kernel compresses.
+    return vec3<f32>(
+        min(colour.g, colour.b) - colour.r,
+        min(colour.r, colour.b) - colour.g,
+        min(colour.r, colour.g) - colour.b,
+    );
+}
+
+fn aces_transform_compress_excess(excess: f32, threshold: f32, limit: f32, strength: f32, kind: u32) -> f32 {
+    if (excess <= threshold || kind == 0u) {
+        return excess;
+    }
+    let clipped_limit = max(limit, threshold);
+    var compressed = excess;
+    if (kind == 1u) {
+        let span = max(clipped_limit - threshold, 0.0001);
+        compressed = threshold + span * tanh((excess - threshold) / span);
+    } else {
+        compressed = min(excess, clipped_limit);
+    }
+    return excess + (compressed - excess) * strength;
+}
+
+fn aces_transform_gamut(colour: vec3<f32>, strength: f32, kind: u32, limits: vec3<f32>, thresholds: vec3<f32>) -> vec3<f32> {
+    if (strength <= 0.0 || kind == 0u) {
+        return colour;
+    }
+    let excess = aces_transform_gamut_excess(colour);
+    var result = colour;
+    let cyan = aces_transform_compress_excess(excess.x, thresholds.x, limits.x, strength, kind);
+    if (cyan < excess.x) {
+        result.r = result.r + (excess.x - cyan);
+    }
+    let magenta = aces_transform_compress_excess(excess.y, thresholds.y, limits.y, strength, kind);
+    if (magenta < excess.y) {
+        result.g = result.g + (excess.y - magenta);
+    }
+    let yellow = aces_transform_compress_excess(excess.z, thresholds.z, limits.z, strength, kind);
+    if (yellow < excess.z) {
+        result.b = result.b + (excess.z - yellow);
+    }
+    return result;
+}
+
+fn aces_transform_soft_clip(value: f32, rolloff: f32) -> f32 {
+    if (value <= 1.0 || rolloff <= 0.0) {
+        return value;
+    }
+    let over = value - 1.0;
+    return 1.0 + over / (1.0 + rolloff * over);
+}
+
+fn aces_transform_tone(value: f32) -> f32 {
+    let v = max(value, 0.0);
+    let numerator = v * (v + 0.0245786) - 0.000090537;
+    let denominator = v * (0.983729 * v + 0.432951) + 0.238081;
+    return max(numerator / denominator, 0.0);
+}
+
+fn aces_transform_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> {
+    // Disabled masters and empty coverage are exact no-ops, matching the CPU
+    // kernel and the neighbouring colour space transform arm.
+    if (effect.params.x < 0.5 || pixel.a <= 0.0) {
+        return pixel;
+    }
+    let input_tag = u32(effect.params.z + 0.5);
+    let output_tag = u32(effect.params.w + 0.5);
+    let exposure_scale = effect.color.x;
+    let gamut_strength = effect.color.z;
+    let gamut_kind = u32(effect.color.w + 0.5);
+    let limits = vec3<f32>(effect.extra0.x, effect.extra0.y, effect.extra0.z);
+    let thresholds = vec3<f32>(effect.extra0.w, effect.extra1.x, effect.extra1.y);
+    let rolloff = effect.extra1.z;
+    let mid_gray_gain = effect.extra1.w;
+    var colour = aces_transform_decode_input(pixel.rgb, input_tag);
+    colour = colour * exposure_scale;
+    colour = aces_transform_gamut(colour, gamut_strength, gamut_kind, limits, thresholds);
+    colour = vec3<f32>(
+        aces_transform_tone(aces_transform_soft_clip(colour.r, rolloff)) * mid_gray_gain,
+        aces_transform_tone(aces_transform_soft_clip(colour.g, rolloff)) * mid_gray_gain,
+        aces_transform_tone(aces_transform_soft_clip(colour.b, rolloff)) * mid_gray_gain,
+    );
+    let encoded = aces_transform_encode_output(colour, output_tag);
+    return vec4<f32>(encoded, pixel.a);
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -4070,6 +4300,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = star_burst_apply(pixel, position, effect);
         } else if (effect.header.x == 54u) {
             pixel = color_space_transform_apply(pixel, effect);
+        } else if (effect.header.x == 55u) {
+            pixel = aces_transform_apply(pixel, effect);
         }
     }
     return pixel;
@@ -8648,6 +8880,18 @@ fn effect_uniforms_for_ops(
                     extra1,
                     extra2,
                     extra3,
+                }
+            }
+            EffectGpuPointOp::AcesTransform { grade } => {
+                let (params, color, extra0, extra1) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [55, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Scanlines { grade } => {
@@ -13930,6 +14174,121 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU colour space transform accuracy budget exceeded for {label}: {report:?}"
+            );
+        }
+    }
+
+    fn aces_transform_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            for column in 0..width {
+                let v = row as f32 / (height - 1) as f32;
+                // Alpha varies by column so a dropped or clipped coverage value
+                // cannot hide behind a constant. The four colour bands cover the
+                // cyan, magenta and yellow gamut excursions, a saturated primary
+                // and highlights above 1.0 for the soft clip shoulder.
+                let alpha = 0.25 + 0.65 * column as f32 / (width - 1) as f32;
+                let rgb = match column % 4 {
+                    0 => [0.05 + 0.15 * v, 0.85 - 0.15 * v, 0.9 - 0.1 * v],
+                    1 => [1.35 - 0.2 * v, 0.02 + 0.03 * v, 0.03],
+                    2 => [0.9 - 0.1 * v, 1.2 + 0.1 * v, 0.04],
+                    _ => [0.9, 0.05 + 0.03 * v, 1.1],
+                };
+                data.push([rgb[0], rgb[1], rgb[2], alpha]);
+            }
+        }
+        data
+    }
+
+    #[tokio::test]
+    async fn gpu_aces_transform_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, AcesGamutCompression,
+            AcesInputTransform, AcesOutputTransform, AcesTransformGrade, AcesTransformParameters,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU ACES transform parity test: no GPU adapter available");
+            return;
+        };
+        const WIDTH: u32 = 12;
+        const HEIGHT: u32 = 9;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: aces_transform_test_pixels(WIDTH, HEIGHT),
+        });
+        let defaults = AcesTransformParameters::default();
+        let cases = [
+            ("documented defaults", defaults),
+            (
+                "sRGB input into P3 D65",
+                AcesTransformParameters {
+                    input_transform: AcesInputTransform::Srgb,
+                    output_transform: AcesOutputTransform::P3D65,
+                    ..defaults
+                },
+            ),
+            (
+                "ACES gamut compression into Rec.2020",
+                AcesTransformParameters {
+                    gamut_compress_type: AcesGamutCompression::Aces,
+                    cyan_threshold: 0.2,
+                    cyan_limit: 0.4,
+                    output_transform: AcesOutputTransform::Rec2020,
+                    ..defaults
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = AcesTransformGrade::new(parameters).expect("valid ACES transform grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::AcesTransform { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let mut expected = aces_transform_test_pixels(WIDTH, HEIGHT);
+            assert!(mondrian_effects::aces_transform_frame_f32(
+                &mut expected,
+                WIDTH as usize,
+                HEIGHT as usize,
+                &grade,
+            ));
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(5.0e-5, 5.0e-5, 5.0e-5),
+                    alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU ACES transform accuracy budget exceeded for {label}: {report:?}"
             );
         }
     }
