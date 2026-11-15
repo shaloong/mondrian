@@ -267,6 +267,11 @@ pub enum EffectGpuPointOp {
     ChromaticAdaptation {
         grade: crate::ChromaticAdaptationGrade,
     },
+    /// Star burst: the lattice and the star shape are packed into the point
+    /// uniform, and the grade carries the integer hash seed.
+    StarBurst {
+        grade: crate::StarBurstGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -994,6 +999,7 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::ChromaticAdaptation { grade } => {
             Ok(EffectGpuPointOp::ChromaticAdaptation { grade: *grade })
         }
+        EffectRenderOp::StarBurst { grade } => Ok(EffectGpuPointOp::StarBurst { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1142,6 +1148,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ColorDifferenceKey { .. } => "color_difference_key",
         EffectRenderOp::CineonConverter { .. } => "cineon_converter",
         EffectRenderOp::ChromaticAdaptation { .. } => "chromatic_adaptation",
+        EffectRenderOp::StarBurst { .. } => "star_burst",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

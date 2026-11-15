@@ -228,6 +228,8 @@ pub enum EffectType {
     CineonConverter,
     /// Re-express a frame under a different illuminant white point.
     ChromaticAdaptation,
+    /// Places a procedural star field in front of the frame.
+    StarBurst,
     ColorDifferenceKey,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
@@ -385,6 +387,7 @@ impl EffectType {
             Self::Highlight => "builtin.highlight".to_string(),
             Self::CineonConverter => "builtin.cineon_converter".to_string(),
             Self::ChromaticAdaptation => "builtin.chromatic_adaptation".to_string(),
+            Self::StarBurst => "builtin.star_burst".to_string(),
             Self::ColorDifferenceKey => "builtin.color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -526,6 +529,7 @@ impl EffectType {
             "builtin.highlight" => Self::Highlight,
             "builtin.cineon_converter" => Self::CineonConverter,
             "builtin.chromatic_adaptation" => Self::ChromaticAdaptation,
+            "builtin.star_burst" => Self::StarBurst,
             "builtin.color_difference_key" => Self::ColorDifferenceKey,
             other => Self::External(other.to_string()),
         }
@@ -667,6 +671,7 @@ impl EffectType {
             Self::Highlight => "高光提取",
             Self::CineonConverter => "对数转换",
             Self::ChromaticAdaptation => "色度适应",
+            Self::StarBurst => "星空",
             Self::ColorDifferenceKey => "颜色差值键",
             Self::External(name) => name,
         }
@@ -701,6 +706,7 @@ impl EffectType {
             Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
             Self::CineonConverter => vec!["颜色"],
             Self::ChromaticAdaptation => vec!["颜色"],
+            Self::StarBurst => vec!["生成器"],
             Self::ColorDifferenceKey => vec!["抠像"],
             Self::Invert => vec!["通道"],
             Self::DropShadow => vec!["光效"],
@@ -944,6 +950,7 @@ impl EffectType {
             Self::Highlight => "highlight".to_string(),
             Self::CineonConverter => "cineon_converter".to_string(),
             Self::ChromaticAdaptation => "chromatic_adaptation".to_string(),
+            Self::StarBurst => "star_burst".to_string(),
             Self::ColorDifferenceKey => "color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -1463,7 +1470,8 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::LightLeak
             | Self::Highlight
             | Self::CineonConverter
-            | Self::ChromaticAdaptation => Ok(()),
+            | Self::ChromaticAdaptation
+            | Self::StarBurst => Ok(()),
             Self::ColorDifferenceKey => Ok(()),
         }
     }

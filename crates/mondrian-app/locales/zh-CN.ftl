@@ -3848,3 +3848,15 @@ parameter-builtin-chromatic-adaptation-gamma-srgb = sRGB
 parameter-builtin-chromatic-adaptation-gamma-rec709 = Rec.709
 parameter-builtin-chromatic-adaptation-gamma-gamma-2-2 = 伽马 2.2
 parameter-builtin-chromatic-adaptation-gamma-gamma-2-4 = 伽马 2.4
+## Star Burst 星空
+
+effect-star-burst = 星空
+parameter-group-star-burst = 星空
+parameter-mondrian-effect-builtin-star-burst-grid-spacing-label = 网格间距
+parameter-mondrian-effect-builtin-star-burst-size-label = 尺寸
+parameter-mondrian-effect-builtin-star-burst-shading-label = 明暗
+parameter-mondrian-effect-builtin-star-burst-scatter-label = 散布
+parameter-mondrian-effect-builtin-star-burst-speed-label = 速度
+parameter-mondrian-effect-builtin-star-burst-phase-label = 相位
+parameter-mondrian-effect-builtin-star-burst-blend-label = 与原图像混合
+

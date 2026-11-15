@@ -3920,3 +3920,15 @@ parameter-builtin-chromatic-adaptation-gamma-srgb = sRGB
 parameter-builtin-chromatic-adaptation-gamma-rec709 = Rec.709
 parameter-builtin-chromatic-adaptation-gamma-gamma-2-2 = Gamma 2.2
 parameter-builtin-chromatic-adaptation-gamma-gamma-2-4 = Gamma 2.4
+## Star Burst
+
+effect-star-burst = Star Burst
+parameter-group-star-burst = Star Burst
+parameter-mondrian-effect-builtin-star-burst-grid-spacing-label = Grid Spacing
+parameter-mondrian-effect-builtin-star-burst-size-label = Size
+parameter-mondrian-effect-builtin-star-burst-shading-label = Shading
+parameter-mondrian-effect-builtin-star-burst-scatter-label = Scatter
+parameter-mondrian-effect-builtin-star-burst-speed-label = Speed
+parameter-mondrian-effect-builtin-star-burst-phase-label = Phase
+parameter-mondrian-effect-builtin-star-burst-blend-label = Blend w. Original
+

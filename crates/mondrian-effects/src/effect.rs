@@ -1327,6 +1327,11 @@ pub enum EffectRenderOp {
         /// Authored transform, the two white points and the transfer function.
         grade: crate::ChromaticAdaptationGrade,
     },
+    /// Star burst: lays a procedural star field over the frame.
+    StarBurst {
+        /// Authored lattice, star shape and blend.
+        grade: crate::StarBurstGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1770,6 +1775,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ChromaticAdaptation { grade } => {
                 formatter.debug_struct("ChromaticAdaptation").field("grade", grade).finish()
+            }
+            Self::StarBurst { grade } => {
+                formatter.debug_struct("StarBurst").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2893,6 +2901,12 @@ impl EffectRenderOp {
                 // read the authored values, so the grade hashes them all.
                 grade.hash_state(state);
             }
+            EffectRenderOp::StarBurst { grade } => {
+                135u8.hash(state);
+                // The lattice, the star shape and the blend all read the authored
+                // values, so the grade hashes them all.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3175,6 +3189,7 @@ impl EffectRenderOp {
             EffectRenderOp::ColorDifferenceKey { .. } => 1,
             EffectRenderOp::CineonConverter { .. } => 1,
             EffectRenderOp::ChromaticAdaptation { .. } => 2,
+            EffectRenderOp::StarBurst { .. } => 2,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3709,7 +3724,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 135] {
+fn builtin_effect_types() -> [EffectType; 136] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3846,6 +3861,7 @@ fn builtin_effect_types() -> [EffectType; 135] {
         EffectType::ColorDifferenceKey,
         EffectType::CineonConverter,
         EffectType::ChromaticAdaptation,
+        EffectType::StarBurst,
     ]
 }
 
@@ -13171,6 +13187,88 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 .collect(),
             );
         }
+        EffectType::StarBurst => {
+            // The seven authored values mirror the star field: the lattice and
+            // the star size, the shading and scatter of the stars, then the
+            // motion seed and the blend with the source.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "grid_spacing",
+                "星空",
+                "网格间距",
+                PropertyValue::Float(crate::STAR_BURST_DEFAULT_GRID_SPACING),
+                Some(crate::STAR_BURST_MIN_GRID_SPACING as f64),
+                Some(crate::STAR_BURST_MAX_GRID_SPACING as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "size",
+                "星空",
+                "尺寸",
+                PropertyValue::Float(crate::STAR_BURST_DEFAULT_SIZE),
+                Some(crate::STAR_BURST_MIN_SIZE as f64),
+                Some(crate::STAR_BURST_MAX_SIZE as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shading",
+                "星空",
+                "明暗",
+                PropertyValue::Float(crate::STAR_BURST_DEFAULT_SHADING),
+                Some(crate::STAR_BURST_MIN_SHADING as f64),
+                Some(crate::STAR_BURST_MAX_SHADING as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "scatter",
+                "星空",
+                "散布",
+                PropertyValue::Float(crate::STAR_BURST_DEFAULT_SCATTER),
+                Some(crate::STAR_BURST_MIN_SCATTER as f64),
+                Some(crate::STAR_BURST_MAX_SCATTER as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "speed",
+                "星空",
+                "速度",
+                PropertyValue::Float(crate::STAR_BURST_DEFAULT_SPEED),
+                Some(crate::STAR_BURST_MIN_SPEED as f64),
+                Some(crate::STAR_BURST_MAX_SPEED as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "phase",
+                "星空",
+                "相位",
+                PropertyValue::Float(crate::STAR_BURST_DEFAULT_PHASE),
+                Some(crate::STAR_BURST_MIN_PHASE as f64),
+                Some(crate::STAR_BURST_MAX_PHASE as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend",
+                "星空",
+                "与原图像混合",
+                PropertyValue::Float(crate::STAR_BURST_DEFAULT_BLEND),
+                Some(crate::STAR_BURST_MIN_BLEND as f64),
+                Some(crate::STAR_BURST_MAX_BLEND as f64),
+                Some(0.01),
+            );
+        }
         EffectType::LightLeak => {
             // The seven authored values mirror the specified leak: the
             // intensity and tint of the added light, its streak geometry, the
@@ -15599,6 +15697,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The matrix works on one pixel at a time, so no neighbour or
             // history enters the result.
+            ..cpu_linear
+        },
+        EffectType::StarBurst => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Every star is decided from the pixel position and the lattice
+            // hash, so no neighbour or history enters the result.
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -22249,6 +22353,57 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::StarBurst => Some(Arc::new(move |effect, context, graph| {
+            let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                reason,
+            };
+            fn read(
+                effect: &EffectNode,
+                context: EffectEvalContext,
+                invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                parameter: &str,
+                fallback: f32,
+            ) -> Result<f32, EffectGraphBuildError> {
+                let id = builtin_parameter_id(&effect.effect_type, parameter);
+                match effect.evaluate_parameter(&id, context.time) {
+                    Some(PropertyValue::Float(value)) => Ok(value),
+                    Some(PropertyValue::Int(value)) => Ok(value as f32),
+                    Some(_) => Err(invalid(format!("星空的参数 {parameter} 必须是数值"))),
+                    None => Ok(fallback),
+                }
+            }
+            let defaults = crate::StarBurstParameters::default();
+            let mut parameters = defaults;
+            for (parameter, fallback) in [
+                ("grid_spacing", defaults.grid_spacing),
+                ("size", defaults.size),
+                ("shading", defaults.shading),
+                ("scatter", defaults.scatter),
+                ("speed", defaults.speed),
+                ("phase", defaults.phase),
+                ("blend", defaults.blend),
+            ] {
+                let value = read(effect, context, &invalid, parameter, fallback)?;
+                match parameter {
+                    "grid_spacing" => parameters.grid_spacing = value,
+                    "size" => parameters.size = value,
+                    "shading" => parameters.shading = value,
+                    "scatter" => parameters.scatter = value,
+                    "speed" => parameters.speed = value,
+                    "phase" => parameters.phase = value,
+                    "blend" => parameters.blend = value,
+                    _ => {}
+                }
+            }
+            let grade = crate::StarBurstGrade::new(parameters)
+                .map_err(|error| invalid(error.to_string()))?;
+            if !grade.is_identity() {
+                graph.append_unary(EffectRenderOp::StarBurst { grade });
+            }
+            Ok(())
+        })),
         EffectType::LightLeak => {
             let colour_id = builtin_parameter_id(effect_type, "colour");
             let position_id = builtin_parameter_id(effect_type, "position");
@@ -23899,6 +24054,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ColorDifferenceKey => "颜色差值键",
         EffectType::CineonConverter => "对数转换",
         EffectType::ChromaticAdaptation => "色度适应",
+        EffectType::StarBurst => "星空",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -25308,6 +25464,7 @@ mod tests {
             EffectType::ColorDifferenceKey,
             EffectType::CineonConverter,
             EffectType::ChromaticAdaptation,
+            EffectType::StarBurst,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -34604,7 +34761,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 135);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 136);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -35132,7 +35289,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 135);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 136);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -38091,7 +38248,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 135);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 136);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -39227,7 +39384,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 135);
+        assert_eq!(builtin_effect_types().len(), 136);
     }
 
     #[test]
@@ -40715,6 +40872,215 @@ mod tests {
             reason.contains("log_to_video"),
             "the error names the rejected menu key: {reason}"
         );
+    }
+
+    fn star_burst_op(graph: &EffectRenderGraph) -> Option<crate::StarBurstGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::StarBurst { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::StarBurst { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_star_burst(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::StarBurst)
+            .expect("the star burst effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::StarBurst.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the star burst parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn star_burst_defaults_match_the_dump() {
+        let effect_type = EffectType::StarBurst;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("grid_spacing", "网格间距"),
+            ("size", "尺寸"),
+            ("shading", "明暗"),
+            ("scatter", "散布"),
+            ("speed", "速度"),
+            ("phase", "相位"),
+            ("blend", "与原图像混合"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the parameter is defined");
+            assert_eq!(property.descriptor.display_name, *name, "{parameter}");
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("星空")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "star_burst",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["生成器"]);
+
+        let numeric = [
+            ("grid_spacing", 4.0),
+            ("size", 100.0),
+            ("shading", 0.0),
+            ("scatter", 100.0),
+            ("speed", 1.0),
+            ("phase", 0.0),
+            ("blend", 0.0),
+        ];
+        for (parameter, default) in numeric {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the parameter is defined");
+            let evaluated = match property.evaluate(tt(0)) {
+                PropertyValue::Float(value) => value,
+                PropertyValue::Int(value) => value as f32,
+                other => panic!("{parameter} evaluated to {other:?}"),
+            };
+            assert!((evaluated - default).abs() < 1.0e-6, "{parameter}");
+        }
+    }
+
+    #[test]
+    fn star_burst_defaults_leave_the_frame_alone() {
+        let effect = instantiate_effect_node(EffectType::StarBurst)
+            .expect("the star burst effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default star burst should compile");
+        assert!(
+            star_burst_op(&graph).is_none(),
+            "a blend of zero leaves the source untouched"
+        );
+        assert_eq!(graph.nodes.len(), 1, "only the source node remains");
+    }
+
+    #[test]
+    fn star_burst_authored_blend_builds_one_point_op() {
+        let effect = author_star_burst(&[
+            ("blend", PropertyValue::Float(0.5)),
+            ("grid_spacing", PropertyValue::Float(8.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a blended star field should compile");
+        let grade = star_burst_op(&graph).expect("the star field is not the identity");
+        assert_eq!(
+            grade,
+            crate::StarBurstGrade::new(crate::StarBurstParameters {
+                grid_spacing: 8.0,
+                blend: 0.5,
+                ..crate::StarBurstParameters::default()
+            })
+            .expect("the authored values are in range")
+        );
+        assert_eq!(graph.nodes.len(), 2, "the source plus one star node");
+        let op = EffectRenderOp::StarBurst { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the star field decides each pixel in place"
+        );
+        assert_eq!(op.estimated_cost(), 2);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the star field is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            136
+        );
+    }
+
+    #[test]
+    fn star_burst_parameters_round_trip() {
+        let effect = author_star_burst(&[
+            ("grid_spacing", PropertyValue::Float(12.0)),
+            ("size", PropertyValue::Float(240.0)),
+            ("shading", PropertyValue::Float(-40.0)),
+            ("scatter", PropertyValue::Float(250.0)),
+            ("speed", PropertyValue::Float(-2.5)),
+            ("phase", PropertyValue::Float(3.25)),
+            ("blend", PropertyValue::Float(0.75)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened star burst should compile");
+        let parameters = crate::StarBurstParameters {
+            grid_spacing: 12.0,
+            size: 240.0,
+            shading: -40.0,
+            scatter: 250.0,
+            speed: -2.5,
+            phase: 3.25,
+            blend: 0.75,
+        };
+        assert_eq!(
+            star_burst_op(&graph),
+            Some(crate::StarBurstGrade::new(parameters).expect("the authored values are in range"))
+        );
+    }
+
+    #[test]
+    fn star_burst_invalid_grid_spacing_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::StarBurst)
+            .expect("the star burst effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "star_burst.grid_spacing",
+            serde_json::json!({"Float": 0.5}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("an out of range grid spacing should fail");
+        match error {
+            EffectGraphBuildError::InvalidAuthorState { effect_key, effect_id: failed, reason } => {
+                assert_eq!(effect_key, "builtin.star_burst");
+                assert_eq!(failed, effect_id);
+                assert!(reason.contains("star_burst.grid_spacing"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn star_burst_non_numeric_parameter_is_rejected_by_the_contract() {
+        let effect = instantiate_effect_node(EffectType::StarBurst)
+            .expect("the star burst effect should instantiate");
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "star_burst.size",
+            serde_json::json!({"Bool": true}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a boolean size should fail");
+        // The property contract runs before the builder, so the boolean is
+        // coerced to one and rejected for lying outside the documented range.
+        let message = error.to_string();
+        assert!(message.contains("star_burst.size"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
     }
 
     fn chromatic_adaptation_op(

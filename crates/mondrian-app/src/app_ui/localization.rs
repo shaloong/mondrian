@@ -418,6 +418,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "颜色差值键" => Some("parameter-group-color-difference-key"),
         "对数转换" => Some("parameter-group-cineon-converter"),
         "色度适应" => Some("parameter-group-chromatic-adaptation"),
+        "星空" => Some("parameter-group-star-burst"),
         _ => None,
     }
 }

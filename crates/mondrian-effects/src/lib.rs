@@ -197,6 +197,7 @@ pub mod scatter;
 pub mod selective_color;
 pub mod shift_channels;
 pub mod smart_blur;
+pub mod star_burst;
 pub(crate) mod straight_alpha;
 pub mod temporal_execution;
 pub mod test_signals;
@@ -690,6 +691,15 @@ pub use spill_suppressor::{
 pub use split::{
     split_frame_f32, SplitError, SplitGrade, SPLIT_MAX_COORDINATE, SPLIT_MAX_PIXELS,
     SPLIT_MIN_PIXELS,
+};
+pub use star_burst::{
+    star_burst_frame_f32, StarBurstError, StarBurstGrade, StarBurstParameters,
+    STAR_BURST_DEFAULT_BLEND, STAR_BURST_DEFAULT_GRID_SPACING, STAR_BURST_DEFAULT_PHASE,
+    STAR_BURST_DEFAULT_SCATTER, STAR_BURST_DEFAULT_SHADING, STAR_BURST_DEFAULT_SIZE,
+    STAR_BURST_DEFAULT_SPEED, STAR_BURST_MAX_BLEND, STAR_BURST_MAX_GRID_SPACING,
+    STAR_BURST_MAX_PHASE, STAR_BURST_MAX_SCATTER, STAR_BURST_MAX_SHADING, STAR_BURST_MAX_SIZE,
+    STAR_BURST_MAX_SPEED, STAR_BURST_MIN_BLEND, STAR_BURST_MIN_GRID_SPACING, STAR_BURST_MIN_PHASE,
+    STAR_BURST_MIN_SCATTER, STAR_BURST_MIN_SHADING, STAR_BURST_MIN_SIZE, STAR_BURST_MIN_SPEED,
 };
 pub use stroke::{
     stroke_frame_f32, StrokeControls, StrokeError, StrokeGrade, StrokePaintStyle,
