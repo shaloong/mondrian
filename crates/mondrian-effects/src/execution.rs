@@ -3248,6 +3248,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CineonConverter { .. } => "cineon_converter",
         EffectRenderOp::ChromaticAdaptation { .. } => "chromatic_adaptation",
         EffectRenderOp::StarBurst { .. } => "star_burst",
+        EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

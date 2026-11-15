@@ -1332,6 +1332,11 @@ pub enum EffectRenderOp {
         /// Authored lattice, star shape and blend.
         grade: crate::StarBurstGrade,
     },
+    /// Colour space transform: converts primaries and transfer functions.
+    ColorSpaceTransform {
+        /// Authored spaces, transfer functions and mapping settings.
+        grade: crate::ColorSpaceTransformGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1778,6 +1783,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::StarBurst { grade } => {
                 formatter.debug_struct("StarBurst").field("grade", grade).finish()
+            }
+            Self::ColorSpaceTransform { grade } => {
+                formatter.debug_struct("ColorSpaceTransform").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2907,6 +2915,12 @@ impl EffectRenderOp {
                 // values, so the grade hashes them all.
                 grade.hash_state(state);
             }
+            EffectRenderOp::ColorSpaceTransform { grade } => {
+                136u8.hash(state);
+                // Every space, transfer function and mapping setting changes the
+                // pixels, so the grade hashes the whole configuration.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3190,6 +3204,7 @@ impl EffectRenderOp {
             EffectRenderOp::CineonConverter { .. } => 1,
             EffectRenderOp::ChromaticAdaptation { .. } => 2,
             EffectRenderOp::StarBurst { .. } => 2,
+            EffectRenderOp::ColorSpaceTransform { .. } => 4,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3724,7 +3739,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 136] {
+fn builtin_effect_types() -> [EffectType; 137] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3862,6 +3877,7 @@ fn builtin_effect_types() -> [EffectType; 136] {
         EffectType::CineonConverter,
         EffectType::ChromaticAdaptation,
         EffectType::StarBurst,
+        EffectType::ColorSpaceTransform,
     ]
 }
 
@@ -13269,6 +13285,367 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::ColorSpaceTransform => {
+            // The twenty-five authored values mirror the specified transform:
+            // the two spaces and transfer functions, then the tone and gamut
+            // mapping controls and the adaptation weights.
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "input_color_space",
+                "色彩空间转换",
+                "输入色彩空间",
+                "rec709",
+                [
+                    ("rec709", "Rec.709"),
+                    ("srgb", "sRGB"),
+                    ("p3d65", "P3 D65"),
+                    ("p3dci", "P3 DCI"),
+                    ("rec2020", "Rec.2020"),
+                    ("aces_ap1", "ACES AP1"),
+                    ("aces_ap0", "ACES AP0"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.color_space_transform.input_color_space.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "input_gamma",
+                "色彩空间转换",
+                "输入伽马",
+                "linear",
+                [
+                    ("linear", "Linear"),
+                    ("srgb", "sRGB"),
+                    ("rec709", "Rec.709"),
+                    ("gamma_2_2", "Gamma 2.2"),
+                    ("gamma_2_4", "Gamma 2.4"),
+                    ("gamma_2_6", "Gamma 2.6"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.color_space_transform.input_gamma.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "output_color_space",
+                "色彩空间转换",
+                "输出色彩空间",
+                "rec709",
+                [
+                    ("rec709", "Rec.709"),
+                    ("srgb", "sRGB"),
+                    ("p3d65", "P3 D65"),
+                    ("p3dci", "P3 DCI"),
+                    ("rec2020", "Rec.2020"),
+                    ("aces_ap1", "ACES AP1"),
+                    ("aces_ap0", "ACES AP0"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.color_space_transform.output_color_space.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "output_gamma",
+                "色彩空间转换",
+                "输出伽马",
+                "linear",
+                [
+                    ("linear", "Linear"),
+                    ("srgb", "sRGB"),
+                    ("rec709", "Rec.709"),
+                    ("gamma_2_2", "Gamma 2.2"),
+                    ("gamma_2_4", "Gamma 2.4"),
+                    ("gamma_2_6", "Gamma 2.6"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.color_space_transform.output_gamma.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "tone_mapping_method",
+                "色彩空间转换",
+                "色调映射方式",
+                "none",
+                [
+                    ("none", "None"),
+                    ("reinhard", "Reinhard"),
+                    ("hable", "Hable"),
+                    ("aces", "ACES"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.color_space_transform.tone_mapping_method.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "gamut_mapping_method",
+                "色彩空间转换",
+                "色域映射方式",
+                "none",
+                [
+                    ("none", "None"),
+                    ("clip", "Clip"),
+                    ("desaturate", "Desaturate"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.color_space_transform.gamut_mapping_method.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color_space_transform",
+                "色彩空间转换",
+                "色彩空间转换",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "swap",
+                "色彩空间转换",
+                "交换",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tone_mapping",
+                "色彩空间转换",
+                "色调映射",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "use_custom_max_input",
+                "色彩空间转换",
+                "使用自定义最大输入",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "max_input_nits",
+                "色彩空间转换",
+                "最大输入（尼特）",
+                PropertyValue::Float(100.0),
+                Some(1.0),
+                Some(10000.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "use_custom_max_output",
+                "色彩空间转换",
+                "使用自定义最大输出",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "max_output_nits",
+                "色彩空间转换",
+                "最大输出（尼特）",
+                PropertyValue::Float(100.0),
+                Some(1.0),
+                Some(10000.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "adaptation",
+                "色彩空间转换",
+                "适配",
+                PropertyValue::Float(9.0),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "saturation_rolloff_start",
+                "色彩空间转换",
+                "饱和度过渡开始（尼特）",
+                PropertyValue::Float(100.0),
+                Some(1.0),
+                Some(10000.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "saturation_rolloff_limit",
+                "色彩空间转换",
+                "饱和度过渡限制（尼特）",
+                PropertyValue::Float(10000.0),
+                Some(1.0),
+                Some(10000.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "gamut_mapping",
+                "色彩空间转换",
+                "色域映射",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "saturation_knee",
+                "色彩空间转换",
+                "饱和度拐点",
+                PropertyValue::Float(0.9),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "saturation_max",
+                "色彩空间转换",
+                "饱和度最大值",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "advanced",
+                "色彩空间转换",
+                "高级",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "use_hdr_standard_conversions",
+                "色彩空间转换",
+                "使用 HDR 标准转换",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "use_hdr_diffuse_white",
+                "色彩空间转换",
+                "使用 HDR 203 尼特漫反射白",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "apply_forward_ootf",
+                "色彩空间转换",
+                "应用正向OOTF",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "apply_inverse_ootf",
+                "色彩空间转换",
+                "应用反向OOTF",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "use_white_point_adaptation",
+                "色彩空间转换",
+                "使用白点自适应",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+        }
         EffectType::LightLeak => {
             // The seven authored values mirror the specified leak: the
             // intensity and tint of the added light, its streak geometry, the
@@ -15703,6 +16080,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Every star is decided from the pixel position and the lattice
             // hash, so no neighbour or history enters the result.
+            ..cpu_linear
+        },
+        EffectType::ColorSpaceTransform => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Every output channel is a function of the same input pixel, the
+            // authored spaces and the mapping settings.
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -22404,6 +22787,186 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             }
             Ok(())
         })),
+        EffectType::ColorSpaceTransform => {
+            let input_space_id = builtin_parameter_id(effect_type, "input_color_space");
+            let input_gamma_id = builtin_parameter_id(effect_type, "input_gamma");
+            let output_space_id = builtin_parameter_id(effect_type, "output_color_space");
+            let output_gamma_id = builtin_parameter_id(effect_type, "output_gamma");
+            let tone_method_id = builtin_parameter_id(effect_type, "tone_mapping_method");
+            let gamut_method_id = builtin_parameter_id(effect_type, "gamut_mapping_method");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!(
+                            "色彩空间转换的参数 {parameter} 必须是数值"
+                        ))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_enum<T: Copy>(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    id: &ParameterId,
+                    name: &str,
+                    from_key: fn(&str) -> Option<T>,
+                ) -> Result<Option<T>, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                            Some(value) => Ok(Some(value)),
+                            None => Err(invalid(format!(
+                                "色彩空间转换的{name}没有对应的菜单项 {key}"
+                            ))),
+                        },
+                        Some(_) => Err(invalid(format!("色彩空间转换的{name}必须是菜单项"))),
+                        None => Ok(None),
+                    }
+                }
+                let defaults = crate::ColorSpaceTransformParameters::default();
+                let mut parameters = defaults;
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &input_space_id,
+                    "输入色彩空间",
+                    crate::ColorSpaceTransformSpace::from_key,
+                )? {
+                    parameters.input_color_space = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &input_gamma_id,
+                    "输入伽马",
+                    crate::ColorSpaceTransformGamma::from_key,
+                )? {
+                    parameters.input_gamma = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &output_space_id,
+                    "输出色彩空间",
+                    crate::ColorSpaceTransformSpace::from_key,
+                )? {
+                    parameters.output_color_space = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &output_gamma_id,
+                    "输出伽马",
+                    crate::ColorSpaceTransformGamma::from_key,
+                )? {
+                    parameters.output_gamma = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &tone_method_id,
+                    "色调映射方式",
+                    crate::ColorSpaceTransformToneMapping::from_key,
+                )? {
+                    parameters.tone_mapping_method = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &gamut_method_id,
+                    "色域映射方式",
+                    crate::ColorSpaceTransformGamutMapping::from_key,
+                )? {
+                    parameters.gamut_mapping_method = value;
+                }
+                for (parameter, fallback) in [
+                    ("color_space_transform", defaults.color_space_transform),
+                    ("swap", defaults.swap),
+                    ("tone_mapping", defaults.tone_mapping),
+                    ("use_custom_max_input", defaults.use_custom_max_input),
+                    ("max_input_nits", defaults.max_input_nits),
+                    ("use_custom_max_output", defaults.use_custom_max_output),
+                    ("max_output_nits", defaults.max_output_nits),
+                    ("adaptation", defaults.adaptation),
+                    (
+                        "saturation_rolloff_start",
+                        defaults.saturation_rolloff_start,
+                    ),
+                    (
+                        "saturation_rolloff_limit",
+                        defaults.saturation_rolloff_limit,
+                    ),
+                    ("gamut_mapping", defaults.gamut_mapping),
+                    ("saturation_knee", defaults.saturation_knee),
+                    ("saturation_max", defaults.saturation_max),
+                    ("advanced", defaults.advanced),
+                    (
+                        "use_hdr_standard_conversions",
+                        defaults.use_hdr_standard_conversions,
+                    ),
+                    ("use_hdr_diffuse_white", defaults.use_hdr_diffuse_white),
+                    ("apply_forward_ootf", defaults.apply_forward_ootf),
+                    ("apply_inverse_ootf", defaults.apply_inverse_ootf),
+                    (
+                        "use_white_point_adaptation",
+                        defaults.use_white_point_adaptation,
+                    ),
+                ] {
+                    let value = read(effect, context, &invalid, parameter, fallback)?;
+                    match parameter {
+                        "color_space_transform" => parameters.color_space_transform = value,
+                        "swap" => parameters.swap = value,
+                        "tone_mapping" => parameters.tone_mapping = value,
+                        "use_custom_max_input" => parameters.use_custom_max_input = value,
+                        "max_input_nits" => parameters.max_input_nits = value,
+                        "use_custom_max_output" => parameters.use_custom_max_output = value,
+                        "max_output_nits" => parameters.max_output_nits = value,
+                        "adaptation" => parameters.adaptation = value,
+                        "saturation_rolloff_start" => parameters.saturation_rolloff_start = value,
+                        "saturation_rolloff_limit" => parameters.saturation_rolloff_limit = value,
+                        "gamut_mapping" => parameters.gamut_mapping = value,
+                        "saturation_knee" => parameters.saturation_knee = value,
+                        "saturation_max" => parameters.saturation_max = value,
+                        "advanced" => parameters.advanced = value,
+                        "use_hdr_standard_conversions" => {
+                            parameters.use_hdr_standard_conversions = value
+                        }
+                        "use_hdr_diffuse_white" => parameters.use_hdr_diffuse_white = value,
+                        "apply_forward_ootf" => parameters.apply_forward_ootf = value,
+                        "apply_inverse_ootf" => parameters.apply_inverse_ootf = value,
+                        "use_white_point_adaptation" => {
+                            parameters.use_white_point_adaptation = value
+                        }
+                        _ => {}
+                    }
+                }
+                let grade = crate::ColorSpaceTransformGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ColorSpaceTransform { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LightLeak => {
             let colour_id = builtin_parameter_id(effect_type, "colour");
             let position_id = builtin_parameter_id(effect_type, "position");
@@ -24055,6 +24618,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::CineonConverter => "对数转换",
         EffectType::ChromaticAdaptation => "色度适应",
         EffectType::StarBurst => "星空",
+        EffectType::ColorSpaceTransform => "色彩空间转换",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -25465,6 +26029,7 @@ mod tests {
             EffectType::CineonConverter,
             EffectType::ChromaticAdaptation,
             EffectType::StarBurst,
+            EffectType::ColorSpaceTransform,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -34761,7 +35326,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 136);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 137);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -35289,7 +35854,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 136);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 137);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -38248,7 +38813,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 136);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 137);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -39384,7 +39949,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 136);
+        assert_eq!(builtin_effect_types().len(), 137);
     }
 
     #[test]
@@ -41080,6 +41645,298 @@ mod tests {
         // coerced to one and rejected for lying outside the documented range.
         let message = error.to_string();
         assert!(message.contains("star_burst.size"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+    }
+
+    fn color_space_transform_op(
+        graph: &EffectRenderGraph,
+    ) -> Option<crate::ColorSpaceTransformGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ColorSpaceTransform { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ColorSpaceTransform { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_color_space_transform(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ColorSpaceTransform)
+            .expect("the colour space transform should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ColorSpaceTransform.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the colour space parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn color_space_transform_defaults_match_the_dump() {
+        let effect_type = EffectType::ColorSpaceTransform;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("input_color_space", "输入色彩空间"),
+            ("input_gamma", "输入伽马"),
+            ("output_color_space", "输出色彩空间"),
+            ("output_gamma", "输出伽马"),
+            ("tone_mapping_method", "色调映射方式"),
+            ("gamut_mapping_method", "色域映射方式"),
+            ("color_space_transform", "色彩空间转换"),
+            ("swap", "交换"),
+            ("tone_mapping", "色调映射"),
+            ("use_custom_max_input", "使用自定义最大输入"),
+            ("max_input_nits", "最大输入（尼特）"),
+            ("use_custom_max_output", "使用自定义最大输出"),
+            ("max_output_nits", "最大输出（尼特）"),
+            ("adaptation", "适配"),
+            ("saturation_rolloff_start", "饱和度过渡开始（尼特）"),
+            ("saturation_rolloff_limit", "饱和度过渡限制（尼特）"),
+            ("gamut_mapping", "色域映射"),
+            ("saturation_knee", "饱和度拐点"),
+            ("saturation_max", "饱和度最大值"),
+            ("advanced", "高级"),
+            ("use_hdr_standard_conversions", "使用 HDR 标准转换"),
+            ("use_hdr_diffuse_white", "使用 HDR 203 尼特漫反射白"),
+            ("apply_forward_ootf", "应用正向OOTF"),
+            ("apply_inverse_ootf", "应用反向OOTF"),
+            ("use_white_point_adaptation", "使用白点自适应"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("色彩空间转换")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "color_space_transform",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["颜色"]);
+
+        let menus = [
+            ("input_color_space", "rec709", 7),
+            ("input_gamma", "linear", 6),
+            ("output_color_space", "rec709", 7),
+            ("output_gamma", "linear", 6),
+            ("tone_mapping_method", "none", 4),
+            ("gamut_mapping_method", "none", 3),
+        ];
+        for (parameter, default, count) in menus {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the menu is defined");
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Enum(default.to_owned()),
+                "{parameter}"
+            );
+            let options = &property.descriptor.schema.enum_options;
+            assert_eq!(options.len(), count, "{parameter}");
+            for option in options {
+                assert_eq!(
+                    option.message_id,
+                    format!("builtin.color_space_transform.{parameter}.{}", option.key)
+                );
+            }
+        }
+
+        let numeric = [
+            ("color_space_transform", 1.0),
+            ("swap", 0.0),
+            ("tone_mapping", 1.0),
+            ("use_custom_max_input", 0.0),
+            ("max_input_nits", 100.0),
+            ("use_custom_max_output", 0.0),
+            ("max_output_nits", 100.0),
+            ("adaptation", 9.0),
+            ("saturation_rolloff_start", 100.0),
+            ("saturation_rolloff_limit", 10000.0),
+            ("gamut_mapping", 1.0),
+            ("saturation_knee", 0.9),
+            ("saturation_max", 1.0),
+            ("advanced", 1.0),
+            ("use_hdr_standard_conversions", 1.0),
+            ("use_hdr_diffuse_white", 1.0),
+            ("apply_forward_ootf", 0.0),
+            ("apply_inverse_ootf", 0.0),
+            ("use_white_point_adaptation", 1.0),
+        ];
+        for (parameter, default) in numeric {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the parameter is defined");
+            let evaluated = match property.evaluate(tt(0)) {
+                PropertyValue::Float(value) => value,
+                PropertyValue::Int(value) => value as f32,
+                other => panic!("{parameter} evaluated to {other:?}"),
+            };
+            assert!((evaluated - default).abs() < 1.0e-6, "{parameter}");
+        }
+    }
+
+    #[test]
+    fn color_space_transform_defaults_leave_the_frame_alone() {
+        let effect = instantiate_effect_node(EffectType::ColorSpaceTransform)
+            .expect("the colour space transform should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity transform should compile");
+        assert!(
+            color_space_transform_op(&graph).is_none(),
+            "the documented defaults are the identity"
+        );
+    }
+
+    #[test]
+    fn color_space_transform_authored_primaries_build_one_point_op() {
+        let effect = author_color_space_transform(&[(
+            "input_color_space",
+            PropertyValue::Enum("p3d65".to_owned()),
+        )]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a primaries conversion should compile");
+        let grade = color_space_transform_op(&graph).expect("the transform is not the identity");
+        assert_eq!(
+            grade,
+            crate::ColorSpaceTransformGrade::new(crate::ColorSpaceTransformParameters {
+                input_color_space: crate::ColorSpaceTransformSpace::P3D65,
+                ..crate::ColorSpaceTransformParameters::default()
+            })
+            .expect("the authored values are in range")
+        );
+        assert_eq!(graph.nodes.len(), 2, "the source plus one transform node");
+        let op = EffectRenderOp::ColorSpaceTransform { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the transform decides each pixel in place"
+        );
+        assert_eq!(op.estimated_cost(), 4);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the transform is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            137
+        );
+    }
+
+    #[test]
+    fn color_space_transform_parameters_round_trip() {
+        let effect = author_color_space_transform(&[
+            (
+                "input_color_space",
+                PropertyValue::Enum("aces_ap1".to_owned()),
+            ),
+            ("input_gamma", PropertyValue::Enum("srgb".to_owned())),
+            (
+                "output_color_space",
+                PropertyValue::Enum("p3d65".to_owned()),
+            ),
+            ("output_gamma", PropertyValue::Enum("gamma_2_2".to_owned())),
+            (
+                "tone_mapping_method",
+                PropertyValue::Enum("hable".to_owned()),
+            ),
+            (
+                "gamut_mapping_method",
+                PropertyValue::Enum("clip".to_owned()),
+            ),
+            ("swap", PropertyValue::Float(1.0)),
+            ("max_input_nits", PropertyValue::Float(400.0)),
+            ("use_custom_max_input", PropertyValue::Float(1.0)),
+            ("saturation_knee", PropertyValue::Float(0.45)),
+            ("apply_inverse_ootf", PropertyValue::Float(1.0)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened transform should compile");
+        let parameters = crate::ColorSpaceTransformParameters {
+            input_color_space: crate::ColorSpaceTransformSpace::AcesAp1,
+            input_gamma: crate::ColorSpaceTransformGamma::Srgb,
+            output_color_space: crate::ColorSpaceTransformSpace::P3D65,
+            output_gamma: crate::ColorSpaceTransformGamma::Gamma22,
+            tone_mapping_method: crate::ColorSpaceTransformToneMapping::Hable,
+            gamut_mapping_method: crate::ColorSpaceTransformGamutMapping::Clip,
+            swap: 1.0,
+            max_input_nits: 400.0,
+            use_custom_max_input: 1.0,
+            saturation_knee: 0.45,
+            apply_inverse_ootf: 1.0,
+            ..crate::ColorSpaceTransformParameters::default()
+        };
+        assert_eq!(
+            color_space_transform_op(&graph),
+            Some(
+                crate::ColorSpaceTransformGrade::new(parameters)
+                    .expect("the authored values are in range")
+            )
+        );
+    }
+
+    #[test]
+    fn color_space_transform_invalid_nits_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::ColorSpaceTransform)
+            .expect("the colour space transform should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "color_space_transform.max_input_nits",
+            serde_json::json!(0.5),
+        );
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a dimmer than one nit input should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.color_space_transform");
+                    assert!(
+                        reason.contains("color_space_transform.max_input_nits"),
+                        "{reason}"
+                    );
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn color_space_transform_unknown_menu_key_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::ColorSpaceTransform)
+            .expect("the colour space transform should instantiate");
+        // The property contract rejects a key the schema never declared, so the
+        // mutation itself fails closed before the graph builder runs.
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ColorSpaceTransform.property_path("input_color_space"),
+                value: PropertyValue::Enum("rec2100".to_owned()),
+            })
+            .expect_err("an unknown menu key should fail");
+        let message = error.to_string();
+        assert!(message.contains("rec2100"), "{message}");
         assert!(message.contains("parameter_value_contract"), "{message}");
     }
 

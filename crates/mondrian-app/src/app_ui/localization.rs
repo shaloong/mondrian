@@ -419,6 +419,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "对数转换" => Some("parameter-group-cineon-converter"),
         "色度适应" => Some("parameter-group-chromatic-adaptation"),
         "星空" => Some("parameter-group-star-burst"),
+        "色彩空间转换" => Some("parameter-group-color-space-transform"),
         _ => None,
     }
 }

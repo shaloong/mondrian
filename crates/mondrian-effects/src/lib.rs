@@ -167,6 +167,7 @@ pub mod brush_strokes;
 pub mod chromatic_adaptation;
 pub mod cineon_converter;
 pub mod color_difference_key;
+pub mod color_space_transform;
 pub mod colorama;
 pub mod jpeg_damage;
 pub mod kaleidoscope;
@@ -371,6 +372,21 @@ pub use color_difference_key::{
 pub use color_offset::{
     color_offset_frame_f32, ColorOffsetError, ColorOffsetGrade, ColorOffsetOverflow,
     COLOR_OFFSET_MAX_PHASE_PIXELS, COLOR_OFFSET_OVERFLOW_COUNT,
+};
+pub use color_space_transform::{
+    color_space_transform_frame_f32, ColorSpaceTransformError, ColorSpaceTransformGamma,
+    ColorSpaceTransformGamutMapping, ColorSpaceTransformGrade, ColorSpaceTransformParameters,
+    ColorSpaceTransformSpace, ColorSpaceTransformToneMapping, ColorSpaceTransformUniforms,
+    COLOR_SPACE_TRANSFORM_DEFAULT_ADAPTATION, COLOR_SPACE_TRANSFORM_DEFAULT_GAMUT_MAPPING_METHOD,
+    COLOR_SPACE_TRANSFORM_DEFAULT_INPUT_COLOR_SPACE, COLOR_SPACE_TRANSFORM_DEFAULT_INPUT_GAMMA,
+    COLOR_SPACE_TRANSFORM_DEFAULT_MAX_INPUT_NITS, COLOR_SPACE_TRANSFORM_DEFAULT_MAX_OUTPUT_NITS,
+    COLOR_SPACE_TRANSFORM_DEFAULT_OUTPUT_COLOR_SPACE, COLOR_SPACE_TRANSFORM_DEFAULT_OUTPUT_GAMMA,
+    COLOR_SPACE_TRANSFORM_DEFAULT_SATURATION_KNEE, COLOR_SPACE_TRANSFORM_DEFAULT_SATURATION_MAX,
+    COLOR_SPACE_TRANSFORM_DEFAULT_SATURATION_ROLLOFF_LIMIT,
+    COLOR_SPACE_TRANSFORM_DEFAULT_SATURATION_ROLLOFF_START,
+    COLOR_SPACE_TRANSFORM_DEFAULT_TONE_MAPPING_METHOD, COLOR_SPACE_TRANSFORM_MAX_ADAPTATION,
+    COLOR_SPACE_TRANSFORM_MAX_NITS, COLOR_SPACE_TRANSFORM_MIN_ADAPTATION,
+    COLOR_SPACE_TRANSFORM_MIN_NITS,
 };
 pub use colorama::{
     colorama_frame_f32, ColoramaAddMode, ColoramaError, ColoramaGpuControls, ColoramaGrade,

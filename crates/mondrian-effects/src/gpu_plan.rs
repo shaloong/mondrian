@@ -272,6 +272,11 @@ pub enum EffectGpuPointOp {
     StarBurst {
         grade: crate::StarBurstGrade,
     },
+    /// Colour space transform: the composed matrix and the transfer tags fill
+    /// the point uniform, so the shader never rebuilds the primaries.
+    ColorSpaceTransform {
+        grade: crate::ColorSpaceTransformGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -1000,6 +1005,9 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::ChromaticAdaptation { grade: *grade })
         }
         EffectRenderOp::StarBurst { grade } => Ok(EffectGpuPointOp::StarBurst { grade: *grade }),
+        EffectRenderOp::ColorSpaceTransform { grade } => {
+            Ok(EffectGpuPointOp::ColorSpaceTransform { grade: *grade })
+        }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1149,6 +1157,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CineonConverter { .. } => "cineon_converter",
         EffectRenderOp::ChromaticAdaptation { .. } => "chromatic_adaptation",
         EffectRenderOp::StarBurst { .. } => "star_burst",
+        EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

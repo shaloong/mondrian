@@ -230,6 +230,9 @@ pub enum EffectType {
     ChromaticAdaptation,
     /// Places a procedural star field in front of the frame.
     StarBurst,
+    /// Converts footage between primaries and transfer functions, with optional
+    /// tone and gamut mapping.
+    ColorSpaceTransform,
     ColorDifferenceKey,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
@@ -388,6 +391,7 @@ impl EffectType {
             Self::CineonConverter => "builtin.cineon_converter".to_string(),
             Self::ChromaticAdaptation => "builtin.chromatic_adaptation".to_string(),
             Self::StarBurst => "builtin.star_burst".to_string(),
+            Self::ColorSpaceTransform => "builtin.color_space_transform".to_string(),
             Self::ColorDifferenceKey => "builtin.color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -530,6 +534,7 @@ impl EffectType {
             "builtin.cineon_converter" => Self::CineonConverter,
             "builtin.chromatic_adaptation" => Self::ChromaticAdaptation,
             "builtin.star_burst" => Self::StarBurst,
+            "builtin.color_space_transform" => Self::ColorSpaceTransform,
             "builtin.color_difference_key" => Self::ColorDifferenceKey,
             other => Self::External(other.to_string()),
         }
@@ -672,6 +677,7 @@ impl EffectType {
             Self::CineonConverter => "对数转换",
             Self::ChromaticAdaptation => "色度适应",
             Self::StarBurst => "星空",
+            Self::ColorSpaceTransform => "色彩空间转换",
             Self::ColorDifferenceKey => "颜色差值键",
             Self::External(name) => name,
         }
@@ -707,6 +713,7 @@ impl EffectType {
             Self::CineonConverter => vec!["颜色"],
             Self::ChromaticAdaptation => vec!["颜色"],
             Self::StarBurst => vec!["生成器"],
+            Self::ColorSpaceTransform => vec!["颜色"],
             Self::ColorDifferenceKey => vec!["抠像"],
             Self::Invert => vec!["通道"],
             Self::DropShadow => vec!["光效"],
@@ -951,6 +958,7 @@ impl EffectType {
             Self::CineonConverter => "cineon_converter".to_string(),
             Self::ChromaticAdaptation => "chromatic_adaptation".to_string(),
             Self::StarBurst => "star_burst".to_string(),
+            Self::ColorSpaceTransform => "color_space_transform".to_string(),
             Self::ColorDifferenceKey => "color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -1472,6 +1480,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::CineonConverter
             | Self::ChromaticAdaptation
             | Self::StarBurst => Ok(()),
+            Self::ColorSpaceTransform => Ok(()),
             Self::ColorDifferenceKey => Ok(()),
         }
     }
