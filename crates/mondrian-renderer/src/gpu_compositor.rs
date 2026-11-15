@@ -18848,6 +18848,115 @@ mod tests {
         }
     }
 
+    fn deinterlace_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let mut colour = [0.1 + 0.8 * u, 0.2 + 0.6 * v, 0.3 + 0.3 * (1.0 - u)];
+                if y % 2 == 0 {
+                    // The retained rows are deliberately darker, so a frame that
+                    // was not rebuilt at all cannot pass the comparison.
+                    colour = [colour[0] * 0.6, colour[1] * 0.7, colour[2] * 0.8];
+                }
+                let alpha = if x == 2 || y == 4 {
+                    0.0
+                } else if u > 0.85 {
+                    0.35
+                } else {
+                    1.0
+                };
+                pixels.push([colour[0], colour[1], colour[2], alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_deinterlace_matches_the_cpu_kernel() {
+        use mondrian_effects::{deinterlace_frame_f32, DeinterlaceGrade, EffectGpuSpatialPass};
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping deinterlace parity test: no GPU adapter available");
+            return;
+        };
+        let width = 16;
+        let height = 11;
+        let pixels = deinterlace_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+
+        let cases: [(&str, f32, u32); 4] = [
+            ("single tap", 0.0, 1),
+            ("two taps", 250.0, 2),
+            ("three taps", 600.0, 3),
+            ("four taps", 1000.0, 4),
+        ];
+        for (label, softness, expected_taps) in cases {
+            let grade = DeinterlaceGrade::new(softness)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            assert_eq!(grade.taps(), expected_taps, "{label}: tap count");
+            let mut cpu = pixels.clone();
+            assert!(
+                deinterlace_frame_f32(&mut cpu, width as usize, height as usize, &grade),
+                "{label}: the CPU kernel must accept the frame"
+            );
+
+            let pass = EffectGpuSpatialPass::Deinterlace { grade };
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 1, "{label}: one rebuild draw");
+            let source = key_cleaner_upload(&context, &pixels, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, passes as usize);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.deinterlace.encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label} record: {error}"));
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+
+            assert_eq!(gpu.len(), cpu.len(), "{label}: pixel count");
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "deinterlace case {label} pixel {pixel_index} channel {channel}: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+            for row in (0..height).step_by(2) {
+                for column in 0..width {
+                    let index = (row * width + column) as usize;
+                    assert_eq!(
+                        gpu[index], pixels[index],
+                        "{label}: the retained row {row} must pass through unchanged"
+                    );
+                }
+            }
+            // Every source pixel of that column is fully transparent, so the
+            // rebuild divides by a positive weight sum over cleared samples and
+            // must stay cleared on both sides instead of exploding.
+            for row in (1..height).step_by(2) {
+                let index = (row * width + 2) as usize;
+                assert_eq!(cpu[index], [0.0; 4], "{label}: cleared CPU column {row}");
+                assert_eq!(gpu[index], [0.0; 4], "{label}: cleared GPU column {row}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gpu_chromatic_aberration_removal_matches_the_cpu_layer() {
         use mondrian_effects::{

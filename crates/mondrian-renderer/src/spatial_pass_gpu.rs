@@ -83,6 +83,7 @@ pub(crate) struct EffectSpatialGpu {
     polar_coordinates: wgpu::RenderPipeline,
     lens_distortion: wgpu::RenderPipeline,
     chromatic_aberration_removal: wgpu::RenderPipeline,
+    deinterlace: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
     grow_bounds: wgpu::RenderPipeline,
@@ -832,6 +833,35 @@ impl EffectSpatialGpu {
                 multiview_mask: None,
                 cache: None,
             });
+        let deinterlace = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.deinterlace"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_deinterlace"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let basic_3d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.basic-3d"),
             layout: Some(&layout),
@@ -2216,6 +2246,7 @@ impl EffectSpatialGpu {
             polar_coordinates,
             lens_distortion,
             chromatic_aberration_removal,
+            deinterlace,
             basic_3d,
             camera_view,
             grow_bounds,
@@ -2801,6 +2832,35 @@ impl EffectSpatialGpu {
         destination.clone()
     }
 
+    fn record_deinterlace(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::DeinterlaceGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+    ) -> wgpu::Texture {
+        let (params, extra) = grade.gpu_controls();
+        let uniforms = SpatialPassUniform {
+            size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.deinterlace,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        destination.clone()
+    }
+
     /// Records the lens flare stage.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_flare(
@@ -3112,6 +3172,9 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::BezierWarp { .. } => Ok(1),
             EffectGpuSpatialPass::LensDistortion { .. } => Ok(1),
             EffectGpuSpatialPass::ChromaticAberrationRemoval { .. } => Ok(1),
+            // The rebuild is one full-screen draw over the same source and
+            // destination pair.
+            EffectGpuSpatialPass::Deinterlace { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
@@ -3642,6 +3705,10 @@ impl EffectSpatialGpu {
                     source,
                     destination,
                 ));
+            }
+            EffectGpuSpatialPass::Deinterlace { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return Ok(self.record_deinterlace(device, encoder, *grade, source, destination));
             }
             EffectGpuSpatialPass::Basic3D { grade } => {
                 let Some([params, extra, aces, extra1]) =
@@ -8566,6 +8633,39 @@ fn fs_chromatic_aberration_removal(@builtin(position) position: vec4<f32>) -> @l
         result.b = blue_sample.b / blue_sample.a;
     }
     return result;
+}
+
+
+// The deinterlace pass keeps the retained even rows and rebuilds each odd row
+// from the even rows above and below it. Tap `k` reaches `2k - 1` rows away and
+// weighs `1 / (2k - 1)`, matching the CPU kernel exactly. `params` is
+// `[softness, taps, 0, 0]`.
+@fragment
+fn fs_deinterlace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let dims = frame_dims();
+    if (pixel.y % 2 == 0) {
+        return load_clamped(pixel);
+    }
+    let taps = i32(round(uniforms.params.y));
+    var accumulated = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var tap = 1; tap <= taps; tap = tap + 1) {
+        let distance = 2 * tap - 1;
+        let weight = 1.0 / f32(distance);
+        for (var direction = -1; direction <= 1; direction = direction + 2) {
+            let row = pixel.y + direction * distance;
+            if (row < 0 || row >= dims.y) {
+                continue;
+            }
+            accumulated += premultiply(load_clamped(vec2<i32>(pixel.x, row))) * weight;
+            weight_sum += weight;
+        }
+    }
+    if (weight_sum <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return unpremultiply(accumulated / weight_sum);
 }
 
 @fragment

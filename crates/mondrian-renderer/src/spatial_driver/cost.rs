@@ -378,6 +378,9 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // the gate usually short-circuits the sum; the average tap is cheaper
         // than a convolution tap because there is no tap table to read.
         "smart_blur" => 1.4,
+        // Up to eight clamped loads and one write; the taps are a fixed
+        // fraction of a bilinear sample each.
+        "deinterlace" => 1.2,
         "bilateral_blur" => 70.0,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
@@ -445,6 +448,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "directional_blur" | "convolution" | "glow" | "fractal_noise" | "deband" => 3.0,
         "twirl" | "spherize" | "dent" | "polar_coordinates" | "lens_distortion" => 2.0,
         "chromatic_aberration_removal" => 2.6,
+        "deinterlace" => 2.4,
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,
