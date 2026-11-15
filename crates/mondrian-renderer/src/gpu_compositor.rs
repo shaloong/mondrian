@@ -2743,6 +2743,67 @@ fn chromatic_adaptation_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f
     );
 }
 
+fn star_burst_hash(value: u32) -> u32 {
+    var mixed = value;
+    mixed = mixed ^ (mixed >> 16u);
+    mixed = mixed * 0x7feb352du;
+    mixed = mixed ^ (mixed >> 15u);
+    mixed = mixed * 0x846ca68bu;
+    mixed = mixed ^ (mixed >> 16u);
+    return mixed;
+}
+
+fn star_burst_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
+    let blend = effect.extra0.z;
+    if (blend <= 0.0) {
+        return pixel;
+    }
+    let cell = max(effect.params.x, 1.0);
+    let size = effect.params.y;
+    let shading = effect.params.z;
+    let scatter = effect.params.w;
+    let speed = effect.extra0.x;
+    let phase = effect.extra0.y;
+
+    let dims = uniforms.geometry.zw;
+    let centre = dims * 0.5;
+    let extent = max(length(centre), 1.0);
+    let offset = position + vec2<f32>(0.5) - centre;
+    let radius = length(offset) / extent;
+    let star_radius = max(size * 0.5 * (1.0 + 3.0 * radius), 0.5);
+
+    let cell_x = floor(position.x / cell);
+    let cell_y = floor(position.y / cell);
+    let seeded = round(speed * 100.0 + phase * 1000.0);
+    var seed = bitcast<u32>(i32(seeded));
+    seed = star_burst_hash(seed);
+    let x_index = u32(cell_x) + 0x9e3779b9u;
+    let y_index = u32(cell_y) + 0x85ebca6bu;
+    let base = star_burst_hash(x_index ^ star_burst_hash(y_index ^ seed));
+
+    let presence = f32(base & 0xFFFFu) / 65535.0;
+    if (presence > 0.5) {
+        return pixel;
+    }
+    let offset_x = f32((base >> 4u) & 0x3FFu) / 1023.0 - 0.5;
+    let offset_y = f32((base >> 14u) & 0x3FFu) / 1023.0 - 0.5;
+    let star = f32((base >> 24u) & 0xFFu) / 255.0;
+
+    let star_x = (cell_x + 0.5) * cell + offset_x * scatter * 0.5;
+    let star_y = (cell_y + 0.5) * cell + offset_y * scatter * 0.5;
+    let distance = length(vec2<f32>(position.x + 0.5, position.y + 0.5) - vec2<f32>(star_x, star_y));
+    let gradient = 1.0 - min(distance / star_radius, 1.0);
+    if (gradient <= 0.0) {
+        return pixel;
+    }
+    let coverage = gradient * gradient * (3.0 - 2.0 * gradient);
+    let strength = coverage * blend;
+    let brightness = clamp((1.0 + shading * (gradient - 0.5)) * (0.35 + 0.65 * star), 0.0, 1.0);
+    var out = vec4<f32>(pixel.rgb + (vec3<f32>(brightness) - pixel.rgb) * strength, pixel.a);
+    out.a = max(pixel.a, strength);
+    return out;
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -3816,6 +3877,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = cineon_converter_apply(pixel, effect);
         } else if (effect.header.x == 52u) {
             pixel = chromatic_adaptation_apply(pixel, effect);
+        } else if (effect.header.x == 53u) {
+            pixel = star_burst_apply(pixel, position, effect);
         }
     }
     return pixel;
@@ -8366,6 +8429,18 @@ fn effect_uniforms_for_ops(
                     header: [52, 0, 0, 0],
                     params,
                     color,
+                    extra0,
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::StarBurst { grade } => {
+                let (params, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [53, 0, 0, 0],
+                    params,
+                    color: [0.0; 4],
                     extra0,
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
@@ -13484,6 +13559,146 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU Cineon converter accuracy budget exceeded for {label}: {report:#?}"
+            );
+        }
+    }
+
+    fn star_burst_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            for column in 0..width {
+                let u = column as f32 / (width - 1) as f32;
+                let v = row as f32 / (height - 1) as f32;
+                // The star field decides on coverage, so a never-zero alpha keeps
+                // the straight to premultiplied round trip comparable.
+                let alpha = if column == 3 { 0.3 } else { 0.55 };
+                data.push([0.15 + 0.75 * u, 0.1 + 0.6 * v, 0.4 - 0.3 * u, alpha]);
+            }
+        }
+        data
+    }
+
+    #[tokio::test]
+    async fn gpu_star_burst_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            StarBurstGrade, StarBurstParameters,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU star burst parity test: no GPU adapter available");
+            return;
+        };
+        const WIDTH: u32 = 24;
+        const HEIGHT: u32 = 18;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: star_burst_test_pixels(WIDTH, HEIGHT),
+        });
+        let cases = [
+            (
+                "mixed over the source",
+                StarBurstParameters { blend: 1.0, ..StarBurstParameters::default() },
+            ),
+            (
+                "wide lattice with a strong scatter",
+                StarBurstParameters {
+                    grid_spacing: 24.0,
+                    size: 220.0,
+                    shading: 60.0,
+                    scatter: -400.0,
+                    speed: 2.5,
+                    phase: 0.75,
+                    blend: 0.8,
+                },
+            ),
+            (
+                "fine lattice with negative shading",
+                StarBurstParameters {
+                    grid_spacing: 2.0,
+                    size: 30.0,
+                    shading: -70.0,
+                    scatter: 0.0,
+                    speed: 1.0,
+                    phase: 0.0,
+                    blend: 1.0,
+                },
+            ),
+            (
+                "negative speed and phase",
+                StarBurstParameters {
+                    grid_spacing: 8.0,
+                    size: 60.0,
+                    shading: 25.0,
+                    scatter: 40.0,
+                    speed: -3.2,
+                    phase: -1.25,
+                    blend: 0.5,
+                },
+            ),
+            (
+                "blend of zero leaves the frame alone",
+                StarBurstParameters::default(),
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = StarBurstGrade::new(parameters).expect("valid star burst grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::StarBurst { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(WIDTH, HEIGHT),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU star burst accuracy budget exceeded for {label}: {report:#?}"
             );
         }
     }
