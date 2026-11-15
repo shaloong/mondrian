@@ -2492,6 +2492,51 @@ fn test_signals_safe_frame(column: u32, row: u32, width: u32, height: u32) -> bo
 // Scanlines reads only its own pixel's frame coordinate: the band profile is a
 // function of the position, and the composite operator folds the pattern into
 // the source colour. Every branch mirrors `mondrian-effects/src/scanlines.rs`.
+// Light leak: an authored streak brightens the pixel along a direction, its
+// coverage shaped by a Gaussian envelope and a striation, with the frame seed
+// driving an optional per-frame flicker. Every branch mirrors
+// `mondrian-effects/src/light_leak.rs`.
+fn light_leak_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
+    // A zero intensity leaves the source untouched; the CPU kernel has the same
+    // short circuit, so both paths return the pixel bit for bit.
+    if (effect.params.x <= 0.0) {
+        return pixel;
+    }
+    let centre = vec2<f32>(position.x + 0.5, position.y + 0.5) / uniforms.geometry.zw;
+    let dx = centre.x - effect.extra0.x;
+    let dy = centre.y - effect.extra0.y;
+    let along = dx * effect.params.y + dy * effect.params.z;
+    let across = -dx * effect.params.z + dy * effect.params.y;
+    let envelope = exp(
+        -((along / 0.9) * (along / 0.9) + (across / 0.35) * (across / 0.35)) * 2.0,
+    );
+    let striation = 0.55 + 0.45 * cos(6.2831855 * along * effect.params.w);
+    let opacity = clamp(envelope * striation, 0.0, 1.0) * effect.params.x;
+    let seed = f32(uniforms.frame_seed_lo & 0xFFFFu) / 65535.0;
+    let jitter = 1.0 + (seed - 0.5) * effect.extra0.z;
+    let leak = effect.color.rgb * jitter;
+    let mode = u32(effect.color.w + 0.5);
+    var result = pixel.rgb;
+    for (var channel = 0u; channel < 3u; channel = channel + 1u) {
+        let base = pixel[channel];
+        let lit = leak[channel];
+        var combined = lit;
+        if (mode == 0u) {
+            combined = 1.0 - (1.0 - base) * (1.0 - lit);
+        } else if (mode == 1u) {
+            combined = select(
+                1.0 - 2.0 * (1.0 - base) * (1.0 - lit),
+                2.0 * base * lit,
+                base < 0.5,
+            );
+        } else if (mode == 2u) {
+            combined = base + lit;
+        }
+        result[channel] = base + (combined - base) * opacity;
+    }
+    return vec4<f32>(result, pixel.a);
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -3557,6 +3602,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             );
         } else if (effect.header.x == 48u) {
             pixel = scanlines_apply(pixel, position, effect);
+        } else if (effect.header.x == 49u) {
+            pixel = light_leak_apply(pixel, position, effect);
         }
     }
     return pixel;
@@ -8060,6 +8107,18 @@ fn effect_uniforms_for_ops(
                     params,
                     color: [0.0; 4],
                     extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::LightLeak { grade } => {
+                let (params, color, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [49, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
@@ -12758,6 +12817,145 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU scanlines accuracy budget exceeded for {label}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_light_leak_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+            LightLeakBlend, LightLeakGrade, LightLeakParameters,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU light leak parity test: no GPU adapter available");
+            return;
+        };
+        // 15x12 with an off-centre streak: the Gaussian envelope needs room on
+        // both sides of the centre, and alpha is never zero because the GPU
+        // straight-to-premultiplied round trip canonicalises fully transparent
+        // pixels.
+        const WIDTH: u32 = 15;
+        const HEIGHT: u32 = 12;
+        let mut data = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        for row in 0..HEIGHT {
+            for column in 0..WIDTH {
+                let u = column as f32 / (WIDTH - 1) as f32;
+                let v = row as f32 / (HEIGHT - 1) as f32;
+                let alpha = if column == 3 { 0.35 } else { 1.0 };
+                data.push([0.1 + 0.7 * u, 0.2 + 0.5 * v, 0.6 - 0.4 * u, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let cases = [
+            ("documented defaults", LightLeakParameters::default(), 0_i64),
+            (
+                "rotated warm streak",
+                LightLeakParameters {
+                    intensity: 80.0,
+                    angle_degrees: 30.0,
+                    position: [0.3, 0.4],
+                    speed: 3.0,
+                    ..LightLeakParameters::default()
+                },
+                0,
+            ),
+            (
+                "overlay with a cool tint",
+                LightLeakParameters {
+                    intensity: 70.0,
+                    colour: [0.2, 0.4, 1.0],
+                    blend: LightLeakBlend::Overlay,
+                    ..LightLeakParameters::default()
+                },
+                0,
+            ),
+            (
+                "additive flicker",
+                LightLeakParameters {
+                    intensity: 60.0,
+                    angle_degrees: -45.0,
+                    blend: LightLeakBlend::Add,
+                    flicker: 40.0,
+                    ..LightLeakParameters::default()
+                },
+                0x9E37,
+            ),
+            (
+                "normal blend at full strength",
+                LightLeakParameters {
+                    intensity: 100.0,
+                    angle_degrees: 90.0,
+                    position: [0.7, 0.5],
+                    speed: 8.0,
+                    blend: LightLeakBlend::Normal,
+                    ..LightLeakParameters::default()
+                },
+                0,
+            ),
+        ];
+        for (label, parameters, frame_seed) in cases {
+            let grade = LightLeakGrade::new(parameters).expect("valid light leak grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::LightLeak { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(WIDTH, HEIGHT),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                frame_seed,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-4, 1.0e-4, 1.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU light leak accuracy budget exceeded for {label}: {report:#?}"
             );
         }
     }
