@@ -2804,6 +2804,195 @@ fn star_burst_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform
     return out;
 }
 
+fn color_space_transform_signed_pow(value: f32, exponent: f32) -> f32 {
+    if (value < 0.0) {
+        return -pow(-value, exponent);
+    }
+    return pow(value, exponent);
+}
+
+fn color_space_transform_decode(value: f32, tag: u32) -> f32 {
+    if (tag == 1u) {
+        if (value <= 0.04045) {
+            return value / 12.92;
+        }
+        return pow((value + 0.055) / 1.055, 2.4);
+    }
+    if (tag == 2u) {
+        if (value < 0.081) {
+            return value / 4.5;
+        }
+        return pow((value + 0.099) / 1.099, 1.0 / 0.45);
+    }
+    if (tag == 3u) {
+        return color_space_transform_signed_pow(value, 2.2);
+    }
+    if (tag == 4u) {
+        return color_space_transform_signed_pow(value, 2.4);
+    }
+    if (tag == 5u) {
+        return color_space_transform_signed_pow(value, 2.6);
+    }
+    return value;
+}
+
+fn color_space_transform_encode(value: f32, tag: u32) -> f32 {
+    if (tag == 1u) {
+        if (value <= 0.0031308) {
+            return value * 12.92;
+        }
+        return 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+    }
+    if (tag == 2u) {
+        if (value < 0.018) {
+            return value * 4.5;
+        }
+        return 1.099 * pow(value, 0.45) - 0.099;
+    }
+    if (tag == 3u) {
+        return color_space_transform_signed_pow(value, 1.0 / 2.2);
+    }
+    if (tag == 4u) {
+        return color_space_transform_signed_pow(value, 1.0 / 2.4);
+    }
+    if (tag == 5u) {
+        return color_space_transform_signed_pow(value, 1.0 / 2.6);
+    }
+    return value;
+}
+
+fn color_space_transform_hable(value: f32) -> f32 {
+    let numerator = value * (0.15 * value + 0.10) + 0.20 * 0.02;
+    let denominator = value * (0.15 * value + 0.50) + 0.20 * 0.30 - 0.02 / 0.30;
+    if (abs(denominator) <= 0.000001) {
+        return 0.0;
+    }
+    return numerator / denominator;
+}
+
+fn color_space_transform_tone(value: f32, tag: u32) -> f32 {
+    if (tag == 1u) {
+        if (value <= 0.0) {
+            return 0.0;
+        }
+        return value / (1.0 + value);
+    }
+    if (tag == 2u) {
+        let white = color_space_transform_hable(1.0);
+        if (abs(white) <= 0.000001) {
+            return value;
+        }
+        return color_space_transform_hable(max(value, 0.0)) / white;
+    }
+    if (tag == 3u) {
+        let v = max(value, 0.0);
+        return clamp(
+            (v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14),
+            0.0,
+            1.0,
+        );
+    }
+    return value;
+}
+
+fn color_space_transform_gamut(
+    colour: vec3<f32>,
+    tag: u32,
+    knee: f32,
+    maximum: f32,
+) -> vec3<f32> {
+    if (tag == 1u) {
+        return clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    if (tag == 2u) {
+        let luma = 0.2126 * colour.r + 0.7152 * colour.g + 0.0722 * colour.b;
+        let high = max(max(colour.r, colour.g), colour.b);
+        let low = min(min(colour.r, colour.g), colour.b);
+        var saturation = 0.0;
+        if (abs(high) > 0.000001) {
+            saturation = (high - low) / high;
+        }
+        let k = clamp(knee, 0.0, 1.0);
+        let m = clamp(maximum, 0.0, 1.0);
+        var factor = 1.0;
+        if (saturation > k && abs(1.0 - k) > 0.000001) {
+            let over = (saturation - k) / (1.0 - k);
+            factor = 1.0 - over * (1.0 - m);
+        }
+        factor = max(factor, 0.0);
+        return clamp(
+            vec3<f32>(luma) + (colour - vec3<f32>(luma)) * factor,
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        );
+    }
+    return colour;
+}
+
+fn color_space_transform_ootf(colour: vec3<f32>, inverse: bool) -> vec3<f32> {
+    let luma = 0.2126 * colour.r + 0.7152 * colour.g + 0.0722 * colour.b;
+    if (luma <= 0.0) {
+        return colour;
+    }
+    let gain = pow(luma, 0.2);
+    if (inverse) {
+        return colour / gain;
+    }
+    return colour * gain;
+}
+
+fn color_space_transform_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> {
+    let flags = u32(effect.extra2.z + 0.5);
+    if ((flags & 64u) == 0u || pixel.a <= 0.0) {
+        return pixel;
+    }
+    let input_tag = u32(effect.extra0.y + 0.5);
+    let output_tag = u32(effect.extra0.z + 0.5);
+    let tone_tag = u32(effect.extra0.w + 0.5);
+    let gamut_tag = u32(effect.extra1.x + 0.5);
+    // The row-major CPU matrix is transposed into WGSL's column-major cells.
+    let matrix = mat3x3<f32>(
+        vec3<f32>(effect.params.x, effect.params.w, effect.color.z),
+        vec3<f32>(effect.params.y, effect.color.x, effect.color.w),
+        vec3<f32>(effect.params.z, effect.color.y, effect.extra0.x),
+    );
+    var colour = vec3<f32>(
+        color_space_transform_decode(pixel.r, input_tag),
+        color_space_transform_decode(pixel.g, input_tag),
+        color_space_transform_decode(pixel.b, input_tag),
+    );
+    colour = matrix * colour;
+    if ((flags & 1u) != 0u && tone_tag != 0u) {
+        let diffuse_white = select(100.0, 203.0, (flags & 8u) != 0u);
+        let gain = diffuse_white / effect.extra1.y;
+        let output_gain = effect.extra1.z / diffuse_white;
+        colour = vec3<f32>(
+            color_space_transform_tone(colour.r * gain, tone_tag) * output_gain,
+            color_space_transform_tone(colour.g * gain, tone_tag) * output_gain,
+            color_space_transform_tone(colour.b * gain, tone_tag) * output_gain,
+        );
+    }
+    if ((flags & 2u) != 0u && gamut_tag != 0u) {
+        colour = color_space_transform_gamut(
+            colour,
+            gamut_tag,
+            effect.extra1.w,
+            effect.extra2.x,
+        );
+    }
+    if ((flags & 16u) != 0u) {
+        colour = color_space_transform_ootf(colour, false);
+    } else if ((flags & 32u) != 0u) {
+        colour = color_space_transform_ootf(colour, true);
+    }
+    return vec4<f32>(
+        color_space_transform_encode(colour.r, output_tag),
+        color_space_transform_encode(colour.g, output_tag),
+        color_space_transform_encode(colour.b, output_tag),
+        pixel.a,
+    );
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -3879,6 +4068,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = chromatic_adaptation_apply(pixel, effect);
         } else if (effect.header.x == 53u) {
             pixel = star_burst_apply(pixel, position, effect);
+        } else if (effect.header.x == 54u) {
+            pixel = color_space_transform_apply(pixel, effect);
         }
     }
     return pixel;
@@ -8445,6 +8636,18 @@ fn effect_uniforms_for_ops(
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::ColorSpaceTransform { grade } => {
+                let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [54, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2,
+                    extra3,
                 }
             }
             EffectGpuPointOp::Scanlines { grade } => {
@@ -13559,6 +13762,174 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU Cineon converter accuracy budget exceeded for {label}: {report:#?}"
+            );
+        }
+    }
+
+    fn color_space_transform_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            for column in 0..width {
+                let u = column as f32 / (width - 1) as f32;
+                let v = row as f32 / (height - 1) as f32;
+                // A never-zero alpha keeps the straight to premultiplied round trip
+                // comparable, and the muted range avoids the negative-lobe branch
+                // of the signed power curves.
+                let alpha = if column == 2 { 0.3 } else { 0.8 };
+                data.push([0.08 + 0.8 * u, 0.06 + 0.7 * v, 0.65 - 0.4 * u, alpha]);
+            }
+        }
+        data
+    }
+
+    #[tokio::test]
+    async fn gpu_color_space_transform_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ColorSpaceTransformGamma,
+            ColorSpaceTransformGamutMapping, ColorSpaceTransformGrade,
+            ColorSpaceTransformParameters, ColorSpaceTransformSpace,
+            ColorSpaceTransformToneMapping, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU colour space parity test: no GPU adapter available");
+            return;
+        };
+        const WIDTH: u32 = 12;
+        const HEIGHT: u32 = 9;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: color_space_transform_test_pixels(WIDTH, HEIGHT),
+        });
+        let defaults = ColorSpaceTransformParameters::default();
+        let cases = [
+            (
+                "Rec.709 sRGB to Rec.2020 linear",
+                ColorSpaceTransformParameters {
+                    input_gamma: ColorSpaceTransformGamma::Srgb,
+                    output_color_space: ColorSpaceTransformSpace::Rec2020,
+                    ..defaults
+                },
+            ),
+            (
+                "P3 D65 to Rec.709 with gamma 2.2",
+                ColorSpaceTransformParameters {
+                    input_color_space: ColorSpaceTransformSpace::P3D65,
+                    input_gamma: ColorSpaceTransformGamma::Gamma22,
+                    output_gamma: ColorSpaceTransformGamma::Gamma22,
+                    ..defaults
+                },
+            ),
+            (
+                "swap reverses the transform",
+                ColorSpaceTransformParameters {
+                    input_color_space: ColorSpaceTransformSpace::P3D65,
+                    output_color_space: ColorSpaceTransformSpace::Rec2020,
+                    input_gamma: ColorSpaceTransformGamma::Rec709,
+                    output_gamma: ColorSpaceTransformGamma::Srgb,
+                    swap: 1.0,
+                    ..defaults
+                },
+            ),
+            (
+                "Reinhard over a bright input",
+                ColorSpaceTransformParameters {
+                    input_color_space: ColorSpaceTransformSpace::AcesAp0,
+                    output_color_space: ColorSpaceTransformSpace::Rec709,
+                    tone_mapping_method: ColorSpaceTransformToneMapping::Reinhard,
+                    use_custom_max_input: 1.0,
+                    max_input_nits: 2000.0,
+                    ..defaults
+                },
+            ),
+            (
+                "ACES AP1 to Rec.709 with Hable",
+                ColorSpaceTransformParameters {
+                    input_color_space: ColorSpaceTransformSpace::AcesAp1,
+                    input_gamma: ColorSpaceTransformGamma::Srgb,
+                    tone_mapping_method: ColorSpaceTransformToneMapping::Hable,
+                    ..defaults
+                },
+            ),
+            (
+                "desaturate back into gamut",
+                ColorSpaceTransformParameters {
+                    output_color_space: ColorSpaceTransformSpace::Rec2020,
+                    input_gamma: ColorSpaceTransformGamma::Gamma24,
+                    output_gamma: ColorSpaceTransformGamma::Gamma24,
+                    gamut_mapping_method: ColorSpaceTransformGamutMapping::Desaturate,
+                    saturation_knee: 0.3,
+                    saturation_max: 0.4,
+                    ..defaults
+                },
+            ),
+            (
+                "forward OOTF on a linear pair",
+                ColorSpaceTransformParameters {
+                    output_color_space: ColorSpaceTransformSpace::P3D65,
+                    apply_forward_ootf: 1.0,
+                    ..defaults
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = ColorSpaceTransformGrade::new(parameters).expect("valid transform grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::ColorSpaceTransform { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(WIDTH, HEIGHT),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(5.0e-5, 5.0e-5, 5.0e-5),
+                    alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU colour space transform accuracy budget exceeded for {label}: {report:?}"
             );
         }
     }
