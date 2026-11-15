@@ -85,6 +85,7 @@ pub(crate) struct EffectSpatialGpu {
     chromatic_aberration_removal: wgpu::RenderPipeline,
     deinterlace: wgpu::RenderPipeline,
     watercolor: wgpu::RenderPipeline,
+    highlight: wgpu::RenderPipeline,
     abstraction_horizontal: wgpu::RenderPipeline,
     abstraction_vertical: wgpu::RenderPipeline,
     abstraction: wgpu::RenderPipeline,
@@ -878,6 +879,35 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_watercolor"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let highlight = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.highlight"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_highlight"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -2369,6 +2399,7 @@ impl EffectSpatialGpu {
             chromatic_aberration_removal,
             deinterlace,
             watercolor,
+            highlight,
             abstraction_horizontal,
             abstraction_vertical,
             abstraction,
@@ -3015,6 +3046,35 @@ impl EffectSpatialGpu {
         destination.clone()
     }
 
+    fn record_highlight(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::HighlightGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+    ) -> wgpu::Texture {
+        let (params, extra, aces, extra1) = grade.gpu_controls(source.width() as usize);
+        let uniforms = SpatialPassUniform {
+            size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.highlight,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        destination.clone()
+    }
+
     fn record_abstraction(
         &self,
         device: &wgpu::Device,
@@ -3406,6 +3466,8 @@ impl EffectSpatialGpu {
             // 512 MiB spatial scratch budget while DCI 4K (566,231,040 bytes)
             // does not; the limit is identical to the key cleaner chain.
             EffectGpuSpatialPass::Abstraction { .. } => Ok(3),
+            // The ray marches in one full-screen draw over the source.
+            EffectGpuSpatialPass::Highlight { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
@@ -3449,6 +3511,10 @@ impl EffectSpatialGpu {
         }
         // Single-pass kernels write one texture and need no scratch pool.
         match pass {
+            EffectGpuSpatialPass::Highlight { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return Ok(self.record_highlight(device, encoder, *grade, source, destination));
+            }
             EffectGpuSpatialPass::Abstraction { grade } => {
                 return self
                     .record_abstraction(device, encoder, *grade, source, scratch, width, height);
@@ -8980,6 +9046,67 @@ fn fs_abstraction(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f
         result = result * (1.0 - darken);
     }
     return vec4<f32>(result, alpha);
+}
+
+// One bilinear read in pixel coordinates, clamped to the frame edge. The CPU
+// kernel samples the straight-alpha texels directly, so the shader does too.
+fn highlight_bilinear(pixel: vec2<i32>, offset: vec2<f32>) -> vec3<f32> {
+    let dims = frame_dims();
+    let last = vec2<f32>(f32(dims.x - 1), f32(dims.y - 1));
+    let point = clamp(vec2<f32>(pixel) + vec2<f32>(0.5) + offset, vec2<f32>(0.0), last);
+    let base = floor(point);
+    let fraction = point - base;
+    let left = i32(base.x);
+    let top = i32(base.y);
+    let right = min(left + 1, dims.x - 1);
+    let bottom = min(top + 1, dims.y - 1);
+    let top_left = load_clamped(vec2<i32>(left, top)).rgb;
+    let top_right = load_clamped(vec2<i32>(right, top)).rgb;
+    let bottom_left = load_clamped(vec2<i32>(left, bottom)).rgb;
+    let bottom_right = load_clamped(vec2<i32>(right, bottom)).rgb;
+    let upper = top_left + (top_right - top_left) * fraction.x;
+    let lower = bottom_left + (bottom_right - bottom_left) * fraction.x;
+    return upper + (lower - upper) * fraction.y;
+}
+
+// `params` is `[alpha_scale, low, high, length_px]`, `extra` is
+// `[cos angle, sin angle, curve, merge]`, `aces` is
+// `[red scale, green scale, blue scale, colour scale]` and `extra1.x` is the
+// sample count. Every sample is a bilinear read along the authored ray, gated by
+// the threshold window and weighted by the distance falloff, matching the CPU
+// kernel.
+@fragment
+fn fs_highlight(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let base = load_clamped(pixel);
+    if (base.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let points = max(i32(round(uniforms.extra1.x)), 1);
+    let length_px = uniforms.params.w;
+    let low = uniforms.params.y;
+    let high = max(uniforms.params.z, low + 0.0001);
+    let direction = vec2<f32>(uniforms.extra.x, uniforms.extra.y);
+    let scale = vec3<f32>(uniforms.aces.x, uniforms.aces.y, uniforms.aces.z) * uniforms.aces.w;
+    var accumulated = vec3<f32>(0.0);
+    var coverage = 0.0;
+    for (var sample = 1; sample <= points; sample = sample + 1) {
+        let t = f32(sample) / f32(points);
+        let read = highlight_bilinear(pixel, direction * (length_px * t));
+        let luma = 0.2126 * read.r + 0.7152 * read.g + 0.0722 * read.b;
+        let ramp = clamp((luma - low) / (high - low), 0.0, 1.0);
+        let highlight = ramp * ramp * (3.0 - 2.0 * ramp);
+        let weight = pow(highlight, uniforms.extra.z) * (1.0 - 0.5 * t);
+        accumulated = accumulated + read * weight * scale;
+        coverage = max(coverage, weight);
+    }
+    let average = 1.0 / f32(points);
+    let alpha_scale = clamp(uniforms.params.x, 0.0, 1.0);
+    if (uniforms.extra.w >= 0.5) {
+        return vec4<f32>(base.rgb + accumulated * average * alpha_scale, base.a);
+    }
+    let opacity = clamp(coverage * alpha_scale, 0.0, 1.0);
+    return vec4<f32>(accumulated * average * alpha_scale, base.a * opacity);
 }
 
 @fragment

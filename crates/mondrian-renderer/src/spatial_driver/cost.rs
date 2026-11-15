@@ -386,6 +386,9 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "watercolor" => 6.0,
         // Two 17-tap separable passes and a five-read redraw.
         "abstraction" => 3.2,
+        // The ray is points bilinear reads, four loads each, plus the window
+        // arithmetic; the documented default is four samples.
+        "highlight" => 4.5,
         "bilateral_blur" => 70.0,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
@@ -456,6 +459,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "deinterlace" => 2.4,
         "watercolor" => 9.0,
         "abstraction" => 5.0,
+        "highlight" => 3.0,
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,

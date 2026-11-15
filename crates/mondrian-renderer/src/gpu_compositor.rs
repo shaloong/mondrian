@@ -19650,6 +19650,131 @@ mod tests {
         }
     }
 
+    fn highlight_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                // A bright patch in the middle so the threshold window opens,
+                // a dark half so it stays closed, and a partly covered column
+                // that exercises the alpha carry.
+                let bright = if (3..=7).contains(&x) && (3..=6).contains(&y) {
+                    0.9
+                } else {
+                    0.15
+                };
+                let colour = [bright * (0.5 + 0.5 * u), bright, bright * (0.5 + 0.5 * v)];
+                let alpha = if x == 1 {
+                    0.0
+                } else if x == 2 {
+                    0.4
+                } else {
+                    1.0
+                };
+                pixels.push([colour[0], colour[1], colour[2], alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_highlight_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            highlight_frame_f32, spatial_pass_for, EffectGpuSpatialPass, HighlightGrade,
+            HighlightParameters,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping highlight parity test: no GPU adapter available");
+            return;
+        };
+        let (width, height) = (12, 10);
+        let pixels = highlight_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+
+        let defaults = HighlightParameters::default();
+        let cases = [
+            ("documented default".to_owned(), defaults),
+            (
+                "merge off".to_owned(),
+                HighlightParameters { merge_over: 0.0, ..defaults },
+            ),
+            (
+                "vertical ray".to_owned(),
+                HighlightParameters { angle_degrees: 90.0, length: 0.5, ..defaults },
+            ),
+            (
+                "eight samples".to_owned(),
+                HighlightParameters { points: 8.0, length: 1.0, ..defaults },
+            ),
+            (
+                "channel tint".to_owned(),
+                HighlightParameters {
+                    red_scale: 0.25,
+                    green_scale: 0.5,
+                    blue_scale: 2.0,
+                    colour_scale: 0.5,
+                    curve: 2.0,
+                    ..defaults
+                },
+            ),
+            (
+                "wide window".to_owned(),
+                HighlightParameters { low: 0.1, high: 0.5, curve: 0.5, ..defaults },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = HighlightGrade::new(parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let mut cpu = pixels.clone();
+            assert!(
+                highlight_frame_f32(&mut cpu, width as usize, height as usize, &grade),
+                "{label}: the CPU kernel must accept the frame"
+            );
+            let pass = EffectGpuSpatialPass::Highlight { grade };
+            assert_eq!(pass.name(), "highlight");
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 1, "{label}: one ray-marched draw");
+            assert!(
+                spatial_pass_for(&mondrian_effects::EffectRenderOp::Highlight { grade }).is_some()
+            );
+
+            let source = key_cleaner_upload(&context, &pixels, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, passes as usize);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.highlight.encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label} record: {error}"));
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+
+            assert_eq!(gpu.len(), cpu.len(), "{label}: pixel count");
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for lane in 0..4 {
+                    let difference = (cpu_pixel[lane] - gpu_pixel[lane]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "highlight case {label} pixel {pixel_index} channel {lane}: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gpu_chromatic_aberration_removal_matches_the_cpu_layer() {
         use mondrian_effects::{
