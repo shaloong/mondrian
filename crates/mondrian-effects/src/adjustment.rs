@@ -561,6 +561,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::ColorDifferenceKey { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "color_difference_key",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Highlight { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "highlight",
@@ -1411,6 +1417,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::TemporalFrameBlend { .. }
         | EffectRenderOp::Scanlines { .. }
         | EffectRenderOp::LightLeak { .. }
+        | EffectRenderOp::ColorDifferenceKey { .. }
         | EffectRenderOp::Lut3D { .. } => 0,
         // The two blur passes each keep one full-frame plane.
         EffectRenderOp::Abstraction { .. } => 2,
@@ -2535,6 +2542,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 height as usize,
                 grade,
                 frame_seed,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::ColorDifferenceKey { grade } => {
+            crate::color_difference_key::apply_color_difference_key_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                grade,
                 checkpoint,
             )?;
             Ok(true)

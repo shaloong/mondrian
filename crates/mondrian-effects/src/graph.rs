@@ -3457,6 +3457,10 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
             ..cpu_float
         },
+        EffectRenderOp::ColorDifferenceKey { .. } => EffectImplementationRequirements {
+            execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
+            ..cpu_float
+        },
         EffectRenderOp::TemporalFrameBlend { sample_offset, .. } => {
             EffectImplementationRequirements {
                 // The cross-time edge itself is not a pixel operation, so no

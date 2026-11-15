@@ -1309,6 +1309,12 @@ pub enum EffectRenderOp {
         /// Authored threshold, streak geometry and merge controls.
         grade: crate::HighlightGrade,
     },
+    /// Color difference key: builds a matte from the colour distance between
+    /// each pixel and an authored key colour.
+    ColorDifferenceKey {
+        /// Authored key colour, accuracy, partial mattes and mask levels.
+        grade: crate::ColorDifferenceKeyGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1743,6 +1749,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Highlight { grade } => {
                 formatter.debug_struct("Highlight").field("grade", grade).finish()
+            }
+            Self::ColorDifferenceKey { grade } => {
+                formatter.debug_struct("ColorDifferenceKey").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2854,6 +2863,12 @@ impl EffectRenderOp {
                 // all read the authored values, so the grade hashes them all.
                 grade.hash_state(state);
             }
+            EffectRenderOp::ColorDifferenceKey { grade } => {
+                132u8.hash(state);
+                // The key colour, the two partial mattes and the mask levels
+                // all read the authored values, so the grade hashes them all.
+                grade.hash_state(state);
+            }
             EffectRenderOp::Highlight { grade } => {
                 131u8.hash(state);
                 // The threshold window, the streak ray and the merge controls
@@ -3126,6 +3141,7 @@ impl EffectRenderOp {
             EffectRenderOp::Abstraction { .. } => 3,
             EffectRenderOp::LightLeak { .. } => 1,
             EffectRenderOp::Highlight { .. } => 4,
+            EffectRenderOp::ColorDifferenceKey { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3660,7 +3676,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 132] {
+fn builtin_effect_types() -> [EffectType; 133] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3794,6 +3810,7 @@ fn builtin_effect_types() -> [EffectType; 132] {
         EffectType::Abstraction,
         EffectType::LightLeak,
         EffectType::Highlight,
+        EffectType::ColorDifferenceKey,
     ]
 }
 
@@ -12559,6 +12576,181 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::ColorDifferenceKey => {
+            // The fifteen authored values mirror the specified key: the key
+            // colour and accuracy, the two partial mattes with their own
+            // windows and outside values, and the three mask levels.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "key_colour",
+                "颜色差值键",
+                "主色",
+                PropertyValue::Color(Color {
+                    r: crate::COLOR_DIFFERENCE_KEY_DEFAULT_KEY_COLOUR[0],
+                    g: crate::COLOR_DIFFERENCE_KEY_DEFAULT_KEY_COLOUR[1],
+                    b: crate::COLOR_DIFFERENCE_KEY_DEFAULT_KEY_COLOUR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "accuracy",
+                "颜色差值键",
+                "颜色匹配准确度",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_ACCURACY),
+                Some(crate::COLOR_DIFFERENCE_KEY_MIN_ACCURACY as f64),
+                Some(crate::COLOR_DIFFERENCE_KEY_MAX_ACCURACY as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "black_a",
+                "颜色差值键",
+                "黑色区域的 A 部分",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_BLACK),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "white_a",
+                "颜色差值键",
+                "白色区域的 A 部分",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_WHITE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "gamma_a",
+                "颜色差值键",
+                "A 部分的灰度系数",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_GAMMA),
+                Some(crate::COLOR_DIFFERENCE_KEY_MIN_GAMMA as f64),
+                Some(crate::COLOR_DIFFERENCE_KEY_MAX_GAMMA as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "black_outside_a",
+                "颜色差值键",
+                "黑色区域外的 A 部分",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_BLACK),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "white_outside_a",
+                "颜色差值键",
+                "白色区域外的 A 部分",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_WHITE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "black_b",
+                "颜色差值键",
+                "黑色的部分 B",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_OPEN_BLACK_B),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "white_b",
+                "颜色差值键",
+                "白色区域中的 B 部分",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_OPEN_WHITE_B),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "gamma_b",
+                "颜色差值键",
+                "B 部分的灰度系数",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_GAMMA),
+                Some(crate::COLOR_DIFFERENCE_KEY_MIN_GAMMA as f64),
+                Some(crate::COLOR_DIFFERENCE_KEY_MAX_GAMMA as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "black_outside_b",
+                "颜色差值键",
+                "黑色区域外的 B 部分",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_OPEN_OUTSIDE_B),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "white_outside_b",
+                "颜色差值键",
+                "白色区域外的 B 部分",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_OPEN_OUTSIDE_B),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "black_mask",
+                "颜色差值键",
+                "黑色遮罩",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_BLACK_MASK),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "white_mask",
+                "颜色差值键",
+                "白色遮罩",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_WHITE_MASK),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mask_gamma",
+                "颜色差值键",
+                "遮罩灰度系数",
+                PropertyValue::Float(crate::COLOR_DIFFERENCE_KEY_DEFAULT_GAMMA),
+                Some(crate::COLOR_DIFFERENCE_KEY_MIN_GAMMA as f64),
+                Some(crate::COLOR_DIFFERENCE_KEY_MAX_GAMMA as f64),
+                Some(0.1),
+            );
+        }
         EffectType::LightLeak => {
             // The seven authored values mirror the specified leak: the
             // intensity and tint of the added light, its streak geometry, the
@@ -14969,6 +15161,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // the spatial pass writes a whole-frame destination, so the input
             // tile cannot be narrowed; each frame is computed from its source.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::ColorDifferenceKey => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The matte is an algebraic function of the pixel's own colour, so
+            // no neighbour or history enters the result.
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -21317,6 +21515,79 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             }
             Ok(())
         })),
+        EffectType::ColorDifferenceKey => {
+            let key_id = builtin_parameter_id(effect_type, "key_colour");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("颜色差值键的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                let defaults = crate::ColorDifferenceKeyParameters::default();
+                let mut parameters = defaults;
+                match effect.evaluate_parameter(&key_id, context.time) {
+                    Some(PropertyValue::Color(color)) => {
+                        parameters.key_colour = [color.r, color.g, color.b];
+                    }
+                    Some(_) => return Err(invalid("颜色差值键的主色必须是颜色值".to_string())),
+                    None => {}
+                }
+                for (parameter, fallback) in [
+                    ("accuracy", defaults.accuracy),
+                    ("black_a", defaults.black_a),
+                    ("white_a", defaults.white_a),
+                    ("gamma_a", defaults.gamma_a),
+                    ("black_outside_a", defaults.black_outside_a),
+                    ("white_outside_a", defaults.white_outside_a),
+                    ("black_b", defaults.black_b),
+                    ("white_b", defaults.white_b),
+                    ("gamma_b", defaults.gamma_b),
+                    ("black_outside_b", defaults.black_outside_b),
+                    ("white_outside_b", defaults.white_outside_b),
+                    ("black_mask", defaults.black_mask),
+                    ("white_mask", defaults.white_mask),
+                    ("mask_gamma", defaults.mask_gamma),
+                ] {
+                    let value = read(effect, context, &invalid, parameter, fallback)?;
+                    match parameter {
+                        "accuracy" => parameters.accuracy = value,
+                        "black_a" => parameters.black_a = value,
+                        "white_a" => parameters.white_a = value,
+                        "gamma_a" => parameters.gamma_a = value,
+                        "black_outside_a" => parameters.black_outside_a = value,
+                        "white_outside_a" => parameters.white_outside_a = value,
+                        "black_b" => parameters.black_b = value,
+                        "white_b" => parameters.white_b = value,
+                        "gamma_b" => parameters.gamma_b = value,
+                        "black_outside_b" => parameters.black_outside_b = value,
+                        "white_outside_b" => parameters.white_outside_b = value,
+                        "black_mask" => parameters.black_mask = value,
+                        "white_mask" => parameters.white_mask = value,
+                        "mask_gamma" => parameters.mask_gamma = value,
+                        _ => {}
+                    }
+                }
+                let grade = crate::ColorDifferenceKeyGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                graph.append_unary(EffectRenderOp::ColorDifferenceKey { grade });
+                Ok(())
+            }))
+        }
         EffectType::LightLeak => {
             let colour_id = builtin_parameter_id(effect_type, "colour");
             let position_id = builtin_parameter_id(effect_type, "position");
@@ -22964,6 +23235,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Abstraction => "抽象画",
         EffectType::LightLeak => "漏光",
         EffectType::Highlight => "高光提取",
+        EffectType::ColorDifferenceKey => "颜色差值键",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -24370,6 +24642,7 @@ mod tests {
             EffectType::Abstraction,
             EffectType::LightLeak,
             EffectType::Highlight,
+            EffectType::ColorDifferenceKey,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -33666,7 +33939,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 132);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 133);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -34194,7 +34467,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 132);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 133);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -37153,7 +37426,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 132);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 133);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -38289,7 +38562,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 132);
+        assert_eq!(builtin_effect_types().len(), 133);
     }
 
     #[test]
@@ -39276,6 +39549,273 @@ mod tests {
         let reason = format!("{error:?}");
         assert!(
             reason.contains("light_leak.intensity"),
+            "the persisted value contract names the parameter: {reason}"
+        );
+    }
+
+    fn color_difference_key_op(
+        graph: &EffectRenderGraph,
+    ) -> Option<crate::ColorDifferenceKeyGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ColorDifferenceKey { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ColorDifferenceKey { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_color_difference_key(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ColorDifferenceKey)
+            .expect("the colour difference key should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ColorDifferenceKey.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the colour difference key parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn color_difference_key_defaults_match_the_dump() {
+        let effect_type = EffectType::ColorDifferenceKey;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("key_colour", "主色"),
+            ("accuracy", "颜色匹配准确度"),
+            ("black_a", "黑色区域的 A 部分"),
+            ("white_a", "白色区域的 A 部分"),
+            ("gamma_a", "A 部分的灰度系数"),
+            ("black_outside_a", "黑色区域外的 A 部分"),
+            ("white_outside_a", "白色区域外的 A 部分"),
+            ("black_b", "黑色的部分 B"),
+            ("white_b", "白色区域中的 B 部分"),
+            ("gamma_b", "B 部分的灰度系数"),
+            ("black_outside_b", "黑色区域外的 B 部分"),
+            ("white_outside_b", "白色区域外的 B 部分"),
+            ("black_mask", "黑色遮罩"),
+            ("white_mask", "白色遮罩"),
+            ("mask_gamma", "遮罩灰度系数"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("颜色差值键")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "color_difference_key",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["抠像"]);
+
+        let key_colour = properties
+            .property(&effect_type.property_path("key_colour"))
+            .expect("the key colour is defined");
+        assert_eq!(
+            key_colour.evaluate(tt(0)),
+            PropertyValue::Color(mondrian_core::Color {
+                r: crate::COLOR_DIFFERENCE_KEY_DEFAULT_KEY_COLOUR[0],
+                g: crate::COLOR_DIFFERENCE_KEY_DEFAULT_KEY_COLOUR[1],
+                b: crate::COLOR_DIFFERENCE_KEY_DEFAULT_KEY_COLOUR[2],
+                a: 1.0,
+            })
+        );
+
+        let defaults = [
+            (
+                "accuracy",
+                crate::COLOR_DIFFERENCE_KEY_DEFAULT_ACCURACY,
+                crate::COLOR_DIFFERENCE_KEY_MIN_ACCURACY as f64,
+                crate::COLOR_DIFFERENCE_KEY_MAX_ACCURACY as f64,
+            ),
+            (
+                "black_a",
+                crate::COLOR_DIFFERENCE_KEY_DEFAULT_BLACK,
+                0.0,
+                1.0,
+            ),
+            (
+                "white_a",
+                crate::COLOR_DIFFERENCE_KEY_DEFAULT_WHITE,
+                0.0,
+                1.0,
+            ),
+            (
+                "gamma_a",
+                crate::COLOR_DIFFERENCE_KEY_DEFAULT_GAMMA,
+                crate::COLOR_DIFFERENCE_KEY_MIN_GAMMA as f64,
+                crate::COLOR_DIFFERENCE_KEY_MAX_GAMMA as f64,
+            ),
+            (
+                "black_outside_a",
+                crate::COLOR_DIFFERENCE_KEY_DEFAULT_BLACK,
+                0.0,
+                1.0,
+            ),
+            (
+                "white_outside_a",
+                crate::COLOR_DIFFERENCE_KEY_DEFAULT_WHITE,
+                0.0,
+                1.0,
+            ),
+        ];
+        for (parameter, default, min, max) in defaults {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(default));
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .expect("every numeric parameter declares a range");
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, min, "{parameter} minimum");
+            assert_eq!(contract.hard_range.max, max, "{parameter} maximum");
+        }
+
+        // The second partial matte opens wide so the documented defaults key on
+        // the A matte alone; narrowing B is an explicit trim of the result.
+        let open = ["black_b", "white_b", "black_outside_b", "white_outside_b"];
+        for parameter in open {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(1.0));
+        }
+        let masks = [
+            ("black_mask", crate::COLOR_DIFFERENCE_KEY_DEFAULT_BLACK_MASK),
+            ("white_mask", crate::COLOR_DIFFERENCE_KEY_DEFAULT_WHITE_MASK),
+            ("mask_gamma", crate::COLOR_DIFFERENCE_KEY_DEFAULT_GAMMA),
+        ];
+        for (parameter, default) in masks {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(default));
+        }
+
+        let documented = crate::ColorDifferenceKeyGrade::documented_defaults();
+        assert_eq!(
+            documented.parameters().accuracy,
+            crate::COLOR_DIFFERENCE_KEY_DEFAULT_ACCURACY
+        );
+        assert_eq!(documented.parameters().black_b, 1.0);
+        assert_eq!(documented.parameters().mask_gamma, 1.0);
+    }
+
+    #[test]
+    fn color_difference_key_defaults_build_one_point_op_without_scratch() {
+        let effect = instantiate_effect_node(EffectType::ColorDifferenceKey)
+            .expect("the colour difference key should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default colour difference key should compile");
+        let grade = color_difference_key_op(&graph).expect("the default parameters key the frame");
+        assert_eq!(grade, crate::ColorDifferenceKeyGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one colour difference key node"
+        );
+        let op = EffectRenderOp::ColorDifferenceKey { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the matte is derived from the pixel's own colour"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the colour difference key is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            133
+        );
+    }
+
+    #[test]
+    fn color_difference_key_parameters_round_trip() {
+        let effect = author_color_difference_key(&[
+            (
+                "key_colour",
+                PropertyValue::Color(mondrian_core::Color { r: 0.1, g: 0.8, b: 0.2, a: 1.0 }),
+            ),
+            ("accuracy", PropertyValue::Float(1.5)),
+            ("black_a", PropertyValue::Float(0.1)),
+            ("white_a", PropertyValue::Float(0.7)),
+            ("gamma_a", PropertyValue::Float(2.0)),
+            ("black_mask", PropertyValue::Float(0.25)),
+            ("white_mask", PropertyValue::Float(0.75)),
+            ("mask_gamma", PropertyValue::Float(3.0)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened colour difference key should compile");
+        let parameters = crate::ColorDifferenceKeyParameters {
+            key_colour: [0.1, 0.8, 0.2],
+            accuracy: 1.5,
+            black_a: 0.1,
+            white_a: 0.7,
+            gamma_a: 2.0,
+            black_mask: 0.25,
+            white_mask: 0.75,
+            mask_gamma: 3.0,
+            ..crate::ColorDifferenceKeyParameters::default()
+        };
+        assert_eq!(
+            color_difference_key_op(&graph),
+            Some(
+                crate::ColorDifferenceKeyGrade::new(parameters)
+                    .expect("the authored values are in range")
+            )
+        );
+    }
+
+    #[test]
+    fn color_difference_key_invalid_gamma_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::ColorDifferenceKey)
+            .expect("the colour difference key should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "color_difference_key.gamma_a",
+            serde_json::json!({"Float": 11.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a gamma past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("color_difference_key.gamma_a"),
             "the persisted value contract names the parameter: {reason}"
         );
     }

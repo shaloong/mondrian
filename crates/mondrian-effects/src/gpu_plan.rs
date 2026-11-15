@@ -252,6 +252,11 @@ pub enum EffectGpuPointOp {
     LightLeak {
         grade: crate::LightLeakGrade,
     },
+    /// Color difference key: the packed key colour, partial mattes and mask
+    /// controls are carried whole, so the shader never re-derives them.
+    ColorDifferenceKey {
+        grade: crate::ColorDifferenceKeyGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -970,6 +975,9 @@ pub(crate) fn lower_point_op(
         }
         EffectRenderOp::Scanlines { grade } => Ok(EffectGpuPointOp::Scanlines { grade: *grade }),
         EffectRenderOp::LightLeak { grade } => Ok(EffectGpuPointOp::LightLeak { grade: *grade }),
+        EffectRenderOp::ColorDifferenceKey { grade } => {
+            Ok(EffectGpuPointOp::ColorDifferenceKey { grade: *grade })
+        }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1115,6 +1123,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Scanlines { .. } => "scanlines",
         EffectRenderOp::Abstraction { .. } => "abstraction",
         EffectRenderOp::LightLeak { .. } => "light_leak",
+        EffectRenderOp::ColorDifferenceKey { .. } => "color_difference_key",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

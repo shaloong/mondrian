@@ -221,6 +221,9 @@ pub enum EffectType {
     /// Highlight: streaks the bright pixels of the frame along an authored
     /// direction and either merges the streak back or keeps it isolated.
     Highlight,
+    /// Color difference key: builds a matte from the colour distance between
+    /// each pixel and an authored key colour, with two partial mattes.
+    ColorDifferenceKey,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -375,6 +378,7 @@ impl EffectType {
             Self::Abstraction => "builtin.abstraction".to_string(),
             Self::LightLeak => "builtin.light_leak".to_string(),
             Self::Highlight => "builtin.highlight".to_string(),
+            Self::ColorDifferenceKey => "builtin.color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -513,6 +517,7 @@ impl EffectType {
             "builtin.abstraction" => Self::Abstraction,
             "builtin.light_leak" => Self::LightLeak,
             "builtin.highlight" => Self::Highlight,
+            "builtin.color_difference_key" => Self::ColorDifferenceKey,
             other => Self::External(other.to_string()),
         }
     }
@@ -651,6 +656,7 @@ impl EffectType {
             Self::Abstraction => "抽象画",
             Self::LightLeak => "漏光",
             Self::Highlight => "高光提取",
+            Self::ColorDifferenceKey => "颜色差值键",
             Self::External(name) => name,
         }
     }
@@ -682,6 +688,7 @@ impl EffectType {
             }
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
             Self::Qualifier | Self::ChromaKey | Self::LumaKey => vec!["抠像"],
+            Self::ColorDifferenceKey => vec!["抠像"],
             Self::Invert => vec!["通道"],
             Self::DropShadow => vec!["光效"],
             Self::FindEdges => vec!["风格化"],
@@ -922,6 +929,7 @@ impl EffectType {
             Self::Abstraction => "abstraction".to_string(),
             Self::LightLeak => "light_leak".to_string(),
             Self::Highlight => "highlight".to_string(),
+            Self::ColorDifferenceKey => "color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1438,7 +1446,8 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::Scanlines
             | Self::Abstraction
             | Self::LightLeak
-            | Self::Highlight => Ok(()),
+            | Self::Highlight
+            | Self::ColorDifferenceKey => Ok(()),
         }
     }
 }

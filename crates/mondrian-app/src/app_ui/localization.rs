@@ -415,6 +415,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "抽象画" => Some("parameter-group-abstraction"),
         "漏光" => Some("parameter-group-light-leak"),
         "高光提取" => Some("parameter-group-highlight"),
+        "颜色差值键" => Some("parameter-group-color-difference-key"),
         _ => None,
     }
 }
