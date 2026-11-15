@@ -247,6 +247,11 @@ pub enum EffectGpuPointOp {
     Scanlines {
         grade: crate::ScanlinesGrade,
     },
+    /// Light leak: the packed streak controls are carried whole, so the
+    /// shader never re-derives the tint or the envelope.
+    LightLeak {
+        grade: crate::LightLeakGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -964,6 +969,7 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::ChannelCombiner { grade: *grade })
         }
         EffectRenderOp::Scanlines { grade } => Ok(EffectGpuPointOp::Scanlines { grade: *grade }),
+        EffectRenderOp::LightLeak { grade } => Ok(EffectGpuPointOp::LightLeak { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1108,6 +1114,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Watercolor { .. } => "watercolor",
         EffectRenderOp::Scanlines { .. } => "scanlines",
         EffectRenderOp::Abstraction { .. } => "abstraction",
+        EffectRenderOp::LightLeak { .. } => "light_leak",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",

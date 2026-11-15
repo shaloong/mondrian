@@ -1297,6 +1297,12 @@ pub enum EffectRenderOp {
         /// Authored blur, quantisation and edge controls.
         grade: crate::AbstractionGrade,
     },
+    /// Light leak: a tinted streak that brightens the frame along an authored
+    /// direction, with an optional per-frame flicker.
+    LightLeak {
+        /// Authored leak intensity, tint, geometry and blend.
+        grade: crate::LightLeakGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1725,6 +1731,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Abstraction { grade } => {
                 formatter.debug_struct("Abstraction").field("grade", grade).finish()
+            }
+            Self::LightLeak { grade } => {
+                formatter.debug_struct("LightLeak").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2836,6 +2845,12 @@ impl EffectRenderOp {
                 // all read the authored values, so the grade hashes them all.
                 grade.hash_state(state);
             }
+            EffectRenderOp::LightLeak { grade } => {
+                130u8.hash(state);
+                // The streak geometry, the tint and the flicker all read the
+                // authored values, so the grade hashes every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::Scanlines { grade } => {
                 128u8.hash(state);
                 // The band pattern is a pure function of the whole authored
@@ -3094,6 +3109,7 @@ impl EffectRenderOp {
             EffectRenderOp::Watercolor { .. } => 2,
             EffectRenderOp::Scanlines { .. } => 1,
             EffectRenderOp::Abstraction { .. } => 3,
+            EffectRenderOp::LightLeak { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3628,7 +3644,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 130] {
+fn builtin_effect_types() -> [EffectType; 131] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3760,6 +3776,7 @@ fn builtin_effect_types() -> [EffectType; 130] {
         EffectType::Watercolor,
         EffectType::Scanlines,
         EffectType::Abstraction,
+        EffectType::LightLeak,
     ]
 }
 
@@ -12525,6 +12542,103 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::LightLeak => {
+            // The seven authored values mirror the specified leak: the
+            // intensity and tint of the added light, its streak geometry, the
+            // striation spacing, the composite mode and the per-frame flicker.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "intensity",
+                "漏光",
+                "强度",
+                PropertyValue::Float(crate::LIGHT_LEAK_DEFAULT_INTENSITY),
+                Some(crate::LIGHT_LEAK_MIN_INTENSITY as f64),
+                Some(crate::LIGHT_LEAK_MAX_INTENSITY as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "colour",
+                "漏光",
+                "颜色",
+                PropertyValue::Color(Color {
+                    r: crate::LIGHT_LEAK_DEFAULT_COLOUR[0],
+                    g: crate::LIGHT_LEAK_DEFAULT_COLOUR[1],
+                    b: crate::LIGHT_LEAK_DEFAULT_COLOUR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "angle",
+                "漏光",
+                "角度",
+                PropertyValue::Float(crate::LIGHT_LEAK_DEFAULT_ANGLE_DEGREES),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "position",
+                "漏光",
+                "位置",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::LIGHT_LEAK_DEFAULT_POSITION[0],
+                    crate::LIGHT_LEAK_DEFAULT_POSITION[1],
+                )),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "speed",
+                "漏光",
+                "速度",
+                PropertyValue::Float(crate::LIGHT_LEAK_DEFAULT_SPEED),
+                Some(crate::LIGHT_LEAK_MIN_SPEED as f64),
+                Some(crate::LIGHT_LEAK_MAX_SPEED as f64),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "blend",
+                "漏光",
+                "混合模式",
+                crate::LightLeakBlend::Screen.as_key(),
+                crate::LightLeakBlend::ALL
+                    .iter()
+                    .map(|blend| {
+                        ParameterEnumOption::new(
+                            blend.as_key(),
+                            blend.label(),
+                            format!("mondrian.effect.light_leak.blend.{}", blend.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "flicker",
+                "漏光",
+                "闪烁",
+                PropertyValue::Float(crate::LIGHT_LEAK_DEFAULT_FLICKER),
+                Some(crate::LIGHT_LEAK_MIN_FLICKER as f64),
+                Some(crate::LIGHT_LEAK_MAX_FLICKER as f64),
+                Some(1.0),
+            );
+        }
         EffectType::Scanlines => {
             // The nineteen authored values mirror Resolve's ScanlineV2: the band
             // geometry, the two band colours, the per-channel phase offsets and
@@ -14678,6 +14792,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The blur window and the edge gradient reach a bounded halo of
             // radius plus one, so the definition-level envelope is the frame.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::LightLeak => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The leak reads the pixel's own frame coordinate, its coverage and
+            // the frame seed; no neighbour or history enters the result.
+            determinism: EffectDeterminism::FrameSeeded,
+            roi_propagation: EffectRoiPropagation::PixelLocal,
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -21026,6 +21148,65 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             }
             Ok(())
         })),
+        EffectType::LightLeak => {
+            let colour_id = builtin_parameter_id(effect_type, "colour");
+            let position_id = builtin_parameter_id(effect_type, "position");
+            let blend_id = builtin_parameter_id(effect_type, "blend");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("漏光的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                let defaults = crate::LightLeakParameters::default();
+                let mut parameters = defaults;
+                parameters.intensity =
+                    read(effect, context, &invalid, "intensity", defaults.intensity)?;
+                match effect.evaluate_parameter(&colour_id, context.time) {
+                    Some(PropertyValue::Color(color)) => {
+                        parameters.colour = [color.r, color.g, color.b];
+                    }
+                    Some(_) => return Err(invalid("漏光的颜色必须是颜色值".to_string())),
+                    None => {}
+                }
+                parameters.angle_degrees =
+                    read(effect, context, &invalid, "angle", defaults.angle_degrees)?;
+                match effect.evaluate_parameter(&position_id, context.time) {
+                    Some(PropertyValue::Vec2(position)) => {
+                        parameters.position = [position.x, position.y];
+                    }
+                    Some(_) => return Err(invalid("漏光的位置必须是二维坐标".to_string())),
+                    None => {}
+                }
+                parameters.speed = read(effect, context, &invalid, "speed", defaults.speed)?;
+                if let Some(key) = effect.evaluate_enum_parameter(&blend_id, context.time) {
+                    parameters.blend = crate::LightLeakBlend::from_key(&key)
+                        .ok_or_else(|| invalid("漏光的混合模式未知".to_string()))?;
+                }
+                parameters.flicker = read(effect, context, &invalid, "flicker", defaults.flicker)?;
+                let grade = crate::LightLeakGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::LightLeak { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Scanlines => {
             let composite_type_id = builtin_parameter_id(effect_type, "composite_type");
             Some(Arc::new(move |effect, context, graph| {
@@ -22521,6 +22702,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Watercolor => "水彩",
         EffectType::Scanlines => "扫描线与老电视",
         EffectType::Abstraction => "抽象画",
+        EffectType::LightLeak => "漏光",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -23925,6 +24107,7 @@ mod tests {
             EffectType::Watercolor,
             EffectType::Scanlines,
             EffectType::Abstraction,
+            EffectType::LightLeak,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -33221,7 +33404,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 130);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 131);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33749,7 +33932,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 130);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 131);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -36708,7 +36891,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 130);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 131);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -37844,7 +38027,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 130);
+        assert_eq!(builtin_effect_types().len(), 131);
     }
 
     #[test]
@@ -38585,6 +38768,252 @@ mod tests {
         let reason = format!("{error:?}");
         assert!(
             reason.contains("abstraction.edge_strength"),
+            "the persisted value contract names the parameter: {reason}"
+        );
+    }
+
+    fn light_leak_op(graph: &EffectRenderGraph) -> Option<crate::LightLeakGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::LightLeak { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::LightLeak { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_light_leak(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::LightLeak)
+            .expect("the light leak effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::LightLeak.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the light leak parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn light_leak_defaults_match_the_dump() {
+        let effect_type = EffectType::LightLeak;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("intensity", "强度"),
+            ("colour", "颜色"),
+            ("angle", "角度"),
+            ("position", "位置"),
+            ("speed", "速度"),
+            ("blend", "混合模式"),
+            ("flicker", "闪烁"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("漏光")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "light_leak",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["胶片质感"]);
+
+        let defaults = [
+            (
+                "intensity",
+                crate::LIGHT_LEAK_DEFAULT_INTENSITY,
+                crate::LIGHT_LEAK_MIN_INTENSITY as f64,
+                crate::LIGHT_LEAK_MAX_INTENSITY as f64,
+            ),
+            (
+                "angle",
+                crate::LIGHT_LEAK_DEFAULT_ANGLE_DEGREES,
+                -180.0,
+                180.0,
+            ),
+            (
+                "speed",
+                crate::LIGHT_LEAK_DEFAULT_SPEED,
+                crate::LIGHT_LEAK_MIN_SPEED as f64,
+                crate::LIGHT_LEAK_MAX_SPEED as f64,
+            ),
+            (
+                "flicker",
+                crate::LIGHT_LEAK_DEFAULT_FLICKER,
+                crate::LIGHT_LEAK_MIN_FLICKER as f64,
+                crate::LIGHT_LEAK_MAX_FLICKER as f64,
+            ),
+        ];
+        for (parameter, (default, min, max)) in
+            defaults.into_iter().map(|entry| (entry.0, (entry.1, entry.2, entry.3)))
+        {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(default));
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .expect("every numeric parameter declares a range");
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, min, "{parameter} minimum");
+            assert_eq!(contract.hard_range.max, max, "{parameter} maximum");
+        }
+
+        let colour = properties
+            .property(&effect_type.property_path("colour"))
+            .expect("the colour is defined");
+        assert_eq!(
+            colour.evaluate(tt(0)),
+            PropertyValue::Color(mondrian_core::Color {
+                r: crate::LIGHT_LEAK_DEFAULT_COLOUR[0],
+                g: crate::LIGHT_LEAK_DEFAULT_COLOUR[1],
+                b: crate::LIGHT_LEAK_DEFAULT_COLOUR[2],
+                a: 1.0,
+            })
+        );
+        let position = properties
+            .property(&effect_type.property_path("position"))
+            .expect("the position is defined");
+        assert_eq!(
+            position.evaluate(tt(0)),
+            PropertyValue::Vec2(glam::Vec2::new(
+                crate::LIGHT_LEAK_DEFAULT_POSITION[0],
+                crate::LIGHT_LEAK_DEFAULT_POSITION[1],
+            ))
+        );
+        let blend = properties
+            .property(&effect_type.property_path("blend"))
+            .expect("the blend mode is defined");
+        assert_eq!(
+            blend.evaluate(tt(0)),
+            PropertyValue::Enum("screen".to_owned())
+        );
+        assert_eq!(
+            crate::LightLeakBlend::ALL.map(|blend| blend.as_key()),
+            ["screen", "overlay", "add", "normal"]
+        );
+        assert_eq!(
+            crate::LightLeakGrade::documented_defaults().parameters().intensity,
+            crate::LIGHT_LEAK_DEFAULT_INTENSITY
+        );
+    }
+
+    #[test]
+    fn light_leak_defaults_build_one_point_op_without_scratch() {
+        let effect = instantiate_effect_node(EffectType::LightLeak)
+            .expect("the light leak effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default light leak should compile");
+        let grade = light_leak_op(&graph).expect("the default parameters emit the leak");
+        assert_eq!(grade, crate::LightLeakGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one light leak node"
+        );
+        let op = EffectRenderOp::LightLeak { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the leak is computed from the pixel's own coordinate"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the light leak is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            131
+        );
+    }
+
+    #[test]
+    fn light_leak_zero_intensity_builds_no_node() {
+        let effect = author_light_leak(&[("intensity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the zero intensity should compile");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(light_leak_op(&graph), None);
+    }
+
+    #[test]
+    fn light_leak_parameters_round_trip() {
+        let effect = author_light_leak(&[
+            ("intensity", PropertyValue::Float(80.0)),
+            (
+                "colour",
+                PropertyValue::Color(mondrian_core::Color { r: 0.25, g: 0.5, b: 0.75, a: 1.0 }),
+            ),
+            ("angle", PropertyValue::Float(90.0)),
+            ("position", PropertyValue::Vec2(glam::Vec2::new(0.25, 0.75))),
+            ("speed", PropertyValue::Float(3.0)),
+            ("blend", PropertyValue::Enum("add".to_owned())),
+            ("flicker", PropertyValue::Float(40.0)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened light leak should compile");
+        let parameters = crate::LightLeakParameters {
+            intensity: 80.0,
+            colour: [0.25, 0.5, 0.75],
+            angle_degrees: 90.0,
+            position: [0.25, 0.75],
+            speed: 3.0,
+            blend: crate::LightLeakBlend::Add,
+            flicker: 40.0,
+        };
+        assert_eq!(
+            light_leak_op(&graph),
+            Some(crate::LightLeakGrade::new(parameters).expect("the authored values are in range"))
+        );
+    }
+
+    #[test]
+    fn light_leak_invalid_intensity_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::LightLeak)
+            .expect("the light leak effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "light_leak.intensity",
+            serde_json::json!({"Float": 200.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("an intensity past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("light_leak.intensity"),
             "the persisted value contract names the parameter: {reason}"
         );
     }

@@ -413,6 +413,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "水彩" => Some("parameter-group-watercolor"),
         "扫描线" => Some("parameter-group-scanlines"),
         "抽象画" => Some("parameter-group-abstraction"),
+        "漏光" => Some("parameter-group-light-leak"),
         _ => None,
     }
 }

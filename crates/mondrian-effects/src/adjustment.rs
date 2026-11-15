@@ -555,6 +555,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::LightLeak { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "light_leak",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Abstraction { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "abstraction",
@@ -1396,6 +1402,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::Crop { .. }
         | EffectRenderOp::TemporalFrameBlend { .. }
         | EffectRenderOp::Scanlines { .. }
+        | EffectRenderOp::LightLeak { .. }
         | EffectRenderOp::Lut3D { .. } => 0,
         // The two blur passes each keep one full-frame plane.
         EffectRenderOp::Abstraction { .. } => 2,
@@ -2501,6 +2508,17 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             if amount > 1.0e-4 {
                 apply_grain_f32_region_controlled(working, region, amount, frame_seed, checkpoint)?;
             }
+            Ok(true)
+        }
+        EffectRenderOp::LightLeak { grade } => {
+            crate::light_leak::apply_light_leak_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                grade,
+                frame_seed,
+                checkpoint,
+            )?;
             Ok(true)
         }
         EffectRenderOp::Invert { channels, blend_with_original } => {

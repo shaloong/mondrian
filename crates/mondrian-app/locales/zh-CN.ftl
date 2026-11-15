@@ -3731,3 +3731,18 @@ parameter-mondrian-effect-builtin-abstraction-edge-control-label = 绘制边缘�
 parameter-mondrian-effect-builtin-abstraction-draw-edges-label = 绘制边缘
 parameter-mondrian-effect-builtin-abstraction-edge-strength-label = 边缘强度
 parameter-mondrian-effect-builtin-abstraction-edge-threshold-label = 边缘阈值
+
+## Light Leak 漏光
+effect-light-leak = 漏光
+parameter-group-light-leak = 漏光
+parameter-mondrian-effect-builtin-light-leak-intensity-label = 强度
+parameter-mondrian-effect-builtin-light-leak-colour-label = 颜色
+parameter-mondrian-effect-builtin-light-leak-angle-label = 角度
+parameter-mondrian-effect-builtin-light-leak-position-label = 位置
+parameter-mondrian-effect-builtin-light-leak-speed-label = 速度
+parameter-mondrian-effect-builtin-light-leak-blend-label = 混合模式
+parameter-mondrian-effect-builtin-light-leak-flicker-label = 闪烁
+parameter-mondrian-effect-light-leak-blend-screen = 滤色
+parameter-mondrian-effect-light-leak-blend-overlay = 叠加
+parameter-mondrian-effect-light-leak-blend-add = 相加
+parameter-mondrian-effect-light-leak-blend-normal = 正常

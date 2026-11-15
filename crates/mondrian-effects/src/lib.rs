@@ -170,6 +170,7 @@ pub mod leave_color;
 pub mod lens_distortion;
 pub mod lens_flare;
 pub mod levels;
+pub mod light_leak;
 pub mod linear_color_key;
 pub mod magnify;
 pub mod median;
@@ -522,6 +523,14 @@ pub use lens_flare::{
 pub use levels::{
     levels_frame_f32, LevelsChannel, LevelsClip, LevelsError, LevelsGrade, LEVELS_CHANNEL_COUNT,
     LEVELS_CLIP_COUNT, LEVELS_MAX_GAMMA, LEVELS_MAX_LEVEL, LEVELS_MIN_GAMMA, LEVELS_MIN_LEVEL,
+};
+pub use light_leak::{
+    light_leak_frame_f32, seed_unit, LightLeakBlend, LightLeakError, LightLeakGrade,
+    LightLeakParameters, LIGHT_LEAK_DEFAULT_ANGLE_DEGREES, LIGHT_LEAK_DEFAULT_COLOUR,
+    LIGHT_LEAK_DEFAULT_FLICKER, LIGHT_LEAK_DEFAULT_INTENSITY, LIGHT_LEAK_DEFAULT_POSITION,
+    LIGHT_LEAK_DEFAULT_SPEED, LIGHT_LEAK_MAX_FLICKER, LIGHT_LEAK_MAX_INTENSITY,
+    LIGHT_LEAK_MAX_SPEED, LIGHT_LEAK_MIN_FLICKER, LIGHT_LEAK_MIN_INTENSITY, LIGHT_LEAK_MIN_SPEED,
+    LIGHT_LEAK_SEED_MASK, LIGHT_LEAK_SEED_SCALE,
 };
 pub use linear_color_key::{
     linear_color_key_frame_f32, KeyOperation, LinearColorKeyError, LinearColorKeyGrade,

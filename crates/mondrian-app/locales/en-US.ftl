@@ -3803,3 +3803,18 @@ parameter-mondrian-effect-builtin-abstraction-edge-control-label = Draw Edges Co
 parameter-mondrian-effect-builtin-abstraction-draw-edges-label = Draw Edges
 parameter-mondrian-effect-builtin-abstraction-edge-strength-label = Edge Strength
 parameter-mondrian-effect-builtin-abstraction-edge-threshold-label = Edge Threshold
+
+## Light Leak
+effect-light-leak = Light Leak
+parameter-group-light-leak = Light Leak
+parameter-mondrian-effect-builtin-light-leak-intensity-label = Intensity
+parameter-mondrian-effect-builtin-light-leak-colour-label = Colour
+parameter-mondrian-effect-builtin-light-leak-angle-label = Angle
+parameter-mondrian-effect-builtin-light-leak-position-label = Position
+parameter-mondrian-effect-builtin-light-leak-speed-label = Speed
+parameter-mondrian-effect-builtin-light-leak-blend-label = Blend Mode
+parameter-mondrian-effect-builtin-light-leak-flicker-label = Flicker
+parameter-mondrian-effect-light-leak-blend-screen = Screen
+parameter-mondrian-effect-light-leak-blend-overlay = Overlay
+parameter-mondrian-effect-light-leak-blend-add = Add
+parameter-mondrian-effect-light-leak-blend-normal = Normal
