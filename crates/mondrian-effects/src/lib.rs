@@ -133,6 +133,7 @@ pub mod grid_warp;
 pub mod hdr_grading;
 pub mod hdr_tone_mapping;
 pub mod heterogeneous_execution;
+pub mod highlight;
 pub mod hsl;
 pub(crate) mod hsl_space;
 pub mod hue_saturation;
@@ -492,6 +493,13 @@ pub use heterogeneous_execution::{
     PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWork,
     PreparedHeterogeneousEffectWorkError, PreparedHeterogeneousGpuDispatch,
     PreparedHeterogeneousGpuStep, PreparedHeterogeneousGpuSuffix,
+};
+pub use highlight::{
+    highlight_frame_f32, HighlightError, HighlightGrade, HighlightParameters,
+    HIGHLIGHT_DEFAULT_ALPHA_SCALE, HIGHLIGHT_DEFAULT_ANGLE_DEGREES, HIGHLIGHT_DEFAULT_COLOUR_SCALE,
+    HIGHLIGHT_DEFAULT_CURVE, HIGHLIGHT_DEFAULT_HIGH, HIGHLIGHT_DEFAULT_LENGTH,
+    HIGHLIGHT_DEFAULT_LOW, HIGHLIGHT_DEFAULT_POINTS, HIGHLIGHT_MAX_CURVE, HIGHLIGHT_MAX_POINTS,
+    HIGHLIGHT_MAX_SCALE, HIGHLIGHT_MIN_CURVE, HIGHLIGHT_MIN_POINTS,
 };
 pub use hsl::{HslGrade, HslGradeError};
 pub use hue_saturation::{HueBand, HueSaturationError, HueSaturationGrade};

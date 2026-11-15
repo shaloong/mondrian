@@ -561,6 +561,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Highlight { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "highlight",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Abstraction { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "abstraction",
@@ -1291,6 +1297,8 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
             }
         }
         EffectRenderOp::Deinterlace { .. } => 0,
+        // The kernel keeps one straight snapshot of the source frame.
+        EffectRenderOp::Highlight { .. } => 1,
         // The kernel keeps one straight snapshot of the source frame.
         EffectRenderOp::Watercolor { .. } => 1,
         EffectRenderOp::ChromaticAberrationRemoval { .. }
@@ -2508,6 +2516,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             if amount > 1.0e-4 {
                 apply_grain_f32_region_controlled(working, region, amount, frame_seed, checkpoint)?;
             }
+            Ok(true)
+        }
+        EffectRenderOp::Highlight { grade } => {
+            crate::highlight::apply_highlight_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                grade,
+                checkpoint,
+            )?;
             Ok(true)
         }
         EffectRenderOp::LightLeak { grade } => {

@@ -282,6 +282,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored amounts, edge scale, and normalized centre.
         grade: crate::ChromaticAberrationRemovalGrade,
     },
+    /// Ray-marched highlight streak along an authored direction.
+    Highlight {
+        /// Authored threshold, streak geometry and merge controls.
+        grade: crate::HighlightGrade,
+    },
     /// One perspective remap with optional specular lighting.
     Basic3D {
         /// Validated camera and lighting controls.
@@ -474,6 +479,7 @@ impl EffectGpuSpatialPass {
             Self::Deinterlace { .. } => "deinterlace",
             Self::Watercolor { .. } => "watercolor",
             Self::Abstraction { .. } => "abstraction",
+            Self::Highlight { .. } => "highlight",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
             Self::Basic3D { .. } => "basic_3d",
@@ -581,6 +587,9 @@ impl EffectGpuSpatialPass {
             Self::Watercolor { grade } => grade.radius(),
             // The blur window and the edge gradient need one more pixel.
             Self::Abstraction { grade } => grade.input_halo().0,
+            // The authored length is a fraction of the frame width, so the ray
+            // can reach any distance and the plane is never tiled.
+            Self::Highlight { .. } => u32::MAX,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
@@ -670,6 +679,8 @@ impl EffectGpuSpatialPass {
             Self::Watercolor { grade } => grade.radius(),
             // The blur window and the edge gradient need one more pixel.
             Self::Abstraction { grade } => grade.input_halo().1,
+            // Same unbounded reach as the horizontal halo.
+            Self::Highlight { .. } => u32::MAX,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
@@ -1258,6 +1269,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::Abstraction { grade } => {
             Some(EffectGpuSpatialPass::Abstraction { grade: *grade })
+        }
+        EffectRenderOp::Highlight { grade } => {
+            Some(EffectGpuSpatialPass::Highlight { grade: *grade })
         }
         EffectRenderOp::ChromaticAberrationRemoval { grade } => {
             Some(EffectGpuSpatialPass::ChromaticAberrationRemoval { grade: *grade })

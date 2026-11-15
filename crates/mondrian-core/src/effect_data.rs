@@ -218,6 +218,9 @@ pub enum EffectType {
     /// Light leak: a tinted streak that brightens the frame along an authored
     /// direction, with an optional per-frame flicker.
     LightLeak,
+    /// Highlight: streaks the bright pixels of the frame along an authored
+    /// direction and either merges the streak back or keeps it isolated.
+    Highlight,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -371,6 +374,7 @@ impl EffectType {
             Self::Scanlines => "builtin.scanlines".to_string(),
             Self::Abstraction => "builtin.abstraction".to_string(),
             Self::LightLeak => "builtin.light_leak".to_string(),
+            Self::Highlight => "builtin.highlight".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -508,6 +512,7 @@ impl EffectType {
             "builtin.scanlines" => Self::Scanlines,
             "builtin.abstraction" => Self::Abstraction,
             "builtin.light_leak" => Self::LightLeak,
+            "builtin.highlight" => Self::Highlight,
             other => Self::External(other.to_string()),
         }
     }
@@ -645,6 +650,7 @@ impl EffectType {
             Self::Scanlines => "扫描线与老电视",
             Self::Abstraction => "抽象画",
             Self::LightLeak => "漏光",
+            Self::Highlight => "高光提取",
             Self::External(name) => name,
         }
     }
@@ -777,6 +783,7 @@ impl EffectType {
             Self::Scanlines => vec!["胶片质感"],
             Self::Abstraction => vec!["风格化"],
             Self::LightLeak => vec!["胶片质感"],
+            Self::Highlight => vec!["光效"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -914,6 +921,7 @@ impl EffectType {
             Self::Scanlines => "scanlines".to_string(),
             Self::Abstraction => "abstraction".to_string(),
             Self::LightLeak => "light_leak".to_string(),
+            Self::Highlight => "highlight".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1429,7 +1437,8 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::Watercolor
             | Self::Scanlines
             | Self::Abstraction
-            | Self::LightLeak => Ok(()),
+            | Self::LightLeak
+            | Self::Highlight => Ok(()),
         }
     }
 }

@@ -3264,6 +3264,7 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::BlankingFill { .. }
         | EffectRenderOp::Deinterlace { .. }
         | EffectRenderOp::Watercolor { .. }
+        | EffectRenderOp::Highlight { .. }
         | EffectRenderOp::GrowBounds { .. }
         | EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }

@@ -1303,6 +1303,12 @@ pub enum EffectRenderOp {
         /// Authored leak intensity, tint, geometry and blend.
         grade: crate::LightLeakGrade,
     },
+    /// Highlight: streaks the frame's bright pixels along an authored
+    /// direction, optionally merging the streak back under the source.
+    Highlight {
+        /// Authored threshold, streak geometry and merge controls.
+        grade: crate::HighlightGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1734,6 +1740,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::LightLeak { grade } => {
                 formatter.debug_struct("LightLeak").field("grade", grade).finish()
+            }
+            Self::Highlight { grade } => {
+                formatter.debug_struct("Highlight").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2845,6 +2854,12 @@ impl EffectRenderOp {
                 // all read the authored values, so the grade hashes them all.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Highlight { grade } => {
+                131u8.hash(state);
+                // The threshold window, the streak ray and the merge controls
+                // all read the authored values, so the grade hashes them all.
+                grade.hash_state(state);
+            }
             EffectRenderOp::LightLeak { grade } => {
                 130u8.hash(state);
                 // The streak geometry, the tint and the flicker all read the
@@ -3110,6 +3125,7 @@ impl EffectRenderOp {
             EffectRenderOp::Scanlines { .. } => 1,
             EffectRenderOp::Abstraction { .. } => 3,
             EffectRenderOp::LightLeak { .. } => 1,
+            EffectRenderOp::Highlight { .. } => 4,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3644,7 +3660,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 131] {
+fn builtin_effect_types() -> [EffectType; 132] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3777,6 +3793,7 @@ fn builtin_effect_types() -> [EffectType; 131] {
         EffectType::Scanlines,
         EffectType::Abstraction,
         EffectType::LightLeak,
+        EffectType::Highlight,
     ]
 }
 
@@ -12639,6 +12656,150 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Highlight => {
+            // The fourteen authored values mirror Resolve Fusion's Highlight:
+            // the threshold window and curve that choose the bright pixels, the
+            // streak ray (count, length, angle), the per-channel tint, the merge
+            // switch and the mask that is declared but not yet consumed.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "alpha_scale",
+                "高光提取",
+                "Alpha比例",
+                PropertyValue::Float(crate::HIGHLIGHT_DEFAULT_ALPHA_SCALE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "low",
+                "高光提取",
+                "低",
+                PropertyValue::Float(crate::HIGHLIGHT_DEFAULT_LOW),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "merge_over",
+                "高光提取",
+                "向上合并",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "curve",
+                "高光提取",
+                "曲线",
+                PropertyValue::Float(crate::HIGHLIGHT_DEFAULT_CURVE),
+                Some(crate::HIGHLIGHT_MIN_CURVE as f64),
+                Some(crate::HIGHLIGHT_MAX_CURVE as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "points",
+                "高光提取",
+                "点的数量",
+                PropertyValue::Float(crate::HIGHLIGHT_DEFAULT_POINTS as f32),
+                Some(crate::HIGHLIGHT_MIN_POINTS as f64),
+                Some(crate::HIGHLIGHT_MAX_POINTS as f64),
+                Some(1.0),
+            );
+            for (parameter, label) in [
+                ("red_scale", "红色比例"),
+                ("green_scale", "绿色比例"),
+                ("blue_scale", "蓝色比例"),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "高光提取",
+                    label,
+                    PropertyValue::Float(1.0),
+                    Some(0.0),
+                    Some(crate::HIGHLIGHT_MAX_SCALE as f64),
+                    Some(0.01),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "angle",
+                "高光提取",
+                "角度",
+                PropertyValue::Float(crate::HIGHLIGHT_DEFAULT_ANGLE_DEGREES),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "length",
+                "高光提取",
+                "长度",
+                PropertyValue::Float(crate::HIGHLIGHT_DEFAULT_LENGTH),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "colour_scale",
+                "高光提取",
+                "颜色比例",
+                PropertyValue::Float(crate::HIGHLIGHT_DEFAULT_COLOUR_SCALE),
+                Some(0.0),
+                Some(crate::HIGHLIGHT_MAX_SCALE as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "high",
+                "高光提取",
+                "高",
+                PropertyValue::Float(crate::HIGHLIGHT_DEFAULT_HIGH),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "highlight_mask",
+                "高光提取",
+                "高光遮罩",
+                PropertyValue::MaskReference(None),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "mask_layer",
+                "高光提取",
+                "高光遮罩 Layering",
+                PropertyValue::Int(1),
+                Some(1.0),
+                Some(19.0),
+                Some(1.0),
+            );
+        }
         EffectType::Scanlines => {
             // The nineteen authored values mirror Resolve's ScanlineV2: the band
             // geometry, the two band colours, the per-channel phase offsets and
@@ -14800,6 +14961,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // the frame seed; no neighbour or history enters the result.
             determinism: EffectDeterminism::FrameSeeded,
             roi_propagation: EffectRoiPropagation::PixelLocal,
+            ..cpu_linear
+        },
+        EffectType::Highlight => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The streak ray samples neighbours up to its own length away and
+            // the spatial pass writes a whole-frame destination, so the input
+            // tile cannot be narrowed; each frame is computed from its source.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -21207,6 +21376,97 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Highlight => {
+            let mask_id = builtin_parameter_id(effect_type, "highlight_mask");
+            let mask_layer_id = builtin_parameter_id(effect_type, "mask_layer");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("高光提取的 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                // A bound mask would have to gate the streak through the mask
+                // path; that path is not part of this slice, so authoring one
+                // fails closed instead of silently ignoring it.
+                if matches!(
+                    effect.evaluate_mask_reference_parameter(&mask_id),
+                    Some(Some(_))
+                ) {
+                    return Err(invalid("高光提取的高光遮罩尚未支持".to_owned()));
+                }
+                // The layer selector is inert until the mask path lands, but an
+                // out-of-range value is still an authoring mistake.
+                if let Some(value) = effect.evaluate_parameter(&mask_layer_id, context.time) {
+                    match value {
+                        PropertyValue::Int(layer) if (1..=19).contains(&layer) => {}
+                        _ => {
+                            return Err(invalid(
+                                "高光提取的高光遮罩 Layering 必须是 1 到 19 的整数".to_owned(),
+                            ));
+                        }
+                    }
+                }
+                let defaults = crate::HighlightParameters::default();
+                let mut parameters = defaults;
+                parameters.alpha_scale = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "alpha_scale",
+                    defaults.alpha_scale,
+                )?;
+                parameters.low = read(effect, context, &invalid, "low", defaults.low)?;
+                parameters.high = read(effect, context, &invalid, "high", defaults.high)?;
+                parameters.merge_over =
+                    read(effect, context, &invalid, "merge_over", defaults.merge_over)?;
+                parameters.curve = read(effect, context, &invalid, "curve", defaults.curve)?;
+                parameters.points = read(effect, context, &invalid, "points", defaults.points)?;
+                parameters.red_scale =
+                    read(effect, context, &invalid, "red_scale", defaults.red_scale)?;
+                parameters.green_scale = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "green_scale",
+                    defaults.green_scale,
+                )?;
+                parameters.blue_scale =
+                    read(effect, context, &invalid, "blue_scale", defaults.blue_scale)?;
+                parameters.angle_degrees =
+                    read(effect, context, &invalid, "angle", defaults.angle_degrees)?;
+                parameters.length = read(effect, context, &invalid, "length", defaults.length)?;
+                parameters.colour_scale = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "colour_scale",
+                    defaults.colour_scale,
+                )?;
+                let grade = crate::HighlightGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // A zero alpha scale with no merge is the identity, so no node
+                // is appended.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Highlight { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Scanlines => {
             let composite_type_id = builtin_parameter_id(effect_type, "composite_type");
             Some(Arc::new(move |effect, context, graph| {
@@ -22703,6 +22963,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Scanlines => "扫描线与老电视",
         EffectType::Abstraction => "抽象画",
         EffectType::LightLeak => "漏光",
+        EffectType::Highlight => "高光提取",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -24108,6 +24369,7 @@ mod tests {
             EffectType::Scanlines,
             EffectType::Abstraction,
             EffectType::LightLeak,
+            EffectType::Highlight,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -33404,7 +33666,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 131);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 132);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33932,7 +34194,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 131);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 132);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -36891,7 +37153,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 131);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 132);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -38027,7 +38289,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 131);
+        assert_eq!(builtin_effect_types().len(), 132);
     }
 
     #[test]
@@ -39016,6 +39278,287 @@ mod tests {
             reason.contains("light_leak.intensity"),
             "the persisted value contract names the parameter: {reason}"
         );
+    }
+
+    fn highlight_op(graph: &EffectRenderGraph) -> Option<crate::HighlightGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Highlight { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Highlight { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_highlight(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Highlight)
+            .expect("the highlight effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Highlight.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the highlight parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn highlight_defaults_match_the_dump() {
+        let effect_type = EffectType::Highlight;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("alpha_scale", "Alpha比例"),
+            ("low", "低"),
+            ("merge_over", "向上合并"),
+            ("curve", "曲线"),
+            ("points", "点的数量"),
+            ("red_scale", "红色比例"),
+            ("green_scale", "绿色比例"),
+            ("blue_scale", "蓝色比例"),
+            ("angle", "角度"),
+            ("length", "长度"),
+            ("colour_scale", "颜色比例"),
+            ("high", "高"),
+            ("highlight_mask", "高光遮罩"),
+            ("mask_layer", "高光遮罩 Layering"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("高光提取")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "highlight",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["光效"]);
+
+        let defaults = [
+            (
+                "alpha_scale",
+                crate::HIGHLIGHT_DEFAULT_ALPHA_SCALE,
+                0.0,
+                1.0,
+            ),
+            ("low", crate::HIGHLIGHT_DEFAULT_LOW, 0.0, 1.0),
+            ("merge_over", 1.0, 0.0, 1.0),
+            (
+                "curve",
+                crate::HIGHLIGHT_DEFAULT_CURVE,
+                crate::HIGHLIGHT_MIN_CURVE as f64,
+                crate::HIGHLIGHT_MAX_CURVE as f64,
+            ),
+            (
+                "points",
+                crate::HIGHLIGHT_DEFAULT_POINTS as f32,
+                crate::HIGHLIGHT_MIN_POINTS as f64,
+                crate::HIGHLIGHT_MAX_POINTS as f64,
+            ),
+            ("red_scale", 1.0, 0.0, crate::HIGHLIGHT_MAX_SCALE as f64),
+            ("green_scale", 1.0, 0.0, crate::HIGHLIGHT_MAX_SCALE as f64),
+            ("blue_scale", 1.0, 0.0, crate::HIGHLIGHT_MAX_SCALE as f64),
+            (
+                "angle",
+                crate::HIGHLIGHT_DEFAULT_ANGLE_DEGREES,
+                -180.0,
+                180.0,
+            ),
+            ("length", crate::HIGHLIGHT_DEFAULT_LENGTH, 0.0, 1.0),
+            (
+                "colour_scale",
+                crate::HIGHLIGHT_DEFAULT_COLOUR_SCALE,
+                0.0,
+                crate::HIGHLIGHT_MAX_SCALE as f64,
+            ),
+            ("high", crate::HIGHLIGHT_DEFAULT_HIGH, 0.0, 1.0),
+        ];
+        for (parameter, default, min, max) in defaults {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(default));
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .expect("every numeric parameter declares a range");
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, min, "{parameter} minimum");
+            assert_eq!(contract.hard_range.max, max, "{parameter} maximum");
+        }
+
+        let mask = properties
+            .property(&effect_type.property_path("highlight_mask"))
+            .expect("the mask is defined");
+        assert_eq!(mask.evaluate(tt(0)), PropertyValue::MaskReference(None));
+        let layer = properties
+            .property(&effect_type.property_path("mask_layer"))
+            .expect("the mask layer is defined");
+        assert_eq!(layer.evaluate(tt(0)), PropertyValue::Int(1));
+        let numeric = layer.descriptor.schema.numeric.as_ref().expect("the layer declares a range");
+        let contract = numeric.first().expect("one numeric contract per parameter");
+        assert_eq!(contract.hard_range.min, 1.0);
+        assert_eq!(contract.hard_range.max, 19.0);
+        assert_eq!(
+            crate::HighlightGrade::documented_defaults().parameters().alpha_scale,
+            crate::HIGHLIGHT_DEFAULT_ALPHA_SCALE
+        );
+    }
+
+    #[test]
+    fn highlight_defaults_build_one_spatial_op_with_scratch() {
+        let effect = instantiate_effect_node(EffectType::Highlight)
+            .expect("the highlight effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default highlight should compile");
+        let grade = highlight_op(&graph).expect("the default parameters emit the streak");
+        assert_eq!(grade, crate::HighlightGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one highlight node"
+        );
+        let op = EffectRenderOp::Highlight { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            1,
+            "the kernel keeps one straight snapshot of the source frame"
+        );
+        assert_eq!(op.estimated_cost(), 4);
+        let pass = crate::spatial_pass_for(&op).expect("the streak runs as a spatial pass");
+        assert_eq!(pass.name(), "highlight");
+        assert_eq!(pass.horizontal_halo(), u32::MAX);
+        assert_eq!(pass.vertical_halo(), u32::MAX);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            132
+        );
+    }
+
+    #[test]
+    fn highlight_zero_alpha_merge_builds_no_node() {
+        let effect = author_highlight(&[("alpha_scale", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the zero alpha merge should compile");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(highlight_op(&graph), None);
+    }
+
+    #[test]
+    fn highlight_parameters_round_trip() {
+        let effect = author_highlight(&[
+            ("alpha_scale", PropertyValue::Float(0.5)),
+            ("low", PropertyValue::Float(0.25)),
+            ("high", PropertyValue::Float(0.75)),
+            ("merge_over", PropertyValue::Float(0.0)),
+            ("curve", PropertyValue::Float(2.0)),
+            ("points", PropertyValue::Float(8.0)),
+            ("red_scale", PropertyValue::Float(0.25)),
+            ("green_scale", PropertyValue::Float(0.5)),
+            ("blue_scale", PropertyValue::Float(2.0)),
+            ("angle", PropertyValue::Float(90.0)),
+            ("length", PropertyValue::Float(0.5)),
+            ("colour_scale", PropertyValue::Float(0.5)),
+            ("mask_layer", PropertyValue::Int(3)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened highlight should compile");
+        let parameters = crate::HighlightParameters {
+            alpha_scale: 0.5,
+            low: 0.25,
+            high: 0.75,
+            merge_over: 0.0,
+            curve: 2.0,
+            points: 8.0,
+            red_scale: 0.25,
+            green_scale: 0.5,
+            blue_scale: 2.0,
+            angle_degrees: 90.0,
+            length: 0.5,
+            colour_scale: 0.5,
+        };
+        assert_eq!(
+            highlight_op(&graph),
+            Some(crate::HighlightGrade::new(parameters).expect("the authored values are in range"))
+        );
+    }
+
+    #[test]
+    fn highlight_invalid_curve_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::Highlight)
+            .expect("the highlight effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "highlight.curve",
+            serde_json::json!({"Float": 5.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a curve past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("highlight.curve"),
+            "the value contract names the parameter: {reason}"
+        );
+    }
+
+    #[test]
+    fn highlight_bound_mask_fails_closed() {
+        let effect = instantiate_effect_node(EffectType::Highlight)
+            .expect("the highlight effect should instantiate");
+        let effect_id = effect.id;
+        let mask = mondrian_core::MaskId::new();
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "highlight.highlight_mask",
+            serde_json::json!({"MaskReference": mask.to_string()}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the node with a bound mask");
+        let graph = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE);
+        if let Ok(graph) = graph {
+            assert_eq!(highlight_op(&graph), None, "a bound mask must not stream");
+        } else {
+            let reason = format!("{graph:?}");
+            assert!(
+                reason.contains("高光遮罩"),
+                "the refusal names the unported mask: {reason}"
+            );
+            assert!(
+                reason.contains(&effect_id.to_string()),
+                "the refusal names the effect"
+            );
+        }
     }
 
     fn scanlines_op(graph: &EffectRenderGraph) -> Option<crate::ScanlinesGrade> {

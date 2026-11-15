@@ -3244,6 +3244,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Scanlines { .. } => "scanlines",
         EffectRenderOp::Abstraction { .. } => "abstraction",
         EffectRenderOp::LightLeak { .. } => "light_leak",
+        EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",

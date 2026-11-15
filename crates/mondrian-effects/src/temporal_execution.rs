@@ -3673,6 +3673,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Scanlines { .. } => "scanlines",
         crate::EffectRenderOp::Abstraction { .. } => "abstraction",
         crate::EffectRenderOp::LightLeak { .. } => "light_leak",
+        crate::EffectRenderOp::Highlight { .. } => "highlight",
         crate::EffectRenderOp::SetMatte { .. } => "set_matte",
         crate::EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         crate::EffectRenderOp::GrowBounds { .. } => "grow_bounds",
