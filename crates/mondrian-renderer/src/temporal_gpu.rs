@@ -954,4 +954,140 @@ mod tests {
         );
         assert!(historical < now);
     }
+
+    fn posterize_time_program() -> PreparedEffectProgram {
+        let mut effect = mondrian_effects::instantiate_effect_node(EffectType::PosterizeTime)
+            .expect("posterize time definition");
+        effect
+            .set_static_value_by_parameter(
+                &EffectType::PosterizeTime
+                    .parameter_id("frame_rate")
+                    .expect("frame rate parameter"),
+                PropertyValue::Float(24.0),
+            )
+            .expect("a 24 fps hold is admissible");
+        PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709)
+            .expect("posterize time is a valid program")
+    }
+
+    fn posterize_time_schedule(
+        extent: EffectFrameExtent,
+        now: TimelineTime,
+    ) -> mondrian_effects::PreparedEffectTemporalGpuExecution {
+        let program = posterize_time_program();
+        let request = EffectTemporalExecutionRequest::new(
+            1,
+            EffectExecutionContinuity::Discontinuous,
+            now,
+            extent,
+            ImageSampling::UNIT_SQUARE,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        prepare_temporal_frame_execution(&program, &request, |_| Ok(1))
+            .expect("finite posterize time execution")
+            .plan_gpu_execution()
+            .expect("posterize time lowers to a device schedule")
+    }
+
+    /// A held frame is a real effect payload: the device must publish the
+    /// earlier instant's pixels, not the current ones, and the scalar executor
+    /// must agree to the seam tolerance.
+    #[test]
+    fn device_posterize_time_matches_the_scalar_executor() {
+        let Ok(context) = pollster::block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU posterize time parity test: no GPU adapter available");
+            return;
+        };
+        let extent = EffectFrameExtent::new(7, 5);
+        let now = TimelineTime::new(51, 100).expect("current time");
+        let held = TimelineTime::new(1, 2).expect("held instant");
+        let schedule = posterize_time_schedule(extent, now);
+        assert_eq!(schedule.step_count(), 1, "one hold is one sampled frame");
+
+        let program = posterize_time_program();
+        let execution = prepare_temporal_frame_execution(&program, schedule.request(), |_| Ok(1))
+            .expect("finite posterize time execution");
+        let mut session = EffectExecutionSession::default();
+        let mut cpu_frames = GradientFrames { extent, historical: held, copies: 0 };
+        let cpu = session
+            .execute_prepared_temporal_f32_with_auxiliary(
+                &execution,
+                &mut cpu_frames,
+                &mut EmptyMatte,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .expect("scalar hold");
+
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .expect("device runtime");
+        let mut gpu_frames = GradientFrames { extent, historical: held, copies: 0 };
+        let device = runtime
+            .execute_temporal_schedule(
+                &schedule,
+                &mut gpu_frames,
+                &mut EmptyMatte,
+                WorkingColorSpace::LinearRec709,
+                Instant::now() + Duration::from_secs(120),
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("device hold");
+
+        assert_eq!(
+            device.readbacks(),
+            1,
+            "the held frame crosses the seam once"
+        );
+        assert_eq!(device.dispatches(), 1);
+        assert_eq!(
+            device.uploads(),
+            2,
+            "the current and held frames are leaves"
+        );
+        assert_eq!(gpu_frames.copies, 2, "both instants read the source");
+
+        let cpu_pixels = cpu.tile().pixels();
+        let gpu_pixels = device.output().tile().pixels();
+        let difference = max_channel_difference(cpu_pixels, gpu_pixels);
+        assert!(
+            difference <= PARITY_TOLERANCE,
+            "device hold diverged from the scalar executor by {difference}"
+        );
+        let width = extent.width() as usize;
+        for (index, pixel) in gpu_pixels.iter().enumerate() {
+            let expected = historical_source_pixel(
+                index % width,
+                index / width,
+                width,
+                extent.height() as usize,
+            );
+            for (channel, value) in expected.iter().enumerate() {
+                assert!(
+                    (pixel[channel] - value).abs() <= PARITY_TOLERANCE,
+                    "pixel {index} channel {channel}: {} vs {value}",
+                    pixel[channel]
+                );
+            }
+        }
+        // The two fixture gradients cross at a few pixels, so the whole-frame
+        // difference from the current instant is the meaningful refusal.
+        let current_frame = (0..gpu_pixels.len())
+            .map(|index| {
+                current_source_pixel(
+                    index % width,
+                    index / width,
+                    width,
+                    extent.height() as usize,
+                )
+            })
+            .collect::<Vec<_>>();
+        let drift = max_channel_difference(gpu_pixels, &current_frame);
+        assert!(
+            drift > 0.1,
+            "the hold must not pass the current frame through, drifted by {drift}"
+        );
+    }
 }
