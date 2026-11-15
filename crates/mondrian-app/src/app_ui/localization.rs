@@ -410,6 +410,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "边缘拉伸" => Some("parameter-group-blanking-fill-edge-stretch"),
         "抽帧" => Some("parameter-group-posterize-time"),
         "去交错" => Some("parameter-group-deinterlace"),
+        "水彩" => Some("parameter-group-watercolor"),
         _ => None,
     }
 }

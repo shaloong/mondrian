@@ -109,6 +109,7 @@ pub mod vr_project_2d;
 pub mod vr_rotate_sphere;
 pub mod vr_sphere_to_plane;
 pub mod warp;
+pub mod watercolor;
 pub mod wave_warp;
 pub mod wire_removal;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
@@ -835,6 +836,11 @@ pub use test_signals::{
     test_signals_frame_f32, TestSignalsError, TestSignalsGrade, TestSignalsPattern,
     TEST_SIGNALS_DEFAULT_INTENSITY, TEST_SIGNALS_MAX_INTENSITY, TEST_SIGNALS_MIN_INTENSITY,
     TEST_SIGNALS_PATTERN_COUNT,
+};
+pub use watercolor::{
+    watercolor_frame_f32, WatercolorChannel, WatercolorError, WatercolorGrade,
+    WATERCOLOR_DEFAULT_SMOOTHNESS, WATERCOLOR_MAX_RADIUS, WATERCOLOR_MAX_SMOOTHNESS,
+    WATERCOLOR_MIN_SMOOTHNESS,
 };
 pub use wave_warp::{
     validate_wave_speed as validate_wave_warp_speed, wave_warp_frame_f32, wave_warp_phase_turns,

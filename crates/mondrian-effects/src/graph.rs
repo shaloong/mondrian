@@ -3263,6 +3263,7 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::CameraView { .. }
         | EffectRenderOp::BlankingFill { .. }
         | EffectRenderOp::Deinterlace { .. }
+        | EffectRenderOp::Watercolor { .. }
         | EffectRenderOp::GrowBounds { .. }
         | EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }

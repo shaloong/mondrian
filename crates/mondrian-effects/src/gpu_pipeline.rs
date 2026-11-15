@@ -267,6 +267,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored softness, which selects the vertical tap count.
         grade: crate::DeinterlaceGrade,
     },
+    /// Guide-gated diffusion over a square window.
+    Watercolor {
+        /// Authored guide channel and smoothness.
+        grade: crate::WatercolorGrade,
+    },
     /// Radial correction around the green reference channel.
     ChromaticAberrationRemoval {
         /// Authored amounts, edge scale, and normalized centre.
@@ -462,6 +467,7 @@ impl EffectGpuSpatialPass {
             Self::KeyCleaner { .. } => "key_cleaner",
             Self::SmartBlur { .. } => "smart_blur",
             Self::Deinterlace { .. } => "deinterlace",
+            Self::Watercolor { .. } => "watercolor",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
             Self::Basic3D { .. } => "basic_3d",
@@ -565,6 +571,8 @@ impl EffectGpuSpatialPass {
             Self::SmartBlur { grade } => smart_blur_halo(grade),
             // The rebuild reads only the same column, so it never leaves it.
             Self::Deinterlace { .. } => 0,
+            // The square window reaches the same distance on both axes.
+            Self::Watercolor { grade } => grade.radius(),
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
@@ -650,6 +658,8 @@ impl EffectGpuSpatialPass {
             Self::SmartBlur { grade } => smart_blur_halo(grade),
             // The rebuild reads only the same column, so it never leaves it.
             Self::Deinterlace { grade } => grade.halo(),
+            // The square window reaches the same distance on both axes.
+            Self::Watercolor { grade } => grade.radius(),
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
@@ -1233,6 +1243,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Deinterlace { grade } => {
             Some(EffectGpuSpatialPass::Deinterlace { grade: *grade })
         }
+        EffectRenderOp::Watercolor { grade } => {
+            Some(EffectGpuSpatialPass::Watercolor { grade: *grade })
+        }
         EffectRenderOp::ChromaticAberrationRemoval { grade } => {
             Some(EffectGpuSpatialPass::ChromaticAberrationRemoval { grade: *grade })
         }
@@ -1528,6 +1541,31 @@ mod tests {
             pipeline.stages(),
             &[EffectGpuStage::Spatial {
                 pass: EffectGpuSpatialPass::Deinterlace { grade },
+                node_id: pipeline.output_value(),
+            }]
+        );
+    }
+
+    #[test]
+    fn watercolor_maps_to_the_dedicated_spatial_pass() {
+        let grade =
+            crate::WatercolorGrade::new(crate::WatercolorChannel::Red, 0.5).expect("valid grade");
+        let op = EffectRenderOp::Watercolor { grade };
+        let pass = spatial_pass_for(&op).expect("watercolor runs as a spatial pass");
+        assert_eq!(pass, EffectGpuSpatialPass::Watercolor { grade });
+        assert_eq!(pass.name(), "watercolor");
+        // The square window reaches the authored radius on both axes.
+        assert_eq!(pass.horizontal_halo(), 3);
+        assert_eq!(pass.vertical_halo(), 3);
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("watercolor pipeline");
+        assert_eq!(
+            pipeline.stages(),
+            &[EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::Watercolor { grade },
                 node_id: pipeline.output_value(),
             }]
         );

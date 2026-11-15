@@ -207,6 +207,8 @@ pub enum EffectType {
     /// Deinterlace: rebuilds the odd rows from their retained even-row
     /// neighbours with a symmetric vertical tap window.
     Deinterlace,
+    /// Watercolor: a guide-gated diffusion that keeps edges sharp.
+    Watercolor,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -356,6 +358,7 @@ impl EffectType {
             Self::CameraView => "builtin.camera_view".to_string(),
             Self::BlankingFill => "builtin.blanking_fill".to_string(),
             Self::Deinterlace => "builtin.deinterlace".to_string(),
+            Self::Watercolor => "builtin.watercolor".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -489,6 +492,7 @@ impl EffectType {
             "builtin.camera_view" => Self::CameraView,
             "builtin.blanking_fill" => Self::BlankingFill,
             "builtin.deinterlace" => Self::Deinterlace,
+            "builtin.watercolor" => Self::Watercolor,
             other => Self::External(other.to_string()),
         }
     }
@@ -622,6 +626,7 @@ impl EffectType {
             Self::CameraView => "摄像机视图",
             Self::BlankingFill => "遮幅填充",
             Self::Deinterlace => "去交错",
+            Self::Watercolor => "水彩",
             Self::External(name) => name,
         }
     }
@@ -750,6 +755,7 @@ impl EffectType {
             Self::CameraView => vec!["变换"],
             Self::BlankingFill => vec!["变换"],
             Self::Deinterlace => vec!["修复"],
+            Self::Watercolor => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -883,6 +889,7 @@ impl EffectType {
             Self::CameraView => "camera_view".to_string(),
             Self::BlankingFill => "blanking_fill".to_string(),
             Self::Deinterlace => "deinterlace".to_string(),
+            Self::Watercolor => "watercolor".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1390,7 +1397,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::BilateralBlur
             | Self::ChromaticAberrationRemoval
             | Self::Basic3D => Ok(()),
-            Self::CameraView | Self::BlankingFill | Self::Deinterlace => Ok(()),
+            Self::CameraView | Self::BlankingFill | Self::Deinterlace | Self::Watercolor => Ok(()),
         }
     }
 }

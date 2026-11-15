@@ -3669,6 +3669,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::CameraView { .. } => "camera_view",
         crate::EffectRenderOp::BlankingFill { .. } => "blanking_fill",
         crate::EffectRenderOp::Deinterlace { .. } => "deinterlace",
+        crate::EffectRenderOp::Watercolor { .. } => "watercolor",
         crate::EffectRenderOp::SetMatte { .. } => "set_matte",
         crate::EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         crate::EffectRenderOp::GrowBounds { .. } => "grow_bounds",

@@ -1280,6 +1280,11 @@ pub enum EffectRenderOp {
         /// Authored softness, which widens the vertical tap window.
         grade: crate::DeinterlaceGrade,
     },
+    /// Watercolor: a guide-gated diffusion over a square window.
+    Watercolor {
+        /// Authored guide channel and smoothness.
+        grade: crate::WatercolorGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1699,6 +1704,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Deinterlace { grade } => {
                 formatter.debug_struct("Deinterlace").field("grade", grade).finish()
+            }
+            Self::Watercolor { grade } => {
+                formatter.debug_struct("Watercolor").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2804,6 +2812,12 @@ impl EffectRenderOp {
                 // the whole identity of the kernel.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Watercolor { grade } => {
+                127u8.hash(state);
+                // The channel tag and the raw smoothness bits select the
+                // guide, the window and the blend, so both are hashed.
+                grade.hash_state(state);
+            }
             EffectRenderOp::SetMatte { grade } => {
                 120u8.hash(state);
                 grade.hash(state);
@@ -3047,6 +3061,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChannelCombiner { .. } => 1,
             EffectRenderOp::SmartBlur { .. } => 3,
             EffectRenderOp::Deinterlace { .. } => 1,
+            EffectRenderOp::Watercolor { .. } => 2,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3581,7 +3596,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 127] {
+fn builtin_effect_types() -> [EffectType; 128] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3710,6 +3725,7 @@ fn builtin_effect_types() -> [EffectType; 127] {
         EffectType::BlankingFill,
         EffectType::PosterizeTime,
         EffectType::Deinterlace,
+        EffectType::Watercolor,
     ]
 }
 
@@ -12311,6 +12327,42 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Watercolor => {
+            // The two authored values match Resolve's Watercolour: a guide
+            // channel and a smoothness that widens the window and the guide
+            // tolerance together. The floor smoothness of zero is a byte
+            // identity, so the builder can elide the node.
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "channel",
+                "水彩",
+                "通道",
+                crate::WatercolorChannel::Luminance.as_key(),
+                crate::WatercolorChannel::ALL
+                    .iter()
+                    .map(|channel| {
+                        let key = channel.as_key();
+                        ParameterEnumOption::new(
+                            key,
+                            channel.label(),
+                            format!("mondrian.effect.watercolor.channel.{key}"),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "smoothness",
+                "水彩",
+                "平滑度",
+                PropertyValue::Float(crate::WATERCOLOR_DEFAULT_SMOOTHNESS),
+                Some(crate::WATERCOLOR_MIN_SMOOTHNESS as f64),
+                Some(crate::WATERCOLOR_MAX_SMOOTHNESS as f64),
+                Some(0.01),
+            );
+        }
         EffectType::BlankingFill => define_blanking_fill_properties(&mut properties, &effect_type),
         EffectType::SmartBlur => {
             // The documented default (radius 3 at threshold 25 %) already
@@ -14219,6 +14271,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The tap window reaches four retained rows out in both directions,
             // so the definition-level envelope cannot narrow the input tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Watercolor => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The window reaches up to four pixels out in every direction, so
+            // the definition-level envelope cannot narrow the input tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -20500,6 +20559,34 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Watercolor => {
+            let channel_id = builtin_parameter_id(effect_type, "channel");
+            let smoothness_id = builtin_parameter_id(effect_type, "smoothness");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let channel = match effect.evaluate_enum_parameter(&channel_id, context.time) {
+                    Some(key) => crate::WatercolorChannel::from_key(&key)
+                        .ok_or_else(|| invalid("水彩的通道未知".to_string()))?,
+                    None => crate::WatercolorGrade::documented_defaults().channel(),
+                };
+                let smoothness = match effect.evaluate_parameter(&smoothness_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value,
+                    Some(PropertyValue::Int(value)) => value as f32,
+                    Some(_) => return Err(invalid("水彩的平滑度必须是数值".to_string())),
+                    None => crate::WATERCOLOR_DEFAULT_SMOOTHNESS,
+                };
+                let grade = crate::WatercolorGrade::new(channel, smoothness)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Watercolor { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::SelectiveColor => {
             let method_id = builtin_parameter_id(effect_type, "method");
             let colors_id = builtin_parameter_id(effect_type, "colors");
@@ -21871,6 +21958,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::CameraView => "摄像机视图",
         EffectType::BlankingFill => "遮幅填充",
         EffectType::Deinterlace => "去交错",
+        EffectType::Watercolor => "水彩",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -23272,6 +23360,7 @@ mod tests {
             EffectType::VideoCollage,
             EffectType::PosterizeTime,
             EffectType::Deinterlace,
+            EffectType::Watercolor,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -32568,7 +32657,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 127);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 128);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33096,7 +33185,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 127);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 128);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -36055,7 +36144,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 127);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 128);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -37191,7 +37280,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 127);
+        assert_eq!(builtin_effect_types().len(), 128);
     }
 
     #[test]
@@ -37829,6 +37918,164 @@ mod tests {
             "the persisted value contract names the parameter: {reason}"
         );
     }
+    fn watercolor_op(graph: &EffectRenderGraph) -> Option<crate::WatercolorGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Watercolor { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Watercolor { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_watercolor(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Watercolor)
+            .expect("the watercolor effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Watercolor.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the watercolor parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn watercolor_defaults_match_the_dump() {
+        let effect_type = EffectType::Watercolor;
+        let properties = default_properties_for(effect_type.clone());
+        assert_eq!(properties.iter().count(), 2);
+        let channel = properties
+            .property(&effect_type.property_path("channel"))
+            .expect("the guide channel should be defined");
+        assert_eq!(channel.descriptor.display_name, "通道");
+        assert_eq!(
+            channel.descriptor.ui_metadata.group_name.as_deref(),
+            Some("水彩")
+        );
+        assert_eq!(channel.descriptor.ui_metadata.display_order, Some(0));
+        assert_eq!(
+            channel.evaluate(tt(0)),
+            PropertyValue::Enum("luminance".to_owned())
+        );
+        assert_eq!(
+            crate::WatercolorChannel::ALL.map(|guide| guide.as_key()),
+            ["luminance", "red", "green", "blue"]
+        );
+        let smoothness = properties
+            .property(&effect_type.property_path("smoothness"))
+            .expect("the smoothness should be defined");
+        assert_eq!(smoothness.descriptor.display_name, "平滑度");
+        assert_eq!(
+            smoothness.descriptor.ui_metadata.group_name.as_deref(),
+            Some("水彩")
+        );
+        assert_eq!(smoothness.descriptor.ui_metadata.display_order, Some(1));
+        assert_eq!(smoothness.evaluate(tt(0)), PropertyValue::Float(0.01));
+        let numeric = smoothness
+            .descriptor
+            .schema
+            .numeric
+            .as_ref()
+            .expect("the smoothness declares a range");
+        let contract = numeric.first().expect("one numeric contract per parameter");
+        assert_eq!(contract.hard_range.min, 0.0);
+        assert_eq!(contract.hard_range.max, 1.0);
+        assert_eq!(effect_type.property_namespace(), "watercolor");
+        assert_eq!(effect_type.category_path(), vec!["风格化"]);
+        assert_eq!(crate::WatercolorGrade::documented_defaults().radius(), 1);
+    }
+
+    #[test]
+    fn watercolor_defaults_build_one_op_with_scratch() {
+        let effect = instantiate_effect_node(EffectType::Watercolor)
+            .expect("the watercolor effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default watercolor should compile");
+        let grade = watercolor_op(&graph).expect("the default parameters emit the diffusion");
+        assert_eq!(grade, crate::WatercolorGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one watercolor node"
+        );
+        let op = EffectRenderOp::Watercolor { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            1,
+            "the kernel keeps one straight snapshot of the source frame"
+        );
+        assert_eq!(op.estimated_cost(), 2);
+        let pass = crate::spatial_pass_for(&op).expect("the diffusion runs as a spatial pass");
+        assert_eq!(pass.name(), "watercolor");
+        assert_eq!(pass.horizontal_halo(), 1);
+        assert_eq!(pass.vertical_halo(), 1);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            128
+        );
+    }
+
+    #[test]
+    fn watercolor_zero_smoothness_builds_no_node() {
+        // The smoothness floor is a byte identity, so the builder elides it.
+        let effect = author_watercolor(&[("smoothness", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity configuration should compile");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(watercolor_op(&graph), None);
+    }
+
+    #[test]
+    fn watercolor_parameters_round_trip() {
+        let effect = author_watercolor(&[
+            ("channel", PropertyValue::Enum("red".to_owned())),
+            ("smoothness", PropertyValue::Float(0.5)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened watercolor should compile");
+        let grade = watercolor_op(&graph).expect("the authored pair emits the diffusion");
+        assert_eq!(grade.channel(), crate::WatercolorChannel::Red);
+        assert_eq!(grade.smoothness(), 0.5);
+        assert_eq!(grade.radius(), 3, "1 + round(1.5) widens the window");
+    }
+
+    #[test]
+    fn watercolor_invalid_smoothness_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::Watercolor)
+            .expect("the watercolor effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "watercolor.smoothness",
+            serde_json::json!({"Float": 1.5}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("smoothness past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("watercolor.smoothness"),
+            "the persisted value contract names the parameter: {reason}"
+        );
+    }
+
     fn chromatic_aberration_removal_op(graph: &EffectRenderGraph) -> Option<&EffectRenderOp> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {
