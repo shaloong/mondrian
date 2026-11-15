@@ -84,6 +84,7 @@ pub(crate) struct EffectSpatialGpu {
     lens_distortion: wgpu::RenderPipeline,
     chromatic_aberration_removal: wgpu::RenderPipeline,
     deinterlace: wgpu::RenderPipeline,
+    watercolor: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
     grow_bounds: wgpu::RenderPipeline,
@@ -845,6 +846,35 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_deinterlace"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let watercolor = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.watercolor"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_watercolor"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -2247,6 +2277,7 @@ impl EffectSpatialGpu {
             lens_distortion,
             chromatic_aberration_removal,
             deinterlace,
+            watercolor,
             basic_3d,
             camera_view,
             grow_bounds,
@@ -2861,6 +2892,35 @@ impl EffectSpatialGpu {
         destination.clone()
     }
 
+    fn record_watercolor(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::WatercolorGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+    ) -> wgpu::Texture {
+        let (params, extra) = grade.gpu_controls();
+        let uniforms = SpatialPassUniform {
+            size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.watercolor,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        destination.clone()
+    }
+
     /// Records the lens flare stage.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_flare(
@@ -3175,6 +3235,9 @@ impl EffectSpatialGpu {
             // The rebuild is one full-screen draw over the same source and
             // destination pair.
             EffectGpuSpatialPass::Deinterlace { .. } => Ok(1),
+            // The diffusion is one full-screen draw over the same source
+            // and destination pair.
+            EffectGpuSpatialPass::Watercolor { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
@@ -3709,6 +3772,10 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Deinterlace { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return Ok(self.record_deinterlace(device, encoder, *grade, source, destination));
+            }
+            EffectGpuSpatialPass::Watercolor { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return Ok(self.record_watercolor(device, encoder, *grade, source, destination));
             }
             EffectGpuSpatialPass::Basic3D { grade } => {
                 let Some([params, extra, aces, extra1]) =
@@ -8640,6 +8707,62 @@ fn fs_chromatic_aberration_removal(@builtin(position) position: vec4<f32>) -> @l
 // from the even rows above and below it. Tap `k` reaches `2k - 1` rows away and
 // weighs `1 / (2k - 1)`, matching the CPU kernel exactly. `params` is
 // `[softness, taps, 0, 0]`.
+// The guide value of one straight sample. The CPU kernel treats a sample with
+// no coverage as a zero guide, so the shader does the same.
+fn watercolor_guide(sample: vec4<f32>, channel: f32) -> f32 {
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return 0.0;
+    }
+    let tag = i32(round(channel));
+    if (tag <= 0) {
+        return 0.2126 * sample.r + 0.7152 * sample.g + 0.0722 * sample.b;
+    }
+    if (tag == 1) {
+        return sample.r;
+    }
+    if (tag == 2) {
+        return sample.g;
+    }
+    return sample.b;
+}
+
+// A guide-gated diffusion over the authored square window. Tap weights are
+// `1 / (1 + d^2)` times `1 / (1 + (delta guide / edge scale)^2)` and the
+// diffusion is mixed over the centre by the authored smoothness, exactly like
+// the CPU kernel. `params` is `[channel tag, radius, edge scale, smoothness]`.
+@fragment
+fn fs_watercolor(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let channel = uniforms.params.x;
+    let radius = i32(round(uniforms.params.y));
+    let edge_scale = uniforms.params.z;
+    let mix = clamp(uniforms.params.w, 0.0, 1.0);
+    let centre = load_clamped(pixel);
+    let centre_guide = watercolor_guide(centre, channel);
+    var sum = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var offset_y = -radius; offset_y <= radius; offset_y = offset_y + 1) {
+        for (var offset_x = -radius; offset_x <= radius; offset_x = offset_x + 1) {
+            let sample = load_clamped(pixel + vec2<i32>(offset_x, offset_y));
+            let distance = f32(offset_x * offset_x + offset_y * offset_y);
+            let spatial = 1.0 / (1.0 + distance);
+            let scaled = (watercolor_guide(sample, channel) - centre_guide) / edge_scale;
+            let edge = 1.0 / (1.0 + scaled * scaled);
+            let weight = spatial * edge;
+            sum += premultiply(sample) * weight;
+            weight_sum += weight;
+        }
+    }
+    if (weight_sum <= 0.0) {
+        return centre;
+    }
+    let diffused = unpremultiply(sum / weight_sum);
+    return unpremultiply(
+        premultiply(centre) * (1.0 - mix) + premultiply(diffused) * mix
+    );
+}
+
 @fragment
 fn fs_deinterlace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(position.xy));

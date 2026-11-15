@@ -18957,6 +18957,105 @@ mod tests {
         }
     }
 
+    fn watercolor_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let colour = [0.1 + 0.8 * u, 0.15 + 0.7 * v, 0.5 - 0.3 * u];
+                // A partial coverage column keeps every lane below one so the
+                // premultiplied accumulation is actually exercised.
+                let alpha = if x == 2 || u > 0.8 { 0.4 } else { 1.0 };
+                pixels.push([colour[0], colour[1], colour[2], alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_watercolor_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            spatial_pass_for, watercolor_frame_f32, WatercolorChannel, WatercolorGrade,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping watercolor parity test: no GPU adapter available");
+            return;
+        };
+        let (width, height) = (11, 9);
+        let pixels = watercolor_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+
+        let cases: [(&str, WatercolorChannel, f32); 5] = [
+            ("documented default", WatercolorChannel::Luminance, 0.01),
+            ("red guide", WatercolorChannel::Red, 0.5),
+            ("green guide", WatercolorChannel::Green, 0.25),
+            ("blue guide", WatercolorChannel::Blue, 1.0),
+            ("zero smoothness", WatercolorChannel::Luminance, 0.0),
+        ];
+        for (label, channel, smoothness) in cases {
+            let grade = WatercolorGrade::new(channel, smoothness)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let mut cpu = pixels.clone();
+            assert!(
+                watercolor_frame_f32(&mut cpu, width as usize, height as usize, &grade),
+                "{label}: the CPU kernel must accept the frame"
+            );
+            let pass = mondrian_effects::EffectGpuSpatialPass::Watercolor { grade };
+            assert_eq!(pass.name(), "watercolor");
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 1, "{label}: one diffusion draw");
+            assert!(
+                spatial_pass_for(&mondrian_effects::EffectRenderOp::Watercolor { grade }).is_some()
+            );
+            if smoothness > 0.0 {
+                assert!(
+                    cpu.iter()
+                        .zip(&pixels)
+                        .any(|(after, before)| (after[0] - before[0]).abs() > 1.0e-6
+                            || (after[1] - before[1]).abs() > 1.0e-6),
+                    "{label}: the diffusion must move the frame"
+                );
+            } else {
+                assert_eq!(cpu, pixels, "{label}: zero smoothness is the identity");
+            }
+
+            let source = key_cleaner_upload(&context, &pixels, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, passes as usize);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.watercolor.encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label} record: {error}"));
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+
+            assert_eq!(gpu.len(), cpu.len(), "{label}: pixel count");
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for lane in 0..4 {
+                    let difference = (cpu_pixel[lane] - gpu_pixel[lane]).abs();
+                    assert!(
+                        difference <= 1.0e-4,
+                        "watercolor case {label} pixel {pixel_index} channel {lane}: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gpu_chromatic_aberration_removal_matches_the_cpu_layer() {
         use mondrian_effects::{
