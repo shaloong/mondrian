@@ -2537,6 +2537,64 @@ fn light_leak_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform
     return vec4<f32>(result, pixel.a);
 }
 
+fn color_difference_key_partial(
+    distance: f32,
+    black: f32,
+    white: f32,
+    gamma: f32,
+    black_outside: f32,
+    white_outside: f32,
+) -> f32 {
+    // A degenerate window collapses to a hard cut at the black point, matching
+    // the CPU kernel's two-valued branch.
+    if (white <= black) {
+        return select(white_outside, black_outside, distance < black);
+    }
+    if (distance < black) {
+        return black_outside;
+    }
+    if (distance > white) {
+        return white_outside;
+    }
+    let ramp = clamp((distance - black) / (white - black), 0.0, 1.0);
+    return pow(ramp, 1.0 / max(gamma, 0.001));
+}
+
+fn color_difference_key_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> {
+    // Fully transparent pixels carry no coverage; keying them would only
+    // re-derive black from an arbitrary colour, so the CPU kernel skips them.
+    if (pixel.a <= 0.0) {
+        return pixel;
+    }
+    let difference = abs(pixel.rgb - effect.color.rgb);
+    let distance = clamp(
+        max(max(difference.r, difference.g), difference.b) * effect.params.x,
+        0.0,
+        1.0,
+    );
+    let partial_a = color_difference_key_partial(
+        distance, effect.params.y, effect.params.z, effect.params.w,
+        effect.extra0.x, effect.extra0.y,
+    );
+    let partial_b = color_difference_key_partial(
+        distance, effect.extra0.z, effect.extra0.w, effect.extra1.x,
+        effect.extra1.y, effect.extra1.z,
+    );
+    let matte = partial_a * partial_b;
+    let black_mask = effect.extra1.w;
+    let white_mask = effect.extra2.x;
+    var remapped = 0.0;
+    if (white_mask <= black_mask) {
+        remapped = select(1.0, 0.0, matte < black_mask);
+    } else {
+        remapped = pow(
+            clamp((matte - black_mask) / (white_mask - black_mask), 0.0, 1.0),
+            1.0 / max(effect.extra2.y, 0.001),
+        );
+    }
+    return vec4<f32>(pixel.rgb, pixel.a * remapped);
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -3604,6 +3662,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = scanlines_apply(pixel, position, effect);
         } else if (effect.header.x == 49u) {
             pixel = light_leak_apply(pixel, position, effect);
+        } else if (effect.header.x == 50u) {
+            pixel = color_difference_key_apply(pixel, effect);
         }
     }
     return pixel;
@@ -8122,6 +8182,18 @@ fn effect_uniforms_for_ops(
                     extra1: [0.0; 4],
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::ColorDifferenceKey { grade } => {
+                let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [50, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2,
+                    extra3,
                 }
             }
             EffectGpuPointOp::Scanlines { grade } => {
@@ -12956,6 +13028,157 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU light leak accuracy budget exceeded for {label}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_color_difference_key_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, ColorDifferenceKeyGrade, ColorDifferenceKeyParameters,
+            EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU colour difference key parity test: no GPU adapter available");
+            return;
+        };
+        const WIDTH: u32 = 12;
+        const HEIGHT: u32 = 9;
+        let mut data = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        for row in 0..HEIGHT {
+            for column in 0..WIDTH {
+                let u = column as f32 / (WIDTH - 1) as f32;
+                let v = row as f32 / (HEIGHT - 1) as f32;
+                // Never zero: the straight-to-premultiplied round trip
+                // canonicalises fully transparent pixels, which would compare
+                // the kept RGB against a cleared pixel.
+                let alpha = if column == 2 { 0.3 } else { 0.55 };
+                data.push([0.05 + 0.85 * u, 0.10 + 0.70 * v, 0.35 - 0.30 * u, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let cases = [
+            (
+                "documented defaults",
+                ColorDifferenceKeyParameters::default(),
+            ),
+            (
+                "narrowed B window",
+                ColorDifferenceKeyParameters {
+                    black_b: 0.2,
+                    white_b: 0.8,
+                    ..ColorDifferenceKeyParameters::default()
+                },
+            ),
+            (
+                "tight accuracy",
+                ColorDifferenceKeyParameters {
+                    accuracy: 2.0,
+                    white_a: 0.6,
+                    ..ColorDifferenceKeyParameters::default()
+                },
+            ),
+            (
+                "gamma on the A ramp",
+                ColorDifferenceKeyParameters {
+                    gamma_a: 2.0,
+                    black_a: 0.1,
+                    ..ColorDifferenceKeyParameters::default()
+                },
+            ),
+            (
+                "masked and re-levelled",
+                ColorDifferenceKeyParameters {
+                    black_mask: 0.1,
+                    white_mask: 0.9,
+                    mask_gamma: 2.0,
+                    ..ColorDifferenceKeyParameters::default()
+                },
+            ),
+            (
+                "red key with a hard window",
+                ColorDifferenceKeyParameters {
+                    key_colour: [0.9, 0.1, 0.1],
+                    black_a: 0.4,
+                    ..ColorDifferenceKeyParameters::default()
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = ColorDifferenceKeyGrade::new(parameters).expect("valid key grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::ColorDifferenceKey { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(WIDTH, HEIGHT),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            // A keyed pixel can reach zero coverage, and the GPU straight to
+            // premultiplied round trip canonicalises such a pixel to black while
+            // the CPU reference keeps its unobservable RGB. Zero the reference
+            // RGB wherever coverage is gone so the comparison covers what a
+            // transparent pixel can actually carry.
+            let mut expected_pixels = expected.pixels().to_vec();
+            for pixel in &mut expected_pixels {
+                if pixel[3] <= 0.0 {
+                    pixel[0] = 0.0;
+                    pixel[1] = 0.0;
+                    pixel[2] = 0.0;
+                }
+            }
+            let report = compare_linear_rgba(
+                &expected_pixels,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                    alpha: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU colour difference key accuracy budget exceeded for {label}: {report:#?}"
             );
         }
     }
