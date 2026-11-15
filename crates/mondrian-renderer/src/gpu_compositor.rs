@@ -2595,6 +2595,83 @@ fn color_difference_key_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f
     return vec4<f32>(pixel.rgb, pixel.a * remapped);
 }
 
+fn cineon_converter_normalize_range(value: f32, low: f32, high: f32) -> f32 {
+    // A collapsed range degenerates to a threshold, matching the CPU kernel's
+    // two-valued branch.
+    if (high <= low) {
+        return select(1.0, 0.0, value < low);
+    }
+    return (value - low) / (high - low);
+}
+
+fn cineon_converter_shoulder(value: f32, highlight: f32) -> f32 {
+    // The decoding direction rolls highlights off instead of clipping them
+    // flat, so values above the white point stay below one.
+    if (highlight <= 0.0 || value <= 1.0) {
+        return value;
+    }
+    return value / (1.0 + highlight * (value - 1.0));
+}
+
+fn cineon_converter_decode(value: f32, black: f32, white: f32, effect: EffectUniform) -> f32 {
+    let normalized = clamp(
+        cineon_converter_shoulder(
+            cineon_converter_normalize_range(value, black, white),
+            effect.extra0.y,
+        ),
+        0.0,
+        1.0,
+    );
+    let linear = pow(normalized, 1.0 / max(effect.extra0.x, 0.001));
+    return effect.params.z + linear * (effect.params.w - effect.params.z);
+}
+
+fn cineon_converter_encode(
+    value: f32,
+    black: f32,
+    white: f32,
+    effect: EffectUniform,
+    exponential: bool,
+) -> f32 {
+    let t = clamp(
+        cineon_converter_normalize_range(value, effect.params.z, effect.params.w),
+        0.0,
+        1.0,
+    );
+    var graded = t;
+    if (exponential) {
+        graded = pow(t, max(effect.extra0.x, 0.001));
+    }
+    return black + graded * (white - black);
+}
+
+fn cineon_converter_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> {
+    let black = effect.params.x;
+    let white = effect.params.y;
+    let direction = u32(effect.extra0.z + 0.5);
+    var result = pixel.rgb;
+    if (direction == 0u) {
+        result = vec3<f32>(
+            cineon_converter_decode(pixel.r, black, white, effect),
+            cineon_converter_decode(pixel.g, black, white, effect),
+            cineon_converter_decode(pixel.b, black, white, effect),
+        );
+    } else if (direction == 1u) {
+        result = vec3<f32>(
+            cineon_converter_encode(pixel.r, black, white, effect, true),
+            cineon_converter_encode(pixel.g, black, white, effect, true),
+            cineon_converter_encode(pixel.b, black, white, effect, true),
+        );
+    } else {
+        result = vec3<f32>(
+            cineon_converter_encode(pixel.r, black, white, effect, false),
+            cineon_converter_encode(pixel.g, black, white, effect, false),
+            cineon_converter_encode(pixel.b, black, white, effect, false),
+        );
+    }
+    return vec4<f32>(result, pixel.a);
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -3664,6 +3741,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = light_leak_apply(pixel, position, effect);
         } else if (effect.header.x == 50u) {
             pixel = color_difference_key_apply(pixel, effect);
+        } else if (effect.header.x == 51u) {
+            pixel = cineon_converter_apply(pixel, effect);
         }
     }
     return pixel;
@@ -8194,6 +8273,18 @@ fn effect_uniforms_for_ops(
                     extra1,
                     extra2,
                     extra3,
+                }
+            }
+            EffectGpuPointOp::CineonConverter { grade } => {
+                let (params, extra0) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [51, 0, 0, 0],
+                    params,
+                    color: [0.0; 4],
+                    extra0,
+                    extra1: [0.0; 4],
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Scanlines { grade } => {
@@ -13179,6 +13270,135 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU colour difference key accuracy budget exceeded for {label}: {report:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_cineon_converter_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_plan, CineonConversion, CineonConverterGrade,
+            CineonConverterParameters, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU Cineon converter parity test: no GPU adapter available");
+            return;
+        };
+        const WIDTH: u32 = 12;
+        const HEIGHT: u32 = 9;
+        let mut data = Vec::with_capacity((WIDTH * HEIGHT) as usize);
+        for row in 0..HEIGHT {
+            for column in 0..WIDTH {
+                let u = column as f32 / (WIDTH - 1) as f32;
+                let v = row as f32 / (HEIGHT - 1) as f32;
+                // The converter only remaps colour, but a never-zero coverage
+                // keeps the straight to premultiplied round trip comparable.
+                let alpha = if column == 2 { 0.3 } else { 0.55 };
+                data.push([0.05 + 0.85 * u, 0.10 + 0.70 * v, 0.35 - 0.30 * u, alpha]);
+            }
+        }
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WorkingColorSpace::LinearRec709,
+            data,
+        });
+        let cases = [
+            ("documented defaults", CineonConverterParameters::default()),
+            (
+                "encode with the documented points",
+                CineonConverterParameters {
+                    conversion: CineonConversion::LinearToLog,
+                    ..CineonConverterParameters::default()
+                },
+            ),
+            (
+                "linear pass through",
+                CineonConverterParameters {
+                    conversion: CineonConversion::LinearToLinear,
+                    internal_black: 0.1,
+                    internal_white: 0.9,
+                    ..CineonConverterParameters::default()
+                },
+            ),
+            (
+                "lifted internal range with a warm gamma",
+                CineonConverterParameters {
+                    conversion: CineonConversion::LinearToLog,
+                    internal_black: 0.05,
+                    internal_white: 0.95,
+                    gamma: 2.2,
+                    ..CineonConverterParameters::default()
+                },
+            ),
+            (
+                "highlight roll off",
+                CineonConverterParameters {
+                    black_point: 200.0,
+                    white_point: 500.0,
+                    gamma: 1.0,
+                    highlight: 150.0,
+                    ..CineonConverterParameters::default()
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = CineonConverterGrade::new(parameters).expect("valid converter grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::CineonConverter { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(WIDTH, HEIGHT),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &frame.rgba_f32().data,
+                ),
+                &graph,
+                0,
+            )
+            .expect("CPU float reference");
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                expected.pixels(),
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(2.0e-5, 2.0e-5, 2.0e-5),
+                    alpha: LinearAccuracyBudget::finite(2.0e-5, 2.0e-5, 2.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU Cineon converter accuracy budget exceeded for {label}: {report:#?}"
             );
         }
     }
