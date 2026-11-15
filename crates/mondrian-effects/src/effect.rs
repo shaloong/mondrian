@@ -1321,6 +1321,12 @@ pub enum EffectRenderOp {
         /// Authored direction, points, gamma and highlight roll-off.
         grade: crate::CineonConverterGrade,
     },
+    /// Chromatic adaptation: re-expresses the frame under another illuminant
+    /// white point through a cone response transform.
+    ChromaticAdaptation {
+        /// Authored transform, the two white points and the transfer function.
+        grade: crate::ChromaticAdaptationGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1761,6 +1767,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::CineonConverter { grade } => {
                 formatter.debug_struct("CineonConverter").field("grade", grade).finish()
+            }
+            Self::ChromaticAdaptation { grade } => {
+                formatter.debug_struct("ChromaticAdaptation").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2878,6 +2887,12 @@ impl EffectRenderOp {
                 // all read the authored values, so the grade hashes them all.
                 grade.hash_state(state);
             }
+            EffectRenderOp::ChromaticAdaptation { grade } => {
+                134u8.hash(state);
+                // The transform, both white points and the transfer function all
+                // read the authored values, so the grade hashes them all.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3159,6 +3174,7 @@ impl EffectRenderOp {
             EffectRenderOp::Highlight { .. } => 4,
             EffectRenderOp::ColorDifferenceKey { .. } => 1,
             EffectRenderOp::CineonConverter { .. } => 1,
+            EffectRenderOp::ChromaticAdaptation { .. } => 2,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3693,7 +3709,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 134] {
+fn builtin_effect_types() -> [EffectType; 135] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3829,6 +3845,7 @@ fn builtin_effect_types() -> [EffectType; 134] {
         EffectType::Highlight,
         EffectType::ColorDifferenceKey,
         EffectType::CineonConverter,
+        EffectType::ChromaticAdaptation,
     ]
 }
 
@@ -12862,6 +12879,298 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::ChromaticAdaptation => {
+            // The eighteen authored values mirror the specified adaptation:
+            // the transform, one white point per side (weight, naming mode,
+            // preset or Kelvin or chromaticity) and the working colour space
+            // and gamma the frame is decoded from.
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "method",
+                "色度适应",
+                "方法",
+                "cat02",
+                [
+                    ("bradford", "Bradford"),
+                    ("cat02", "CAT02"),
+                    ("von_kries", "Von Kries"),
+                    ("xyz_scaling", "XYZ scaling"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.chromatic_adaptation.method.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "source_weight",
+                "色度适应",
+                "光源",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_SOURCE_WEIGHT),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_WEIGHT as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_WEIGHT as f64),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "source_mode",
+                "色度适应",
+                "光源类型",
+                "preset",
+                [
+                    ("preset", "Preset"),
+                    ("kelvin", "Kelvin"),
+                    ("chromatic", "Chromaticity"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.chromatic_adaptation.source_mode.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "source_preset",
+                "色度适应",
+                "标准光源",
+                "d65",
+                [
+                    ("d50", "D50"),
+                    ("d55", "D55"),
+                    ("d65", "D65"),
+                    ("d75", "D75"),
+                    ("a", "A"),
+                    ("c", "C"),
+                    ("e", "E"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.chromatic_adaptation.source_preset.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "source_kelvin",
+                "色度适应",
+                "开尔文",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_SOURCE_KELVIN),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_KELVIN as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_KELVIN as f64),
+                Some(10.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "source_tint",
+                "色度适应",
+                "色调",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_TINT),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_TINT as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_TINT as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "source_x",
+                "色度适应",
+                "x",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_SOURCE_X),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_CHROMATICITY as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_CHROMATICITY as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "source_y",
+                "色度适应",
+                "y",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_SOURCE_Y),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_CHROMATICITY as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_CHROMATICITY as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "target_weight",
+                "色度适应",
+                "目标光源",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_TARGET_WEIGHT),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_WEIGHT as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_WEIGHT as f64),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "target_mode",
+                "色度适应",
+                "光源类型",
+                "preset",
+                [
+                    ("preset", "Preset"),
+                    ("kelvin", "Kelvin"),
+                    ("chromatic", "Chromaticity"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.chromatic_adaptation.target_mode.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "target_preset",
+                "色度适应",
+                "标准光源",
+                "d65",
+                [
+                    ("d50", "D50"),
+                    ("d55", "D55"),
+                    ("d65", "D65"),
+                    ("d75", "D75"),
+                    ("a", "A"),
+                    ("c", "C"),
+                    ("e", "E"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.chromatic_adaptation.target_preset.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "target_kelvin",
+                "色度适应",
+                "开尔文",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_TARGET_KELVIN),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_KELVIN as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_KELVIN as f64),
+                Some(10.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "target_tint",
+                "色度适应",
+                "色调",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_TINT),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_TINT as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_TINT as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "target_x",
+                "色度适应",
+                "x",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_TARGET_X),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_CHROMATICITY as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_CHROMATICITY as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "target_y",
+                "色度适应",
+                "y",
+                PropertyValue::Float(crate::CHROMATIC_ADAPTATION_DEFAULT_TARGET_Y),
+                Some(crate::CHROMATIC_ADAPTATION_MIN_CHROMATICITY as f64),
+                Some(crate::CHROMATIC_ADAPTATION_MAX_CHROMATICITY as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "use_colour_space",
+                "色度适应",
+                "当前色彩空间和伽马",
+                PropertyValue::Bool(crate::CHROMATIC_ADAPTATION_DEFAULT_USE_COLOUR_SPACE),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "colour_space",
+                "色度适应",
+                "色彩空间",
+                "rec709",
+                [
+                    ("rec709", "Rec.709"),
+                    ("p3d65", "P3 D65"),
+                    ("rec2020", "Rec.2020"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.chromatic_adaptation.colour_space.{key}"),
+                    )
+                })
+                .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "gamma",
+                "色度适应",
+                "伽马",
+                "linear",
+                [
+                    ("linear", "Linear"),
+                    ("srgb", "sRGB"),
+                    ("rec709", "Rec.709"),
+                    ("gamma_2_2", "Gamma 2.2"),
+                    ("gamma_2_4", "Gamma 2.4"),
+                ]
+                .into_iter()
+                .map(|(key, caption)| {
+                    ParameterEnumOption::new(
+                        key,
+                        caption,
+                        format!("builtin.chromatic_adaptation.gamma.{key}"),
+                    )
+                })
+                .collect(),
+            );
+        }
         EffectType::LightLeak => {
             // The seven authored values mirror the specified leak: the
             // intensity and tint of the added light, its streak geometry, the
@@ -15284,6 +15593,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Each channel is remapped from its own code value, so no neighbour
             // or history enters the result.
+            ..cpu_linear
+        },
+        EffectType::ChromaticAdaptation => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The matrix works on one pixel at a time, so no neighbour or
+            // history enters the result.
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -21771,6 +22086,169 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ChromaticAdaptation => {
+            let method_id = builtin_parameter_id(effect_type, "method");
+            let source_mode_id = builtin_parameter_id(effect_type, "source_mode");
+            let source_preset_id = builtin_parameter_id(effect_type, "source_preset");
+            let target_mode_id = builtin_parameter_id(effect_type, "target_mode");
+            let target_preset_id = builtin_parameter_id(effect_type, "target_preset");
+            let space_id = builtin_parameter_id(effect_type, "colour_space");
+            let gamma_id = builtin_parameter_id(effect_type, "gamma");
+            let use_space_id = builtin_parameter_id(effect_type, "use_colour_space");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("色度适应的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_enum<T: Copy>(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    id: &ParameterId,
+                    name: &str,
+                    from_key: fn(&str) -> Option<T>,
+                ) -> Result<Option<T>, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                            Some(value) => Ok(Some(value)),
+                            None => Err(invalid(format!("色度适应的{name}没有对应的菜单项 {key}"))),
+                        },
+                        Some(_) => Err(invalid(format!("色度适应的{name}必须是菜单项"))),
+                        None => Ok(None),
+                    }
+                }
+                let defaults = crate::ChromaticAdaptationParameters::default();
+                let mut parameters = defaults;
+                if let Some(method) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &method_id,
+                    "方法",
+                    crate::ChromaticAdaptationMethod::from_key,
+                )? {
+                    parameters.method = method;
+                }
+                if let Some(mode) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &source_mode_id,
+                    "光源类型",
+                    crate::IlluminantMode::from_key,
+                )? {
+                    parameters.source_mode = mode;
+                }
+                if let Some(preset) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &source_preset_id,
+                    "标准光源",
+                    crate::StandardIlluminant::from_key,
+                )? {
+                    parameters.source_preset = preset;
+                }
+                if let Some(mode) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &target_mode_id,
+                    "光源类型",
+                    crate::IlluminantMode::from_key,
+                )? {
+                    parameters.target_mode = mode;
+                }
+                if let Some(preset) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &target_preset_id,
+                    "标准光源",
+                    crate::StandardIlluminant::from_key,
+                )? {
+                    parameters.target_preset = preset;
+                }
+                if let Some(space) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &space_id,
+                    "色彩空间",
+                    crate::ChromaticAdaptationSpace::from_key,
+                )? {
+                    parameters.colour_space = space;
+                }
+                if let Some(gamma) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &gamma_id,
+                    "伽马",
+                    crate::ChromaticAdaptationGamma::from_key,
+                )? {
+                    parameters.gamma = gamma;
+                }
+                match effect.evaluate_parameter(&use_space_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => parameters.use_colour_space = value,
+                    Some(_) => {
+                        return Err(invalid(
+                            "色度适应的当前色彩空间和伽马必须是开关".to_string(),
+                        ))
+                    }
+                    None => {}
+                }
+                for (parameter, fallback) in [
+                    ("source_weight", defaults.source_weight),
+                    ("source_kelvin", defaults.source_kelvin),
+                    ("source_tint", defaults.source_tint),
+                    ("source_x", defaults.source_x),
+                    ("source_y", defaults.source_y),
+                    ("target_weight", defaults.target_weight),
+                    ("target_kelvin", defaults.target_kelvin),
+                    ("target_tint", defaults.target_tint),
+                    ("target_x", defaults.target_x),
+                    ("target_y", defaults.target_y),
+                ] {
+                    let value = read(effect, context, &invalid, parameter, fallback)?;
+                    match parameter {
+                        "source_weight" => parameters.source_weight = value,
+                        "source_kelvin" => parameters.source_kelvin = value,
+                        "source_tint" => parameters.source_tint = value,
+                        "source_x" => parameters.source_x = value,
+                        "source_y" => parameters.source_y = value,
+                        "target_weight" => parameters.target_weight = value,
+                        "target_kelvin" => parameters.target_kelvin = value,
+                        "target_tint" => parameters.target_tint = value,
+                        "target_x" => parameters.target_x = value,
+                        "target_y" => parameters.target_y = value,
+                        _ => {}
+                    }
+                }
+                let grade = crate::ChromaticAdaptationGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ChromaticAdaptation { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LightLeak => {
             let colour_id = builtin_parameter_id(effect_type, "colour");
             let position_id = builtin_parameter_id(effect_type, "position");
@@ -23420,6 +23898,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Highlight => "高光提取",
         EffectType::ColorDifferenceKey => "颜色差值键",
         EffectType::CineonConverter => "对数转换",
+        EffectType::ChromaticAdaptation => "色度适应",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -24828,6 +25307,7 @@ mod tests {
             EffectType::Highlight,
             EffectType::ColorDifferenceKey,
             EffectType::CineonConverter,
+            EffectType::ChromaticAdaptation,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -34124,7 +34604,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 134);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 135);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -34652,7 +35132,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 134);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 135);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -37611,7 +38091,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 134);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 135);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -38747,7 +39227,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 134);
+        assert_eq!(builtin_effect_types().len(), 135);
     }
 
     #[test]
@@ -40233,6 +40713,310 @@ mod tests {
         let reason = format!("{error:?}");
         assert!(
             reason.contains("log_to_video"),
+            "the error names the rejected menu key: {reason}"
+        );
+    }
+
+    fn chromatic_adaptation_op(
+        graph: &EffectRenderGraph,
+    ) -> Option<crate::ChromaticAdaptationGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::ChromaticAdaptation { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ChromaticAdaptation { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_chromatic_adaptation(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ChromaticAdaptation)
+            .expect("the chromatic adaptation effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ChromaticAdaptation.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the chromatic adaptation parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn chromatic_adaptation_defaults_match_the_dump() {
+        let effect_type = EffectType::ChromaticAdaptation;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("method", "方法"),
+            ("source_weight", "光源"),
+            ("source_mode", "光源类型"),
+            ("source_preset", "标准光源"),
+            ("source_kelvin", "开尔文"),
+            ("source_tint", "色调"),
+            ("source_x", "x"),
+            ("source_y", "y"),
+            ("target_weight", "目标光源"),
+            ("target_mode", "光源类型"),
+            ("target_preset", "标准光源"),
+            ("target_kelvin", "开尔文"),
+            ("target_tint", "色调"),
+            ("target_x", "x"),
+            ("target_y", "y"),
+            ("use_colour_space", "当前色彩空间和伽马"),
+            ("colour_space", "色彩空间"),
+            ("gamma", "伽马"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("色度适应")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "chromatic_adaptation",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["颜色"]);
+
+        let menus = [
+            (
+                "method",
+                "cat02",
+                vec!["bradford", "cat02", "von_kries", "xyz_scaling"],
+            ),
+            (
+                "source_mode",
+                "preset",
+                vec!["preset", "kelvin", "chromatic"],
+            ),
+            (
+                "source_preset",
+                "d65",
+                vec!["d50", "d55", "d65", "d75", "a", "c", "e"],
+            ),
+            (
+                "target_mode",
+                "preset",
+                vec!["preset", "kelvin", "chromatic"],
+            ),
+            (
+                "target_preset",
+                "d65",
+                vec!["d50", "d55", "d65", "d75", "a", "c", "e"],
+            ),
+            ("colour_space", "rec709", vec!["rec709", "p3d65", "rec2020"]),
+            (
+                "gamma",
+                "linear",
+                vec!["linear", "srgb", "rec709", "gamma_2_2", "gamma_2_4"],
+            ),
+        ];
+        for (parameter, default, keys) in menus {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the menu is defined");
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Enum(default.to_owned()),
+                "{parameter}"
+            );
+            let options = &property.descriptor.schema.enum_options;
+            assert_eq!(options.len(), keys.len(), "{parameter}");
+            for (option, key) in options.iter().zip(keys) {
+                assert_eq!(option.key, key, "{parameter}");
+                assert_eq!(
+                    option.message_id,
+                    format!("builtin.chromatic_adaptation.{parameter}.{key}")
+                );
+            }
+        }
+
+        let numeric = [
+            ("source_weight", 1.0),
+            ("source_kelvin", 6500.0),
+            ("source_tint", 0.0),
+            ("source_x", 0.3127),
+            ("source_y", 0.329),
+            ("target_weight", 1.0),
+            ("target_kelvin", 6500.0),
+            ("target_tint", 0.0),
+            ("target_x", 0.3127),
+            ("target_y", 0.329),
+        ];
+        for (parameter, default) in numeric {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the parameter is defined");
+            let evaluated = match property.evaluate(tt(0)) {
+                PropertyValue::Float(value) => value,
+                PropertyValue::Int(value) => value as f32,
+                other => panic!("{parameter} evaluated to {other:?}"),
+            };
+            assert!((evaluated - default).abs() < 1.0e-6, "{parameter}");
+        }
+        assert_eq!(
+            properties
+                .property(&effect_type.property_path("use_colour_space"))
+                .expect("the switch is defined")
+                .evaluate(tt(0)),
+            PropertyValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn chromatic_adaptation_defaults_leave_the_frame_alone() {
+        let effect = instantiate_effect_node(EffectType::ChromaticAdaptation)
+            .expect("the chromatic adaptation effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default adaptation should compile");
+        assert!(
+            chromatic_adaptation_op(&graph).is_none(),
+            "equal white points and a linear transfer are the identity"
+        );
+        assert_eq!(graph.nodes.len(), 1, "only the source node remains");
+    }
+
+    #[test]
+    fn chromatic_adaptation_authored_white_point_builds_one_point_op() {
+        let effect = author_chromatic_adaptation(&[(
+            "source_preset",
+            PropertyValue::Enum("d50".to_owned()),
+        )]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a moved white point should compile");
+        let grade = chromatic_adaptation_op(&graph).expect("the adaptation is not the identity");
+        assert_eq!(
+            grade,
+            crate::ChromaticAdaptationGrade::new(crate::ChromaticAdaptationParameters {
+                source_preset: crate::StandardIlluminant::D50,
+                ..crate::ChromaticAdaptationParameters::default()
+            })
+            .expect("the authored values are in range")
+        );
+        assert_eq!(graph.nodes.len(), 2, "the source plus one adaptation node");
+        let op = EffectRenderOp::ChromaticAdaptation { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the adaptation remaps each pixel in place"
+        );
+        assert_eq!(op.estimated_cost(), 2);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the adaptation is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            135
+        );
+    }
+
+    #[test]
+    fn chromatic_adaptation_parameters_round_trip() {
+        let effect = author_chromatic_adaptation(&[
+            ("method", PropertyValue::Enum("bradford".to_owned())),
+            ("source_weight", PropertyValue::Float(0.5)),
+            ("source_mode", PropertyValue::Enum("kelvin".to_owned())),
+            ("source_kelvin", PropertyValue::Float(3200.0)),
+            ("source_tint", PropertyValue::Float(0.25)),
+            ("target_mode", PropertyValue::Enum("chromatic".to_owned())),
+            ("target_x", PropertyValue::Float(0.29)),
+            ("target_y", PropertyValue::Float(0.31)),
+            ("target_weight", PropertyValue::Float(0.75)),
+            ("colour_space", PropertyValue::Enum("p3d65".to_owned())),
+            ("gamma", PropertyValue::Enum("srgb".to_owned())),
+            ("use_colour_space", PropertyValue::Bool(true)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened adaptation should compile");
+        let parameters = crate::ChromaticAdaptationParameters {
+            method: crate::ChromaticAdaptationMethod::Bradford,
+            source_weight: 0.5,
+            source_mode: crate::IlluminantMode::Kelvin,
+            source_kelvin: 3200.0,
+            source_tint: 0.25,
+            target_mode: crate::IlluminantMode::Chromatic,
+            target_x: 0.29,
+            target_y: 0.31,
+            target_weight: 0.75,
+            colour_space: crate::ChromaticAdaptationSpace::P3D65,
+            gamma: crate::ChromaticAdaptationGamma::Srgb,
+            ..crate::ChromaticAdaptationParameters::default()
+        };
+        assert_eq!(
+            chromatic_adaptation_op(&graph),
+            Some(
+                crate::ChromaticAdaptationGrade::new(parameters)
+                    .expect("the authored values are in range")
+            )
+        );
+    }
+
+    #[test]
+    fn chromatic_adaptation_invalid_weight_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::ChromaticAdaptation)
+            .expect("the chromatic adaptation effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "chromatic_adaptation.target_weight",
+            serde_json::json!({"Float": 1.5}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("a weight past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("chromatic_adaptation.target_weight"),
+            "the persisted value contract names the parameter: {reason}"
+        );
+    }
+
+    #[test]
+    fn chromatic_adaptation_unknown_menu_key_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::ChromaticAdaptation)
+            .expect("the chromatic adaptation effect should instantiate");
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "chromatic_adaptation.method",
+            serde_json::json!({"Enum": "ciecam02"}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("an unknown menu key must not reach a graph");
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("ciecam02"),
             "the error names the rejected menu key: {reason}"
         );
     }

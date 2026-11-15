@@ -262,6 +262,11 @@ pub enum EffectGpuPointOp {
     CineonConverter {
         grade: crate::CineonConverterGrade,
     },
+    /// Chromatic adaptation: the packed cone response matrix and the transfer
+    /// tag are carried whole, so the shader never re-derives them.
+    ChromaticAdaptation {
+        grade: crate::ChromaticAdaptationGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -986,6 +991,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::CineonConverter { grade } => {
             Ok(EffectGpuPointOp::CineonConverter { grade: *grade })
         }
+        EffectRenderOp::ChromaticAdaptation { grade } => {
+            Ok(EffectGpuPointOp::ChromaticAdaptation { grade: *grade })
+        }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1133,6 +1141,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::LightLeak { .. } => "light_leak",
         EffectRenderOp::ColorDifferenceKey { .. } => "color_difference_key",
         EffectRenderOp::CineonConverter { .. } => "cineon_converter",
+        EffectRenderOp::ChromaticAdaptation { .. } => "chromatic_adaptation",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
