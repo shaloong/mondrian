@@ -160,6 +160,7 @@ pub use processor_residency::{
     EffectProcessorRetention, EffectProcessorStopReason, EffectProcessorTransientMemoryRefusal,
     PreparedEffectProcessorInput,
 };
+pub mod aces_transform;
 pub mod bevel;
 pub mod bezier_warp;
 pub mod broadcast_safe;
@@ -217,6 +218,19 @@ pub use abstraction::{
     ABSTRACTION_DEFAULT_SOFTNESS, ABSTRACTION_MAX_BINS, ABSTRACTION_MAX_BLUR,
     ABSTRACTION_MAX_EDGE_STRENGTH, ABSTRACTION_MAX_ITERATIONS, ABSTRACTION_MAX_RADIUS,
     ABSTRACTION_MIN_BINS, ABSTRACTION_MIN_BLUR, ABSTRACTION_MIN_ITERATIONS,
+};
+pub use aces_transform::{
+    aces_transform_frame_f32, AcesExposureIndex, AcesGamutCompression, AcesInputTransform,
+    AcesOutputTransform, AcesTransformError, AcesTransformGrade, AcesTransformParameters,
+    AcesTransformUniforms, AcesVersion, ACES_TRANSFORM_DEFAULT_CYAN_LIMIT,
+    ACES_TRANSFORM_DEFAULT_CYAN_THRESHOLD, ACES_TRANSFORM_DEFAULT_GAMUT_COMPRESS,
+    ACES_TRANSFORM_DEFAULT_MAGENTA_LIMIT, ACES_TRANSFORM_DEFAULT_MAGENTA_THRESHOLD,
+    ACES_TRANSFORM_DEFAULT_OUTPUT_MID_GRAY, ACES_TRANSFORM_DEFAULT_ROLLOFF,
+    ACES_TRANSFORM_DEFAULT_TRANSFORM, ACES_TRANSFORM_DEFAULT_YELLOW_LIMIT,
+    ACES_TRANSFORM_DEFAULT_YELLOW_THRESHOLD, ACES_TRANSFORM_MAX_LIMIT, ACES_TRANSFORM_MAX_MID_GRAY,
+    ACES_TRANSFORM_MAX_ROLLOFF, ACES_TRANSFORM_MAX_THRESHOLD, ACES_TRANSFORM_MIN_LIMIT,
+    ACES_TRANSFORM_MIN_MID_GRAY, ACES_TRANSFORM_MIN_ROLLOFF, ACES_TRANSFORM_MIN_THRESHOLD,
+    ACES_TRANSFORM_REFERENCE_EXPOSURE_INDEX,
 };
 pub use adjustment::{
     blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,

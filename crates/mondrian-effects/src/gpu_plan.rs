@@ -277,6 +277,11 @@ pub enum EffectGpuPointOp {
     ColorSpaceTransform {
         grade: crate::ColorSpaceTransformGrade,
     },
+    /// ACES transform: the packed ACES version, transforms, exposure and tone
+    /// controls fill the point uniform, so the shader never rebuilds them.
+    AcesTransform {
+        grade: crate::AcesTransformGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -1008,6 +1013,9 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::ColorSpaceTransform { grade } => {
             Ok(EffectGpuPointOp::ColorSpaceTransform { grade: *grade })
         }
+        EffectRenderOp::AcesTransform { grade } => {
+            Ok(EffectGpuPointOp::AcesTransform { grade: *grade })
+        }
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1158,6 +1166,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ChromaticAdaptation { .. } => "chromatic_adaptation",
         EffectRenderOp::StarBurst { .. } => "star_burst",
         EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
+        EffectRenderOp::AcesTransform { .. } => "aces_transform",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

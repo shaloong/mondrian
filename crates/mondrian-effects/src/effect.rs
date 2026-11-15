@@ -1337,6 +1337,11 @@ pub enum EffectRenderOp {
         /// Authored spaces, transfer functions and mapping settings.
         grade: crate::ColorSpaceTransformGrade,
     },
+    /// ACES transform: applies the ACES RRT and an optional ODT.
+    AcesTransform {
+        /// Authored ACES version, transforms, exposure and tone controls.
+        grade: crate::AcesTransformGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1786,6 +1791,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ColorSpaceTransform { grade } => {
                 formatter.debug_struct("ColorSpaceTransform").field("grade", grade).finish()
+            }
+            Self::AcesTransform { grade } => {
+                formatter.debug_struct("AcesTransform").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2921,6 +2929,13 @@ impl EffectRenderOp {
                 // pixels, so the grade hashes the whole configuration.
                 grade.hash_state(state);
             }
+            EffectRenderOp::AcesTransform { grade } => {
+                137u8.hash(state);
+                // Every ACES version, transform, exposure and tone control
+                // changes the pixels, so the grade hashes the whole
+                // configuration.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3205,6 +3220,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChromaticAdaptation { .. } => 2,
             EffectRenderOp::StarBurst { .. } => 2,
             EffectRenderOp::ColorSpaceTransform { .. } => 4,
+            EffectRenderOp::AcesTransform { .. } => 5,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3739,7 +3755,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 137] {
+fn builtin_effect_types() -> [EffectType; 138] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3878,6 +3894,7 @@ fn builtin_effect_types() -> [EffectType; 137] {
         EffectType::ChromaticAdaptation,
         EffectType::StarBurst,
         EffectType::ColorSpaceTransform,
+        EffectType::AcesTransform,
     ]
 }
 
@@ -13646,6 +13663,244 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::AcesTransform => {
+            // The fifteen authored values mirror the specified transform: the
+            // master switch, the ACES release, the input and output transforms,
+            // the exposure index, then the mid grey, gamut compression and tone
+            // curve controls.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "aces_transform",
+                "ACES 转换",
+                "ACES转换",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_TRANSFORM),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "aces_version",
+                "ACES 转换",
+                "ACES版本",
+                crate::AcesVersion::DEFAULT.as_key(),
+                crate::AcesVersion::ALL
+                    .into_iter()
+                    .map(|version| {
+                        let caption = match version {
+                            crate::AcesVersion::Aces10 => "ACES 1.0",
+                            crate::AcesVersion::Aces11 => "ACES 1.1",
+                            crate::AcesVersion::Aces20 => "ACES 2.0",
+                        };
+                        ParameterEnumOption::new(
+                            version.as_key(),
+                            caption,
+                            format!("builtin.aces_transform.aces_version.{}", version.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "input_transform",
+                "ACES 转换",
+                "输入转换",
+                crate::AcesInputTransform::DEFAULT.as_key(),
+                crate::AcesInputTransform::ALL
+                    .into_iter()
+                    .map(|transform| {
+                        let caption = match transform {
+                            crate::AcesInputTransform::None => "None",
+                            crate::AcesInputTransform::Srgb => "sRGB",
+                            crate::AcesInputTransform::Rec709 => "Rec.709",
+                            crate::AcesInputTransform::Acescc => "ACEScc",
+                            crate::AcesInputTransform::Acescct => "ACEScct",
+                        };
+                        ParameterEnumOption::new(
+                            transform.as_key(),
+                            caption,
+                            format!(
+                                "builtin.aces_transform.input_transform.{}",
+                                transform.as_key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "exposure_index",
+                "ACES 转换",
+                "曝光系数",
+                crate::AcesExposureIndex::DEFAULT.as_key(),
+                crate::AcesExposureIndex::ALL
+                    .into_iter()
+                    .map(|index| {
+                        ParameterEnumOption::new(
+                            index.as_key(),
+                            index.as_key(),
+                            format!("builtin.aces_transform.exposure_index.{}", index.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "output_transform",
+                "ACES 转换",
+                "输出转换",
+                crate::AcesOutputTransform::DEFAULT.as_key(),
+                crate::AcesOutputTransform::ALL
+                    .into_iter()
+                    .map(|transform| {
+                        let caption = match transform {
+                            crate::AcesOutputTransform::Rec709 => "Rec.709",
+                            crate::AcesOutputTransform::Srgb => "sRGB",
+                            crate::AcesOutputTransform::P3D65 => "P3 D65",
+                            crate::AcesOutputTransform::Rec2020 => "Rec.2020",
+                        };
+                        ParameterEnumOption::new(
+                            transform.as_key(),
+                            caption,
+                            format!(
+                                "builtin.aces_transform.output_transform.{}",
+                                transform.as_key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "output_mid_gray",
+                "ACES 转换",
+                "输出中灰",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_OUTPUT_MID_GRAY),
+                Some(crate::ACES_TRANSFORM_MIN_MID_GRAY as f64),
+                Some(crate::ACES_TRANSFORM_MAX_MID_GRAY as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "gamut_compress",
+                "ACES 转换",
+                "色域压缩",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_GAMUT_COMPRESS),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "gamut_compress_type",
+                "ACES 转换",
+                "色域压缩类型",
+                crate::AcesGamutCompression::DEFAULT.as_key(),
+                crate::AcesGamutCompression::ALL
+                    .into_iter()
+                    .map(|compression| {
+                        let caption = match compression {
+                            crate::AcesGamutCompression::None => "None",
+                            crate::AcesGamutCompression::Aces => "ACES",
+                            crate::AcesGamutCompression::Clip => "Clip",
+                        };
+                        ParameterEnumOption::new(
+                            compression.as_key(),
+                            caption,
+                            format!(
+                                "builtin.aces_transform.gamut_compress_type.{}",
+                                compression.as_key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cyan_limit",
+                "ACES 转换",
+                "青色极限",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_CYAN_LIMIT),
+                Some(crate::ACES_TRANSFORM_MIN_LIMIT as f64),
+                Some(crate::ACES_TRANSFORM_MAX_LIMIT as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "magenta_limit",
+                "ACES 转换",
+                "品色极限",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_MAGENTA_LIMIT),
+                Some(crate::ACES_TRANSFORM_MIN_LIMIT as f64),
+                Some(crate::ACES_TRANSFORM_MAX_LIMIT as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "yellow_limit",
+                "ACES 转换",
+                "黄色极限",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_YELLOW_LIMIT),
+                Some(crate::ACES_TRANSFORM_MIN_LIMIT as f64),
+                Some(crate::ACES_TRANSFORM_MAX_LIMIT as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "cyan_threshold",
+                "ACES 转换",
+                "青色阈值",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_CYAN_THRESHOLD),
+                Some(crate::ACES_TRANSFORM_MIN_THRESHOLD as f64),
+                Some(crate::ACES_TRANSFORM_MAX_THRESHOLD as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "magenta_threshold",
+                "ACES 转换",
+                "品色阈值",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_MAGENTA_THRESHOLD),
+                Some(crate::ACES_TRANSFORM_MIN_THRESHOLD as f64),
+                Some(crate::ACES_TRANSFORM_MAX_THRESHOLD as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "yellow_threshold",
+                "ACES 转换",
+                "黄色阈值",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_YELLOW_THRESHOLD),
+                Some(crate::ACES_TRANSFORM_MIN_THRESHOLD as f64),
+                Some(crate::ACES_TRANSFORM_MAX_THRESHOLD as f64),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "rolloff",
+                "ACES 转换",
+                "滚降",
+                PropertyValue::Float(crate::ACES_TRANSFORM_DEFAULT_ROLLOFF),
+                Some(crate::ACES_TRANSFORM_MIN_ROLLOFF as f64),
+                Some(crate::ACES_TRANSFORM_MAX_ROLLOFF as f64),
+                Some(0.01),
+            );
+        }
         EffectType::LightLeak => {
             // The seven authored values mirror the specified leak: the
             // intensity and tint of the added light, its streak geometry, the
@@ -16086,6 +16341,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Every output channel is a function of the same input pixel, the
             // authored spaces and the mapping settings.
+            ..cpu_linear
+        },
+        EffectType::AcesTransform => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Every output channel is a function of the same input pixel, the
+            // authored ACES version, transforms and tone controls.
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -22967,6 +23228,139 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::AcesTransform => {
+            let version_id = builtin_parameter_id(effect_type, "aces_version");
+            let input_transform_id = builtin_parameter_id(effect_type, "input_transform");
+            let exposure_index_id = builtin_parameter_id(effect_type, "exposure_index");
+            let output_transform_id = builtin_parameter_id(effect_type, "output_transform");
+            let gamut_compress_type_id = builtin_parameter_id(effect_type, "gamut_compress_type");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("ACES 转换的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_enum<T: Copy>(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    id: &ParameterId,
+                    name: &str,
+                    from_key: fn(&str) -> Option<T>,
+                ) -> Result<Option<T>, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                            Some(value) => Ok(Some(value)),
+                            None => {
+                                Err(invalid(format!("ACES 转换的{name}没有对应的菜单项 {key}")))
+                            }
+                        },
+                        Some(_) => Err(invalid(format!("ACES 转换的{name}必须是菜单项"))),
+                        None => Ok(None),
+                    }
+                }
+                let defaults = crate::AcesTransformParameters::default();
+                let mut parameters = defaults;
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &version_id,
+                    "ACES版本",
+                    crate::AcesVersion::from_key,
+                )? {
+                    parameters.aces_version = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &input_transform_id,
+                    "输入转换",
+                    crate::AcesInputTransform::from_key,
+                )? {
+                    parameters.input_transform = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &exposure_index_id,
+                    "曝光系数",
+                    crate::AcesExposureIndex::from_key,
+                )? {
+                    parameters.exposure_index = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &output_transform_id,
+                    "输出转换",
+                    crate::AcesOutputTransform::from_key,
+                )? {
+                    parameters.output_transform = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &gamut_compress_type_id,
+                    "色域压缩类型",
+                    crate::AcesGamutCompression::from_key,
+                )? {
+                    parameters.gamut_compress_type = value;
+                }
+                for (parameter, fallback) in [
+                    ("aces_transform", defaults.aces_transform),
+                    ("output_mid_gray", defaults.output_mid_gray),
+                    ("gamut_compress", defaults.gamut_compress),
+                    ("cyan_limit", defaults.cyan_limit),
+                    ("magenta_limit", defaults.magenta_limit),
+                    ("yellow_limit", defaults.yellow_limit),
+                    ("cyan_threshold", defaults.cyan_threshold),
+                    ("magenta_threshold", defaults.magenta_threshold),
+                    ("yellow_threshold", defaults.yellow_threshold),
+                    ("rolloff", defaults.rolloff),
+                ] {
+                    let value = read(effect, context, &invalid, parameter, fallback)?;
+                    match parameter {
+                        "aces_transform" => parameters.aces_transform = value,
+                        "output_mid_gray" => parameters.output_mid_gray = value,
+                        "gamut_compress" => parameters.gamut_compress = value,
+                        "cyan_limit" => parameters.cyan_limit = value,
+                        "magenta_limit" => parameters.magenta_limit = value,
+                        "yellow_limit" => parameters.yellow_limit = value,
+                        "cyan_threshold" => parameters.cyan_threshold = value,
+                        "magenta_threshold" => parameters.magenta_threshold = value,
+                        "yellow_threshold" => parameters.yellow_threshold = value,
+                        "rolloff" => parameters.rolloff = value,
+                        _ => {}
+                    }
+                }
+                let grade = crate::AcesTransformGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::AcesTransform { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::LightLeak => {
             let colour_id = builtin_parameter_id(effect_type, "colour");
             let position_id = builtin_parameter_id(effect_type, "position");
@@ -24619,6 +25013,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChromaticAdaptation => "色度适应",
         EffectType::StarBurst => "星空",
         EffectType::ColorSpaceTransform => "色彩空间转换",
+        EffectType::AcesTransform => "ACES 转换",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -26030,6 +26425,7 @@ mod tests {
             EffectType::ChromaticAdaptation,
             EffectType::StarBurst,
             EffectType::ColorSpaceTransform,
+            EffectType::AcesTransform,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -35326,7 +35722,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 137);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 138);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -35854,7 +36250,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 137);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 138);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -38813,7 +39209,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 137);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 138);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -39949,7 +40345,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 137);
+        assert_eq!(builtin_effect_types().len(), 138);
     }
 
     #[test]
@@ -41938,6 +42334,273 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("rec2100"), "{message}");
         assert!(message.contains("parameter_value_contract"), "{message}");
+    }
+
+    fn aces_transform_op(graph: &EffectRenderGraph) -> Option<crate::AcesTransformGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::AcesTransform { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::AcesTransform { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_aces_transform(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::AcesTransform)
+            .expect("the ACES transform should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::AcesTransform.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the ACES parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn aces_transform_identity_builds_no_node() {
+        let effect = author_aces_transform(&[("aces_transform", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the switched-off transform should compile");
+        assert!(
+            aces_transform_op(&graph).is_none(),
+            "the master switch off is the identity"
+        );
+    }
+
+    #[test]
+    fn aces_transform_defaults_build_one_point_op() {
+        let effect = instantiate_effect_node(EffectType::AcesTransform)
+            .expect("the ACES transform should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = aces_transform_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::AcesTransformGrade::documented_defaults());
+        assert_eq!(graph.nodes.len(), 2, "the source plus one transform node");
+        let op = EffectRenderOp::AcesTransform { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the transform decides each pixel in place"
+        );
+        assert_eq!(op.estimated_cost(), 5);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the transform is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            138
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::AcesTransform {
+            grade: crate::AcesTransformGrade::new(crate::AcesTransformParameters::default())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn aces_transform_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::AcesTransform;
+        let properties = default_properties_for(effect_type.clone());
+        let menus: [(&str, &str, &[&str]); 5] = [
+            (
+                "aces_version",
+                "aces_2_0",
+                &["aces_1_0", "aces_1_1", "aces_2_0"],
+            ),
+            (
+                "input_transform",
+                "none",
+                &["none", "srgb", "rec709", "acescc", "acescct"],
+            ),
+            (
+                "exposure_index",
+                "800",
+                &["100", "200", "400", "800", "1600", "3200"],
+            ),
+            (
+                "output_transform",
+                "rec709",
+                &["rec709", "srgb", "p3d65", "rec2020"],
+            ),
+            ("gamut_compress_type", "none", &["none", "aces", "clip"]),
+        ];
+        for (parameter, default, keys) in menus {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the menu is defined");
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Enum(default.to_owned()),
+                "{parameter}"
+            );
+            let options = &property.descriptor.schema.enum_options;
+            assert_eq!(options.len(), keys.len(), "{parameter}");
+            for (option, key) in options.iter().zip(keys) {
+                assert_eq!(option.key, *key, "{parameter}");
+                assert_eq!(
+                    option.message_id,
+                    format!("builtin.aces_transform.{parameter}.{key}")
+                );
+            }
+        }
+
+        use crate::{
+            AcesExposureIndex, AcesGamutCompression, AcesInputTransform, AcesOutputTransform,
+            AcesVersion,
+        };
+        for (key, version) in [
+            ("aces_1_0", AcesVersion::Aces10),
+            ("aces_1_1", AcesVersion::Aces11),
+            ("aces_2_0", AcesVersion::Aces20),
+        ] {
+            assert_eq!(AcesVersion::from_key(key), Some(version));
+            assert_eq!(version.as_key(), key);
+        }
+        for (key, transform) in [
+            ("none", AcesInputTransform::None),
+            ("srgb", AcesInputTransform::Srgb),
+            ("rec709", AcesInputTransform::Rec709),
+            ("acescc", AcesInputTransform::Acescc),
+            ("acescct", AcesInputTransform::Acescct),
+        ] {
+            assert_eq!(AcesInputTransform::from_key(key), Some(transform));
+            assert_eq!(transform.as_key(), key);
+        }
+        for (key, index) in [
+            ("100", AcesExposureIndex::E100),
+            ("200", AcesExposureIndex::E200),
+            ("400", AcesExposureIndex::E400),
+            ("800", AcesExposureIndex::E800),
+            ("1600", AcesExposureIndex::E1600),
+            ("3200", AcesExposureIndex::E3200),
+        ] {
+            assert_eq!(AcesExposureIndex::from_key(key), Some(index));
+            assert_eq!(index.as_key(), key);
+        }
+        for (key, transform) in [
+            ("rec709", AcesOutputTransform::Rec709),
+            ("srgb", AcesOutputTransform::Srgb),
+            ("p3d65", AcesOutputTransform::P3D65),
+            ("rec2020", AcesOutputTransform::Rec2020),
+        ] {
+            assert_eq!(AcesOutputTransform::from_key(key), Some(transform));
+            assert_eq!(transform.as_key(), key);
+        }
+        for (key, compression) in [
+            ("none", AcesGamutCompression::None),
+            ("aces", AcesGamutCompression::Aces),
+            ("clip", AcesGamutCompression::Clip),
+        ] {
+            assert_eq!(AcesGamutCompression::from_key(key), Some(compression));
+            assert_eq!(compression.as_key(), key);
+        }
+    }
+
+    #[test]
+    fn aces_transform_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::AcesTransform;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::PixelLocal);
+    }
+
+    #[test]
+    fn aces_transform_out_of_range_parameter_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::AcesTransform)
+            .expect("the ACES transform should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::AcesTransform.property_path("aces_transform"),
+                value: PropertyValue::Float(2.0),
+            })
+            .expect_err("the master switch above one should fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("aces_transform.aces_transform"),
+            "{message}"
+        );
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect = instantiate_effect_node(EffectType::AcesTransform)
+            .expect("the ACES transform should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "aces_transform.rolloff",
+            serde_json::json!(11.0),
+        );
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a roll-off above ten should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.aces_transform");
+                    assert!(reason.contains("rolloff"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn aces_transform_point_lowering_exposes_the_four_control_cells() {
+        let effect = author_aces_transform(&[
+            ("exposure_index", PropertyValue::Enum("1600".to_owned())),
+            ("output_transform", PropertyValue::Enum("p3d65".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored transform should compile");
+        let grade = aces_transform_op(&graph).expect("the authored transform is not the identity");
+        let op = EffectRenderOp::AcesTransform { grade };
+        let node_id = graph.nodes[1].id;
+        let lowered = crate::gpu_plan::lower_point_op(node_id, &op)
+            .expect("the transform is point-lowerable");
+        match lowered {
+            crate::gpu_plan::EffectGpuPointOp::AcesTransform { grade: lowered } => {
+                let cells = lowered.gpu_controls();
+                assert_eq!(
+                    cells,
+                    grade.gpu_controls(),
+                    "the lowered grade is carried whole"
+                );
+                assert_eq!(cells.0[0], 1.0, "the master switch");
+                assert_eq!(cells.1[1], 15.0, "the output mid grey");
+                assert_eq!(
+                    (cells.0.len(), cells.1.len(), cells.2.len(), cells.3.len()),
+                    (4, 4, 4, 4),
+                    "the point pass reads four four-component cells"
+                );
+            }
+            other => panic!("unexpected lowered point op {other:?}"),
+        }
     }
 
     fn chromatic_adaptation_op(

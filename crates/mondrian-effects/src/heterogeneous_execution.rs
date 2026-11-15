@@ -2936,6 +2936,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::ChromaticAdaptation { .. } => 135,
         EffectRenderOp::StarBurst { .. } => 136,
         EffectRenderOp::ColorSpaceTransform { .. } => 137,
+        EffectRenderOp::AcesTransform { .. } => 138,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
         EffectRenderOp::Reshape { .. } => 123,
@@ -5297,6 +5298,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::ChromaticAdaptation { .. }
             | crate::EffectRenderOp::StarBurst { .. }
             | crate::EffectRenderOp::ColorSpaceTransform { .. }
+            | crate::EffectRenderOp::AcesTransform { .. }
             | crate::EffectRenderOp::Highlight { .. }
             | crate::EffectRenderOp::GrowBounds { .. }
             | crate::EffectRenderOp::Smear { .. }
