@@ -3717,3 +3717,17 @@ parameter-mondrian-effect-scanlines-composite-type-screen = 滤色
 parameter-mondrian-effect-scanlines-composite-type-add = 相加
 parameter-mondrian-effect-scanlines-composite-type-multiply = 相乘
 parameter-mondrian-effect-scanlines-composite-type-normal = 正常
+## Abstraction 抽象画
+effect-abstraction = 抽象画
+parameter-group-abstraction = 抽象画
+parameter-mondrian-effect-builtin-abstraction-blur-label = 预模糊
+parameter-mondrian-effect-builtin-abstraction-smoothness-label = 抽象强度
+parameter-mondrian-effect-builtin-abstraction-iterations-label = 重复抽象
+parameter-mondrian-effect-builtin-abstraction-quantize-control-label = 量化控制
+parameter-mondrian-effect-builtin-abstraction-quantize-label = 量化
+parameter-mondrian-effect-builtin-abstraction-bins-label = 步数
+parameter-mondrian-effect-builtin-abstraction-softness-label = 柔化
+parameter-mondrian-effect-builtin-abstraction-edge-control-label = 绘制边缘控制
+parameter-mondrian-effect-builtin-abstraction-draw-edges-label = 绘制边缘
+parameter-mondrian-effect-builtin-abstraction-edge-strength-label = 边缘强度
+parameter-mondrian-effect-builtin-abstraction-edge-threshold-label = 边缘阈值

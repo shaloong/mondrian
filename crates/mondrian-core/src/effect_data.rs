@@ -212,6 +212,9 @@ pub enum EffectType {
     /// Scanlines: a coordinate-driven CRT band pattern with per-channel
     /// phase offsets and a selectable composite operator.
     Scanlines,
+    /// Abstraction: a quantised redraw of a pre-blurred frame with an
+    /// optional edge overlay.
+    Abstraction,
     /// Externally registered effect definition, including native-format adapters.
     /// This is a domain definition reference, not an Extension package identity.
     /// The serde name preserves the existing project wire representation.
@@ -363,6 +366,7 @@ impl EffectType {
             Self::Deinterlace => "builtin.deinterlace".to_string(),
             Self::Watercolor => "builtin.watercolor".to_string(),
             Self::Scanlines => "builtin.scanlines".to_string(),
+            Self::Abstraction => "builtin.abstraction".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -498,6 +502,7 @@ impl EffectType {
             "builtin.deinterlace" => Self::Deinterlace,
             "builtin.watercolor" => Self::Watercolor,
             "builtin.scanlines" => Self::Scanlines,
+            "builtin.abstraction" => Self::Abstraction,
             other => Self::External(other.to_string()),
         }
     }
@@ -633,6 +638,7 @@ impl EffectType {
             Self::Deinterlace => "去交错",
             Self::Watercolor => "水彩",
             Self::Scanlines => "扫描线与老电视",
+            Self::Abstraction => "抽象画",
             Self::External(name) => name,
         }
     }
@@ -763,6 +769,7 @@ impl EffectType {
             Self::Deinterlace => vec!["修复"],
             Self::Watercolor => vec!["风格化"],
             Self::Scanlines => vec!["胶片质感"],
+            Self::Abstraction => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -898,6 +905,7 @@ impl EffectType {
             Self::Deinterlace => "deinterlace".to_string(),
             Self::Watercolor => "watercolor".to_string(),
             Self::Scanlines => "scanlines".to_string(),
+            Self::Abstraction => "abstraction".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1411,7 +1419,8 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::BlankingFill
             | Self::Deinterlace
             | Self::Watercolor
-            | Self::Scanlines => Ok(()),
+            | Self::Scanlines
+            | Self::Abstraction => Ok(()),
         }
     }
 }

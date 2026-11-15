@@ -2,6 +2,7 @@
 //!
 //! 高级效果系统：LUT 调色 / 滤镜 / 转场 / 蒙版
 
+pub mod abstraction;
 pub mod adjustment;
 pub mod auxiliary;
 pub mod set_matte;
@@ -200,6 +201,16 @@ pub mod tracking;
 pub mod turbulent_displace;
 pub mod unsharp_mask;
 
+pub use abstraction::{
+    abstraction_frame_f32, AbstractionError, AbstractionGpuControls, AbstractionGrade,
+    AbstractionParameters, ABSTRACTION_DEFAULT_BINS, ABSTRACTION_DEFAULT_BLUR,
+    ABSTRACTION_DEFAULT_EDGE_CONTROL, ABSTRACTION_DEFAULT_EDGE_STRENGTH,
+    ABSTRACTION_DEFAULT_EDGE_THRESHOLD, ABSTRACTION_DEFAULT_ITERATIONS,
+    ABSTRACTION_DEFAULT_QUANTIZE_CONTROL, ABSTRACTION_DEFAULT_SMOOTHNESS,
+    ABSTRACTION_DEFAULT_SOFTNESS, ABSTRACTION_MAX_BINS, ABSTRACTION_MAX_BLUR,
+    ABSTRACTION_MAX_EDGE_STRENGTH, ABSTRACTION_MAX_ITERATIONS, ABSTRACTION_MAX_RADIUS,
+    ABSTRACTION_MIN_BINS, ABSTRACTION_MIN_BLUR, ABSTRACTION_MIN_ITERATIONS,
+};
 pub use adjustment::{
     blend_rgba_f32_pixel, blend_rgba_f32_pixel_seeded, blend_rgba_pixel, blend_rgba_pixel_seeded,
 };

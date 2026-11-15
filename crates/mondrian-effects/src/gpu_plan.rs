@@ -1107,6 +1107,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Deinterlace { .. } => "deinterlace",
         EffectRenderOp::Watercolor { .. } => "watercolor",
         EffectRenderOp::Scanlines { .. } => "scanlines",
+        EffectRenderOp::Abstraction { .. } => "abstraction",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",

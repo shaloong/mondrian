@@ -3789,3 +3789,17 @@ parameter-mondrian-effect-scanlines-composite-type-screen = Screen
 parameter-mondrian-effect-scanlines-composite-type-add = Add
 parameter-mondrian-effect-scanlines-composite-type-multiply = Multiply
 parameter-mondrian-effect-scanlines-composite-type-normal = Normal
+## Abstraction
+effect-abstraction = Abstraction
+parameter-group-abstraction = Abstraction
+parameter-mondrian-effect-builtin-abstraction-blur-label = Pre-blur
+parameter-mondrian-effect-builtin-abstraction-smoothness-label = Abstraction Strength
+parameter-mondrian-effect-builtin-abstraction-iterations-label = Iterations
+parameter-mondrian-effect-builtin-abstraction-quantize-control-label = Quantize Control
+parameter-mondrian-effect-builtin-abstraction-quantize-label = Quantize
+parameter-mondrian-effect-builtin-abstraction-bins-label = Bins
+parameter-mondrian-effect-builtin-abstraction-softness-label = Softness
+parameter-mondrian-effect-builtin-abstraction-edge-control-label = Draw Edges Control
+parameter-mondrian-effect-builtin-abstraction-draw-edges-label = Draw Edges
+parameter-mondrian-effect-builtin-abstraction-edge-strength-label = Edge Strength
+parameter-mondrian-effect-builtin-abstraction-edge-threshold-label = Edge Threshold

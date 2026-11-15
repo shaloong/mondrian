@@ -272,6 +272,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored guide channel and smoothness.
         grade: crate::WatercolorGrade,
     },
+    /// Pre-blur, quantise and optionally draw edges over the frame.
+    Abstraction {
+        /// Authored blur, quantisation and edge controls.
+        grade: crate::AbstractionGrade,
+    },
     /// Radial correction around the green reference channel.
     ChromaticAberrationRemoval {
         /// Authored amounts, edge scale, and normalized centre.
@@ -468,6 +473,7 @@ impl EffectGpuSpatialPass {
             Self::SmartBlur { .. } => "smart_blur",
             Self::Deinterlace { .. } => "deinterlace",
             Self::Watercolor { .. } => "watercolor",
+            Self::Abstraction { .. } => "abstraction",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
             Self::Basic3D { .. } => "basic_3d",
@@ -573,6 +579,8 @@ impl EffectGpuSpatialPass {
             Self::Deinterlace { .. } => 0,
             // The square window reaches the same distance on both axes.
             Self::Watercolor { grade } => grade.radius(),
+            // The blur window and the edge gradient need one more pixel.
+            Self::Abstraction { grade } => grade.input_halo().0,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
@@ -660,6 +668,8 @@ impl EffectGpuSpatialPass {
             Self::Deinterlace { grade } => grade.halo(),
             // The square window reaches the same distance on both axes.
             Self::Watercolor { grade } => grade.radius(),
+            // The blur window and the edge gradient need one more pixel.
+            Self::Abstraction { grade } => grade.input_halo().1,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
@@ -1246,6 +1256,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Watercolor { grade } => {
             Some(EffectGpuSpatialPass::Watercolor { grade: *grade })
         }
+        EffectRenderOp::Abstraction { grade } => {
+            Some(EffectGpuSpatialPass::Abstraction { grade: *grade })
+        }
         EffectRenderOp::ChromaticAberrationRemoval { grade } => {
             Some(EffectGpuSpatialPass::ChromaticAberrationRemoval { grade: *grade })
         }
@@ -1566,6 +1579,35 @@ mod tests {
             pipeline.stages(),
             &[EffectGpuStage::Spatial {
                 pass: EffectGpuSpatialPass::Watercolor { grade },
+                node_id: pipeline.output_value(),
+            }]
+        );
+    }
+
+    #[test]
+    fn abstraction_maps_to_the_dedicated_spatial_pass() {
+        let parameters = crate::AbstractionParameters {
+            blur: 0.5,
+            bins: 4.0,
+            ..crate::AbstractionParameters::default()
+        };
+        let grade = crate::AbstractionGrade::new(parameters).expect("valid grade");
+        let op = EffectRenderOp::Abstraction { grade };
+        let pass = spatial_pass_for(&op).expect("abstraction runs as a spatial pass");
+        assert_eq!(pass, EffectGpuSpatialPass::Abstraction { grade });
+        assert_eq!(pass.name(), "abstraction");
+        // The blur radius plus the one-pixel edge gradient reach both axes.
+        assert_eq!(pass.horizontal_halo(), 5);
+        assert_eq!(pass.vertical_halo(), 5);
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("abstraction pipeline");
+        assert_eq!(
+            pipeline.stages(),
+            &[EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::Abstraction { grade },
                 node_id: pipeline.output_value(),
             }]
         );

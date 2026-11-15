@@ -412,6 +412,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "去交错" => Some("parameter-group-deinterlace"),
         "水彩" => Some("parameter-group-watercolor"),
         "扫描线" => Some("parameter-group-scanlines"),
+        "抽象画" => Some("parameter-group-abstraction"),
         _ => None,
     }
 }

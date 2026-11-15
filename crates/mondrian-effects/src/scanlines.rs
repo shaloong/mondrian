@@ -509,6 +509,10 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    // The fixtures start from the documented defaults and then mutate the
+    // one parameter under test, which reads clearer than a full literal.
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
 
     fn valid_grade(parameters: ScanlinesParameters) -> ScanlinesGrade {

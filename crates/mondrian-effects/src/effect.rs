@@ -1291,6 +1291,12 @@ pub enum EffectRenderOp {
         /// Authored band geometry, colours and composite controls.
         grade: crate::ScanlinesGrade,
     },
+    /// Abstraction: a quantised redraw of a pre-blurred frame with an
+    /// optional edge overlay.
+    Abstraction {
+        /// Authored blur, quantisation and edge controls.
+        grade: crate::AbstractionGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1716,6 +1722,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Scanlines { grade } => {
                 formatter.debug_struct("Scanlines").field("grade", grade).finish()
+            }
+            Self::Abstraction { grade } => {
+                formatter.debug_struct("Abstraction").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2821,6 +2830,12 @@ impl EffectRenderOp {
                 // the whole identity of the kernel.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Abstraction { grade } => {
+                129u8.hash(state);
+                // The blur window, the quantisation grid and the edge map
+                // all read the authored values, so the grade hashes them all.
+                grade.hash_state(state);
+            }
             EffectRenderOp::Scanlines { grade } => {
                 128u8.hash(state);
                 // The band pattern is a pure function of the whole authored
@@ -3078,6 +3093,7 @@ impl EffectRenderOp {
             EffectRenderOp::Deinterlace { .. } => 1,
             EffectRenderOp::Watercolor { .. } => 2,
             EffectRenderOp::Scanlines { .. } => 1,
+            EffectRenderOp::Abstraction { .. } => 3,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3612,7 +3628,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 129] {
+fn builtin_effect_types() -> [EffectType; 130] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3743,6 +3759,7 @@ fn builtin_effect_types() -> [EffectType; 129] {
         EffectType::Deinterlace,
         EffectType::Watercolor,
         EffectType::Scanlines,
+        EffectType::Abstraction,
     ]
 }
 
@@ -12380,6 +12397,134 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::Abstraction => {
+            // The eleven authored values mirror ResolveFX Abstraction: the
+            // pre-blur, the quantisation grid and the edge overlay. Every
+            // value is a normalised control, so the ranges stay inside 0..1
+            // except for the step count, the iteration count and the edge
+            // strength.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blur",
+                "抽象画",
+                "预模糊",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_BLUR),
+                Some(crate::ABSTRACTION_MIN_BLUR as f64),
+                Some(crate::ABSTRACTION_MAX_BLUR as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "smoothness",
+                "抽象画",
+                "抽象强度",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_SMOOTHNESS),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "iterations",
+                "抽象画",
+                "重复抽象",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_ITERATIONS as f32),
+                Some(crate::ABSTRACTION_MIN_ITERATIONS as f64),
+                Some(crate::ABSTRACTION_MAX_ITERATIONS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "quantize_control",
+                "抽象画",
+                "量化控制",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_QUANTIZE_CONTROL),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "quantize",
+                "抽象画",
+                "量化",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "bins",
+                "抽象画",
+                "步数",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_BINS as f32),
+                Some(crate::ABSTRACTION_MIN_BINS as f64),
+                Some(crate::ABSTRACTION_MAX_BINS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "softness",
+                "抽象画",
+                "柔化",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_SOFTNESS),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_control",
+                "抽象画",
+                "绘制边缘控制",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_EDGE_CONTROL),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "draw_edges",
+                "抽象画",
+                "绘制边缘",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_strength",
+                "抽象画",
+                "边缘强度",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_EDGE_STRENGTH),
+                Some(0.0),
+                Some(crate::ABSTRACTION_MAX_EDGE_STRENGTH as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_threshold",
+                "抽象画",
+                "边缘阈值",
+                PropertyValue::Float(crate::ABSTRACTION_DEFAULT_EDGE_THRESHOLD),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::Scanlines => {
             // The nineteen authored values mirror Resolve's ScanlineV2: the band
             // geometry, the two band colours, the per-channel phase offsets and
@@ -14526,6 +14671,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // The band pattern reads only the pixel's own frame coordinate, so
             // every output pixel depends on exactly one input pixel.
             roi_propagation: EffectRoiPropagation::PixelLocal,
+            ..cpu_linear
+        },
+        EffectType::Abstraction => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The blur window and the edge gradient reach a bounded halo of
+            // radius plus one, so the definition-level envelope is the frame.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -20806,6 +20958,74 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Abstraction => Some(Arc::new(move |effect, context, graph| {
+            let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                reason,
+            };
+            fn read(
+                effect: &EffectNode,
+                context: EffectEvalContext,
+                invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                parameter: &str,
+                fallback: f32,
+            ) -> Result<f32, EffectGraphBuildError> {
+                let id = builtin_parameter_id(&effect.effect_type, parameter);
+                match effect.evaluate_parameter(&id, context.time) {
+                    Some(PropertyValue::Float(value)) => Ok(value),
+                    Some(PropertyValue::Int(value)) => Ok(value as f32),
+                    Some(_) => Err(invalid(format!("抽象画的参数 {parameter} 必须是数值"))),
+                    None => Ok(fallback),
+                }
+            }
+            let defaults = crate::AbstractionParameters::default();
+            let mut parameters = defaults;
+            parameters.blur = read(effect, context, &invalid, "blur", defaults.blur)?;
+            parameters.smoothness =
+                read(effect, context, &invalid, "smoothness", defaults.smoothness)?;
+            parameters.iterations =
+                read(effect, context, &invalid, "iterations", defaults.iterations)?;
+            parameters.quantize_control = read(
+                effect,
+                context,
+                &invalid,
+                "quantize_control",
+                defaults.quantize_control,
+            )?;
+            parameters.quantize = read(effect, context, &invalid, "quantize", defaults.quantize)?;
+            parameters.bins = read(effect, context, &invalid, "bins", defaults.bins)?;
+            parameters.softness = read(effect, context, &invalid, "softness", defaults.softness)?;
+            parameters.edge_control = read(
+                effect,
+                context,
+                &invalid,
+                "edge_control",
+                defaults.edge_control,
+            )?;
+            parameters.draw_edges =
+                read(effect, context, &invalid, "draw_edges", defaults.draw_edges)?;
+            parameters.edge_strength = read(
+                effect,
+                context,
+                &invalid,
+                "edge_strength",
+                defaults.edge_strength,
+            )?;
+            parameters.edge_threshold = read(
+                effect,
+                context,
+                &invalid,
+                "edge_threshold",
+                defaults.edge_threshold,
+            )?;
+            let grade = crate::AbstractionGrade::new(parameters)
+                .map_err(|error| invalid(error.to_string()))?;
+            if !grade.is_identity() {
+                graph.append_unary(EffectRenderOp::Abstraction { grade });
+            }
+            Ok(())
+        })),
         EffectType::Scanlines => {
             let composite_type_id = builtin_parameter_id(effect_type, "composite_type");
             Some(Arc::new(move |effect, context, graph| {
@@ -22300,6 +22520,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Deinterlace => "去交错",
         EffectType::Watercolor => "水彩",
         EffectType::Scanlines => "扫描线与老电视",
+        EffectType::Abstraction => "抽象画",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -23703,6 +23924,7 @@ mod tests {
             EffectType::Deinterlace,
             EffectType::Watercolor,
             EffectType::Scanlines,
+            EffectType::Abstraction,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -32999,7 +33221,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 129);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 130);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -33527,7 +33749,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 129);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 130);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -36486,7 +36708,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 129);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 130);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -37622,7 +37844,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 129);
+        assert_eq!(builtin_effect_types().len(), 130);
     }
 
     #[test]
@@ -38125,6 +38347,248 @@ mod tests {
         );
     }
 
+    fn abstraction_op(graph: &EffectRenderGraph) -> Option<crate::AbstractionGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Abstraction { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Abstraction { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_abstraction(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Abstraction)
+            .expect("the abstraction effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Abstraction.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the abstraction parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn abstraction_defaults_match_the_dump() {
+        let effect_type = EffectType::Abstraction;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("blur", "预模糊"),
+            ("smoothness", "抽象强度"),
+            ("iterations", "重复抽象"),
+            ("quantize_control", "量化控制"),
+            ("quantize", "量化"),
+            ("bins", "步数"),
+            ("softness", "柔化"),
+            ("edge_control", "绘制边缘控制"),
+            ("draw_edges", "绘制边缘"),
+            ("edge_strength", "边缘强度"),
+            ("edge_threshold", "边缘阈值"),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("抽象画")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(
+            effect_type.property_namespace(),
+            "abstraction",
+            "the namespace is the FTL key stem"
+        );
+        assert_eq!(effect_type.category_path(), vec!["风格化"]);
+
+        let defaults = [
+            ("blur", crate::ABSTRACTION_DEFAULT_BLUR, 0.0, 1.0),
+            (
+                "smoothness",
+                crate::ABSTRACTION_DEFAULT_SMOOTHNESS,
+                0.0,
+                1.0,
+            ),
+            (
+                "iterations",
+                crate::ABSTRACTION_DEFAULT_ITERATIONS as f32,
+                crate::ABSTRACTION_MIN_ITERATIONS as f64,
+                crate::ABSTRACTION_MAX_ITERATIONS as f64,
+            ),
+            (
+                "quantize_control",
+                crate::ABSTRACTION_DEFAULT_QUANTIZE_CONTROL,
+                0.0,
+                1.0,
+            ),
+            ("quantize", 0.0, 0.0, 1.0),
+            (
+                "bins",
+                crate::ABSTRACTION_DEFAULT_BINS as f32,
+                crate::ABSTRACTION_MIN_BINS as f64,
+                crate::ABSTRACTION_MAX_BINS as f64,
+            ),
+            ("softness", crate::ABSTRACTION_DEFAULT_SOFTNESS, 0.0, 1.0),
+            (
+                "edge_control",
+                crate::ABSTRACTION_DEFAULT_EDGE_CONTROL,
+                0.0,
+                1.0,
+            ),
+            ("draw_edges", 1.0, 0.0, 1.0),
+            (
+                "edge_strength",
+                crate::ABSTRACTION_DEFAULT_EDGE_STRENGTH,
+                0.0,
+                crate::ABSTRACTION_MAX_EDGE_STRENGTH as f64,
+            ),
+            (
+                "edge_threshold",
+                crate::ABSTRACTION_DEFAULT_EDGE_THRESHOLD,
+                0.0,
+                1.0,
+            ),
+        ];
+        for (parameter, (default, min, max)) in
+            defaults.into_iter().map(|entry| (entry.0, (entry.1, entry.2, entry.3)))
+        {
+            let path = effect_type.property_path(parameter);
+            let property = properties.property(&path).expect("the parameter is defined");
+            assert_eq!(property.evaluate(tt(0)), PropertyValue::Float(default));
+            let numeric = property
+                .descriptor
+                .schema
+                .numeric
+                .as_ref()
+                .expect("every numeric parameter declares a range");
+            let contract = numeric.first().expect("one numeric contract per parameter");
+            assert_eq!(contract.hard_range.min, min, "{parameter} minimum");
+            assert_eq!(contract.hard_range.max, max, "{parameter} maximum");
+        }
+        assert_eq!(
+            crate::AbstractionGrade::documented_defaults().parameters().bins,
+            crate::ABSTRACTION_DEFAULT_BINS as f32
+        );
+    }
+
+    #[test]
+    fn abstraction_defaults_build_one_spatial_op_with_scratch() {
+        let effect = instantiate_effect_node(EffectType::Abstraction)
+            .expect("the abstraction effect should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the default abstraction should compile");
+        let grade = abstraction_op(&graph).expect("the default parameters emit the redraw");
+        assert_eq!(grade, crate::AbstractionGrade::documented_defaults());
+        assert_eq!(
+            graph.nodes.len(),
+            2,
+            "the source plus exactly one abstraction node"
+        );
+        let op = EffectRenderOp::Abstraction { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            2,
+            "the two separable blur planes are full-frame scratch"
+        );
+        assert_eq!(op.estimated_cost(), 3);
+        let pass = crate::spatial_pass_for(&op).expect("the redraw runs as a spatial pass");
+        assert_eq!(pass.name(), "abstraction");
+        assert_eq!(pass.horizontal_halo(), 2);
+        assert_eq!(pass.vertical_halo(), 2);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            130
+        );
+    }
+
+    #[test]
+    fn abstraction_identity_builds_no_node() {
+        // With no blur, no quantisation and no edge overlay the kernel is a byte
+        // identity, so the builder must elide the node.
+        let effect = author_abstraction(&[
+            ("blur", PropertyValue::Float(0.0)),
+            ("quantize", PropertyValue::Float(0.0)),
+            ("draw_edges", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the identity configuration should compile");
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(abstraction_op(&graph), None);
+    }
+
+    #[test]
+    fn abstraction_parameters_round_trip() {
+        let effect = author_abstraction(&[
+            ("blur", PropertyValue::Float(0.5)),
+            ("bins", PropertyValue::Float(16.0)),
+            ("iterations", PropertyValue::Float(5.0)),
+            ("quantize", PropertyValue::Float(1.0)),
+            ("edge_strength", PropertyValue::Float(5.0)),
+        ]);
+        let document = serde_json::to_value(&effect).expect("serialize the node");
+        let restored: EffectNode =
+            serde_json::from_value(document).expect("reopen the authored node");
+        let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
+            .expect("the reopened abstraction should compile");
+        let parameters = crate::AbstractionParameters {
+            blur: 0.5,
+            bins: 16.0,
+            iterations: 5.0,
+            quantize: 1.0,
+            edge_strength: 5.0,
+            ..crate::AbstractionParameters::default()
+        };
+        let grade = abstraction_op(&graph).expect("the authored values emit the redraw");
+        assert_eq!(
+            grade,
+            crate::AbstractionGrade::new(parameters).expect("the authored values are in range")
+        );
+        assert_eq!(grade.radius(), 4, "round(0.5 * 8) widens the blur window");
+        assert_eq!(grade.bins(), 16);
+        assert_eq!(grade.iterations(), 5);
+    }
+
+    #[test]
+    fn abstraction_invalid_edge_strength_is_an_author_error() {
+        let effect = instantiate_effect_node(EffectType::Abstraction)
+            .expect("the abstraction effect should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "abstraction.edge_strength",
+            serde_json::json!({"Float": 20.0}),
+        );
+        let tampered: EffectNode =
+            serde_json::from_value(document).expect("reopen the tampered node");
+        let error = build_effect_render_graph(&[tampered], tt(0), TEST_WORKING_SPACE)
+            .expect_err("an edge strength past the authored range must not reach a graph");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::InvalidAuthorState {
+                effect_id: reported,
+                ..
+            } if reported == effect_id
+        ));
+        let reason = format!("{error:?}");
+        assert!(
+            reason.contains("abstraction.edge_strength"),
+            "the persisted value contract names the parameter: {reason}"
+        );
+    }
+
     fn scanlines_op(graph: &EffectRenderGraph) -> Option<crate::ScanlinesGrade> {
         graph.nodes.iter().find_map(|node| match &node.kind {
             EffectGraphNodeKind::UnaryEffect {
@@ -38311,11 +38775,13 @@ mod tests {
             serde_json::from_value(document).expect("reopen the authored node");
         let graph = build_effect_render_graph(&[restored], tt(0), TEST_WORKING_SPACE)
             .expect("the reopened scanlines should compile");
-        let mut parameters = crate::ScanlinesParameters::default();
-        parameters.frequency = 30.0;
-        parameters.angle_degrees = 90.0;
-        parameters.color2[0] = 0.25;
-        parameters.composite_type = crate::ScanlinesComposite::Screen;
+        let parameters = crate::ScanlinesParameters {
+            frequency: 30.0,
+            angle_degrees: 90.0,
+            color2: [0.25, 0.0, 0.0],
+            composite_type: crate::ScanlinesComposite::Screen,
+            ..crate::ScanlinesParameters::default()
+        };
         assert_eq!(
             scanlines_op(&graph),
             Some(crate::ScanlinesGrade::new(parameters).expect("the authored values are in range"))
