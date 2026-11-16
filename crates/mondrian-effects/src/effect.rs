@@ -1297,6 +1297,12 @@ pub enum EffectRenderOp {
         /// Authored blur, quantisation and edge controls.
         grade: crate::AbstractionGrade,
     },
+    /// Cartoon: posterises the frame into flat shades and optionally traces
+    /// the shade boundaries with an ink edge overlay.
+    Cartoon {
+        /// Authored shade detail, edge ink and render mode controls.
+        grade: crate::CartoonGrade,
+    },
     /// Light leak: a tinted streak that brightens the frame along an authored
     /// direction, with an optional per-frame flicker.
     LightLeak {
@@ -1775,6 +1781,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Abstraction { grade } => {
                 formatter.debug_struct("Abstraction").field("grade", grade).finish()
+            }
+            Self::Cartoon { grade } => {
+                formatter.debug_struct("Cartoon").field("grade", grade).finish()
             }
             Self::LightLeak { grade } => {
                 formatter.debug_struct("LightLeak").field("grade", grade).finish()
@@ -2913,6 +2922,12 @@ impl EffectRenderOp {
                 // all read the authored values, so the grade hashes them all.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Cartoon { grade } => {
+                139u8.hash(state);
+                // The shade grid, the ink edges and the render mode all read
+                // the authored values, so the grade hashes them all.
+                grade.hash_state(state);
+            }
             EffectRenderOp::ColorDifferenceKey { grade } => {
                 132u8.hash(state);
                 // The key colour, the two partial mattes and the mask levels
@@ -3227,6 +3242,7 @@ impl EffectRenderOp {
             EffectRenderOp::Watercolor { .. } => 2,
             EffectRenderOp::Scanlines { .. } => 1,
             EffectRenderOp::Abstraction { .. } => 3,
+            EffectRenderOp::Cartoon { .. } => 3,
             EffectRenderOp::LightLeak { .. } => 1,
             EffectRenderOp::Highlight { .. } => 4,
             EffectRenderOp::ColorDifferenceKey { .. } => 1,
@@ -3770,7 +3786,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 139] {
+fn builtin_effect_types() -> [EffectType; 140] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3902,6 +3918,7 @@ fn builtin_effect_types() -> [EffectType; 139] {
         EffectType::Watercolor,
         EffectType::Scanlines,
         EffectType::Abstraction,
+        EffectType::Cartoon,
         EffectType::LightLeak,
         EffectType::Highlight,
         EffectType::ColorDifferenceKey,
@@ -12676,6 +12693,150 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::Cartoon => {
+            // The twelve authored values mirror the kernel: the render mode,
+            // the shade pre-blur and its thresholds, the posterisation steps
+            // and softening, and the ink edge controls.
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "render",
+                "卡通",
+                "渲染",
+                crate::CartoonRender::DEFAULT.as_key(),
+                crate::CartoonRender::ALL
+                    .iter()
+                    .map(|render| {
+                        ParameterEnumOption::new(
+                            render.as_key(),
+                            render.label(),
+                            format!("builtin.cartoon.render.{}", render.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "detail_radius",
+                "卡通",
+                "细节半径",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_DETAIL_RADIUS),
+                Some(crate::CARTOON_MIN_DETAIL_RADIUS as f64),
+                Some(crate::CARTOON_MAX_DETAIL_RADIUS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "detail_threshold",
+                "卡通",
+                "细节阈值",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_DETAIL_THRESHOLD),
+                Some(crate::CARTOON_MIN_DETAIL_THRESHOLD as f64),
+                Some(crate::CARTOON_MAX_DETAIL_THRESHOLD as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_steps",
+                "卡通",
+                "阴影步骤",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_SHADOW_STEPS as f32),
+                Some(crate::CARTOON_MIN_SHADOW_STEPS as f64),
+                Some(crate::CARTOON_MAX_SHADOW_STEPS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_smoothness",
+                "卡通",
+                "阴影平滑度",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_SHADOW_SMOOTHNESS),
+                Some(crate::CARTOON_MIN_SHADOW_SMOOTHNESS as f64),
+                Some(crate::CARTOON_MAX_SHADOW_SMOOTHNESS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "threshold",
+                "卡通",
+                "阈值",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_THRESHOLD),
+                Some(crate::CARTOON_MIN_THRESHOLD as f64),
+                Some(crate::CARTOON_MAX_THRESHOLD as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "width",
+                "卡通",
+                "宽度",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_WIDTH),
+                Some(crate::CARTOON_MIN_WIDTH as f64),
+                Some(crate::CARTOON_MAX_WIDTH as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "softness",
+                "卡通",
+                "柔和度",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_SOFTNESS),
+                Some(crate::CARTOON_MIN_SOFTNESS as f64),
+                Some(crate::CARTOON_MAX_SOFTNESS as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                "卡通",
+                "不透明度",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_OPACITY),
+                Some(crate::CARTOON_MIN_OPACITY as f64),
+                Some(crate::CARTOON_MAX_OPACITY as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_enhance",
+                "卡通",
+                "边缘增强",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_EDGE_ENHANCE),
+                Some(crate::CARTOON_MIN_EDGE_ENHANCE as f64),
+                Some(crate::CARTOON_MAX_EDGE_ENHANCE as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_black_level",
+                "卡通",
+                "边缘黑色阶",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_EDGE_BLACK_LEVEL),
+                Some(crate::CARTOON_MIN_EDGE_BLACK_LEVEL as f64),
+                Some(crate::CARTOON_MAX_EDGE_BLACK_LEVEL as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_contrast",
+                "卡通",
+                "边缘对比度",
+                PropertyValue::Float(crate::CARTOON_DEFAULT_EDGE_CONTRAST),
+                Some(crate::CARTOON_MIN_EDGE_CONTRAST as f64),
+                Some(crate::CARTOON_MAX_EDGE_CONTRAST as f64),
+                Some(0.01),
+            );
+        }
         EffectType::ColorDifferenceKey => {
             // The fifteen authored values mirror the specified key: the key
             // colour and accuracy, the two partial mattes with their own
@@ -15984,6 +16145,17 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::LightSweep, "width" | "edge_thickness") => ParameterUnit::Pixels,
         (EffectType::LightSweep, "direction") => ParameterUnit::Degrees,
         (EffectType::LightSweep, "sweep_intensity" | "edge_intensity") => ParameterUnit::Percent,
+        (EffectType::Cartoon, "detail_radius" | "width") => ParameterUnit::Pixels,
+        (
+            EffectType::Cartoon,
+            "detail_threshold" | "shadow_smoothness" | "threshold" | "softness" | "opacity"
+            | "edge_enhance",
+        ) => ParameterUnit::Percent,
+        // The step count, the black level offset, the contrast ratio and the
+        // render mode are plain numbers, so they carry no unit.
+        (EffectType::Cartoon, "shadow_steps" | "edge_black_level" | "edge_contrast" | "render") => {
+            ParameterUnit::Unitless
+        }
         _ => ParameterUnit::Unitless,
     }
 }
@@ -16439,6 +16611,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The blur window and the edge gradient reach a bounded halo of
             // radius plus one, so the definition-level envelope is the frame.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::Cartoon => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The shade pre-blur and the ink edge pass reach a bounded halo of
+            // the detail radius plus the edge width, so the definition-level
+            // envelope is the whole frame.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -22846,6 +23026,118 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             }
             Ok(())
         })),
+        EffectType::Cartoon => Some(Arc::new(move |effect, context, graph| {
+            let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                effect_key: effect.effect_type.key(),
+                effect_id: effect.id,
+                reason,
+            };
+            fn read(
+                effect: &EffectNode,
+                context: EffectEvalContext,
+                invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                parameter: &str,
+                fallback: f32,
+            ) -> Result<f32, EffectGraphBuildError> {
+                let id = builtin_parameter_id(&effect.effect_type, parameter);
+                match effect.evaluate_parameter(&id, context.time) {
+                    Some(PropertyValue::Float(value)) => Ok(value),
+                    Some(PropertyValue::Int(value)) => Ok(value as f32),
+                    Some(_) => Err(invalid(format!("卡通的参数 {parameter} 必须是数值"))),
+                    None => Ok(fallback),
+                }
+            }
+            fn read_enum<T: Copy>(
+                effect: &EffectNode,
+                context: EffectEvalContext,
+                invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                id: &ParameterId,
+                name: &str,
+                from_key: fn(&str) -> Option<T>,
+            ) -> Result<Option<T>, EffectGraphBuildError> {
+                match effect.evaluate_parameter(id, context.time) {
+                    Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                        Some(value) => Ok(Some(value)),
+                        None => Err(invalid(format!("卡通的{name}没有对应的菜单项 {key}"))),
+                    },
+                    Some(_) => Err(invalid(format!("卡通的{name}必须是菜单项"))),
+                    None => Ok(None),
+                }
+            }
+            let render_id = builtin_parameter_id(&effect.effect_type, "render");
+            let defaults = crate::CartoonParameters::default();
+            let mut parameters = defaults;
+            if let Some(value) = read_enum(
+                effect,
+                context,
+                &invalid,
+                &render_id,
+                "渲染",
+                crate::CartoonRender::from_key,
+            )? {
+                parameters.render = value;
+            }
+            parameters.detail_radius = read(
+                effect,
+                context,
+                &invalid,
+                "detail_radius",
+                defaults.detail_radius,
+            )?;
+            parameters.detail_threshold = read(
+                effect,
+                context,
+                &invalid,
+                "detail_threshold",
+                defaults.detail_threshold,
+            )?;
+            parameters.shadow_steps = read(
+                effect,
+                context,
+                &invalid,
+                "shadow_steps",
+                defaults.shadow_steps,
+            )?;
+            parameters.shadow_smoothness = read(
+                effect,
+                context,
+                &invalid,
+                "shadow_smoothness",
+                defaults.shadow_smoothness,
+            )?;
+            parameters.threshold =
+                read(effect, context, &invalid, "threshold", defaults.threshold)?;
+            parameters.width = read(effect, context, &invalid, "width", defaults.width)?;
+            parameters.softness = read(effect, context, &invalid, "softness", defaults.softness)?;
+            parameters.opacity = read(effect, context, &invalid, "opacity", defaults.opacity)?;
+            parameters.edge_enhance = read(
+                effect,
+                context,
+                &invalid,
+                "edge_enhance",
+                defaults.edge_enhance,
+            )?;
+            parameters.edge_black_level = read(
+                effect,
+                context,
+                &invalid,
+                "edge_black_level",
+                defaults.edge_black_level,
+            )?;
+            parameters.edge_contrast = read(
+                effect,
+                context,
+                &invalid,
+                "edge_contrast",
+                defaults.edge_contrast,
+            )?;
+            let grade =
+                crate::CartoonGrade::new(parameters).map_err(|error| invalid(error.to_string()))?;
+            if !grade.is_identity() {
+                graph.append_unary(EffectRenderOp::Cartoon { grade });
+            }
+            Ok(())
+        })),
         EffectType::ColorDifferenceKey => {
             let key_id = builtin_parameter_id(effect_type, "key_colour");
             Some(Arc::new(move |effect, context, graph| {
@@ -25268,6 +25560,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Watercolor => "水彩",
         EffectType::Scanlines => "扫描线与老电视",
         EffectType::Abstraction => "抽象画",
+        EffectType::Cartoon => "卡通",
         EffectType::LightLeak => "漏光",
         EffectType::Highlight => "高光提取",
         EffectType::ColorDifferenceKey => "颜色差值键",
@@ -26681,6 +26974,7 @@ mod tests {
             EffectType::Watercolor,
             EffectType::Scanlines,
             EffectType::Abstraction,
+            EffectType::Cartoon,
             EffectType::LightLeak,
             EffectType::Highlight,
             EffectType::ColorDifferenceKey,
@@ -35986,7 +36280,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 139);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 140);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -36514,7 +36808,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 139);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 140);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -39473,7 +39767,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 139);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 140);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -40609,7 +40903,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 139);
+        assert_eq!(builtin_effect_types().len(), 140);
     }
 
     #[test]
@@ -43088,6 +43382,190 @@ mod tests {
             }
             other => panic!("unexpected lowered point op {other:?}"),
         }
+    }
+
+    fn cartoon_op(graph: &EffectRenderGraph) -> Option<crate::CartoonGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Cartoon { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Cartoon { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_cartoon(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Cartoon)
+            .expect("the cartoon effect should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Cartoon.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the cartoon parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn cartoon_identity_builds_no_node() {
+        let effect = author_cartoon(&[
+            ("render", PropertyValue::Enum("edges".to_owned())),
+            ("opacity", PropertyValue::Float(0.0)),
+            ("edge_black_level", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the switched-off cartoon should compile");
+        assert!(
+            cartoon_op(&graph).is_none(),
+            "edges-only output at zero opacity is the identity"
+        );
+        assert_eq!(graph.nodes.len(), 1, "only the source survives");
+    }
+
+    #[test]
+    fn cartoon_defaults_build_one_spatial_op() {
+        let effect =
+            instantiate_effect_node(EffectType::Cartoon).expect("the cartoon should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = cartoon_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::CartoonGrade::documented_defaults());
+        assert_eq!(graph.nodes.len(), 2, "the source plus one cartoon node");
+        let op = EffectRenderOp::Cartoon { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            2,
+            "the shade and edge passes each keep one plane"
+        );
+        assert_eq!(op.estimated_cost(), 3);
+        let pass = crate::spatial_pass_for(&op).expect("the cartoon is a spatial pass");
+        assert_eq!(pass, crate::EffectGpuSpatialPass::Cartoon { grade });
+        assert_eq!(pass.name(), "cartoon");
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            140
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::Cartoon {
+            grade: crate::CartoonGrade::new(crate::CartoonParameters::default())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn cartoon_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::Cartoon;
+        let properties = default_properties_for(effect_type.clone());
+        let property = properties
+            .property(&effect_type.property_path("render"))
+            .expect("the render menu is defined");
+        assert_eq!(
+            property.evaluate(tt(0)),
+            PropertyValue::Enum("fill_and_edges".to_owned())
+        );
+        let options = &property.descriptor.schema.enum_options;
+        let keys: &[&str] = &["fill", "edges", "fill_and_edges"];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, *key);
+            assert_eq!(option.message_id, format!("builtin.cartoon.render.{key}"));
+        }
+
+        for (key, render) in [
+            ("fill", crate::CartoonRender::Fill),
+            ("edges", crate::CartoonRender::Edges),
+            ("fill_and_edges", crate::CartoonRender::FillAndEdges),
+        ] {
+            assert_eq!(crate::CartoonRender::from_key(key), Some(render));
+            assert_eq!(render.as_key(), key);
+        }
+        assert_eq!(crate::CartoonRender::Fill.label(), "填充");
+        assert_eq!(crate::CartoonRender::Edges.label(), "边缘");
+        assert_eq!(crate::CartoonRender::FillAndEdges.label(), "填充与边缘");
+    }
+
+    #[test]
+    fn cartoon_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::Cartoon;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::FullFrame);
+    }
+
+    #[test]
+    fn cartoon_out_of_range_parameter_is_an_author_error() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Cartoon).expect("the cartoon should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Cartoon.property_path("detail_radius"),
+                value: PropertyValue::Float(41.0),
+            })
+            .expect_err("a radius above forty should fail");
+        let message = error.to_string();
+        assert!(message.contains("cartoon.detail_radius"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect =
+            instantiate_effect_node(EffectType::Cartoon).expect("the cartoon should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "cartoon.detail_radius",
+            serde_json::json!(41.5),
+        );
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a radius above forty should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.cartoon");
+                    assert!(reason.contains("detail_radius"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn cartoon_halo_covers_the_blur_and_the_edge_reach() {
+        let parameters = crate::CartoonParameters {
+            detail_radius: 10.0,
+            width: 3.4,
+            ..crate::CartoonParameters::default()
+        };
+        let grade = crate::CartoonGrade::new(parameters).expect("the authored values are in range");
+        assert_eq!(grade.radius(), 10);
+        assert_eq!(grade.edge_width(), 4);
+        let expected = grade.radius() + grade.edge_width() + 1;
+        assert_eq!(grade.input_halo(), (expected, expected));
+        assert_eq!(grade.input_halo(), (15, 15));
+
+        let op = EffectRenderOp::Cartoon { grade };
+        let pass = crate::spatial_pass_for(&op).expect("the cartoon is a spatial pass");
+        assert_eq!(pass.horizontal_halo(), expected);
+        assert_eq!(pass.vertical_halo(), expected);
     }
 
     fn chromatic_adaptation_op(

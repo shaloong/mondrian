@@ -215,6 +215,8 @@ pub enum EffectType {
     /// Abstraction: a quantised redraw of a pre-blurred frame with an
     /// optional edge overlay.
     Abstraction,
+    /// Cartoon: a posterised shade pass with an optional ink edge overlay.
+    Cartoon,
     /// Light leak: a tinted streak that brightens the frame along an authored
     /// direction, with an optional per-frame flicker.
     LightLeak,
@@ -391,6 +393,7 @@ impl EffectType {
             Self::Watercolor => "builtin.watercolor".to_string(),
             Self::Scanlines => "builtin.scanlines".to_string(),
             Self::Abstraction => "builtin.abstraction".to_string(),
+            Self::Cartoon => "builtin.cartoon".to_string(),
             Self::LightLeak => "builtin.light_leak".to_string(),
             Self::Highlight => "builtin.highlight".to_string(),
             Self::CineonConverter => "builtin.cineon_converter".to_string(),
@@ -536,6 +539,7 @@ impl EffectType {
             "builtin.watercolor" => Self::Watercolor,
             "builtin.scanlines" => Self::Scanlines,
             "builtin.abstraction" => Self::Abstraction,
+            "builtin.cartoon" => Self::Cartoon,
             "builtin.light_leak" => Self::LightLeak,
             "builtin.highlight" => Self::Highlight,
             "builtin.cineon_converter" => Self::CineonConverter,
@@ -681,6 +685,7 @@ impl EffectType {
             Self::Watercolor => "水彩",
             Self::Scanlines => "扫描线与老电视",
             Self::Abstraction => "抽象画",
+            Self::Cartoon => "卡通",
             Self::LightLeak => "漏光",
             Self::Highlight => "高光提取",
             Self::CineonConverter => "对数转换",
@@ -827,6 +832,7 @@ impl EffectType {
             Self::Watercolor => vec!["风格化"],
             Self::Scanlines => vec!["胶片质感"],
             Self::Abstraction => vec!["风格化"],
+            Self::Cartoon => vec!["风格化"],
             Self::LightLeak => vec!["胶片质感"],
             Self::Highlight => vec!["光效"],
             Self::LightSweep => vec!["光效"],
@@ -966,6 +972,7 @@ impl EffectType {
             Self::Watercolor => "watercolor".to_string(),
             Self::Scanlines => "scanlines".to_string(),
             Self::Abstraction => "abstraction".to_string(),
+            Self::Cartoon => "cartoon".to_string(),
             Self::LightLeak => "light_leak".to_string(),
             Self::Highlight => "highlight".to_string(),
             Self::CineonConverter => "cineon_converter".to_string(),
@@ -1490,6 +1497,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::Watercolor
             | Self::Scanlines
             | Self::Abstraction
+            | Self::Cartoon
             | Self::LightLeak
             | Self::Highlight
             | Self::CineonConverter

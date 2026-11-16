@@ -277,6 +277,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored blur, quantisation and edge controls.
         grade: crate::AbstractionGrade,
     },
+    /// Posterise flat shades and optionally ink the shade boundaries.
+    Cartoon {
+        /// Authored shade detail, edge ink and render mode controls.
+        grade: crate::CartoonGrade,
+    },
     /// Radial correction around the green reference channel.
     ChromaticAberrationRemoval {
         /// Authored amounts, edge scale, and normalized centre.
@@ -479,6 +484,7 @@ impl EffectGpuSpatialPass {
             Self::Deinterlace { .. } => "deinterlace",
             Self::Watercolor { .. } => "watercolor",
             Self::Abstraction { .. } => "abstraction",
+            Self::Cartoon { .. } => "cartoon",
             Self::Highlight { .. } => "highlight",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
@@ -587,6 +593,8 @@ impl EffectGpuSpatialPass {
             Self::Watercolor { grade } => grade.radius(),
             // The blur window and the edge gradient need one more pixel.
             Self::Abstraction { grade } => grade.input_halo().0,
+            // The shade pre-blur and the ink edge pass need one more pixel.
+            Self::Cartoon { grade } => grade.input_halo().0,
             // The authored length is a fraction of the frame width, so the ray
             // can reach any distance and the plane is never tiled.
             Self::Highlight { .. } => u32::MAX,
@@ -679,6 +687,8 @@ impl EffectGpuSpatialPass {
             Self::Watercolor { grade } => grade.radius(),
             // The blur window and the edge gradient need one more pixel.
             Self::Abstraction { grade } => grade.input_halo().1,
+            // Same reach as the horizontal halo.
+            Self::Cartoon { grade } => grade.input_halo().1,
             // Same unbounded reach as the horizontal halo.
             Self::Highlight { .. } => u32::MAX,
             Self::BilateralBlur { grade } => grade.halo(),
@@ -1270,6 +1280,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Abstraction { grade } => {
             Some(EffectGpuSpatialPass::Abstraction { grade: *grade })
         }
+        EffectRenderOp::Cartoon { grade } => Some(EffectGpuSpatialPass::Cartoon { grade: *grade }),
         EffectRenderOp::Highlight { grade } => {
             Some(EffectGpuSpatialPass::Highlight { grade: *grade })
         }
@@ -1622,6 +1633,36 @@ mod tests {
             pipeline.stages(),
             &[EffectGpuStage::Spatial {
                 pass: EffectGpuSpatialPass::Abstraction { grade },
+                node_id: pipeline.output_value(),
+            }]
+        );
+    }
+
+    #[test]
+    fn cartoon_maps_to_the_dedicated_spatial_pass() {
+        let parameters = crate::CartoonParameters {
+            detail_radius: 0.5,
+            width: 2.0,
+            ..crate::CartoonParameters::default()
+        };
+        let grade = crate::CartoonGrade::new(parameters).expect("valid grade");
+        let op = EffectRenderOp::Cartoon { grade };
+        let pass = spatial_pass_for(&op).expect("cartoon runs as a spatial pass");
+        assert_eq!(pass, EffectGpuSpatialPass::Cartoon { grade });
+        assert_eq!(pass.name(), "cartoon");
+        // One pixel of radius, two of edge width and the one-pixel reach both
+        // axes share.
+        assert_eq!(pass.horizontal_halo(), 4);
+        assert_eq!(pass.vertical_halo(), 4);
+
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(op);
+        let pipeline =
+            lower_effect_graph_to_gpu_pipeline(&compile(builder)).expect("cartoon pipeline");
+        assert_eq!(
+            pipeline.stages(),
+            &[EffectGpuStage::Spatial {
+                pass: EffectGpuSpatialPass::Cartoon { grade },
                 node_id: pipeline.output_value(),
             }]
         );

@@ -615,6 +615,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Cartoon { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "cartoon",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Basic3D { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "basic_3d",
@@ -1463,6 +1469,8 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::Lut3D { .. } => 0,
         // The two blur passes each keep one full-frame plane.
         EffectRenderOp::Abstraction { .. } => 2,
+        // The shade pre-blur and the ink edge pass each keep one plane.
+        EffectRenderOp::Cartoon { .. } => 2,
     }
 }
 
@@ -2014,6 +2022,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 checkpoint,
             )
         }
+        EffectRenderOp::Cartoon { grade } => crate::cartoon::apply_cartoon_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            grade,
+            checkpoint,
+        ),
         EffectRenderOp::Deinterlace { grade } => {
             crate::deinterlace::apply_deinterlace_f32_controlled(
                 working,

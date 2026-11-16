@@ -4060,3 +4060,22 @@ parameter-builtin-light-sweep-shape-soft = Soft
 parameter-builtin-light-sweep-reception-screen = Screen
 parameter-builtin-light-sweep-reception-add = Add
 parameter-builtin-light-sweep-reception-normal = Cover
+
+## Cartoon 卡通
+effect-cartoon = Cartoon
+parameter-group-cartoon = Cartoon
+parameter-mondrian-effect-builtin-cartoon-render-label = Render
+parameter-mondrian-effect-builtin-cartoon-detail-radius-label = Detail Radius
+parameter-mondrian-effect-builtin-cartoon-detail-threshold-label = Detail Threshold
+parameter-mondrian-effect-builtin-cartoon-shadow-steps-label = Shadow Steps
+parameter-mondrian-effect-builtin-cartoon-shadow-smoothness-label = Shadow Smoothness
+parameter-mondrian-effect-builtin-cartoon-threshold-label = Threshold
+parameter-mondrian-effect-builtin-cartoon-width-label = Width
+parameter-mondrian-effect-builtin-cartoon-softness-label = Softness
+parameter-mondrian-effect-builtin-cartoon-opacity-label = Opacity
+parameter-mondrian-effect-builtin-cartoon-edge-enhance-label = Edge Enhance
+parameter-mondrian-effect-builtin-cartoon-edge-black-level-label = Edge Black Level
+parameter-mondrian-effect-builtin-cartoon-edge-contrast-label = Edge Contrast
+parameter-builtin-cartoon-render-fill = Fill
+parameter-builtin-cartoon-render-edges = Edges
+parameter-builtin-cartoon-render-fill-and-edges = Fill and Edges

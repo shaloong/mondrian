@@ -3988,3 +3988,22 @@ parameter-builtin-light-sweep-shape-soft = 柔和
 parameter-builtin-light-sweep-reception-screen = 滤色
 parameter-builtin-light-sweep-reception-add = 相加
 parameter-builtin-light-sweep-reception-normal = 覆盖
+
+## Cartoon 卡通
+effect-cartoon = 卡通
+parameter-group-cartoon = 卡通
+parameter-mondrian-effect-builtin-cartoon-render-label = 渲染
+parameter-mondrian-effect-builtin-cartoon-detail-radius-label = 细节半径
+parameter-mondrian-effect-builtin-cartoon-detail-threshold-label = 细节阈值
+parameter-mondrian-effect-builtin-cartoon-shadow-steps-label = 阴影步骤
+parameter-mondrian-effect-builtin-cartoon-shadow-smoothness-label = 阴影平滑度
+parameter-mondrian-effect-builtin-cartoon-threshold-label = 阈值
+parameter-mondrian-effect-builtin-cartoon-width-label = 宽度
+parameter-mondrian-effect-builtin-cartoon-softness-label = 柔和度
+parameter-mondrian-effect-builtin-cartoon-opacity-label = 不透明度
+parameter-mondrian-effect-builtin-cartoon-edge-enhance-label = 边缘增强
+parameter-mondrian-effect-builtin-cartoon-edge-black-level-label = 边缘黑色阶
+parameter-mondrian-effect-builtin-cartoon-edge-contrast-label = 边缘对比度
+parameter-builtin-cartoon-render-fill = 填充
+parameter-builtin-cartoon-render-edges = 边缘
+parameter-builtin-cartoon-render-fill-and-edges = 填充与边缘

@@ -3672,6 +3672,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Watercolor { .. } => "watercolor",
         crate::EffectRenderOp::Scanlines { .. } => "scanlines",
         crate::EffectRenderOp::Abstraction { .. } => "abstraction",
+        crate::EffectRenderOp::Cartoon { .. } => "cartoon",
         crate::EffectRenderOp::LightLeak { .. } => "light_leak",
         crate::EffectRenderOp::ColorDifferenceKey { .. } => "color_difference_key",
         crate::EffectRenderOp::CineonConverter { .. } => "cineon_converter",

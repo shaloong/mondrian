@@ -3243,6 +3243,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Watercolor { .. } => "watercolor",
         EffectRenderOp::Scanlines { .. } => "scanlines",
         EffectRenderOp::Abstraction { .. } => "abstraction",
+        EffectRenderOp::Cartoon { .. } => "cartoon",
         EffectRenderOp::LightLeak { .. } => "light_leak",
         EffectRenderOp::ColorDifferenceKey { .. } => "color_difference_key",
         EffectRenderOp::CineonConverter { .. } => "cineon_converter",
