@@ -89,6 +89,9 @@ pub(crate) struct EffectSpatialGpu {
     abstraction_horizontal: wgpu::RenderPipeline,
     abstraction_vertical: wgpu::RenderPipeline,
     abstraction: wgpu::RenderPipeline,
+    cartoon_horizontal: wgpu::RenderPipeline,
+    cartoon_vertical: wgpu::RenderPipeline,
+    cartoon: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
     grow_bounds: wgpu::RenderPipeline,
@@ -1013,6 +1016,67 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Cartoon reuses abstraction's separable tent for its two pre-blur
+        // planes, then a combine pass that reads both the original frame and
+        // the vertical plane.
+        let cartoon_horizontal = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.cartoon_horizontal"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_cartoon_horizontal"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let cartoon_vertical = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.cartoon_vertical"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_cartoon_vertical"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let basic_3d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.basic-3d"),
             layout: Some(&layout),
@@ -1474,6 +1538,37 @@ impl EffectSpatialGpu {
             label: Some("mondrian.effect-spatial.composite-layout"),
             bind_group_layouts: &[Some(&composite_bindings)],
             immediate_size: 0,
+        });
+        // The cartoon combine pass needs the original frame *and* the vertical
+        // blur plane, so it lives on the two-texture composite layout.
+        let cartoon = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.cartoon"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_cartoon"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         });
         let blanking_fill_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mondrian.effect-spatial.blanking-fill"),
@@ -2403,6 +2498,9 @@ impl EffectSpatialGpu {
             abstraction_horizontal,
             abstraction_vertical,
             abstraction,
+            cartoon_horizontal,
+            cartoon_vertical,
+            cartoon,
             basic_3d,
             camera_view,
             grow_bounds,
@@ -3144,6 +3242,78 @@ impl EffectSpatialGpu {
         Ok(scratch[2].clone())
     }
 
+    /// Records the cartoon tone separation and edge pass.
+    ///
+    /// Three passes: one separable tent per axis, then the combine pass. The
+    /// combine needs the original frame *and* the vertical blur plane, so it
+    /// runs on the composite layout: binding 0 carries the original source and
+    /// binding 1 the vertical plane. Both blur passes only read `params.x`.
+    fn record_cartoon(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::CartoonGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        // Two blur planes plus the finished frame: the vertical pass reads the
+        // horizontal plane, and the combine needs both the original frame and
+        // the vertical plane, so none of them can be reused in place.
+        if scratch.len() < 3 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "cartoon_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        let (params, extra, aces) = grade.gpu_controls();
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let horizontal_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        let vertical_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+        let destination_view = scratch[2].create_view(&wgpu::TextureViewDescriptor::default());
+
+        // The tent passes run over the authored radius alone; the tone and
+        // edge cells are only read by the combine pass.
+        let blur_uniform = SpatialPassUniform {
+            size,
+            params: [params[0], 0.0, 0.0, 0.0],
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        self.record_pass(
+            device,
+            encoder,
+            &self.cartoon_horizontal,
+            &source_view,
+            &horizontal_view,
+            &blur_uniform,
+        );
+        self.record_pass(
+            device,
+            encoder,
+            &self.cartoon_vertical,
+            &horizontal_view,
+            &vertical_view,
+            &blur_uniform,
+        );
+
+        // `SpatialPassUniform` has five cells: the authored params, the edge
+        // threshold group in `extra`, the render tag and edge group in `aces`.
+        let combine_uniform = SpatialPassUniform { size, params, extra, aces, extra1: [0.0; 4] };
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.cartoon,
+            &source_view,
+            &vertical_view,
+            &destination_view,
+            &combine_uniform,
+        );
+        Ok(scratch[2].clone())
+    }
+
     /// Records the lens flare stage.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_flare(
@@ -3466,6 +3636,11 @@ impl EffectSpatialGpu {
             // 512 MiB spatial scratch budget while DCI 4K (566,231,040 bytes)
             // does not; the limit is identical to the key cleaner chain.
             EffectGpuSpatialPass::Abstraction { .. } => Ok(3),
+            // The same two separable tent passes plus the combine pass, which
+            // needs the original frame alongside the vertical plane. Three
+            // scratch textures carry the same UHD-fits / DCI-4K-does-not
+            // scratch budget as abstraction.
+            EffectGpuSpatialPass::Cartoon { .. } => Ok(3),
             // The ray marches in one full-screen draw over the source.
             EffectGpuSpatialPass::Highlight { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
@@ -3518,6 +3693,10 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Abstraction { grade } => {
                 return self
                     .record_abstraction(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::Cartoon { grade } => {
+                return self
+                    .record_cartoon(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BilateralBlur { grade } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
@@ -9048,6 +9227,45 @@ fn fs_abstraction(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f
     return vec4<f32>(result, alpha);
 }
 
+// The cartoon pre-blur is abstraction's separable tent, but the cartoon
+// kernel reads the authored radius alone: `params` is `[radius, steps,
+// smoothness, detail threshold]` and only `params.x` is meaningful here.
+// One separable tent pass over `params.x` pixels; `axis` is 0 for rows and 1
+// for columns. The weights are `1 / (1 + d^2)`, premultiplied, then normalised.
+fn cartoon_tent(pixel: vec2<i32>, axis: f32) -> vec4<f32> {
+    let radius = i32(round(uniforms.params.x));
+    if (radius <= 0) {
+        return load_clamped(pixel);
+    }
+    var sum = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var offset = -radius; offset <= radius; offset = offset + 1) {
+        var at = pixel;
+        if (axis < 0.5) {
+            at.x = at.x + offset;
+        } else {
+            at.y = at.y + offset;
+        }
+        let weight = 1.0 / (1.0 + f32(offset * offset));
+        sum += premultiply(load_clamped(at)) * weight;
+        weight_sum += weight;
+    }
+    if (weight_sum <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return unpremultiply(sum / weight_sum);
+}
+
+@fragment
+fn fs_cartoon_horizontal(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return cartoon_tent(vec2<i32>(floor(position.xy)), 0.0);
+}
+
+@fragment
+fn fs_cartoon_vertical(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return cartoon_tent(vec2<i32>(floor(position.xy)), 1.0);
+}
+
 // One bilinear read in pixel coordinates, clamped to the frame edge. The CPU
 // kernel samples the straight-alpha texels directly, so the shader does too.
 fn highlight_bilinear(pixel: vec2<i32>, offset: vec2<f32>) -> vec3<f32> {
@@ -10040,6 +10258,73 @@ fn fs_deband(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         mixed = vec4<f32>(mixed.rgb + vec3<f32>(dither), mixed.a);
     }
     return unpremultiply(mixed);
+}
+
+// Cartoon luma ignores hidden colour on fully transparent samples, exactly
+// like the CPU `luma` helper.
+fn cartoon_luma(sample: vec4<f32>) -> f32 {
+    if (clamp(sample.a, 0.0, 1.0) <= 0.0) {
+        return 0.0;
+    }
+    return dot(sample.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// The cartoon combine pass. Binding 0 is the original frame and binding 1 the
+// vertical tent plane. `params` is `[radius, steps, smoothness, detail
+// threshold]`, `extra` is `[edge threshold, edge reach, edge softness, edge
+// opacity]` and `aces` is `[render tag, edge gain, edge black level, edge
+// contrast]`.
+@fragment
+fn fs_cartoon(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped_from(original_texture, pixel);
+    let alpha = clamp(source.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let base = load_clamped_from(auxiliary_texture, pixel);
+    let steps = uniforms.params.y;
+    let smoothness = uniforms.params.z;
+    let detail_threshold = uniforms.params.w;
+    // Detail is the luma distance between the original frame and the blurred
+    // plane; `keep` pulls the unquantised original back where it is high.
+    let detail = abs(cartoon_luma(source) - cartoon_luma(base));
+    let keep = smoothstep(detail_threshold, detail_threshold + 0.001, detail);
+    let clamped_base = clamp(base.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let snapped = clamp(
+        floor(clamped_base * steps + vec3<f32>(0.5)) / steps,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let quantised = base.rgb + (snapped - base.rgb) * smoothness;
+    let fill = quantised + (source.rgb - quantised) * keep;
+
+    let render_tag = i32(round(uniforms.aces.x));
+    var result = fill;
+    if (render_tag == 2) {
+        result = source.rgb;
+    }
+    if (render_tag >= 2) {
+        // A cross gradient on the blurred plane, sampled `extra.y` pixels away
+        // and clamped to the frame edge.
+        let reach = i32(round(uniforms.extra.y));
+        let left = cartoon_luma(load_clamped_from(auxiliary_texture, pixel + vec2<i32>(-reach, 0)));
+        let right = cartoon_luma(load_clamped_from(auxiliary_texture, pixel + vec2<i32>(reach, 0)));
+        let above = cartoon_luma(load_clamped_from(auxiliary_texture, pixel + vec2<i32>(0, -reach)));
+        let below = cartoon_luma(load_clamped_from(auxiliary_texture, pixel + vec2<i32>(0, reach)));
+        let gradient = abs(right - left) + abs(below - above);
+        let enhance = max(1.0 + uniforms.aces.y, 0.0);
+        let low = uniforms.extra.x * (1.0 - uniforms.extra.z);
+        let high = uniforms.extra.x * (1.0 + uniforms.extra.z) + 0.0001;
+        let mask = smoothstep(low, high, gradient * enhance);
+        let darken = clamp(
+            clamp(mask * uniforms.aces.w, 0.0, 1.0) * uniforms.extra.w + uniforms.aces.z,
+            0.0,
+            1.0,
+        );
+        result = result * (1.0 - darken);
+    }
+    return vec4<f32>(result, alpha);
 }
 
 // The blend helpers below mirror the compositor's WGSL helpers in

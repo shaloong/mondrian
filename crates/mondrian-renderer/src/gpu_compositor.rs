@@ -21179,6 +21179,135 @@ mod tests {
         }
     }
 
+    /// A straight-alpha fixture with a soft two-tone boundary, a gentle
+    /// vertical ramp and one isolated bright pixel, so the tent has something to
+    /// average on both axes, the quantiser has a gradient to step, and the edge
+    /// gradient has a lone highlight to find. Alpha varies per column but is
+    /// never zero: the straight-to-premultiplied round trip would canonicalise
+    /// fully transparent pixels.
+    fn cartoon_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                // A smooth transition rather than a hard step, so the tent has a
+                // soft boundary to blur and the tone steps land between tones.
+                let blend = ((u - 0.5) / 0.24).clamp(-1.0, 1.0) * 0.5 + 0.5;
+                let left = [0.86, 0.18, 0.12];
+                let right = [0.1, 0.34, 0.82];
+                let mut colour = [
+                    left[0] + (right[0] - left[0]) * blend,
+                    left[1] + (right[1] - left[1]) * blend,
+                    left[2] + (right[2] - left[2]) * blend,
+                ];
+                colour[1] = (colour[1] + 0.18 * v).min(1.0);
+                if x == 11 && y == 3 {
+                    colour = [1.0, 0.98, 0.92];
+                }
+                let alpha = 0.3 + 0.6 * x as f32 / (width as f32 - 1.0);
+                pixels.push([colour[0], colour[1], colour[2], alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_cartoon_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            cartoon_frame_f32, CartoonGrade, CartoonParameters, CartoonRender, EffectGpuSpatialPass,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping cartoon parity test: no GPU adapter available");
+            return;
+        };
+        let width = 16;
+        let height = 10;
+        let pixels = cartoon_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+
+        let cases: [(&str, CartoonParameters); 3] = [
+            ("documented defaults", CartoonParameters::default()),
+            (
+                "fill only with four hard steps",
+                CartoonParameters {
+                    render: CartoonRender::Fill,
+                    shadow_steps: 4.0,
+                    shadow_smoothness: 1.0,
+                    ..CartoonParameters::default()
+                },
+            ),
+            (
+                "edges only",
+                CartoonParameters {
+                    render: CartoonRender::Edges,
+                    width: 4.0,
+                    softness: 100.0,
+                    edge_contrast: 5.0,
+                    ..CartoonParameters::default()
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = CartoonGrade::new(parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let mut cpu = pixels.clone();
+            assert!(
+                cartoon_frame_f32(&mut cpu, width as usize, height as usize, &grade),
+                "{label}: the CPU kernel must accept the frame"
+            );
+
+            let pass = EffectGpuSpatialPass::Cartoon { grade };
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 3, "{label}: two tent passes then the combine");
+            let source = key_cleaner_upload(&context, &pixels, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, passes as usize);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.cartoon.encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label} record: {error}"));
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+
+            assert_eq!(gpu.len(), cpu.len(), "{label}: pixel count");
+            assert!(
+                cpu.iter().zip(pixels.iter()).any(|(after, before)| {
+                    (0..3).any(|channel| (after[channel] - before[channel]).abs() > 1.0e-4)
+                }),
+                "{label}: the fixture must actually move"
+            );
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                for channel in 0..3 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    assert!(
+                        difference <= 2.0e-4,
+                        "cartoon case {label} pixel {pixel_index} channel {channel}: \
+                         cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+                let difference = (cpu_pixel[3] - gpu_pixel[3]).abs();
+                assert!(
+                    difference <= 1.0e-5,
+                    "cartoon case {label} pixel {pixel_index} alpha: \
+                     cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gpu_smart_blur_matches_the_cpu_kernel() {
         use mondrian_effects::{
