@@ -86,6 +86,7 @@ pub(crate) struct EffectSpatialGpu {
     deinterlace: wgpu::RenderPipeline,
     watercolor: wgpu::RenderPipeline,
     highlight: wgpu::RenderPipeline,
+    radial_shadow: wgpu::RenderPipeline,
     abstraction_horizontal: wgpu::RenderPipeline,
     abstraction_vertical: wgpu::RenderPipeline,
     abstraction: wgpu::RenderPipeline,
@@ -911,6 +912,35 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_highlight"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let radial_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.radial-shadow"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_radial_shadow"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -2495,6 +2525,7 @@ impl EffectSpatialGpu {
             deinterlace,
             watercolor,
             highlight,
+            radial_shadow,
             abstraction_horizontal,
             abstraction_vertical,
             abstraction,
@@ -3173,6 +3204,37 @@ impl EffectSpatialGpu {
         destination.clone()
     }
 
+    fn record_radial_shadow(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::RadialShadowGrade,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+    ) -> wgpu::Texture {
+        let width = source.width() as usize;
+        let height = source.height() as usize;
+        let (params, color, extra0) = grade.gpu_controls(width, height);
+        let uniforms = SpatialPassUniform {
+            size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+            params,
+            extra: color,
+            aces: extra0,
+            extra1: [0.0; 4],
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.radial_shadow,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        destination.clone()
+    }
+
     fn record_abstraction(
         &self,
         device: &wgpu::Device,
@@ -3643,6 +3705,9 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Cartoon { .. } => Ok(3),
             // The ray marches in one full-screen draw over the source.
             EffectGpuSpatialPass::Highlight { .. } => Ok(1),
+            // The projection, the tap average and the composite all happen in
+            // one full-screen draw over the source.
+            EffectGpuSpatialPass::RadialShadow { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
@@ -3689,6 +3754,10 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Highlight { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return Ok(self.record_highlight(device, encoder, *grade, source, destination));
+            }
+            EffectGpuSpatialPass::RadialShadow { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return Ok(self.record_radial_shadow(device, encoder, *grade, source, destination));
             }
             EffectGpuSpatialPass::Abstraction { grade } => {
                 return self
@@ -9325,6 +9394,93 @@ fn fs_highlight(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
     }
     let opacity = clamp(coverage * alpha_scale, 0.0, 1.0);
     return vec4<f32>(accumulated * average * alpha_scale, base.a * opacity);
+}
+
+// One bilinear straight-alpha read in pixel coordinates, clamped to the frame
+// edge. The CPU kernel samples the straight texels directly, so this does not
+// premultiply.
+fn radial_shadow_bilinear(point: vec2<f32>) -> vec4<f32> {
+    let dims = frame_dims();
+    let last = vec2<f32>(f32(dims.x - 1), f32(dims.y - 1));
+    let clamped = clamp(point, vec2<f32>(0.0), last);
+    let base = floor(clamped);
+    let fraction = clamped - base;
+    let left = i32(base.x);
+    let top = i32(base.y);
+    let right = min(left + 1, dims.x - 1);
+    let bottom = min(top + 1, dims.y - 1);
+    let top_left = load_clamped(vec2<i32>(left, top));
+    let top_right = load_clamped(vec2<i32>(right, top));
+    let bottom_left = load_clamped(vec2<i32>(left, bottom));
+    let bottom_right = load_clamped(vec2<i32>(right, bottom));
+    let upper = top_left * (1.0 - fraction.x) + top_right * fraction.x;
+    let lower = bottom_left * (1.0 - fraction.x) + bottom_right * fraction.x;
+    return upper * (1.0 - fraction.y) + lower * fraction.y;
+}
+
+// Projects the pixel centre onto the shadow plane and averages the taps.
+// `params` is `[light x, light y, projection scale, softness radius]`; the
+// light stays normalized until it is scaled by the pass geometry. With a
+// softness radius the kernel averages a centre tap of weight four and eight
+// ring taps of weight one, for a total weight of twelve.
+fn radial_shadow_sample(pixel: vec2<i32>) -> vec4<f32> {
+    let dims = uniforms.size.xy;
+    let light = uniforms.params.xy * dims;
+    let position = vec2<f32>(pixel) + vec2<f32>(0.5);
+    let centre = light + (position - light) * uniforms.params.z;
+    let soft_radius = uniforms.params.w;
+    if (soft_radius <= 0.0) {
+        return radial_shadow_bilinear(centre);
+    }
+    let angles = array<f32, 8>(
+        0.0,
+        0.7853982,
+        1.5707964,
+        2.3561945,
+        3.1415927,
+        3.926991,
+        4.712389,
+        5.4977875,
+    );
+    var result = radial_shadow_bilinear(centre) * 4.0;
+    for (var tap = 0; tap < 8; tap = tap + 1) {
+        let angle = angles[tap];
+        let offset = vec2<f32>(cos(angle), sin(angle)) * soft_radius;
+        result = result + radial_shadow_bilinear(centre + offset);
+    }
+    return result / 12.0;
+}
+
+// `params` is `[light x, light y, projection scale, softness radius]`, `extra`
+// is `[shadow rgb, opacity]` and `aces` is `[render tag, colour influence,
+// shadow only, 0]`. Render tag 1 is the regular shadow and 2 the glass edge.
+// The composite mirrors the CPU kernel: straight-alpha source-over written as
+// the premultiplied sum divided by the output alpha.
+@fragment
+fn fs_radial_shadow(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped(pixel);
+    let sample = radial_shadow_sample(pixel);
+    let shadow_alpha = sample.a * uniforms.extra.w;
+    var shade = uniforms.extra.rgb;
+    if (uniforms.aces.x >= 1.5) {
+        shade = shade + (sample.rgb - shade) * uniforms.aces.y;
+    }
+    if (uniforms.aces.z >= 0.5) {
+        if (shadow_alpha > 0.0) {
+            return vec4<f32>(shade, shadow_alpha);
+        }
+        return vec4<f32>(0.0);
+    }
+    let source_alpha = clamp(source.a, 0.0, 1.0);
+    let clamped_shadow = clamp(shadow_alpha, 0.0, 1.0);
+    let out_alpha = source_alpha + clamped_shadow * (1.0 - source_alpha);
+    if (out_alpha <= 1.1920929e-7) {
+        return vec4<f32>(0.0);
+    }
+    let source_value = source.rgb * source_alpha;
+    let shade_value = shade * clamped_shadow * (1.0 - source_alpha);
+    return vec4<f32>((source_value + shade_value) / out_alpha, out_alpha);
 }
 
 @fragment

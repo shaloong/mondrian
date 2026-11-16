@@ -393,6 +393,10 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // The ray is points bilinear reads, four loads each, plus the window
         // arithmetic; the documented default is four samples.
         "highlight" => 4.5,
+        // One projection and one centre bilinear read by default; a soft
+        // shadow adds eight ring taps, so the tap budget only reaches twelve,
+        // which keeps the pass below the two-pass neighbourhood kernels.
+        "radial_shadow" => 2.2,
         "bilateral_blur" => 70.0,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
@@ -464,6 +468,9 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "watercolor" => 9.0,
         "abstraction" => 5.0,
         "highlight" => 3.0,
+        // One clamped bilinear tap, or the twelve-tap average when the shadow
+        // is soft, plus the straight-alpha composite the kernel writes back.
+        "radial_shadow" => 4.0,
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,

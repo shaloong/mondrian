@@ -21918,6 +21918,189 @@ mod tests {
         }
     }
 
+    /// A straight-alpha fixture with a soft two-tone boundary, a vertical ramp
+    /// and a per-column coverage gradient, so the projected sample has a
+    /// colour gradient on both axes and a twelve-tap average has something to
+    /// average. Alpha never reaches zero: the straight-to-premultiplied round
+    /// trip would canonicalise fully transparent pixels.
+    fn radial_shadow_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let blend = ((u - 0.5) / 0.28).clamp(-1.0, 1.0) * 0.5 + 0.5;
+                // Every channel stays under one half, so the glass edge at
+                // colour influence 2 does not leave the unit interval.
+                let colour = [
+                    0.05 + 0.45 * blend,
+                    0.1 + 0.35 * v,
+                    0.15 + 0.3 * (1.0 - blend),
+                ];
+                let alpha = 0.35 + 0.6 * x as f32 / (width as f32 - 1.0);
+                pixels.push([colour[0], colour[1], colour[2], alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_radial_shadow_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph, spatial_pass_for,
+            EffectColorDomain, EffectFloatFrameView, EffectFrameExtent, EffectGraphBuilderState,
+            EffectRenderOp, EffectValueFormat, EffectWorkingPrecision, RadialShadowGrade,
+            RadialShadowParameters, RadialShadowRender,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping radial shadow parity test: no GPU adapter available");
+            return;
+        };
+        let width = 14;
+        let height = 10;
+        let pixels = radial_shadow_test_pixels(width, height);
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = mondrian_core::ImageSampling::UNIT_SQUARE;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: space,
+            data: pixels.clone(),
+        });
+
+        let defaults = RadialShadowParameters::default();
+        let cases: [(&str, RadialShadowParameters); 4] = [
+            ("documented defaults", defaults),
+            (
+                "glass edge at colour influence 2 and softness 60",
+                RadialShadowParameters {
+                    render: RadialShadowRender::GlassEdge,
+                    color_influence: 2.0,
+                    softness: 60.0,
+                    ..defaults
+                },
+            ),
+            (
+                "flat projection with the shadow only",
+                RadialShadowParameters {
+                    projection_distance: 0.0,
+                    shadow_only: true,
+                    ..defaults
+                },
+            ),
+            (
+                "softness ceiling with a twelve o'clock light",
+                RadialShadowParameters { softness: 100.0, light: [0.5, 0.0], ..defaults },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = RadialShadowGrade::new(parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let op = EffectRenderOp::RadialShadow { grade };
+            let pass = spatial_pass_for(&op)
+                .unwrap_or_else(|| panic!("{label}: the spatial pass must be admitted"));
+            assert_eq!(pass.name(), "radial_shadow", "{label}: pass name");
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 1, "{label}: one full-screen draw");
+
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(op);
+            let graph = compile_reference_render_graph(builder.finish())
+                .unwrap_or_else(|| panic!("{label}: the graph must compile"));
+            let pipeline = mondrian_effects::lower_effect_graph_to_gpu_pipeline(&graph)
+                .unwrap_or_else(|error| panic!("{label} lowered pipeline: {error:?}"));
+            let view = EffectFloatFrameView::new(
+                extent,
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    ColorFrameAlpha::StraightCoverage,
+                ),
+                sampling,
+                &pixels,
+            );
+            let cpu = apply_compiled_effect_graph_rgba_f32(view, &graph, 0)
+                .unwrap_or_else(|error| panic!("{label} CPU graph: {error:?}"));
+            assert!(
+                cpu.pixels() != pixels.as_slice(),
+                "{label}: the fixture must actually move"
+            );
+
+            let entries = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context, &entries, width, height, space,
+            );
+            assert_eq!(
+                diagnostics.spatial_effect_layers, 1,
+                "{label}: one spatial layer"
+            );
+            assert_eq!(
+                diagnostics.spatial_effect_passes, 1,
+                "{label}: the chain records one draw"
+            );
+            assert_eq!(
+                diagnostics.spatial_point_stages, 0,
+                "{label}: no point stage"
+            );
+            assert_eq!(
+                diagnostics.spatial_scratch_textures_peak, 2,
+                "{label}: source plus one destination plane"
+            );
+            assert_eq!(
+                diagnostics.cpu_fallback_composites, 0,
+                "{label}: no CPU fallback"
+            );
+            assert_eq!(
+                diagnostics.execution.render_passes, 1,
+                "{label}: the full-frame spatial pass is the only render pass"
+            );
+            assert_eq!(
+                diagnostics.execution.fused_point_operations, 0,
+                "{label}: no point operation was fused"
+            );
+            assert_eq!(
+                diagnostics.execution.logical_full_frame_shader_pixels,
+                u64::from(width) * u64::from(height),
+                "{label}: the spatial pass shades the whole frame"
+            );
+
+            assert_eq!(actual.len(), cpu.pixels().len(), "{label}: pixel count");
+            let mut max_rgb = 0.0_f32;
+            let mut max_alpha = 0.0_f32;
+            for (pixel_index, (expected_pixel, actual_pixel)) in
+                cpu.pixels().iter().zip(actual.iter()).enumerate()
+            {
+                for channel in 0..3 {
+                    let difference = (expected_pixel[channel] - actual_pixel[channel]).abs();
+                    assert!(
+                        difference <= 2.0e-4,
+                        "{label} pixel {pixel_index} channel {channel}: \
+                         cpu {expected_pixel:?} gpu {actual_pixel:?}"
+                    );
+                    max_rgb = max_rgb.max(difference);
+                }
+                let difference = (expected_pixel[3] - actual_pixel[3]).abs();
+                assert!(
+                    difference <= 1.0e-5,
+                    "{label} pixel {pixel_index} alpha: \
+                     cpu {expected_pixel:?} gpu {actual_pixel:?}"
+                );
+                max_alpha = max_alpha.max(difference);
+            }
+            eprintln!(
+                "radial shadow {label}, max abs error rgb {max_rgb:.9e}, alpha {max_alpha:.9e}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn gpu_chromatic_aberration_removal_matches_the_cpu_layer() {
         use mondrian_effects::{
