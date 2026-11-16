@@ -403,6 +403,9 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // One full-screen draw folds the tap sweep, the premultiplied bilinear
         // read and the composite together.
         "zoom_blur" => 1.6,
+        // One full-screen draw folds the fold partition, the premultiplied
+        // bilinear tap and the paper lighting together.
+        "page_turn" => 1.8,
         "bilateral_blur" => 70.0,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
@@ -483,6 +486,9 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // The same tap sweep over the straight frame, with a premultiplied
         // staging copy and a per-tap straight-alpha rebuild.
         "zoom_blur" => 3.0,
+        // One row-band sweep with a premultiplied staging copy, one clamped
+        // bilinear tap per folded pixel and the straight-alpha rebuild.
+        "page_turn" => 3.4,
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,

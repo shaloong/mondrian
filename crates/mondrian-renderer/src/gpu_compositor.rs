@@ -22459,6 +22459,192 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_page_turn_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph, spatial_pass_for,
+            EffectColorDomain, EffectFloatFrameView, EffectFrameExtent, EffectGraphBuilderState,
+            EffectRenderOp, EffectValueFormat, EffectWorkingPrecision, PageTurnControls,
+            PageTurnGrade, PageTurnParameters, PageTurnRender,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping page turn parity test: no GPU adapter available");
+            return;
+        };
+        let width = 16_u32;
+        let height = 12_u32;
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            let v = row as f32 / (height - 1) as f32;
+            for column in 0..width {
+                let u = column as f32 / (width - 1) as f32;
+                let alpha = 0.4 + 0.55 * column as f32 / (width - 1) as f32;
+                pixels.push([0.15 + 0.7 * u, 0.25 + 0.5 * v, 0.6 - 0.35 * u, alpha]);
+            }
+        }
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = mondrian_core::ImageSampling::UNIT_SQUARE;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: space,
+            data: pixels.clone(),
+        });
+
+        let defaults = PageTurnParameters::default();
+        // With the documented defaults the fold line runs through `x + y == 13`,
+        // which lands exactly on five lattice pixels of this fixture. Those
+        // pixels have `u == 0` in the kernel and must keep the front instead of
+        // entering the roll band, so the fixture also covers GPU cancellation.
+        let cases: [(&str, PageTurnParameters); 5] = [
+            ("documented defaults", defaults),
+            (
+                "classic 30 degree fold at 0.45/0.55 with a 20 pixel radius",
+                PageTurnParameters {
+                    controls: PageTurnControls::Classic,
+                    fold_direction: 30.0,
+                    fold_position: [0.45, 0.55],
+                    fold_radius: 20.0,
+                    ..defaults
+                },
+            ),
+            (
+                "back page with an orange paper at 40 percent opacity",
+                PageTurnParameters {
+                    render: PageTurnRender::BackPage,
+                    paper_colour: [1.0, 0.5, 0.2],
+                    back_opacity: 40.0,
+                    ..defaults
+                },
+            ),
+            (
+                "front page at 0.55/0.45 lit from 120 degrees",
+                PageTurnParameters {
+                    render: PageTurnRender::FrontPage,
+                    fold_position: [0.55, 0.45],
+                    light_direction: 120.0,
+                    ..defaults
+                },
+            ),
+            // A corner fold deep enough to lift more than a half turn of roll,
+            // so the flat strip behind the line is painted as well.
+            (
+                "bottom right corner at 0.2/0.2 with a 4 pixel radius",
+                PageTurnParameters {
+                    fold_position: [0.2, 0.2],
+                    fold_radius: 4.0,
+                    ..defaults
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = PageTurnGrade::new(parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let op = EffectRenderOp::PageTurn { grade };
+            let pass = spatial_pass_for(&op)
+                .unwrap_or_else(|| panic!("{label}: the spatial pass must be admitted"));
+            assert_eq!(pass.name(), "page_turn", "{label}: pass name");
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 1, "{label}: one full-screen draw");
+
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(op);
+            let graph = compile_reference_render_graph(builder.finish())
+                .unwrap_or_else(|| panic!("{label}: the graph must compile"));
+            let pipeline = mondrian_effects::lower_effect_graph_to_gpu_pipeline(&graph)
+                .unwrap_or_else(|error| panic!("{label} lowered pipeline: {error:?}"));
+            let view = EffectFloatFrameView::new(
+                extent,
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    ColorFrameAlpha::StraightCoverage,
+                ),
+                sampling,
+                &pixels,
+            );
+            let cpu = apply_compiled_effect_graph_rgba_f32(view, &graph, 0)
+                .unwrap_or_else(|error| panic!("{label} CPU graph: {error:?}"));
+            assert!(
+                cpu.pixels() != pixels.as_slice(),
+                "{label}: the fixture must actually move"
+            );
+
+            let entries = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context, &entries, width, height, space,
+            );
+            assert_eq!(
+                diagnostics.spatial_effect_layers, 1,
+                "{label}: one spatial layer"
+            );
+            assert_eq!(
+                diagnostics.spatial_effect_passes, 1,
+                "{label}: the chain records one draw"
+            );
+            assert_eq!(
+                diagnostics.spatial_scratch_textures_peak, 2,
+                "{label}: source plus one destination plane"
+            );
+            assert_eq!(
+                diagnostics.spatial_point_stages, 0,
+                "{label}: no point stage"
+            );
+            assert_eq!(
+                diagnostics.cpu_fallback_composites, 0,
+                "{label}: the whole chain must stay on the GPU"
+            );
+
+            let budget = LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+            };
+            let report = compare_linear_rgba(cpu.pixels(), &actual, budget)
+                .unwrap_or_else(|error| panic!("{label} accuracy report: {error}"));
+            assert!(report.within_budget, "{label}: {report:#?}");
+
+            assert_eq!(
+                actual.len(),
+                cpu.pixels().len(),
+                "{label}: mismatched pixel count"
+            );
+            let mut max_rgb = 0.0_f32;
+            let mut max_alpha = 0.0_f32;
+            for (pixel_index, (expected_pixel, actual_pixel)) in
+                cpu.pixels().iter().zip(actual.iter()).enumerate()
+            {
+                for channel in 0..3 {
+                    let difference = (expected_pixel[channel] - actual_pixel[channel]).abs();
+                    assert!(
+                        difference <= 2.0e-4,
+                        "{label} pixel {pixel_index} channel {channel}: \
+                         cpu {expected_pixel:?} gpu {actual_pixel:?}"
+                    );
+                    max_rgb = max_rgb.max(difference);
+                }
+                let difference = (expected_pixel[3] - actual_pixel[3]).abs();
+                assert!(
+                    difference <= 1.0e-5,
+                    "{label} pixel {pixel_index} alpha: \
+                     cpu {expected_pixel:?} gpu {actual_pixel:?}"
+                );
+                max_alpha = max_alpha.max(difference);
+            }
+            eprintln!("page turn {label}, max abs error rgb {max_rgb:.9e}, alpha {max_alpha:.9e}");
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_chromatic_aberration_removal_matches_the_cpu_layer() {
         use mondrian_effects::{
             chromatic_aberration_removal_frame_f32, ChromaticAberrationRemovalGrade, EffectRenderOp,

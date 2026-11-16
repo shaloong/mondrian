@@ -97,6 +97,7 @@ pub(crate) struct EffectSpatialGpu {
     film_look_vertical: wgpu::RenderPipeline,
     film_look: wgpu::RenderPipeline,
     zoom_blur: wgpu::RenderPipeline,
+    page_turn: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
     grow_bounds: wgpu::RenderPipeline,
@@ -974,6 +975,35 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_zoom_blur"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let page_turn = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.page-turn"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_page_turn"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -2661,6 +2691,7 @@ impl EffectSpatialGpu {
             film_look_vertical,
             film_look,
             zoom_blur,
+            page_turn,
             basic_3d,
             camera_view,
             grow_bounds,
@@ -3400,6 +3431,43 @@ impl EffectSpatialGpu {
         Ok(scratch[0].clone())
     }
 
+    /// One full-screen draw lifts the sheet, rolls it over the fold line and
+    /// paints the backed paper, so the pool only needs the destination plane.
+    fn record_page_turn(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::PageTurnGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if scratch.is_empty() {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "page_turn_scratch_geometry",
+            ));
+        }
+        let (params, extra, aces, extra1) =
+            grade.gpu_controls(source.width() as f32, source.height() as f32);
+        let uniforms = SpatialPassUniform {
+            size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.page_turn,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(scratch[0].clone())
+    }
+
     fn record_abstraction(
         &self,
         device: &wgpu::Device,
@@ -3964,6 +4032,9 @@ impl EffectSpatialGpu {
             // The sweep, the tap average and the composite all happen in one
             // full-screen draw over the source.
             EffectGpuSpatialPass::ZoomBlur { .. } => Ok(1),
+            // The fold partition, the roll, the premultiplied tap and the paper
+            // lighting all happen in one full-screen draw.
+            EffectGpuSpatialPass::PageTurn { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
@@ -4017,6 +4088,9 @@ impl EffectSpatialGpu {
             }
             EffectGpuSpatialPass::ZoomBlur { grade } => {
                 return self.record_zoom_blur(device, encoder, *grade, source, scratch);
+            }
+            EffectGpuSpatialPass::PageTurn { grade } => {
+                return self.record_page_turn(device, encoder, *grade, source, scratch);
             }
             EffectGpuSpatialPass::Abstraction { grade } => {
                 return self
@@ -9889,6 +9963,115 @@ fn fs_zoom_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
         source.rgb + (average.rgb - source.rgb) * uniforms.aces.rgb,
         select(source.a, source.a + (average.a - source.a) * uniforms.aces.w, uniforms.extra1.y >= 0.5),
     );
+}
+
+// Page turn (DST-18) lifts the sheet along the authored fold line: past the
+// cylinder the page has left the frame, the roll band shows the back of the
+// sheet bent around the radius, and the flat strip folded over the line shows
+// the back flat. Every back tap filters the premultiplied frame so transparent
+// neighbours cannot bleed colour into the paper.
+fn page_turn_premultiplied(pixel: vec2<i32>) -> vec4<f32> {
+    let straight = load_clamped(pixel);
+    let coverage = clamp(straight.a, 0.0, 1.0);
+    return vec4<f32>(straight.rgb * coverage, coverage);
+}
+
+// Bilinear read of the premultiplied frame, returned in straight alpha. The
+// fold geometry clamps to the frame, so no border rule is needed.
+fn page_turn_bilinear(point: vec2<f32>) -> vec4<f32> {
+    let dims = frame_dims();
+    let last = vec2<f32>(f32(dims.x - 1), f32(dims.y - 1));
+    let clamped = clamp(point, vec2<f32>(0.0), last);
+    let base = floor(clamped);
+    let fraction = clamped - base;
+    let left = i32(base.x);
+    let top = i32(base.y);
+    let right = min(left + 1, dims.x - 1);
+    let bottom = min(top + 1, dims.y - 1);
+    let top_left = page_turn_premultiplied(vec2<i32>(left, top));
+    let top_right = page_turn_premultiplied(vec2<i32>(right, top));
+    let bottom_left = page_turn_premultiplied(vec2<i32>(left, bottom));
+    let bottom_right = page_turn_premultiplied(vec2<i32>(right, bottom));
+    let upper = top_left + (top_right - top_left) * fraction.x;
+    let lower = bottom_left + (bottom_right - bottom_left) * fraction.x;
+    let averaged = upper + (lower - upper) * fraction.y;
+    let coverage = clamp(averaged.a, 0.0, 1.0);
+    if (coverage <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(averaged.rgb / coverage, coverage);
+}
+
+// `params` is `[fold point x, fold point y, normal x, normal y]` in pixel
+// index space, `extra` is `[fold radius, lifted span, light x, light y]`,
+// `aces` is `[paper r, paper g, paper b, back opacity]` and `extra1` is
+// `[render tag, light z, 0, 0]`. Render tag 1 keeps the back over the kept
+// front, 2 draws only the back and 3 only the kept front.
+@fragment
+fn fs_page_turn(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped(pixel);
+    let lifted = uniforms.extra.y;
+    if (lifted <= 0.0) {
+        // The fold line sits outside the frame: the sheet stays flat.
+        return source;
+    }
+    let point = uniforms.params.xy;
+    let normal = uniforms.params.zw;
+    let along = vec2<f32>(normal.y, -normal.x);
+    let radius = uniforms.extra.x;
+    let roll_span = 3.1415927 * radius;
+    let flat_span = max(lifted - roll_span, 0.0);
+    let light = normalize(vec3<f32>(
+        uniforms.extra.z,
+        uniforms.extra.w,
+        uniforms.extra1.y,
+    ));
+    let normal_light = normal.x * light.x + normal.y * light.y;
+    let relative = vec2<f32>(f32(pixel.x), f32(pixel.y)) - point;
+    // The CPU kernel sums two separately rounded products, so a pixel whose
+    // products cancel exactly sits at `u == 0` and stays on the front when
+    // there is no flat strip. A fused multiply-add would turn that exact zero
+    // into a rounding-sized positive offset and wrongly roll the fold line, so
+    // the cancellation is detected on the products themselves and pinned to
+    // zero before the partition tests.
+    let folded_x = relative.x * normal.x;
+    let folded_y = relative.y * normal.y;
+    let distance = select(folded_x + folded_y, 0.0, folded_x == -folded_y);
+    if (distance > radius) {
+        // Past the cylinder: the sheet has lifted off the frame.
+        return vec4<f32>(0.0);
+    }
+    var folded = false;
+    var back_dot = 0.0;
+    var source_distance = 0.0;
+    if (distance > 0.0) {
+        let ratio = clamp(distance / radius, 0.0, 1.0);
+        let angle = 3.1415927 - asin(ratio);
+        source_distance = min(radius * angle, lifted);
+        back_dot = sin(angle) * normal_light - cos(angle) * light.z;
+        folded = true;
+    } else if (flat_span > 0.0 && distance >= -flat_span) {
+        source_distance = min(roll_span - distance, lifted);
+        back_dot = light.z;
+        folded = true;
+    }
+    let render_tag = uniforms.extra1.x;
+    if (folded) {
+        if (render_tag > 2.5) {
+            // FrontPage: the folded back is not drawn.
+            return vec4<f32>(0.0);
+        }
+        let shade = 0.55 + 0.45 * max(0.0, back_dot);
+        let along_distance = dot(relative, along);
+        let tap = page_turn_bilinear(point + along * along_distance - normal * source_distance);
+        return vec4<f32>(uniforms.aces.rgb * shade, tap.a * uniforms.aces.w);
+    }
+    if (render_tag > 1.5 && render_tag < 2.5) {
+        // BackPage: the kept front is transparent.
+        return vec4<f32>(0.0);
+    }
+    return source;
 }
 
 // `params` is `[light x, light y, projection scale, softness radius]`, `extra`
