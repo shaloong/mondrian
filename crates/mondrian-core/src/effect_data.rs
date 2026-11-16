@@ -254,6 +254,8 @@ pub enum EffectType {
     VideoCollage,
     /// Hold each output on a reduced frame rate by sampling an earlier instant.
     PosterizeTime,
+    /// Sweep a beam of light across the frame with an authorable beam and edge.
+    LightSweep,
 }
 
 impl EffectType {
@@ -396,6 +398,7 @@ impl EffectType {
             Self::StarBurst => "builtin.star_burst".to_string(),
             Self::ColorSpaceTransform => "builtin.color_space_transform".to_string(),
             Self::AcesTransform => "builtin.aces_transform".to_string(),
+            Self::LightSweep => "builtin.light_sweep".to_string(),
             Self::ColorDifferenceKey => "builtin.color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -540,6 +543,7 @@ impl EffectType {
             "builtin.star_burst" => Self::StarBurst,
             "builtin.color_space_transform" => Self::ColorSpaceTransform,
             "builtin.aces_transform" => Self::AcesTransform,
+            "builtin.light_sweep" => Self::LightSweep,
             "builtin.color_difference_key" => Self::ColorDifferenceKey,
             other => Self::External(other.to_string()),
         }
@@ -684,6 +688,7 @@ impl EffectType {
             Self::StarBurst => "星空",
             Self::ColorSpaceTransform => "色彩空间转换",
             Self::AcesTransform => "ACES 转换",
+            Self::LightSweep => "扫光",
             Self::ColorDifferenceKey => "颜色差值键",
             Self::External(name) => name,
         }
@@ -824,6 +829,7 @@ impl EffectType {
             Self::Abstraction => vec!["风格化"],
             Self::LightLeak => vec!["胶片质感"],
             Self::Highlight => vec!["光效"],
+            Self::LightSweep => vec!["光效"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -967,6 +973,7 @@ impl EffectType {
             Self::StarBurst => "star_burst".to_string(),
             Self::ColorSpaceTransform => "color_space_transform".to_string(),
             Self::AcesTransform => "aces_transform".to_string(),
+            Self::LightSweep => "light_sweep".to_string(),
             Self::ColorDifferenceKey => "color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -1490,6 +1497,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::StarBurst => Ok(()),
             Self::ColorSpaceTransform => Ok(()),
             Self::AcesTransform => Ok(()),
+            Self::LightSweep => Ok(()),
             Self::ColorDifferenceKey => Ok(()),
         }
     }

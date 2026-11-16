@@ -282,6 +282,11 @@ pub enum EffectGpuPointOp {
     AcesTransform {
         grade: crate::AcesTransformGrade,
     },
+    /// Light sweep: the beam geometry, intensities, tint and reception mode fill
+    /// the point uniform, so the shader never rebuilds them.
+    LightSweep {
+        grade: crate::LightSweepGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -1016,6 +1021,7 @@ pub(crate) fn lower_point_op(
         EffectRenderOp::AcesTransform { grade } => {
             Ok(EffectGpuPointOp::AcesTransform { grade: *grade })
         }
+        EffectRenderOp::LightSweep { grade } => Ok(EffectGpuPointOp::LightSweep { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1167,6 +1173,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::StarBurst { .. } => "star_burst",
         EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
         EffectRenderOp::AcesTransform { .. } => "aces_transform",
+        EffectRenderOp::LightSweep { .. } => "light_sweep",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

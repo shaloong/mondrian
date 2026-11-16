@@ -3679,6 +3679,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::StarBurst { .. } => "star_burst",
         crate::EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
         crate::EffectRenderOp::AcesTransform { .. } => "aces_transform",
+        crate::EffectRenderOp::LightSweep { .. } => "light_sweep",
         crate::EffectRenderOp::Highlight { .. } => "highlight",
         crate::EffectRenderOp::SetMatte { .. } => "set_matte",
         crate::EffectRenderOp::DisplacementMap { .. } => "displacement_map",

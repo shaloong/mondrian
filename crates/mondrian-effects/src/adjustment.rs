@@ -597,6 +597,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::LightSweep { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "light_sweep",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Highlight { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "highlight",
@@ -1453,6 +1459,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::StarBurst { .. }
         | EffectRenderOp::ColorSpaceTransform { .. }
         | EffectRenderOp::AcesTransform { .. }
+        | EffectRenderOp::LightSweep { .. }
         | EffectRenderOp::Lut3D { .. } => 0,
         // The two blur passes each keep one full-frame plane.
         EffectRenderOp::Abstraction { .. } => 2,
@@ -2633,6 +2640,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::AcesTransform { grade } => {
             crate::aces_transform::apply_aces_transform_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::LightSweep { grade } => {
+            crate::light_sweep::apply_light_sweep_f32_controlled(
                 working,
                 width as usize,
                 height as usize,

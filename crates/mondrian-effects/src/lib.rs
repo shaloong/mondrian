@@ -177,6 +177,7 @@ pub mod lens_distortion;
 pub mod lens_flare;
 pub mod levels;
 pub mod light_leak;
+pub mod light_sweep;
 pub mod linear_color_key;
 pub mod magnify;
 pub mod median;
@@ -612,6 +613,15 @@ pub use light_leak::{
     LIGHT_LEAK_DEFAULT_SPEED, LIGHT_LEAK_MAX_FLICKER, LIGHT_LEAK_MAX_INTENSITY,
     LIGHT_LEAK_MAX_SPEED, LIGHT_LEAK_MIN_FLICKER, LIGHT_LEAK_MIN_INTENSITY, LIGHT_LEAK_MIN_SPEED,
     LIGHT_LEAK_SEED_MASK, LIGHT_LEAK_SEED_SCALE,
+};
+pub use light_sweep::{
+    light_sweep_frame_f32, LightSweepError, LightSweepGpuControls, LightSweepGrade,
+    LightSweepParameters, LightSweepReception, LightSweepShape, LIGHT_SWEEP_DEFAULT_CENTRE,
+    LIGHT_SWEEP_DEFAULT_DIRECTION, LIGHT_SWEEP_DEFAULT_EDGE_INTENSITY,
+    LIGHT_SWEEP_DEFAULT_EDGE_THICKNESS, LIGHT_SWEEP_DEFAULT_LIGHT_COLOR,
+    LIGHT_SWEEP_DEFAULT_SWEEP_INTENSITY, LIGHT_SWEEP_DEFAULT_WIDTH, LIGHT_SWEEP_MAX_EDGE_THICKNESS,
+    LIGHT_SWEEP_MAX_INTENSITY, LIGHT_SWEEP_MAX_WIDTH, LIGHT_SWEEP_MIN_INTENSITY,
+    LIGHT_SWEEP_MIN_WIDTH,
 };
 pub use linear_color_key::{
     linear_color_key_frame_f32, KeyOperation, LinearColorKeyError, LinearColorKeyGrade,

@@ -1342,6 +1342,11 @@ pub enum EffectRenderOp {
         /// Authored ACES version, transforms, exposure and tone controls.
         grade: crate::AcesTransformGrade,
     },
+    /// Light sweep: sweeps an authored beam of light across the frame.
+    LightSweep {
+        /// Authored beam geometry, intensities, tint and reception mode.
+        grade: crate::LightSweepGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1794,6 +1799,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::AcesTransform { grade } => {
                 formatter.debug_struct("AcesTransform").field("grade", grade).finish()
+            }
+            Self::LightSweep { grade } => {
+                formatter.debug_struct("LightSweep").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2936,6 +2944,12 @@ impl EffectRenderOp {
                 // configuration.
                 grade.hash_state(state);
             }
+            EffectRenderOp::LightSweep { grade } => {
+                138u8.hash(state);
+                // Every beam control and reception mode changes the pixels,
+                // so the grade hashes the whole configuration.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3221,6 +3235,7 @@ impl EffectRenderOp {
             EffectRenderOp::StarBurst { .. } => 2,
             EffectRenderOp::ColorSpaceTransform { .. } => 4,
             EffectRenderOp::AcesTransform { .. } => 5,
+            EffectRenderOp::LightSweep { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3755,7 +3770,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 138] {
+fn builtin_effect_types() -> [EffectType; 139] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3895,6 +3910,7 @@ fn builtin_effect_types() -> [EffectType; 138] {
         EffectType::StarBurst,
         EffectType::ColorSpaceTransform,
         EffectType::AcesTransform,
+        EffectType::LightSweep,
     ]
 }
 
@@ -14694,6 +14710,132 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.1),
             );
         }
+        EffectType::LightSweep => {
+            // The nine authored values mirror the kernel: the beam centre and
+            // direction, the falloff shape, the beam and edge measures, the
+            // light tint and the reception mode.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre",
+                "扫光",
+                "中心",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::LIGHT_SWEEP_DEFAULT_CENTRE[0],
+                    crate::LIGHT_SWEEP_DEFAULT_CENTRE[1],
+                )),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "direction",
+                "扫光",
+                "方向",
+                PropertyValue::Float(crate::LIGHT_SWEEP_DEFAULT_DIRECTION),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "shape",
+                "扫光",
+                "形状",
+                crate::LightSweepShape::Soft.as_key(),
+                crate::LightSweepShape::ALL
+                    .iter()
+                    .map(|shape| {
+                        ParameterEnumOption::new(
+                            shape.as_key(),
+                            shape.label(),
+                            format!("builtin.light_sweep.shape.{}", shape.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "width",
+                "扫光",
+                "宽度",
+                PropertyValue::Float(crate::LIGHT_SWEEP_DEFAULT_WIDTH),
+                Some(crate::LIGHT_SWEEP_MIN_WIDTH as f64),
+                Some(crate::LIGHT_SWEEP_MAX_WIDTH as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "sweep_intensity",
+                "扫光",
+                "扫光强度",
+                PropertyValue::Float(crate::LIGHT_SWEEP_DEFAULT_SWEEP_INTENSITY),
+                Some(crate::LIGHT_SWEEP_MIN_INTENSITY as f64),
+                Some(crate::LIGHT_SWEEP_MAX_INTENSITY as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_intensity",
+                "扫光",
+                "边缘强度",
+                PropertyValue::Float(crate::LIGHT_SWEEP_DEFAULT_EDGE_INTENSITY),
+                Some(crate::LIGHT_SWEEP_MIN_INTENSITY as f64),
+                Some(crate::LIGHT_SWEEP_MAX_INTENSITY as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "edge_thickness",
+                "扫光",
+                "边缘厚度",
+                PropertyValue::Float(crate::LIGHT_SWEEP_DEFAULT_EDGE_THICKNESS),
+                Some(0.0),
+                Some(crate::LIGHT_SWEEP_MAX_EDGE_THICKNESS as f64),
+                Some(0.5),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "light_color",
+                "扫光",
+                "光照颜色",
+                PropertyValue::Color(Color {
+                    r: crate::LIGHT_SWEEP_DEFAULT_LIGHT_COLOR[0],
+                    g: crate::LIGHT_SWEEP_DEFAULT_LIGHT_COLOR[1],
+                    b: crate::LIGHT_SWEEP_DEFAULT_LIGHT_COLOR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "reception",
+                "扫光",
+                "光接收",
+                crate::LightSweepReception::Screen.as_key(),
+                crate::LightSweepReception::ALL
+                    .iter()
+                    .map(|reception| {
+                        ParameterEnumOption::new(
+                            reception.as_key(),
+                            reception.label(),
+                            format!("builtin.light_sweep.reception.{}", reception.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -15839,6 +15981,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             | "matching_softness"
             | "composite_on_layer",
         ) => ParameterUnit::Normalized,
+        (EffectType::LightSweep, "width" | "edge_thickness") => ParameterUnit::Pixels,
+        (EffectType::LightSweep, "direction") => ParameterUnit::Degrees,
+        (EffectType::LightSweep, "sweep_intensity" | "edge_intensity") => ParameterUnit::Percent,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -16347,6 +16492,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Every output channel is a function of the same input pixel, the
             // authored ACES version, transforms and tone controls.
+            ..cpu_linear
+        },
+        EffectType::LightSweep => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The beam is evaluated from the same pixel, the authored geometry
+            // and intensities, so no neighbour or history enters the result.
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -23420,6 +23571,117 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::LightSweep => {
+            let centre_id = builtin_parameter_id(effect_type, "centre");
+            let shape_id = builtin_parameter_id(effect_type, "shape");
+            let light_color_id = builtin_parameter_id(effect_type, "light_color");
+            let reception_id = builtin_parameter_id(effect_type, "reception");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("扫光的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_enum<T: Copy>(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    id: &ParameterId,
+                    name: &str,
+                    from_key: fn(&str) -> Option<T>,
+                ) -> Result<Option<T>, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                            Some(value) => Ok(Some(value)),
+                            None => Err(invalid(format!("扫光的{name}没有对应的菜单项 {key}"))),
+                        },
+                        Some(_) => Err(invalid(format!("扫光的{name}必须是菜单项"))),
+                        None => Ok(None),
+                    }
+                }
+                let defaults = crate::LightSweepParameters::default();
+                let mut parameters = defaults;
+                match effect.evaluate_parameter(&centre_id, context.time) {
+                    Some(PropertyValue::Vec2(centre)) => {
+                        parameters.centre = [centre.x, centre.y];
+                    }
+                    Some(_) => return Err(invalid("扫光的中心必须是二维坐标".to_string())),
+                    None => {}
+                }
+                parameters.direction =
+                    read(effect, context, &invalid, "direction", defaults.direction)?;
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &shape_id,
+                    "形状",
+                    crate::LightSweepShape::from_key,
+                )? {
+                    parameters.shape = value;
+                }
+                parameters.width = read(effect, context, &invalid, "width", defaults.width)?;
+                parameters.sweep_intensity = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "sweep_intensity",
+                    defaults.sweep_intensity,
+                )?;
+                parameters.edge_intensity = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "edge_intensity",
+                    defaults.edge_intensity,
+                )?;
+                parameters.edge_thickness = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "edge_thickness",
+                    defaults.edge_thickness,
+                )?;
+                match effect.evaluate_parameter(&light_color_id, context.time) {
+                    Some(PropertyValue::Color(color)) => {
+                        parameters.light_color = [color.r, color.g, color.b];
+                    }
+                    Some(_) => return Err(invalid("扫光的光照颜色必须是颜色值".to_string())),
+                    None => {}
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &reception_id,
+                    "光接收",
+                    crate::LightSweepReception::from_key,
+                )? {
+                    parameters.reception = value;
+                }
+                let grade = crate::LightSweepGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::LightSweep { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Highlight => {
             let mask_id = builtin_parameter_id(effect_type, "highlight_mask");
             let mask_layer_id = builtin_parameter_id(effect_type, "mask_layer");
@@ -25014,6 +25276,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::StarBurst => "星空",
         EffectType::ColorSpaceTransform => "色彩空间转换",
         EffectType::AcesTransform => "ACES 转换",
+        EffectType::LightSweep => "扫光",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -26426,6 +26689,7 @@ mod tests {
             EffectType::StarBurst,
             EffectType::ColorSpaceTransform,
             EffectType::AcesTransform,
+            EffectType::LightSweep,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -35722,7 +35986,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 138);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 139);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -36250,7 +36514,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 138);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 139);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -39209,7 +39473,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 138);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 139);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -40345,7 +40609,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 138);
+        assert_eq!(builtin_effect_types().len(), 139);
     }
 
     #[test]
@@ -42597,6 +42861,229 @@ mod tests {
                     (cells.0.len(), cells.1.len(), cells.2.len(), cells.3.len()),
                     (4, 4, 4, 4),
                     "the point pass reads four four-component cells"
+                );
+            }
+            other => panic!("unexpected lowered point op {other:?}"),
+        }
+    }
+
+    fn light_sweep_op(graph: &EffectRenderGraph) -> Option<crate::LightSweepGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::LightSweep { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::LightSweep { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_light_sweep(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::LightSweep)
+            .expect("the light sweep should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::LightSweep.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the light sweep parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn light_sweep_identity_builds_no_node() {
+        let effect = author_light_sweep(&[
+            ("sweep_intensity", PropertyValue::Float(0.0)),
+            ("edge_intensity", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the switched-off sweep should compile");
+        assert!(
+            light_sweep_op(&graph).is_none(),
+            "both intensities at zero is the identity"
+        );
+    }
+
+    #[test]
+    fn light_sweep_defaults_build_one_point_op() {
+        let effect = instantiate_effect_node(EffectType::LightSweep)
+            .expect("the light sweep should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = light_sweep_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::LightSweepGrade::documented_defaults());
+        assert_eq!(graph.nodes.len(), 2, "the source plus one sweep node");
+        let op = EffectRenderOp::LightSweep { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the sweep decides each pixel in place"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the sweep is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            139
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::LightSweep {
+            grade: crate::LightSweepGrade::new(crate::LightSweepParameters::default())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn light_sweep_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::LightSweep;
+        let properties = default_properties_for(effect_type.clone());
+        let menus: [(&str, &str, &[&str]); 2] = [
+            ("shape", "soft", &["hard", "linear", "soft"]),
+            ("reception", "screen", &["screen", "add", "normal"]),
+        ];
+        for (parameter, default, keys) in menus {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the menu is defined");
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Enum(default.to_owned()),
+                "{parameter}"
+            );
+            let options = &property.descriptor.schema.enum_options;
+            assert_eq!(options.len(), keys.len(), "{parameter}");
+            for (option, key) in options.iter().zip(keys) {
+                assert_eq!(option.key, *key, "{parameter}");
+                assert_eq!(
+                    option.message_id,
+                    format!("builtin.light_sweep.{parameter}.{key}")
+                );
+            }
+        }
+
+        use crate::{LightSweepReception, LightSweepShape};
+        for (key, shape) in [
+            ("hard", LightSweepShape::Hard),
+            ("linear", LightSweepShape::Linear),
+            ("soft", LightSweepShape::Soft),
+        ] {
+            assert_eq!(LightSweepShape::from_key(key), Some(shape));
+            assert_eq!(shape.as_key(), key);
+        }
+        for (key, reception) in [
+            ("screen", LightSweepReception::Screen),
+            ("add", LightSweepReception::Add),
+            ("normal", LightSweepReception::Normal),
+        ] {
+            assert_eq!(LightSweepReception::from_key(key), Some(reception));
+            assert_eq!(reception.as_key(), key);
+        }
+    }
+
+    #[test]
+    fn light_sweep_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::LightSweep;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::PixelLocal);
+    }
+
+    #[test]
+    fn light_sweep_out_of_range_parameter_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::LightSweep)
+            .expect("the light sweep should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::LightSweep.property_path("width"),
+                value: PropertyValue::Float(4001.0),
+            })
+            .expect_err("a width above four thousand should fail");
+        let message = error.to_string();
+        assert!(message.contains("light_sweep.width"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect = instantiate_effect_node(EffectType::LightSweep)
+            .expect("the light sweep should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "light_sweep.width",
+            serde_json::json!(5000.0),
+        );
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a width above four thousand should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.light_sweep");
+                    assert!(reason.contains("width"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn light_sweep_point_lowering_exposes_the_six_control_cells() {
+        let effect = author_light_sweep(&[
+            ("direction", PropertyValue::Float(45.0)),
+            ("shape", PropertyValue::Enum("linear".to_owned())),
+            ("width", PropertyValue::Float(120.0)),
+            ("reception", PropertyValue::Enum("add".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored sweep should compile");
+        let grade = light_sweep_op(&graph).expect("the authored sweep is not the identity");
+        let op = EffectRenderOp::LightSweep { grade };
+        let node_id = graph.nodes[1].id;
+        let lowered =
+            crate::gpu_plan::lower_point_op(node_id, &op).expect("the sweep is point-lowerable");
+        match lowered {
+            crate::gpu_plan::EffectGpuPointOp::LightSweep { grade: lowered } => {
+                let cells = lowered.gpu_controls();
+                assert_eq!(
+                    cells,
+                    grade.gpu_controls(),
+                    "the lowered grade is carried whole"
+                );
+                assert_eq!(cells.0[2], 120.0, "the beam width");
+                assert_eq!(cells.2[3], 1.0, "the linear shape tag");
+                assert_eq!(cells.3[0], 1.0, "the add reception tag");
+                assert_eq!(
+                    (
+                        cells.0.len(),
+                        cells.1.len(),
+                        cells.2.len(),
+                        cells.3.len(),
+                        cells.4.len(),
+                        cells.5.len(),
+                    ),
+                    (4, 4, 4, 4, 4, 4),
+                    "the point pass reads six four-component cells"
                 );
             }
             other => panic!("unexpected lowered point op {other:?}"),
