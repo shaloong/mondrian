@@ -3293,6 +3293,62 @@ fn light_sweep_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUnifor
     return vec4<f32>(result, pixel.a);
 }
 
+// Strobe is a pure point op: the schedule already decided that this frame
+// flashes, so the shader only applies the operator blend. `params` carries
+// [flash r, flash g, flash b, weight] and `extra0` carries [mode, operator, 0,
+// 0]. `operator` is a reserved naga identifier, hence `strobe_operator`.
+fn strobe_byte(value: f32) -> u32 {
+    return u32(clamp(value, 0.0, 1.0) * 255.0 + 0.5);
+}
+
+fn strobe_combine(strobe_operator: u32, base: f32, flash: f32) -> f32 {
+    if (strobe_operator == 2u) {
+        return clamp(base + flash, 0.0, 1.0);
+    } else if (strobe_operator == 3u) {
+        return clamp(base - flash, 0.0, 1.0);
+    } else if (strobe_operator == 4u) {
+        return base * flash;
+    } else if (strobe_operator == 5u) {
+        return abs(base - flash);
+    } else if (strobe_operator == 6u) {
+        return f32(strobe_byte(base) & strobe_byte(flash)) / 255.0;
+    } else if (strobe_operator == 7u) {
+        return f32(strobe_byte(base) | strobe_byte(flash)) / 255.0;
+    } else if (strobe_operator == 8u) {
+        return f32(strobe_byte(base) ^ strobe_byte(flash)) / 255.0;
+    } else if (strobe_operator == 9u || strobe_operator == 12u) {
+        return max(base, flash);
+    } else if (strobe_operator == 10u || strobe_operator == 11u) {
+        return min(base, flash);
+    } else if (strobe_operator == 13u) {
+        return 1.0 - (1.0 - base) * (1.0 - flash);
+    }
+    // Copy, and the fallback for any tag this shader does not know.
+    return flash;
+}
+
+fn strobe_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> {
+    // Transparent pixels are never invented into coverage, matching the CPU
+    // kernel's positive coverage test.
+    if (pixel.a <= 0.0) {
+        return pixel;
+    }
+    let weight = clamp(effect.params.w, 0.0, 1.0);
+    let mode = u32(effect.extra0.x + 0.5);
+    let strobe_operator = u32(effect.extra0.y + 0.5);
+    if (mode == 2u) {
+        return vec4<f32>(pixel.rgb, pixel.a * (1.0 - weight));
+    }
+    var result = pixel.rgb;
+    for (var channel = 0u; channel < 3u; channel = channel + 1u) {
+        let base = pixel[channel];
+        let flash = effect.params[channel];
+        let combined = strobe_combine(strobe_operator, base, flash);
+        result[channel] = base + (combined - base) * weight;
+    }
+    return vec4<f32>(result, pixel.a);
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -4374,6 +4430,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = aces_transform_apply(pixel, effect);
         } else if (effect.header.x == 56u) {
             pixel = light_sweep_apply(pixel, position, effect);
+        } else if (effect.header.x == 57u) {
+            pixel = strobe_apply(pixel, effect);
         }
     }
     return pixel;
@@ -8976,6 +9034,22 @@ fn effect_uniforms_for_ops(
                     extra1,
                     extra2,
                     extra3,
+                }
+            }
+            EffectGpuPointOp::Strobe { grade } => {
+                let (params, extra0, extra1) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [57, 0, 0, 0],
+                    params,
+                    // `gpu_controls` returns the flash colour and weight in
+                    // `params` and the mode/operator tags in its second cell,
+                    // which `strobe_apply` reads back through `extra0`; the
+                    // colour slot stays unused.
+                    color: [0.0; 4],
+                    extra0,
+                    extra1,
+                    extra2: [0.0; 4],
+                    extra3: [0.0; 4],
                 }
             }
             EffectGpuPointOp::Scanlines { grade } => {
@@ -14484,6 +14558,125 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU light sweep accuracy budget exceeded for {label}: {report:?}"
+            );
+        }
+    }
+
+    fn strobe_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            for column in 0..width {
+                let u = column as f32 / (width - 1) as f32;
+                let v = row as f32 / (height - 1) as f32;
+                // Alpha never reaches zero: the straight to premultiplied round
+                // trip canonicalises a fully transparent pixel, so a zero-alpha
+                // fixture would hide a dropped or over-applied weight term. The
+                // colour ramp keeps copy, screen and the bitwise operators
+                // distinguishable from each other.
+                let alpha = 0.45 + 0.4 * column as f32 / (width - 1) as f32;
+                data.push([0.1 + 0.6 * u, 0.2 + 0.5 * v, 0.7 - 0.4 * u, alpha]);
+            }
+        }
+        data
+    }
+
+    #[tokio::test]
+    async fn gpu_strobe_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp, StrobeGrade, StrobeMode, StrobeOperator,
+            StrobeParameters,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU strobe parity test: no GPU adapter available");
+            return;
+        };
+        const WIDTH: u32 = 13;
+        const HEIGHT: u32 = 9;
+        let defaults = StrobeParameters::default();
+        let cases = [
+            ("documented defaults", defaults),
+            (
+                "colour only, blend 50, screen",
+                StrobeParameters {
+                    color: [0.2, 0.6, 0.9],
+                    blend_with_original: 50.0,
+                    operator: StrobeOperator::Screen,
+                    ..defaults
+                },
+            ),
+            (
+                "masks layer, blend 40",
+                StrobeParameters {
+                    blend_with_original: 40.0,
+                    strobe_mode: StrobeMode::MasksLayer,
+                    ..defaults
+                },
+            ),
+            (
+                "bitwise and, no blend",
+                StrobeParameters {
+                    color: [0.5, 0.75, 0.25],
+                    blend_with_original: 0.0,
+                    operator: StrobeOperator::And,
+                    ..defaults
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = StrobeGrade::new(parameters).expect("valid strobe grade");
+            let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width: WIDTH,
+                height: HEIGHT,
+                color_space: WorkingColorSpace::LinearRec709,
+                data: strobe_test_pixels(WIDTH, HEIGHT),
+            });
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Strobe { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let mut expected = strobe_test_pixels(WIDTH, HEIGHT);
+            assert!(mondrian_effects::strobe_frame_f32(
+                &mut expected,
+                WIDTH as usize,
+                HEIGHT as usize,
+                &grade,
+            ));
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 1,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU strobe accuracy budget exceeded for {label}: {report:?}"
             );
         }
     }
