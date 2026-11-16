@@ -141,6 +141,8 @@ pub(crate) struct EffectSpatialGpu {
     channel_combiner_layer: wgpu::RenderPipeline,
     set_matte: wgpu::RenderPipeline,
     displacement_map: wgpu::RenderPipeline,
+    difference_matte_horizontal: wgpu::RenderPipeline,
+    difference_matte: wgpu::RenderPipeline,
     temporal_blend: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
@@ -1843,6 +1845,14 @@ impl EffectSpatialGpu {
             "mondrian.effect-spatial.temporal-blend",
             "fs_temporal_blend",
         );
+        let difference_matte_horizontal = auxiliary_pipeline(
+            "mondrian.effect-spatial.difference-matte-horizontal",
+            "fs_difference_matte_h",
+        );
+        let difference_matte = auxiliary_pipeline(
+            "mondrian.effect-spatial.difference-matte",
+            "fs_difference_matte",
+        );
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
             layout: Some(&composite_layout),
@@ -2741,6 +2751,8 @@ impl EffectSpatialGpu {
             channel_combiner_layer,
             set_matte,
             displacement_map,
+            difference_matte_horizontal,
+            difference_matte,
             temporal_blend,
             bindings,
             composite_bindings,
@@ -3730,7 +3742,149 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    /// Record the difference matte chain: one draw without a blur, two with it.
+    ///
+    /// The horizontal difference stage writes `scratch[1]`; the second draw
+    /// reads that plane as its auxiliary input, averages it vertically and
+    /// folds the matte into the composite against `destination`. `scratch[0]`
+    /// is skipped on purpose: the chained route passes its pool destination as
+    /// `scratch[0]`, and a texture cannot be an attachment and a sampled input
+    /// in one draw. The caller's `destination` is therefore never also bound as
+    /// an input.
+    #[allow(clippy::too_many_arguments)]
+    fn record_difference_matte(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        primary: &wgpu::Texture,
+        auxiliary: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        transform: [f32; 6],
+        grade: mondrian_effects::DifferenceMatteGrade,
+        sampling: mondrian_effects::AuxiliarySampling,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if primary.width() == 0
+            || primary.height() == 0
+            || auxiliary.width() == 0
+            || auxiliary.height() == 0
+        {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        if transform.iter().any(|component| !component.is_finite()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "difference_matte_transform",
+            ));
+        }
+        // The matte preserves the raster, so the delivery always keeps the input
+        // extent and the reference raster only feeds the sampler.
+        if (destination.width(), destination.height()) != (primary.width(), primary.height()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "difference_matte_output_extent",
+            ));
+        }
+        let (mut params, extra) = grade.gpu_controls();
+        params[3] = f32::from(u8::from(sampling.filter == AuxiliaryFilter::Linear));
+        // The kernel applies the affine itself, in the same two steps as
+        // the CPU kernel, so the sampler must not repeat it. The host delivery
+        // affine only applies when the graph declared a frame transform; a
+        // primary-grid auxiliary keeps the identity mapping.
+        let [a, b, tx, c, d, ty] = if sampling.mapping == AuxiliaryCoordinateMapping::FrameTransform
+        {
+            transform
+        } else {
+            mondrian_effects::IDENTITY_AFFINE
+        };
+        let mut crop_w = 1.0_f32;
+        let mut crop_h = 1.0_f32;
+        if grade.size_mode() == mondrian_effects::DifferenceMatteSizeMode::CenterCrop {
+            let primary_aspect = primary.width() as f32 / primary.height() as f32;
+            let auxiliary_aspect = auxiliary.width() as f32 / auxiliary.height() as f32;
+            crop_w = (primary_aspect / auxiliary_aspect).min(1.0);
+            crop_h = (auxiliary_aspect / primary_aspect).min(1.0);
+            if !crop_w.is_finite() || !crop_h.is_finite() || crop_w <= 0.0 || crop_h <= 0.0 {
+                return Err(EffectSpatialGpuError::UnsupportedPass(
+                    "difference_matte_geometry",
+                ));
+            }
+        }
+        let uniforms = SpatialPassUniform {
+            size: [
+                primary.width() as f32,
+                primary.height() as f32,
+                f32::from(u8::from(
+                    sampling.out_of_bounds == AuxiliaryOutOfBounds::Transparent,
+                )),
+                // The kernel applies the affine itself, in the same two steps as
+                // the CPU kernel, so the sampler must not repeat it.
+                0.0,
+            ],
+            params,
+            // The stage tag is the only field the record path overrides.
+            extra: [extra[0], extra[1], 0.0, extra[3]],
+            aces: [a, b, tx, crop_w],
+            extra1: [c, d, ty, crop_h],
+        };
+        let primary_view = primary.create_view(&wgpu::TextureViewDescriptor::default());
+        let auxiliary_view = auxiliary.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        if extra[0] <= 0.0 {
+            // Zero taps: the tabulated difference is the plain `S - A` sample,
+            // so one draw covers the whole matte.
+            self.record_composite_pass(
+                device,
+                encoder,
+                &self.difference_matte,
+                &primary_view,
+                &auxiliary_view,
+                &output_view,
+                &uniforms,
+            );
+            return Ok(destination.clone());
+        }
+        // The intermediate plane is `scratch[1]`, never `scratch[0]`: callers
+        // hand over the whole pool, and the chained route writes this stage's
+        // result into `scratch[0]` while the graph-local route copies it out of
+        // `scratch[0]`, so index 1 is the first plane that is both in the pool
+        // and disjoint from whatever the caller considers its destination.
+        let intermediate = scratch.get(1).ok_or(EffectSpatialGpuError::UnsupportedPass(
+            "difference_matte_scratch",
+        ))?;
+        if (intermediate.width(), intermediate.height()) != (primary.width(), primary.height()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "difference_matte_scratch",
+            ));
+        }
+        let intermediate_view = intermediate.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut horizontal = uniforms;
+        horizontal.extra[2] = 1.0;
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.difference_matte_horizontal,
+            &primary_view,
+            &auxiliary_view,
+            &intermediate_view,
+            &horizontal,
+        );
+        let mut composite = uniforms;
+        composite.extra[2] = 2.0;
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.difference_matte,
+            &primary_view,
+            &intermediate_view,
+            &output_view,
+            &composite,
+        );
+        Ok(destination.clone())
+    }
+
     /// Sample an independent texture while processing the primary frame.
+    ///
+    /// `scratch` supplies the intermediate planes that a multi-pass auxiliary
+    /// stage needs; single-pass stages ignore it and write `destination`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_auxiliary(
         &self,
@@ -3740,8 +3894,22 @@ impl EffectSpatialGpu {
         primary: &wgpu::Texture,
         auxiliary: &wgpu::Texture,
         destination: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
         transform: [f32; 6],
     ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if let EffectGpuSpatialPass::DifferenceMatte { grade, sampling, .. } = *pass {
+            return self.record_difference_matte(
+                device,
+                encoder,
+                primary,
+                auxiliary,
+                destination,
+                scratch,
+                transform,
+                grade,
+                sampling,
+            );
+        }
         let (pipeline, sampling, mut params, extra) = match *pass {
             EffectGpuSpatialPass::FillMatte { grade, sampling, .. } => {
                 let [red, green, blue] = grade.color();
@@ -4050,6 +4218,15 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Split { .. } => Ok(1),
             EffectGpuSpatialPass::LinearColorKey { .. } => Ok(1),
             EffectGpuSpatialPass::ColorOffset { .. } => Ok(1),
+            // At most two draws: the horizontal difference plane feeds one
+            // composite that folds the vertical average into the matte, so the
+            // pool is `pass_count + 1` = three textures. At UHD that is
+            // 3 x 132,710,400 = 398,131,200 B and at DCI 4K 3 x 141,557,760 =
+            // 424,673,280 B, both inside the 512 MiB budget; a four-texture
+            // pool would not fit DCI 4K.
+            EffectGpuSpatialPass::DifferenceMatte { grade, .. } => {
+                Ok(if grade.blur() <= 0.0 { 1 } else { 2 })
+            }
             EffectGpuSpatialPass::FillMatte { .. }
             | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
             | EffectGpuSpatialPass::SetMatte { .. }
@@ -4142,6 +4319,7 @@ impl EffectSpatialGpu {
                     source,
                     source,
                     output,
+                    &[],
                     mondrian_effects::IDENTITY_AFFINE,
                 );
             }
@@ -4149,6 +4327,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
             | EffectGpuSpatialPass::SetMatte { sampling: Some(_), .. }
             | EffectGpuSpatialPass::DisplacementMap { .. }
+            | EffectGpuSpatialPass::DifferenceMatte { .. }
             | EffectGpuSpatialPass::Glass { auxiliary: Some(_), .. } => {
                 return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
             }
@@ -10742,11 +10921,12 @@ fn spatial_composite_shader_source() -> String {
         "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
          const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
          const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
-         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}",
+         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}",
         mondrian_effects::PIXEL_CENTRE,
         f32::MAX.to_bits(),
         include_str!("channel_combiner.wgsl"),
         include_str!("displacement_map.wgsl"),
+        include_str!("difference_matte.wgsl"),
     )
 }
 
@@ -14833,6 +15013,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
                 &primary,
                 &matte,
                 &pool[0],
+                &[],
                 IDENTITY_AFFINE,
             )
             .unwrap();

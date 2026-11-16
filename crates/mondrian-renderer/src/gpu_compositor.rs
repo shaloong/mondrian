@@ -6574,6 +6574,7 @@ impl GpuFrameCompositor {
                                 &current_texture,
                                 &resource.resource().texture,
                                 &scratch[0],
+                                &scratch,
                                 binding.transform,
                             )
                         } else {
@@ -7124,6 +7125,42 @@ impl GpuFrameCompositor {
         let source = &input_resource.resource().texture;
         let map = &auxiliary_resource.resource().texture;
         let destination = &output.resource().texture;
+        // A two-draw auxiliary stage needs intermediate planes in the pool. The
+        // chain route passes the planner's `scratch[0]` as the destination and
+        // leaves `scratch[1]` as the horizontal difference plane; this route
+        // runs the stage as a standalone node, so it allocates the same two
+        // planes and copies the finished matte into the output resource. The
+        // planner sizes its pool from the same `texture_pass_count`, so the
+        // frame budget already covers those planes.
+        let scratch_count = if matches!(pass, EffectGpuSpatialPass::DifferenceMatte { .. }) {
+            let passes = EffectSpatialGpu::texture_pass_count(pass).map_err(|error| {
+                GpuCompositeError::SpatialChainFailed {
+                    pass: spatial_failure_pass(&error),
+                    detail: error.to_string(),
+                }
+            })?;
+            if passes > 1 {
+                2
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let mut scratch_resources = Vec::with_capacity(scratch_count);
+        for _ in 0..scratch_count {
+            scratch_resources.push(create_working_resource(
+                device,
+                ids,
+                input.descriptor(),
+                "gpu-graph-auxiliary-scratch",
+                resource_pool,
+            )?);
+        }
+        let scratch: Vec<wgpu::Texture> = scratch_resources
+            .iter()
+            .map(|resource| resource.resource().texture.clone())
+            .collect();
         let result = if let EffectGpuSpatialPass::Glass {
             grade,
             lighting,
@@ -7150,17 +7187,49 @@ impl GpuFrameCompositor {
                 EffectFrameExtent::new(source.width(), source.height()),
             )
         } else {
-            self.spatial
-                .record_auxiliary(
-                    device,
-                    encoder,
-                    pass,
-                    source,
-                    map,
-                    destination,
-                    mondrian_effects::IDENTITY_AFFINE,
-                )
-                .map(|_| ())
+            // With a blur the matte lands in `scratch[0]` and is copied out;
+            // without one the single draw writes the output resource directly.
+            let recorded_destination = if scratch.is_empty() {
+                destination
+            } else {
+                &scratch[0]
+            };
+            match self.spatial.record_auxiliary(
+                device,
+                encoder,
+                pass,
+                source,
+                map,
+                recorded_destination,
+                &scratch,
+                mondrian_effects::IDENTITY_AFFINE,
+            ) {
+                Ok(produced) => {
+                    if !scratch.is_empty() {
+                        encoder.copy_texture_to_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &produced,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::TexelCopyTextureInfo {
+                                texture: destination,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::Extent3d {
+                                width: source.width(),
+                                height: source.height(),
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
         };
         result.map_err(|error| GpuCompositeError::SpatialChainFailed {
             pass: spatial_failure_pass(&error),
@@ -22839,6 +22908,403 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Difference matte (KEY-06) parity against the Float32 CPU kernel.
+    ///
+    /// The raw auxiliary entry point is driven directly: the compositor's
+    /// source-over layer draw would premultiply the matte, and the contract
+    /// under test is the straight coverage the shader returns. Every case pins
+    /// the recorded pass count as well, so a silent extra plane cannot hide
+    /// behind an equal-looking readback.
+    #[tokio::test]
+    async fn gpu_difference_matte_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            apply_difference_matte_f32, AuxiliaryFloatFrame, AuxiliaryPolicy, AuxiliaryResolution,
+            AuxiliarySampling, DifferenceMatteGrade, DifferenceMatteSizeMode, EffectColorDomain,
+            EffectFloatFrameView, EffectFrameExtent, EffectGpuSpatialPass, EffectValueFormat,
+            EffectWorkingPrecision, IDENTITY_AFFINE,
+        };
+
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("GPU for difference matte parity");
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let (width, height) = (37, 23);
+        // A different reference geometry, so stretch and centre crop disagree on
+        // every pixel away from the centre of the frame.
+        let (aux_width, aux_height) = (19, 29);
+        let sampling = AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP;
+        // The effects builder declares centre crop with a transparent border,
+        // because the folded crop window addresses pixels the reference raster
+        // does not cover. Stretch keeps the clamped reading.
+        let cropped_sampling = AuxiliarySampling::new(
+            mondrian_effects::AuxiliaryCoordinateMapping::FrameTransform,
+            mondrian_effects::AuxiliaryFilter::Linear,
+            mondrian_effects::AuxiliaryOutOfBounds::Transparent,
+        );
+
+        // Hidden colour under zero coverage and over-range alpha both appear
+        // here: the kernel keys premultiplied samples and clamps coverage.
+        let primary_pixels: Vec<[f32; 4]> = (0..width * height)
+            .map(|i| {
+                [
+                    (i % 37) as f32 / 13.0 - 0.5,
+                    (i % 23) as f32 / 11.0 - 0.25,
+                    (i % 31) as f32 / 19.0 - 0.1,
+                    if i % 13 == 0 {
+                        0.0
+                    } else {
+                        (1 + i % 9) as f32 / 9.0
+                    },
+                ]
+            })
+            .collect();
+        let auxiliary_pixels: Vec<[f32; 4]> = (0..aux_width * aux_height)
+            .map(|i| {
+                [
+                    (i % 19) as f32 / 9.0 - 0.4,
+                    (i % 29) as f32 / 15.0 - 0.6,
+                    (i % 17) as f32 / 21.0,
+                    if i % 7 == 0 {
+                        0.0
+                    } else {
+                        (1 + i % 5) as f32 / 5.0
+                    },
+                ]
+            })
+            .collect();
+        let reference = |transform: [f32; 6]| AuxiliaryFloatFrame {
+            frame: EffectFloatFrameView::new(
+                EffectFrameExtent::new(aux_width, aux_height),
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &auxiliary_pixels,
+            ),
+            transform,
+            policy: AuxiliaryPolicy::new(AuxiliaryResolution::Authored),
+        };
+        let grade = |layer: u32,
+                     size_mode: DifferenceMatteSizeMode,
+                     tolerance: f32,
+                     softness: f32,
+                     blur: f32| {
+            DifferenceMatteGrade::new(layer, size_mode, tolerance, softness, blur)
+                .expect("the authored controls validate")
+        };
+
+        let cases: [(&str, DifferenceMatteGrade, AuxiliarySampling, [f32; 6], u32); 8] = [
+            (
+                "defaults",
+                DifferenceMatteGrade::documented_defaults(),
+                sampling,
+                IDENTITY_AFFINE,
+                1,
+            ),
+            (
+                "stretch+blur",
+                grade(6, DifferenceMatteSizeMode::Stretch, 15.0, 0.0, 2.0),
+                sampling,
+                IDENTITY_AFFINE,
+                2,
+            ),
+            (
+                "stretch+blur+transparent",
+                grade(6, DifferenceMatteSizeMode::Stretch, 10.0, 0.0, 1.0),
+                cropped_sampling,
+                IDENTITY_AFFINE,
+                2,
+            ),
+            (
+                "center-crop+blur",
+                grade(6, DifferenceMatteSizeMode::CenterCrop, 15.0, 10.0, 1.0),
+                sampling,
+                IDENTITY_AFFINE,
+                2,
+            ),
+            (
+                "center-crop+transparent+blur",
+                grade(6, DifferenceMatteSizeMode::CenterCrop, 15.0, 0.0, 1.0),
+                cropped_sampling,
+                IDENTITY_AFFINE,
+                2,
+            ),
+            (
+                "transform+blur",
+                grade(6, DifferenceMatteSizeMode::CenterCrop, 15.0, 5.0, 1.0),
+                cropped_sampling,
+                [1.0, 0.0, 0.125, 0.0, 1.0, -0.0625],
+                2,
+            ),
+            (
+                "softness=100",
+                grade(9, DifferenceMatteSizeMode::Stretch, 15.0, 100.0, 1.0),
+                sampling,
+                IDENTITY_AFFINE,
+                2,
+            ),
+            (
+                "r=0",
+                grade(6, DifferenceMatteSizeMode::CenterCrop, 4.0, 25.0, 0.0),
+                cropped_sampling,
+                IDENTITY_AFFINE,
+                1,
+            ),
+        ];
+
+        let mut encoder = context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (label, grade_case, case_sampling, transform, passes) in cases {
+            let mut cpu = primary_pixels.clone();
+            assert!(
+                apply_difference_matte_f32(
+                    &mut cpu,
+                    width,
+                    height,
+                    reference(transform),
+                    case_sampling,
+                    &grade_case,
+                ),
+                "{label}: the CPU kernel rejected the raster"
+            );
+            let pass = EffectGpuSpatialPass::DifferenceMatte {
+                grade: grade_case,
+                sampling: case_sampling,
+                auxiliary: None,
+                external_slot: None,
+            };
+            assert_eq!(
+                crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                    .expect("the matte has a pass count"),
+                passes,
+                "{label}: recorded pass count"
+            );
+            let primary = key_cleaner_upload(&context, &primary_pixels, width, height);
+            let auxiliary = key_cleaner_upload(&context, &auxiliary_pixels, aux_width, aux_height);
+            let destination = key_cleaner_scratch(&context, width, height, 1).remove(0);
+            let intermediate = key_cleaner_scratch(&context, width, height, 2);
+            let scratch = intermediate.as_slice();
+            let output = executor
+                .record_auxiliary(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &primary,
+                    &auxiliary,
+                    &destination,
+                    scratch,
+                    transform,
+                )
+                .unwrap_or_else(|error| panic!("{label}: the difference matte records: {error}"));
+            assert_eq!(
+                (output.width(), output.height()),
+                (width, height),
+                "{label}"
+            );
+            // A two-draw matte owes the caller its intermediate plane at index
+            // one, so a short slice is a refusal rather than a silent fallback.
+            if passes > 1 {
+                assert!(
+                    matches!(
+                        executor.record_auxiliary(
+                            &context.device,
+                            &mut encoder,
+                            &pass,
+                            &primary,
+                            &auxiliary,
+                            &destination,
+                            &intermediate[..1],
+                            transform,
+                        ),
+                        Err(
+                            crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                                "difference_matte_scratch"
+                            )
+                        )
+                    ),
+                    "{label}: the two-pass matte needs an intermediate plane"
+                );
+            }
+            let gpu = {
+                context.queue.submit(Some(encoder.finish()));
+                encoder = context
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                key_cleaner_readback(&context, &output, width, height)
+            };
+            let rgb = cpu
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(cpu, gpu)| [cpu[0] - gpu[0], cpu[1] - gpu[1], cpu[2] - gpu[2]])
+                .fold(0.0_f32, |worst, error| worst.max(error.abs()));
+            let alpha = cpu
+                .iter()
+                .zip(&gpu)
+                .map(|(cpu, gpu)| (cpu[3] - gpu[3]).abs())
+                .fold(0.0_f32, f32::max);
+            eprintln!(
+                "KEY-06 {label}: passes={passes} scratch={} rgb={rgb:.3e} alpha={alpha:.3e}",
+                scratch.len()
+            );
+            assert!(rgb <= 2.0e-4, "{label}: rgb error {rgb:.3e}");
+            assert!(alpha <= 1.0e-5, "{label}: alpha error {alpha:.3e}");
+            for (actual, cpu) in gpu.iter().zip(&cpu) {
+                if cpu[3] == 0.0 {
+                    assert_eq!(
+                        actual.map(f32::to_bits),
+                        [0.0_f32; 4].map(f32::to_bits),
+                        "{label}: an uncovered pixel canonicalizes"
+                    );
+                }
+            }
+        }
+
+        // `d == tolerance` keeps the pixel back and `d == tolerance + 2^-10`
+        // opens it: the boundary is strictly greater on both paths, and a
+        // tolerance of fifty makes the comparison exact in binary.
+        let (boundary_width, boundary_height) = (4, 1);
+        let boundary_primary: Vec<[f32; 4]> = vec![[0.25, 0.125, 0.5, 1.0]; 4];
+        let boundary_auxiliary: Vec<[f32; 4]> = vec![
+            [0.75, 0.125, 0.5, 1.0],
+            [0.75 + 1.0 / 1024.0, 0.125, 0.5, 1.0],
+            [0.25, 0.625, 0.5, 1.0],
+            [0.25, 0.125, 0.5, 1.0],
+        ];
+        let boundary_reference = AuxiliaryFloatFrame {
+            frame: EffectFloatFrameView::new(
+                EffectFrameExtent::new(boundary_width, boundary_height),
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &boundary_auxiliary,
+            ),
+            transform: IDENTITY_AFFINE,
+            policy: AuxiliaryPolicy::new(AuxiliaryResolution::Authored),
+        };
+        let boundary_grade = grade(6, DifferenceMatteSizeMode::Stretch, 50.0, 0.0, 0.0);
+        let mut cpu = boundary_primary.clone();
+        assert!(apply_difference_matte_f32(
+            &mut cpu,
+            boundary_width,
+            boundary_height,
+            boundary_reference,
+            sampling,
+            &boundary_grade,
+        ));
+        let boundary_pass = EffectGpuSpatialPass::DifferenceMatte {
+            grade: boundary_grade,
+            sampling,
+            auxiliary: None,
+            external_slot: None,
+        };
+        assert_eq!(
+            crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&boundary_pass)
+                .expect("the matte has a pass count"),
+            1
+        );
+        let boundary_primary_texture =
+            key_cleaner_upload(&context, &boundary_primary, boundary_width, boundary_height);
+        let boundary_auxiliary_texture = key_cleaner_upload(
+            &context,
+            &boundary_auxiliary,
+            boundary_width,
+            boundary_height,
+        );
+        let boundary_destination =
+            key_cleaner_scratch(&context, boundary_width, boundary_height, 1).remove(0);
+        let boundary_output = executor
+            .record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &boundary_pass,
+                &boundary_primary_texture,
+                &boundary_auxiliary_texture,
+                &boundary_destination,
+                &[],
+                IDENTITY_AFFINE,
+            )
+            .expect("the boundary matte records");
+        context.queue.submit(Some(encoder.finish()));
+        encoder = context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let gpu = key_cleaner_readback(&context, &boundary_output, boundary_width, boundary_height);
+        assert_eq!(
+            gpu, cpu,
+            "KEY-06 boundary: the strict threshold matches the CPU"
+        );
+        assert_eq!(
+            gpu[0], [0.0; 4],
+            "KEY-06 boundary: d == t keeps the pixel back"
+        );
+        assert_eq!(gpu[1][3], 1.0, "KEY-06 boundary: d > t opens the pixel");
+        assert_eq!(
+            gpu[2], [0.0; 4],
+            "KEY-06 boundary: the green channel counts too"
+        );
+        assert_eq!(
+            gpu[3], [0.0; 4],
+            "KEY-06 boundary: a match leaves no colour"
+        );
+
+        // Refusals: the pass never degrades into a silent CPU fallback.
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &boundary_pass,
+                &boundary_primary_texture,
+                &boundary_auxiliary_texture,
+                &boundary_destination,
+                &[],
+                [f32::NAN, 0.0, 0.0, 0.0, 1.0, 0.0],
+            ),
+            Err(
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "difference_matte_transform"
+                )
+            )
+        ));
+        let wrong_destination =
+            key_cleaner_scratch(&context, boundary_width + 1, boundary_height, 1).remove(0);
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &boundary_pass,
+                &boundary_primary_texture,
+                &boundary_auxiliary_texture,
+                &wrong_destination,
+                &[],
+                IDENTITY_AFFINE,
+            ),
+            Err(
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "difference_matte_output_extent"
+                )
+            )
+        ));
+        let record_scratch = key_cleaner_scratch(&context, boundary_width, boundary_height, 2);
+        assert!(matches!(
+            executor.record(
+                &context.device,
+                &mut encoder,
+                &boundary_pass,
+                &boundary_primary_texture,
+                &record_scratch,
+                boundary_width,
+                boundary_height,
+            ),
+            Err(crate::spatial_pass_gpu::EffectSpatialGpuError::MissingAuxiliaryInput)
+        ));
     }
 
     #[tokio::test]

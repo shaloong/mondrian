@@ -440,6 +440,9 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "channel_combiner_layer" => 1.2,
         "set_matte" => 1.2,
         "displacement_map" => 2.4,
+        // Two difference gathers plus one matte composite on the blurred
+        // chain; the unblurred chain is a single composite.
+        "difference_matte" => 3.0,
         "grow_bounds" => 0.8,
         "smear" | "reshape" => 2.4,
         "detail_preserving_upscale" => 28.0,
@@ -517,6 +520,8 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "channel_combiner_layer" => 3.0,
         "set_matte" => 3.0,
         "displacement_map" => 6.0,
+        // One bilinear reference sample per blurred tap, then the matte.
+        "difference_matte" => 6.0,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
         // Same sliding histogram as the median plus the deviation gate.
