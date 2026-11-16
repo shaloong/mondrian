@@ -3274,6 +3274,7 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::Watercolor { .. }
         | EffectRenderOp::Highlight { .. }
         | EffectRenderOp::RadialShadow { .. }
+        | EffectRenderOp::ZoomBlur { .. }
         | EffectRenderOp::GrowBounds { .. }
         | EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }

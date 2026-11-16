@@ -633,6 +633,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::ZoomBlur { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "zoom_blur",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::FilmLook { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "film_look",
@@ -1493,6 +1499,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The kernel snapshots the straight-alpha source before rewriting it.
         EffectRenderOp::RadialShadow { .. } => 1,
         EffectRenderOp::FilmLook { .. } => 2,
+        EffectRenderOp::ZoomBlur { .. } => 0,
     }
 }
 
@@ -2060,6 +2067,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 checkpoint,
             )
         }
+        EffectRenderOp::ZoomBlur { grade } => crate::zoom_blur::apply_zoom_blur_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            *grade,
+            checkpoint,
+        ),
         EffectRenderOp::FilmLook { grade } => crate::film_look::apply_film_look_f32_controlled(
             working,
             region.width as usize,

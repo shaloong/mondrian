@@ -116,6 +116,7 @@ pub mod warp;
 pub mod watercolor;
 pub mod wave_warp;
 pub mod wire_removal;
+pub mod zoom_blur;
 pub use project_properties::{rebind_effect_project_geometry, EffectProjectPropertyInitializer};
 pub mod execution;
 pub mod execution_contract;
@@ -1026,4 +1027,12 @@ pub use wave_warp::{
 pub use wire_removal::{
     wire_removal_frame_f32, RemovalStyle, WireRemovalError, WireRemovalGrade,
     WIRE_REMOVAL_MAX_COORDINATE, WIRE_REMOVAL_MAX_FRAME_OFFSET, WIRE_REMOVAL_MAX_THICKNESS,
+};
+pub use zoom_blur::{
+    zoom_blur_frame_f32, ZoomBlurBorder, ZoomBlurError, ZoomBlurGpuControls, ZoomBlurGrade,
+    ZoomBlurParameters, ZoomBlurQuality, ZoomBlurType, ZOOM_BLUR_BETTER_TAPS,
+    ZOOM_BLUR_DEFAULT_CENTRE, ZOOM_BLUR_DEFAULT_CENTRE_EXCLUSION, ZOOM_BLUR_DEFAULT_CHANNEL_GAIN,
+    ZOOM_BLUR_DEFAULT_SMOOTHNESS, ZOOM_BLUR_DEFAULT_ZOOM, ZOOM_BLUR_FASTER_TAPS,
+    ZOOM_BLUR_MAX_CENTRE_EXCLUSION, ZOOM_BLUR_MAX_CHANNEL_GAIN, ZOOM_BLUR_MAX_SMOOTHNESS,
+    ZOOM_BLUR_MAX_ZOOM,
 };

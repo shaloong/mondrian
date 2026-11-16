@@ -287,6 +287,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored stock, component amounts, tint, and frozen grain seed.
         grade: crate::FilmLookGrade,
     },
+    /// Radial smear that pulls each pixel towards an authored centre.
+    ZoomBlur {
+        /// Authored centre, sweep length, tap distribution, and borders.
+        grade: crate::ZoomBlurGrade,
+    },
     /// Radial correction around the green reference channel.
     ChromaticAberrationRemoval {
         /// Authored amounts, edge scale, and normalized centre.
@@ -497,6 +502,7 @@ impl EffectGpuSpatialPass {
             Self::Cartoon { .. } => "cartoon",
             Self::RadialShadow { .. } => "radial_shadow",
             Self::FilmLook { .. } => "film_look",
+            Self::ZoomBlur { .. } => "zoom_blur",
             Self::Highlight { .. } => "highlight",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
@@ -611,6 +617,8 @@ impl EffectGpuSpatialPass {
             // can reach any distance and the plane is never tiled.
             Self::RadialShadow { .. } => u32::MAX,
             Self::FilmLook { .. } => crate::FILM_LOOK_HALO,
+            // The sweep can reach the frame diagonal, so the plane is never tiled.
+            Self::ZoomBlur { .. } => u32::MAX,
             // The authored length is a fraction of the frame width, so the ray
             // can reach any distance and the plane is never tiled.
             Self::Highlight { .. } => u32::MAX,
@@ -708,6 +716,8 @@ impl EffectGpuSpatialPass {
             // Same unbounded reach as the horizontal halo.
             Self::RadialShadow { .. } => u32::MAX,
             Self::FilmLook { .. } => crate::FILM_LOOK_HALO,
+            // The sweep can reach the frame diagonal, so the plane is never tiled.
+            Self::ZoomBlur { .. } => u32::MAX,
             Self::Highlight { .. } => u32::MAX,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
@@ -1304,6 +1314,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::RadialShadow { grade } => {
             Some(EffectGpuSpatialPass::RadialShadow { grade: *grade })
+        }
+        EffectRenderOp::ZoomBlur { grade } => {
+            Some(EffectGpuSpatialPass::ZoomBlur { grade: *grade })
         }
         EffectRenderOp::Highlight { grade } => {
             Some(EffectGpuSpatialPass::Highlight { grade: *grade })

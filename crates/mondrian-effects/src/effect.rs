@@ -1370,6 +1370,11 @@ pub enum EffectRenderOp {
         /// Authored film stock, strength, grain, halation, glow, tint, contrast and fade.
         grade: crate::FilmLookGrade,
     },
+    /// Zoom blur: sweeps samples along rays radiating from a centre.
+    ZoomBlur {
+        /// Authored smoothing, zoom amount, blur type, centre and quality.
+        grade: crate::ZoomBlurGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1837,6 +1842,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::FilmLook { grade } => {
                 formatter.debug_struct("FilmLook").field("grade", grade).finish()
+            }
+            Self::ZoomBlur { grade } => {
+                formatter.debug_struct("ZoomBlur").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -3011,6 +3019,13 @@ impl EffectRenderOp {
                 // grade hashes every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::ZoomBlur { grade } => {
+                143u8.hash(state);
+                // The smoothing, the zoom amount, the blur type, the centre,
+                // the quality and the border rule all read the authored
+                // values, so the grade hashes every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3301,6 +3316,7 @@ impl EffectRenderOp {
             EffectRenderOp::Strobe { .. } => 1,
             EffectRenderOp::RadialShadow { .. } => 4,
             EffectRenderOp::FilmLook { .. } => 3,
+            EffectRenderOp::ZoomBlur { .. } => 3,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3835,7 +3851,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 143] {
+fn builtin_effect_types() -> [EffectType; 144] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3980,6 +3996,7 @@ fn builtin_effect_types() -> [EffectType; 143] {
         EffectType::Strobe,
         EffectType::RadialShadow,
         EffectType::FilmLook,
+        EffectType::ZoomBlur,
     ]
 }
 
@@ -15388,6 +15405,235 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::ZoomBlur => {
+            // The eighteen authored values mirror the kernel: the smoothing,
+            // the zoom amount, the blur type, the centre exclusion, the
+            // per-channel strengths, the legacy and current centres, the
+            // quality, the border rule and the inert group toggles.
+            const GROUP: &str = "缩放模糊";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "smoothness",
+                GROUP,
+                "平滑强度",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_SMOOTHNESS),
+                Some(0.0),
+                Some(crate::ZOOM_BLUR_MAX_SMOOTHNESS as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "zoom",
+                GROUP,
+                "缩放数量",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_ZOOM),
+                Some(0.0),
+                Some(crate::ZOOM_BLUR_MAX_ZOOM as f64),
+                Some(0.01),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "blur_type",
+                GROUP,
+                "模糊类型",
+                crate::ZoomBlurType::DEFAULT.as_key(),
+                crate::ZoomBlurType::ALL
+                    .iter()
+                    .map(|blur_type| {
+                        ParameterEnumOption::new(
+                            blur_type.as_key(),
+                            blur_type.label(),
+                            format!("builtin.zoom_blur.blur_type.{}", blur_type.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "centre_exclusion",
+                GROUP,
+                "排除中心区域",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_CENTRE_EXCLUSION),
+                Some(0.0),
+                Some(crate::ZOOM_BLUR_MAX_CENTRE_EXCLUSION as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "channel_adjust",
+                GROUP,
+                "通道调整",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "relative_red",
+                GROUP,
+                "红色",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_CHANNEL_GAIN),
+                Some(0.0),
+                Some(crate::ZOOM_BLUR_MAX_CHANNEL_GAIN as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "relative_green",
+                GROUP,
+                "绿色",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_CHANNEL_GAIN),
+                Some(0.0),
+                Some(crate::ZOOM_BLUR_MAX_CHANNEL_GAIN as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "relative_blue",
+                GROUP,
+                "蓝色",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_CHANNEL_GAIN),
+                Some(0.0),
+                Some(crate::ZOOM_BLUR_MAX_CHANNEL_GAIN as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "relative_alpha",
+                GROUP,
+                "Alpha",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_CHANNEL_GAIN),
+                Some(0.0),
+                Some(crate::ZOOM_BLUR_MAX_CHANNEL_GAIN as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "center_position",
+                GROUP,
+                "中心位置",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "x_position",
+                GROUP,
+                "X 位置",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_CENTRE[0]),
+                Some(-1.0),
+                Some(2.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "y_position",
+                GROUP,
+                "Y 位置",
+                PropertyValue::Float(crate::ZOOM_BLUR_DEFAULT_CENTRE[1]),
+                Some(-1.0),
+                Some(2.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "position",
+                GROUP,
+                "位置",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::ZOOM_BLUR_DEFAULT_CENTRE[0],
+                    crate::ZOOM_BLUR_DEFAULT_CENTRE[1],
+                )),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "advanced_controls",
+                GROUP,
+                "高级控制",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "quality",
+                GROUP,
+                "质量",
+                crate::ZoomBlurQuality::DEFAULT.as_key(),
+                crate::ZoomBlurQuality::ALL
+                    .iter()
+                    .map(|quality| {
+                        ParameterEnumOption::new(
+                            quality.as_key(),
+                            quality.label(),
+                            format!("builtin.zoom_blur.quality.{}", quality.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "border_type",
+                GROUP,
+                "边界类型",
+                crate::ZoomBlurBorder::DEFAULT.as_key(),
+                crate::ZoomBlurBorder::ALL
+                    .iter()
+                    .map(|border| {
+                        ParameterEnumOption::new(
+                            border.as_key(),
+                            border.label(),
+                            format!("builtin.zoom_blur.border_type.{}", border.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "follow_sizing",
+                GROUP,
+                "跟随大小调整而移动",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blur_alpha",
+                GROUP,
+                "模糊Alpha",
+                PropertyValue::Bool(true),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -16570,6 +16816,26 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Percent
         }
         (EffectType::FilmLook, "contrast") => ParameterUnit::Unitless,
+        // The smoothing, the zoom amount, the centre exclusion and the four
+        // channel strengths are percentages of their documented scale; the
+        // legacy and current centres are normalized to the frame.
+        (EffectType::ZoomBlur, "smoothness" | "zoom" | "centre_exclusion") => {
+            ParameterUnit::Percent
+        }
+        (
+            EffectType::ZoomBlur,
+            "relative_red" | "relative_green" | "relative_blue" | "relative_alpha",
+        ) => ParameterUnit::Percent,
+        (EffectType::ZoomBlur, "x_position" | "y_position" | "position") => {
+            ParameterUnit::Normalized
+        }
+        // The menus and the inert toggles are plain numbers that already carry
+        // their own scale.
+        (
+            EffectType::ZoomBlur,
+            "blur_type" | "channel_adjust" | "center_position" | "advanced_controls" | "quality"
+            | "border_type" | "follow_sizing" | "blur_alpha",
+        ) => ParameterUnit::Unitless,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -17115,6 +17381,15 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // halo, so an input tile grows by that fixed envelope; the result
             // is a pure function of the current frame and its seed.
             roi_propagation: EffectRoiPropagation::PixelLocal,
+            ..cpu_linear
+        },
+        EffectType::ZoomBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Each output walks a ray away from the centre, so the furthest tap
+            // can land anywhere up to the frame diagonal; an input tile cannot
+            // be narrowed, though the result is still a pure function of the
+            // current frame.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -24650,6 +24925,195 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::ZoomBlur => {
+            let position_id = builtin_parameter_id(effect_type, "position");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read_number(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("缩放模糊的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_menu<T: Copy>(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    name: &str,
+                    from_key: fn(&str) -> Option<T>,
+                ) -> Result<Option<T>, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                            Some(value) => Ok(Some(value)),
+                            None => Err(invalid(format!("缩放模糊的{name}没有对应的菜单项 {key}"))),
+                        },
+                        Some(_) => Err(invalid(format!("缩放模糊的{name}必须是菜单项"))),
+                        None => Ok(None),
+                    }
+                }
+                fn read_toggle(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    name: &str,
+                    fallback: bool,
+                ) -> Result<bool, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Bool(value)) => Ok(value),
+                        None => Ok(fallback),
+                        Some(_) => Err(invalid(format!("缩放模糊的{name}必须是布尔值"))),
+                    }
+                }
+                let defaults = crate::ZoomBlurParameters::default();
+                let mut parameters = defaults;
+                parameters.smoothness =
+                    read_number(effect, context, &invalid, "smoothness", defaults.smoothness)?;
+                parameters.zoom = read_number(effect, context, &invalid, "zoom", defaults.zoom)?;
+                if let Some(value) = read_menu(
+                    effect,
+                    context,
+                    &invalid,
+                    "blur_type",
+                    "模糊类型",
+                    crate::ZoomBlurType::from_key,
+                )? {
+                    parameters.blur_type = value;
+                }
+                parameters.centre_exclusion = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "centre_exclusion",
+                    defaults.centre_exclusion,
+                )?;
+                parameters.channel_adjust = read_toggle(
+                    effect,
+                    context,
+                    &invalid,
+                    "channel_adjust",
+                    "通道调整",
+                    defaults.channel_adjust,
+                )?;
+                parameters.relative_red = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "relative_red",
+                    defaults.relative_red,
+                )?;
+                parameters.relative_green = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "relative_green",
+                    defaults.relative_green,
+                )?;
+                parameters.relative_blue = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "relative_blue",
+                    defaults.relative_blue,
+                )?;
+                parameters.relative_alpha = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "relative_alpha",
+                    defaults.relative_alpha,
+                )?;
+                parameters.centre_group = read_toggle(
+                    effect,
+                    context,
+                    &invalid,
+                    "center_position",
+                    "中心位置",
+                    defaults.centre_group,
+                )?;
+                parameters.x_position =
+                    read_number(effect, context, &invalid, "x_position", defaults.x_position)?;
+                parameters.y_position =
+                    read_number(effect, context, &invalid, "y_position", defaults.y_position)?;
+                match effect.evaluate_parameter(&position_id, context.time) {
+                    Some(PropertyValue::Vec2(position)) => {
+                        parameters.position = [position.x, position.y];
+                    }
+                    Some(_) => return Err(invalid("缩放模糊的位置必须是二维坐标".to_string())),
+                    None => {}
+                }
+                parameters.advanced_controls = read_toggle(
+                    effect,
+                    context,
+                    &invalid,
+                    "advanced_controls",
+                    "高级控制",
+                    defaults.advanced_controls,
+                )?;
+                if let Some(value) = read_menu(
+                    effect,
+                    context,
+                    &invalid,
+                    "quality",
+                    "质量",
+                    crate::ZoomBlurQuality::from_key,
+                )? {
+                    parameters.quality = value;
+                }
+                if let Some(value) = read_menu(
+                    effect,
+                    context,
+                    &invalid,
+                    "border_type",
+                    "边界类型",
+                    crate::ZoomBlurBorder::from_key,
+                )? {
+                    parameters.border_type = value;
+                }
+                parameters.follow_sizing = read_toggle(
+                    effect,
+                    context,
+                    &invalid,
+                    "follow_sizing",
+                    "跟随大小调整而移动",
+                    defaults.follow_sizing,
+                )?;
+                parameters.blur_alpha = read_toggle(
+                    effect,
+                    context,
+                    &invalid,
+                    "blur_alpha",
+                    "模糊Alpha",
+                    defaults.blur_alpha,
+                )?;
+                let grade = crate::ZoomBlurGrade::new(parameters).map_err(|error| {
+                    invalid(format!("缩放模糊的参数 {} 必须是数值", error.parameter()))
+                })?;
+                // The kernel resolves the centre from the frame size when it
+                // runs, so the builder never reads the frame and the stored
+                // grade stays frame-relative.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::ZoomBlur { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Highlight => {
             let mask_id = builtin_parameter_id(effect_type, "highlight_mask");
             let mask_layer_id = builtin_parameter_id(effect_type, "mask_layer");
@@ -26249,6 +26713,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Strobe => "频闪",
         EffectType::RadialShadow => "径向阴影",
         EffectType::FilmLook => "胶片外观",
+        EffectType::ZoomBlur => "缩放模糊",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -27666,6 +28131,7 @@ mod tests {
             EffectType::Strobe,
             EffectType::RadialShadow,
             EffectType::FilmLook,
+            EffectType::ZoomBlur,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -36962,7 +37428,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 143);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 144);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -37490,7 +37956,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 143);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 144);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -40449,7 +40915,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 143);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 144);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -41585,7 +42051,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 143);
+        assert_eq!(builtin_effect_types().len(), 144);
     }
 
     #[test]
@@ -44523,6 +44989,305 @@ mod tests {
                 op: name, ..
             }) => {
                 assert_eq!(name, "radial_shadow", "the spatial pass is refused by name");
+            }
+            other => panic!("unexpected point lowering {other:?}"),
+        }
+    }
+
+    fn zoom_blur_op(graph: &EffectRenderGraph) -> Option<crate::ZoomBlurGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::ZoomBlur { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::ZoomBlur { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_zoom_blur(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::ZoomBlur)
+            .expect("the zoom blur should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::ZoomBlur.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the zoom blur parameter should be assignable");
+        }
+        effect
+    }
+
+    /// The schema defaults differ from the kernel defaults for the three inert
+    /// group toggles, so the documented authoring state is spelled out here
+    /// instead of going through `ZoomBlurGrade::documented_defaults`.
+    fn zoom_blur_schema_defaults() -> crate::ZoomBlurParameters {
+        crate::ZoomBlurParameters {
+            channel_adjust: true,
+            centre_group: true,
+            advanced_controls: true,
+            ..crate::ZoomBlurParameters::default()
+        }
+    }
+
+    #[test]
+    fn zoom_blur_identity_builds_no_node() {
+        let effect = author_zoom_blur(&[("zoom", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("a zero zoom should compile");
+        assert!(
+            zoom_blur_op(&graph).is_none(),
+            "a zero zoom radius leaves the frame untouched"
+        );
+    }
+
+    #[test]
+    fn zoom_blur_defaults_build_one_spatial_op() {
+        let effect = instantiate_effect_node(EffectType::ZoomBlur)
+            .expect("the zoom blur should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = zoom_blur_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade.parameters(), zoom_blur_schema_defaults());
+        assert_eq!(grade.cost(), 3);
+        assert_eq!(graph.nodes.len(), 2, "the source plus one zoom node");
+        let op = EffectRenderOp::ZoomBlur { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the zoom pass samples the source plane in place"
+        );
+        assert_eq!(op.estimated_cost(), 3);
+        let pass = crate::spatial_pass_for(&op).expect("the zoom blur is a spatial pass");
+        assert_eq!(pass, crate::EffectGpuSpatialPass::ZoomBlur { grade });
+        assert_eq!(pass.name(), "zoom_blur");
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            144
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::ZoomBlur {
+            grade: crate::ZoomBlurGrade::new(zoom_blur_schema_defaults())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn zoom_blur_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::ZoomBlur;
+        let properties = default_properties_for(effect_type.clone());
+        for parameter in [
+            "smoothness",
+            "zoom",
+            "blur_type",
+            "centre_exclusion",
+            "channel_adjust",
+            "relative_red",
+            "relative_green",
+            "relative_blue",
+            "relative_alpha",
+            "center_position",
+            "x_position",
+            "y_position",
+            "position",
+            "advanced_controls",
+            "quality",
+            "border_type",
+            "follow_sizing",
+            "blur_alpha",
+        ] {
+            assert!(
+                properties.property(&effect_type.property_path(parameter)).is_some(),
+                "the {parameter} value is authored"
+            );
+        }
+        let blur_type = properties
+            .property(&effect_type.property_path("blur_type"))
+            .expect("the blur type menu is defined");
+        assert_eq!(
+            blur_type.evaluate(tt(0)),
+            PropertyValue::Enum("realistic".to_owned())
+        );
+        let options = &blur_type.descriptor.schema.enum_options;
+        let keys = ["realistic", "linear"];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, key);
+            assert_eq!(
+                option.message_id,
+                format!("builtin.zoom_blur.blur_type.{key}")
+            );
+        }
+        for (key, blur_type) in [
+            ("realistic", crate::ZoomBlurType::Realistic),
+            ("linear", crate::ZoomBlurType::Linear),
+        ] {
+            assert_eq!(crate::ZoomBlurType::from_key(key), Some(blur_type));
+            assert_eq!(blur_type.as_key(), key);
+        }
+        assert_eq!(crate::ZoomBlurType::Realistic.label(), "真实");
+        assert_eq!(crate::ZoomBlurType::Linear.label(), "线性");
+
+        let quality = properties
+            .property(&effect_type.property_path("quality"))
+            .expect("the quality menu is defined");
+        assert_eq!(
+            quality.evaluate(tt(0)),
+            PropertyValue::Enum("better".to_owned())
+        );
+        let options = &quality.descriptor.schema.enum_options;
+        let keys = ["better", "faster"];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, key);
+            assert_eq!(
+                option.message_id,
+                format!("builtin.zoom_blur.quality.{key}")
+            );
+        }
+        assert_eq!(crate::ZoomBlurQuality::Better.label(), "更好");
+        assert_eq!(crate::ZoomBlurQuality::Faster.label(), "更快");
+
+        let border_type = properties
+            .property(&effect_type.property_path("border_type"))
+            .expect("the border menu is defined");
+        assert_eq!(
+            border_type.evaluate(tt(0)),
+            PropertyValue::Enum("replicate".to_owned())
+        );
+        let options = &border_type.descriptor.schema.enum_options;
+        let keys = ["replicate", "mirror", "black", "white"];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, key);
+            assert_eq!(
+                option.message_id,
+                format!("builtin.zoom_blur.border_type.{key}")
+            );
+        }
+        assert_eq!(crate::ZoomBlurBorder::Replicate.label(), "复制边缘");
+        assert_eq!(crate::ZoomBlurBorder::White.label(), "白色");
+    }
+
+    #[test]
+    fn zoom_blur_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::ZoomBlur;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            EffectRoiPropagation::FullFrame,
+            "the rays can reach the frame diagonal"
+        );
+    }
+
+    #[test]
+    fn zoom_blur_out_of_range_parameter_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::ZoomBlur)
+            .expect("the zoom blur should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::ZoomBlur.property_path("zoom"),
+                value: PropertyValue::Float(2.0),
+            })
+            .expect_err("a zoom above one should fail");
+        let message = error.to_string();
+        assert!(message.contains("zoom_blur.zoom"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect = instantiate_effect_node(EffectType::ZoomBlur)
+            .expect("the zoom blur should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(&mut document, "zoom_blur.zoom", serde_json::json!(2.0));
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a zoom above one should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.zoom_blur");
+                    assert!(reason.contains("zoom"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_blur_lowering_carries_the_authored_grade() {
+        let effect = author_zoom_blur(&[
+            ("smoothness", PropertyValue::Float(0.75)),
+            ("zoom", PropertyValue::Float(0.6)),
+            ("blur_type", PropertyValue::Enum("linear".to_owned())),
+            ("centre_exclusion", PropertyValue::Float(0.2)),
+            ("channel_adjust", PropertyValue::Bool(false)),
+            ("relative_red", PropertyValue::Float(0.25)),
+            ("relative_green", PropertyValue::Float(0.5)),
+            ("relative_blue", PropertyValue::Float(0.75)),
+            ("relative_alpha", PropertyValue::Float(0.3)),
+            ("center_position", PropertyValue::Bool(true)),
+            ("x_position", PropertyValue::Float(0.2)),
+            ("y_position", PropertyValue::Float(0.8)),
+            ("position", PropertyValue::Vec2(glam::Vec2::new(0.1, 0.9))),
+            ("advanced_controls", PropertyValue::Bool(true)),
+            ("quality", PropertyValue::Enum("faster".to_owned())),
+            ("border_type", PropertyValue::Enum("mirror".to_owned())),
+            ("follow_sizing", PropertyValue::Bool(false)),
+            ("blur_alpha", PropertyValue::Bool(false)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored zoom blur should compile");
+        let grade = zoom_blur_op(&graph).expect("the authored zoom blur is not the identity");
+        let parameters = grade.parameters();
+        assert_eq!(parameters.smoothness, 0.75);
+        assert_eq!(parameters.zoom, 0.6);
+        assert_eq!(parameters.blur_type, crate::ZoomBlurType::Linear);
+        assert_eq!(parameters.centre_exclusion, 0.2);
+        assert!(!parameters.channel_adjust);
+        assert_eq!(parameters.relative_red, 0.25);
+        assert_eq!(parameters.relative_green, 0.5);
+        assert_eq!(parameters.relative_blue, 0.75);
+        assert_eq!(parameters.relative_alpha, 0.3);
+        assert!(parameters.centre_group);
+        assert_eq!(parameters.x_position, 0.2);
+        assert_eq!(parameters.y_position, 0.8);
+        assert_eq!(parameters.position, [0.1, 0.9]);
+        assert!(parameters.advanced_controls);
+        assert_eq!(parameters.quality, crate::ZoomBlurQuality::Faster);
+        assert_eq!(parameters.border_type, crate::ZoomBlurBorder::Mirror);
+        assert!(!parameters.follow_sizing);
+        assert!(!parameters.blur_alpha);
+
+        let op = EffectRenderOp::ZoomBlur { grade };
+        assert_eq!(
+            crate::spatial_pass_for(&op),
+            Some(crate::EffectGpuSpatialPass::ZoomBlur { grade }),
+            "the authored grade reaches the spatial pass unmodified"
+        );
+        match crate::gpu_plan::lower_point_op(graph.nodes[1].id, &op) {
+            Err(crate::gpu_plan::EffectGpuPlanBlocker::UnsupportedOperation {
+                op: name, ..
+            }) => {
+                assert_eq!(name, "zoom_blur", "the spatial pass is refused by name");
             }
             other => panic!("unexpected point lowering {other:?}"),
         }
