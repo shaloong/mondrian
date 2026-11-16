@@ -22287,6 +22287,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_zoom_blur_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph, spatial_pass_for,
+            EffectColorDomain, EffectFloatFrameView, EffectFrameExtent, EffectGraphBuilderState,
+            EffectRenderOp, EffectValueFormat, EffectWorkingPrecision, ZoomBlurBorder,
+            ZoomBlurGrade, ZoomBlurParameters, ZoomBlurQuality, ZoomBlurType,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping zoom blur parity test: no GPU adapter available");
+            return;
+        };
+        let width = 15_u32;
+        let height = 11_u32;
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            let v = row as f32 / (height - 1) as f32;
+            for column in 0..width {
+                let u = column as f32 / (width - 1) as f32;
+                let alpha = 0.4 + 0.55 * column as f32 / (width - 1) as f32;
+                pixels.push([0.1 + 0.7 * u, 0.2 + 0.5 * v, 0.65 - 0.4 * u, alpha]);
+            }
+        }
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = mondrian_core::ImageSampling::UNIT_SQUARE;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: space,
+            data: pixels.clone(),
+        });
+
+        let defaults = ZoomBlurParameters::default();
+        let cases: [(&str, ZoomBlurParameters); 4] = [
+            ("documented defaults", defaults),
+            (
+                "linear faster sweep 0.9 centred at 0.35/0.4",
+                ZoomBlurParameters {
+                    blur_type: ZoomBlurType::Linear,
+                    quality: ZoomBlurQuality::Faster,
+                    zoom: 0.9,
+                    centre_group: true,
+                    x_position: 0.35,
+                    y_position: 0.4,
+                    ..defaults
+                },
+            ),
+            (
+                "realistic full sweep with the centre outside and black borders",
+                ZoomBlurParameters {
+                    blur_type: ZoomBlurType::Realistic,
+                    zoom: 1.0,
+                    centre_group: false,
+                    position: [1.7, 0.6],
+                    border_type: ZoomBlurBorder::Black,
+                    ..defaults
+                },
+            ),
+            (
+                "linear sweep with alpha blur off and no red gain",
+                ZoomBlurParameters {
+                    blur_type: ZoomBlurType::Linear,
+                    relative_red: 0.0,
+                    blur_alpha: false,
+                    ..defaults
+                },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = ZoomBlurGrade::new(parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let op = EffectRenderOp::ZoomBlur { grade };
+            let pass = spatial_pass_for(&op)
+                .unwrap_or_else(|| panic!("{label}: the spatial pass must be admitted"));
+            assert_eq!(pass.name(), "zoom_blur", "{label}: pass name");
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 1, "{label}: one full-screen draw");
+
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(op);
+            let graph = compile_reference_render_graph(builder.finish())
+                .unwrap_or_else(|| panic!("{label}: the graph must compile"));
+            let pipeline = mondrian_effects::lower_effect_graph_to_gpu_pipeline(&graph)
+                .unwrap_or_else(|error| panic!("{label} lowered pipeline: {error:?}"));
+            let view = EffectFloatFrameView::new(
+                extent,
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    ColorFrameAlpha::StraightCoverage,
+                ),
+                sampling,
+                &pixels,
+            );
+            let cpu = apply_compiled_effect_graph_rgba_f32(view, &graph, 0)
+                .unwrap_or_else(|error| panic!("{label} CPU graph: {error:?}"));
+            assert!(
+                cpu.pixels() != pixels.as_slice(),
+                "{label}: the fixture must actually move"
+            );
+
+            let entries = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context, &entries, width, height, space,
+            );
+            assert_eq!(
+                diagnostics.spatial_effect_layers, 1,
+                "{label}: one spatial layer"
+            );
+            assert_eq!(
+                diagnostics.spatial_effect_passes, 1,
+                "{label}: the chain records one draw"
+            );
+            assert_eq!(
+                diagnostics.spatial_scratch_textures_peak, 2,
+                "{label}: source plus one destination plane"
+            );
+            assert_eq!(
+                diagnostics.cpu_fallback_composites, 0,
+                "{label}: the whole chain must stay on the GPU"
+            );
+
+            let budget = LinearRgbaAccuracyBudget {
+                rgb: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+            };
+            let report = compare_linear_rgba(cpu.pixels(), &actual, budget)
+                .unwrap_or_else(|error| panic!("{label} accuracy report: {error}"));
+            assert!(report.within_budget, "{label}: {report:#?}");
+
+            assert_eq!(
+                actual.len(),
+                cpu.pixels().len(),
+                "{label}: mismatched pixel count"
+            );
+            let mut max_rgb = 0.0_f32;
+            let mut max_alpha = 0.0_f32;
+            for (pixel_index, (expected_pixel, actual_pixel)) in
+                cpu.pixels().iter().zip(actual.iter()).enumerate()
+            {
+                for channel in 0..3 {
+                    let difference = (expected_pixel[channel] - actual_pixel[channel]).abs();
+                    assert!(
+                        difference <= 2.0e-4,
+                        "{label} pixel {pixel_index} channel {channel}: \
+                         cpu {expected_pixel:?} gpu {actual_pixel:?}"
+                    );
+                    max_rgb = max_rgb.max(difference);
+                }
+                let difference = (expected_pixel[3] - actual_pixel[3]).abs();
+                assert!(
+                    difference <= 1.0e-5,
+                    "{label} pixel {pixel_index} alpha: \
+                     cpu {expected_pixel:?} gpu {actual_pixel:?}"
+                );
+                max_alpha = max_alpha.max(difference);
+            }
+            eprintln!("zoom blur {label}, max abs error rgb {max_rgb:.9e}, alpha {max_alpha:.9e}");
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_chromatic_aberration_removal_matches_the_cpu_layer() {
         use mondrian_effects::{
             chromatic_aberration_removal_frame_f32, ChromaticAberrationRemovalGrade, EffectRenderOp,

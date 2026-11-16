@@ -400,6 +400,9 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // Three full-screen draws: two separable tents that each fold the
         // highlight extraction into their taps, plus the grade combine.
         "film_look" => 2.4,
+        // One full-screen draw folds the tap sweep, the premultiplied bilinear
+        // read and the composite together.
+        "zoom_blur" => 1.6,
         "bilateral_blur" => 70.0,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
@@ -477,6 +480,9 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // Three row-band passes over the whole frame: two tent sweeps plus the
         // grade that reads the source, the plane and the grain hash.
         "film_look" => 4.2,
+        // The same tap sweep over the straight frame, with a premultiplied
+        // staging copy and a per-tap straight-alpha rebuild.
+        "zoom_blur" => 3.0,
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,

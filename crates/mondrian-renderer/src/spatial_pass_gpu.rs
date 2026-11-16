@@ -96,6 +96,7 @@ pub(crate) struct EffectSpatialGpu {
     film_look_horizontal: wgpu::RenderPipeline,
     film_look_vertical: wgpu::RenderPipeline,
     film_look: wgpu::RenderPipeline,
+    zoom_blur: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
     grow_bounds: wgpu::RenderPipeline,
@@ -944,6 +945,35 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_radial_shadow"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let zoom_blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.zoom-blur"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_zoom_blur"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -2630,6 +2660,7 @@ impl EffectSpatialGpu {
             film_look_horizontal,
             film_look_vertical,
             film_look,
+            zoom_blur,
             basic_3d,
             camera_view,
             grow_bounds,
@@ -3333,6 +3364,42 @@ impl EffectSpatialGpu {
         destination.clone()
     }
 
+    fn record_zoom_blur(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::ZoomBlurGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        // The sweep, the tap average and the composite all happen in one
+        // full-screen draw, so the pool only needs the destination plane.
+        if scratch.is_empty() {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "zoom_blur_scratch_geometry",
+            ));
+        }
+        let (params, extra, aces, extra1) = grade.gpu_controls();
+        let uniforms = SpatialPassUniform {
+            size: [source.width() as f32, source.height() as f32, 0.0, 0.0],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_pass(
+            device,
+            encoder,
+            &self.zoom_blur,
+            &input_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(scratch[0].clone())
+    }
+
     fn record_abstraction(
         &self,
         device: &wgpu::Device,
@@ -3894,6 +3961,9 @@ impl EffectSpatialGpu {
             // The projection, the tap average and the composite all happen in
             // one full-screen draw over the source.
             EffectGpuSpatialPass::RadialShadow { .. } => Ok(1),
+            // The sweep, the tap average and the composite all happen in one
+            // full-screen draw over the source.
+            EffectGpuSpatialPass::ZoomBlur { .. } => Ok(1),
             EffectGpuSpatialPass::Basic3D { .. } => Ok(1),
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
@@ -3944,6 +4014,9 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::RadialShadow { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return Ok(self.record_radial_shadow(device, encoder, *grade, source, destination));
+            }
+            EffectGpuSpatialPass::ZoomBlur { grade } => {
+                return self.record_zoom_blur(device, encoder, *grade, source, scratch);
             }
             EffectGpuSpatialPass::Abstraction { grade } => {
                 return self
@@ -9692,6 +9765,130 @@ fn radial_shadow_sample(pixel: vec2<i32>) -> vec4<f32> {
         result = result + radial_shadow_bilinear(centre + offset);
     }
     return result / 12.0;
+}
+
+// Zoom blur (BLR-05) sweeps taps from the pixel towards the authored centre
+// and averages them with the ramp the CPU kernel uses. Every tap filters the
+// frame through its premultiplied coverage so a transparent neighbour cannot
+// bleed colour into the average.
+fn zoom_blur_mirror(value: f32, maximum: f32) -> f32 {
+    if (maximum <= 0.0) {
+        return 0.0;
+    }
+    let period = 2.0 * maximum;
+    let folded = abs(value) % period;
+    if (folded > maximum) {
+        return period - folded;
+    }
+    return folded;
+}
+
+// One frame texel in premultiplied coverage.
+fn zoom_blur_premultiplied(pixel: vec2<i32>) -> vec4<f32> {
+    let straight = load_clamped(pixel);
+    let coverage = clamp(straight.a, 0.0, 1.0);
+    return vec4<f32>(straight.rgb * coverage, coverage);
+}
+
+// Bilinear read of the premultiplied frame, returned in straight alpha.
+fn zoom_blur_bilinear(point: vec2<f32>) -> vec4<f32> {
+    let dims = frame_dims();
+    let last = vec2<f32>(f32(dims.x - 1), f32(dims.y - 1));
+    let clamped = clamp(point, vec2<f32>(0.0), last);
+    let base = floor(clamped);
+    let fraction = clamped - base;
+    let left = i32(base.x);
+    let top = i32(base.y);
+    let right = min(left + 1, dims.x - 1);
+    let bottom = min(top + 1, dims.y - 1);
+    let top_left = zoom_blur_premultiplied(vec2<i32>(left, top));
+    let top_right = zoom_blur_premultiplied(vec2<i32>(right, top));
+    let bottom_left = zoom_blur_premultiplied(vec2<i32>(left, bottom));
+    let bottom_right = zoom_blur_premultiplied(vec2<i32>(right, bottom));
+    let upper = top_left + (top_right - top_left) * fraction.x;
+    let lower = bottom_left + (bottom_right - bottom_left) * fraction.x;
+    let averaged = upper + (lower - upper) * fraction.y;
+    let coverage = clamp(averaged.a, 0.0, 1.0);
+    if (coverage <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(averaged.rgb / coverage, coverage);
+}
+
+// Bilinear tap in straight alpha, honouring the authored border rule.
+fn zoom_blur_sample(point: vec2<f32>) -> vec4<f32> {
+    let dims = frame_dims();
+    let last = vec2<f32>(f32(dims.x - 1), f32(dims.y - 1));
+    let border = uniforms.extra1.x;
+    if (border >= 2.5) {
+        let outside = point.x < -0.5 || point.x > last.x + 0.5
+            || point.y < -0.5 || point.y > last.y + 0.5;
+        if (outside) {
+            if (border < 3.5) {
+                return vec4<f32>(0.0);
+            }
+            return vec4<f32>(1.0);
+        }
+    }
+    var filtered = point;
+    if (border >= 1.5 && border < 2.5) {
+        filtered = vec2<f32>(
+            zoom_blur_mirror(point.x, last.x),
+            zoom_blur_mirror(point.y, last.y),
+        );
+    }
+    return zoom_blur_bilinear(clamp(filtered, vec2<f32>(0.0), last));
+}
+
+// `params` is `[smoothness, zoom, centre exclusion, 0]`, `extra` is
+// `[centre x, centre y, blur type tag, quality tag]`, `aces` is
+// `[red gain, green gain, blue gain, alpha gain]` and `extra1` is
+// `[border tag, alpha blur tag, 0, 0]`. The authored centre is a fraction of
+// the frame and shifts by half a pixel to address pixel centres.
+@fragment
+fn fs_zoom_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source = load_clamped(pixel);
+    let dims = uniforms.size.xy;
+    let centre = vec2<f32>(
+        uniforms.extra.x * dims.x - 0.5,
+        uniforms.extra.y * dims.y - 0.5,
+    );
+    let dx = f32(pixel.x) - centre.x;
+    let dy = f32(pixel.y) - centre.y;
+    let diagonal = sqrt(dims.x * dims.x + dims.y * dims.y);
+    let exclusion = uniforms.params.z * 0.5 * diagonal;
+    if (sqrt(dx * dx + dy * dy) <= exclusion) {
+        return source;
+    }
+    let linear = uniforms.extra.z >= 1.5;
+    let taps: i32 = select(24, 8, uniforms.extra.w >= 1.5);
+    var weight_sum = 0.0;
+    var blurred = vec4<f32>(0.0);
+    for (var index = 0; index < taps; index = index + 1) {
+        let t = f32(index) / f32(taps - 1);
+        let weight = select(1.0 - uniforms.params.x * t, 1.0, linear);
+        weight_sum = weight_sum + weight;
+        if (weight <= 0.0) {
+            continue;
+        }
+        let shape = select(t * t, t, linear);
+        let scale = 1.0 - uniforms.params.y * shape;
+        let sample = zoom_blur_sample(vec2<f32>(
+            centre.x + dx * scale,
+            centre.y + dy * scale,
+        ));
+        blurred = blurred + sample * weight;
+    }
+    var inverse_weight = 0.0;
+    if (weight_sum > 0.0) {
+        inverse_weight = 1.0 / weight_sum;
+    }
+    let average = blurred * inverse_weight;
+    return vec4<f32>(
+        source.rgb + (average.rgb - source.rgb) * uniforms.aces.rgb,
+        select(source.a, source.a + (average.a - source.a) * uniforms.aces.w, uniforms.extra1.y >= 0.5),
+    );
 }
 
 // `params` is `[light x, light y, projection scale, softness radius]`, `extra`
