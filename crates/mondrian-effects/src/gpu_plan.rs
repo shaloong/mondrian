@@ -1234,6 +1234,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Stroke { .. } => "stroke",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut_3d",
+        EffectRenderOp::DifferenceMatte { .. } => "difference_matte",
         EffectRenderOp::Custom { .. } => "custom",
     }
 }

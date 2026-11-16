@@ -368,6 +368,17 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Key the frame against a separately sampled reference picture.
+    DifferenceMatte {
+        /// Authored layer slot, size mode, tolerance, softness and blur.
+        grade: crate::DifferenceMatteGrade,
+        /// Reconstruction and boundary behavior of the reference picture.
+        sampling: crate::AuxiliarySampling,
+        /// Presence marker for the bound reference raster.
+        auxiliary: Option<crate::AuxiliarySampling>,
+        /// Host slot for a linear chain, or a graph-local input if absent.
+        external_slot: Option<u32>,
+    },
     /// Remap a source picture inside an evaluated mask boundary.
     Smear {
         /// Geometry and controls resolved for the current graph evaluation.
@@ -433,6 +444,7 @@ impl EffectGpuSpatialPass {
             | Self::ChannelCombinerLayer { external_slot, .. }
             | Self::SetMatte { sampling: Some(_), external_slot, .. }
             | Self::DisplacementMap { external_slot, .. }
+            | Self::DifferenceMatte { external_slot, .. }
             | Self::Glass { auxiliary: Some(_), external_slot, .. } => Some(external_slot),
             _ => None,
         }
@@ -519,6 +531,7 @@ impl EffectGpuSpatialPass {
             Self::ChannelCombinerLayer { .. } => "channel_combiner_layer",
             Self::SetMatte { .. } => "set_matte",
             Self::DisplacementMap { .. } => "displacement_map",
+            Self::DifferenceMatte { .. } => "difference_matte",
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
@@ -635,6 +648,10 @@ impl EffectGpuSpatialPass {
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
+            // The box average reads at most the rounded radius; the ceiling plus
+            // one covers a fractional radius. Unlike the resampling passes this
+            // reach is finite, so the plane can still be tiled.
+            Self::DifferenceMatte { grade, .. } => (grade.blur().ceil() as u32).saturating_add(1),
             Self::DisplacementMap { .. } | Self::Glass { .. } | Self::VideoCollage { .. } => {
                 u32::MAX
             }
@@ -733,6 +750,10 @@ impl EffectGpuSpatialPass {
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
             Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
+            // The box average reads at most the rounded radius; the ceiling plus
+            // one covers a fractional radius. Unlike the resampling passes this
+            // reach is finite, so the plane can still be tiled.
+            Self::DifferenceMatte { grade, .. } => (grade.blur().ceil() as u32).saturating_add(1),
             Self::DisplacementMap { .. } | Self::Glass { .. } | Self::VideoCollage { .. } => {
                 u32::MAX
             }
@@ -770,6 +791,14 @@ pub(crate) fn lower_auxiliary_spatial_pass(
         }
         (EffectRenderOp::DisplacementMap { grade }, crate::AuxiliaryRole::Map) => {
             Some(EffectGpuSpatialPass::DisplacementMap { grade: *grade, sampling, external_slot })
+        }
+        (EffectRenderOp::DifferenceMatte { grade }, crate::AuxiliaryRole::Layer) => {
+            Some(EffectGpuSpatialPass::DifferenceMatte {
+                grade: *grade,
+                sampling,
+                auxiliary: Some(sampling),
+                external_slot,
+            })
         }
         (EffectRenderOp::Glass { grade, lighting, projection }, crate::AuxiliaryRole::Map) => {
             Some(EffectGpuSpatialPass::Glass {
@@ -1372,6 +1401,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             external_slot: None,
         }),
         EffectRenderOp::DisplacementMap { .. } => None,
+        // A difference matte always reads a second raster, so a unary node has
+        // no slot to lower; the auxiliary path supplies one.
+        EffectRenderOp::DifferenceMatte { .. } => None,
         _ => None,
     }
 }

@@ -383,8 +383,12 @@ fn texel_position(
 pub const fn render_op_auxiliary_scratch_frames(op: &EffectRenderOp) -> usize {
     if matches!(
         op,
-        EffectRenderOp::DisplacementMap { .. } | EffectRenderOp::Glass { .. }
+        EffectRenderOp::DisplacementMap { .. }
+            | EffectRenderOp::DifferenceMatte { .. }
+            | EffectRenderOp::Glass { .. }
     ) {
+        // These kernels own their whole working set and are charged by
+        // `render_op_f32_scratch_frames`, so no extra auxiliary frame is added.
         return 0;
     }
     if crate::adjustment::render_op_f32_scratch_frames(op) == 0 {
@@ -399,6 +403,7 @@ pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
     matches!(
         op,
         EffectRenderOp::Fill { .. }
+            | EffectRenderOp::DifferenceMatte { .. }
             | EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::ChannelCombiner { .. }
             | EffectRenderOp::SetMatte { .. }
@@ -423,6 +428,11 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
     }
     if let EffectRenderOp::DisplacementMap { grade } = op {
         return crate::apply_displacement_map_controlled(
+            primary, width, height, frame, sampling, grade, checkpoint,
+        );
+    }
+    if let EffectRenderOp::DifferenceMatte { grade } = op {
+        return crate::apply_difference_matte_controlled(
             primary, width, height, frame, sampling, grade, checkpoint,
         );
     }
@@ -459,7 +469,10 @@ pub(crate) fn apply_auxiliary_effect_f32_region<E>(
             primary, region, frame, *grade, sampling, checkpoint,
         );
     }
-    if matches!(op, EffectRenderOp::DisplacementMap { .. }) {
+    if matches!(
+        op,
+        EffectRenderOp::DisplacementMap { .. } | EffectRenderOp::DifferenceMatte { .. }
+    ) {
         // Displacement reads complete-frame coordinates and may outset its
         // output, so a partial region cannot be lowered exactly here. Fail
         // closed exactly like the other full-frame-only operations.

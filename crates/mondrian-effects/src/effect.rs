@@ -1381,6 +1381,15 @@ pub enum EffectRenderOp {
         /// Authored controls, fold, light, render mode and paper colour.
         grade: crate::PageTurnGrade,
     },
+    /// Difference matte: keys the frame against a separate reference picture.
+    ///
+    /// The premultiplied difference between the frame and the reference is
+    /// averaged horizontally, then vertically, and pixels no further apart than
+    /// the tolerance stay background.
+    DifferenceMatte {
+        /// Authored layer slot, size mode, tolerance, softness and blur.
+        grade: crate::DifferenceMatteGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1854,6 +1863,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::PageTurn { grade } => {
                 formatter.debug_struct("PageTurn").field("grade", grade).finish()
+            }
+            Self::DifferenceMatte { grade } => {
+                formatter.debug_struct("DifferenceMatte").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -3042,6 +3054,15 @@ impl EffectRenderOp {
                 // the grade hashes every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::DifferenceMatte { grade } => {
+                146u8.hash(state);
+                // The layer slot, the size mode, the tolerance, the softness
+                // and the blur all reach the GPU through the packed controls,
+                // so the hash covers the whole packing.
+                let (params, extra) = grade.gpu_controls();
+                params.map(f32::to_bits).hash(state);
+                extra.map(f32::to_bits).hash(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3334,6 +3355,7 @@ impl EffectRenderOp {
             EffectRenderOp::FilmLook { .. } => 3,
             EffectRenderOp::ZoomBlur { .. } => 3,
             EffectRenderOp::PageTurn { .. } => 3,
+            EffectRenderOp::DifferenceMatte { .. } => 3,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3868,7 +3890,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 145] {
+fn builtin_effect_types() -> [EffectType; 146] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4015,6 +4037,7 @@ fn builtin_effect_types() -> [EffectType; 145] {
         EffectType::FilmLook,
         EffectType::ZoomBlur,
         EffectType::PageTurn,
+        EffectType::DifferenceMatte,
     ]
 }
 
@@ -15780,6 +15803,75 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::DifferenceMatte => {
+            const GROUP: &str = "差值遮罩";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "layer",
+                GROUP,
+                "参考图层",
+                PropertyValue::Int(crate::DEFAULT_LAYER as i64),
+                Some(crate::MIN_LAYER as f64),
+                Some(crate::MAX_LAYER as f64),
+                Some(1.0),
+            );
+            let size_modes = crate::DifferenceMatteSizeMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    ParameterEnumOption::new(
+                        mode.as_key(),
+                        mode.label(),
+                        format!(
+                            "mondrian.effect.difference_matte.size_mode.{}",
+                            mode.as_key()
+                        ),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "size_mode",
+                GROUP,
+                "适配方式",
+                crate::DifferenceMatteSizeMode::Stretch.as_key(),
+                size_modes,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tolerance",
+                GROUP,
+                "容差",
+                PropertyValue::Float(crate::difference_matte::DEFAULT_TOLERANCE),
+                Some(crate::MIN_TOLERANCE as f64),
+                Some(crate::MAX_TOLERANCE as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "softness",
+                GROUP,
+                "柔和度",
+                PropertyValue::Float(0.0),
+                Some(crate::MIN_SOFTNESS as f64),
+                Some(crate::MAX_SOFTNESS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blur",
+                GROUP,
+                "模糊",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(crate::DIFFERENCE_MATTE_MAX_BLUR_PIXELS as f64),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -16993,6 +17085,12 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::PageTurn, "controls" | "render" | "back_page" | "paper_colour") => {
             ParameterUnit::Unitless
         }
+        // The layer is a slot number and the size mode is a menu; both carry
+        // their own scale. The two matte controls are percentages and the blur
+        // radius is measured in pixels.
+        (EffectType::DifferenceMatte, "layer" | "size_mode") => ParameterUnit::Unitless,
+        (EffectType::DifferenceMatte, "tolerance" | "softness") => ParameterUnit::Percent,
+        (EffectType::DifferenceMatte, "blur") => ParameterUnit::Pixels,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -17031,6 +17129,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::DisplacementMap
                 | EffectType::Glass
                 | EffectType::VideoCollage
+                | EffectType::DifferenceMatte
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -17310,14 +17409,15 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
-        EffectType::DisplacementMap | EffectType::Glass | EffectType::VideoCollage => {
-            EffectExecutionContract {
-                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-                roi_propagation: EffectRoiPropagation::FullFrame,
-                topology: EffectGraphTopology::GeneralDag,
-                ..cpu_linear
-            }
-        }
+        EffectType::DifferenceMatte
+        | EffectType::DisplacementMap
+        | EffectType::Glass
+        | EffectType::VideoCollage => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
         EffectType::Choker => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The alpha morphology reads the whole frame, so the definition-level
@@ -23621,6 +23721,93 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::DifferenceMatte => {
+            let layer_id = builtin_parameter_id(effect_type, "layer");
+            let size_mode_id = builtin_parameter_id(effect_type, "size_mode");
+            let tolerance_id = builtin_parameter_id(effect_type, "tolerance");
+            let softness_id = builtin_parameter_id(effect_type, "softness");
+            let blur_id = builtin_parameter_id(effect_type, "blur");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let layer = match effect.evaluate_parameter(&layer_id, context.time) {
+                    Some(PropertyValue::Int(value)) if (1..=19).contains(&value) => value as u32,
+                    Some(_) => {
+                        return Err(invalid(format!(
+                            "差值遮罩的图层参数必须是 {} 到 {} 之间的整数",
+                            crate::MIN_LAYER,
+                            crate::MAX_LAYER
+                        )));
+                    }
+                    None => crate::DEFAULT_LAYER,
+                };
+                let size_mode = effect
+                    .evaluate_enum_parameter(&size_mode_id, context.time)
+                    .and_then(|key| crate::DifferenceMatteSizeMode::from_key(&key))
+                    .unwrap_or(crate::DifferenceMatteSizeMode::Stretch);
+                let tolerance = match effect.evaluate_parameter(&tolerance_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value,
+                    Some(_) => {
+                        return Err(invalid("差值遮罩的容差参数必须是数值".to_string()));
+                    }
+                    None => crate::difference_matte::DEFAULT_TOLERANCE,
+                };
+                let softness = match effect.evaluate_parameter(&softness_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value,
+                    Some(_) => {
+                        return Err(invalid("差值遮罩的柔和度参数必须是数值".to_string()));
+                    }
+                    None => 0.0,
+                };
+                let blur = match effect.evaluate_parameter(&blur_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value,
+                    Some(_) => {
+                        return Err(invalid("差值遮罩的模糊参数必须是数值".to_string()));
+                    }
+                    None => 0.0,
+                };
+                let grade =
+                    crate::DifferenceMatteGrade::new(layer, size_mode, tolerance, softness, blur)
+                        .map_err(|error| {
+                        invalid(format!("差值遮罩的参数 {} 超出范围", error.parameter()))
+                    })?;
+                let auxiliary = graph.append_external_input(
+                    layer,
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                );
+                // The centre-crop window can address pixels the reference does
+                // not cover, and those must read as transparent instead of
+                // repeating the border texel; the plain stretch keeps the
+                // clamped border.
+                let sampling = match size_mode {
+                    crate::DifferenceMatteSizeMode::Stretch => {
+                        crate::AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP
+                    }
+                    crate::DifferenceMatteSizeMode::CenterCrop => crate::AuxiliarySampling::new(
+                        crate::AuxiliaryCoordinateMapping::FrameTransform,
+                        crate::AuxiliaryFilter::Linear,
+                        crate::AuxiliaryOutOfBounds::Transparent,
+                    ),
+                };
+                let output = graph.add_auxiliary_effect(
+                    graph.current_output(),
+                    auxiliary,
+                    EffectRenderOp::DifferenceMatte { grade },
+                    crate::AuxiliaryRole::Layer,
+                    sampling,
+                );
+                graph.set_current_output(output);
+                Ok(())
+            }))
+        }
         EffectType::ChromaticAberrationRemoval => {
             let lateral_id = builtin_parameter_id(effect_type, "lateral");
             let longitudinal_id = builtin_parameter_id(effect_type, "longitudinal");
@@ -26999,6 +27186,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::FilmLook => "胶片外观",
         EffectType::ZoomBlur => "缩放模糊",
         EffectType::PageTurn => "翻页",
+        EffectType::DifferenceMatte => "差值遮罩",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -28418,6 +28606,7 @@ mod tests {
             EffectType::FilmLook,
             EffectType::ZoomBlur,
             EffectType::PageTurn,
+            EffectType::DifferenceMatte,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -37714,7 +37903,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 145);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 146);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -38242,7 +38431,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 145);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 146);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -41201,7 +41390,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 145);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 146);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -42337,7 +42526,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 145);
+        assert_eq!(builtin_effect_types().len(), 146);
     }
 
     #[test]
@@ -45850,6 +46039,351 @@ mod tests {
             left.finish(),
             right.finish(),
             "the light direction is part of the render identity"
+        );
+    }
+
+    fn difference_matte_node(
+        graph: &EffectRenderGraph,
+    ) -> Option<(
+        crate::DifferenceMatteGrade,
+        crate::AuxiliaryRole,
+        crate::AuxiliarySampling,
+        crate::EffectGraphNodeId,
+    )> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                op: EffectRenderOp::DifferenceMatte { grade },
+                auxiliary,
+                role,
+                sampling,
+                ..
+            } => Some((*grade, *role, *sampling, *auxiliary)),
+            _ => None,
+        })
+    }
+
+    fn author_difference_matte(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::DifferenceMatte)
+            .expect("the difference matte should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::DifferenceMatte.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the difference matte parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn difference_matte_defaults_build_one_auxiliary_node() {
+        let effect = instantiate_effect_node(EffectType::DifferenceMatte)
+            .expect("the difference matte should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let (grade, role, sampling, auxiliary) =
+            difference_matte_node(&graph).expect("the defaults key against a reference");
+        assert_eq!(grade, crate::DifferenceMatteGrade::documented_defaults());
+        assert_eq!(
+            role,
+            crate::AuxiliaryRole::Layer,
+            "the reference is a complete picture, not a coverage matte"
+        );
+        assert_eq!(
+            sampling,
+            crate::AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP,
+            "the reference is sampled through the delivery transform, bilinearly"
+        );
+        match &graph.node(auxiliary).expect("the reference input exists").kind {
+            EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                assert_eq!(
+                    *slot,
+                    crate::DEFAULT_LAYER,
+                    "the layer slot names the input"
+                );
+            }
+            other => panic!("unexpected reference input {other:?}"),
+        }
+        let op = EffectRenderOp::DifferenceMatte { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            2,
+            "one straight source snapshot and one horizontal difference plane"
+        );
+        assert_eq!(op.estimated_cost(), 3);
+        assert_eq!(
+            crate::spatial_pass_for(&op),
+            None,
+            "a unary node has no bound reference to lower"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            146
+        );
+        let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
+            &op,
+            crate::AuxiliaryRole::Layer,
+            crate::AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP,
+            Some(crate::DEFAULT_LAYER),
+        )
+        .expect("the auxiliary lowering carries the difference kernel");
+        assert_eq!(pass.name(), "difference_matte");
+        assert_eq!((pass.horizontal_halo(), pass.vertical_halo()), (1, 1));
+        assert_eq!(pass.auxiliary_slot(), Some(Some(crate::DEFAULT_LAYER)));
+        assert!(matches!(
+            pass,
+            crate::EffectGpuSpatialPass::DifferenceMatte { .. }
+        ));
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::DifferenceMatte {
+            grade: crate::DifferenceMatteGrade::documented_defaults(),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the documented defaults"
+        );
+    }
+
+    #[test]
+    fn difference_matte_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::DifferenceMatte;
+        let properties = default_properties_for(effect_type.clone());
+        for parameter in ["layer", "size_mode", "tolerance", "softness", "blur"] {
+            assert!(
+                properties.property(&effect_type.property_path(parameter)).is_some(),
+                "the {parameter} value is authored"
+            );
+        }
+        let layer = properties
+            .property(&effect_type.property_path("layer"))
+            .expect("the layer slot is defined");
+        assert_eq!(layer.evaluate(tt(0)), PropertyValue::Int(6));
+        assert_eq!(layer.descriptor.display_name, "参考图层");
+        assert_eq!(
+            layer.descriptor.ui_metadata.group_name.as_deref(),
+            Some("差值遮罩")
+        );
+        assert_eq!(layer.descriptor.schema.unit, ParameterUnit::Unitless);
+
+        let size_mode = properties
+            .property(&effect_type.property_path("size_mode"))
+            .expect("the size mode menu is defined");
+        assert_eq!(
+            size_mode.evaluate(tt(0)),
+            PropertyValue::Enum("stretch".to_owned())
+        );
+        let options = &size_mode.descriptor.schema.enum_options;
+        let keys = ["stretch", "center_crop"];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, key);
+            assert_eq!(
+                option.message_id,
+                format!("mondrian.effect.difference_matte.size_mode.{key}")
+            );
+        }
+        for (key, mode) in [
+            ("stretch", crate::DifferenceMatteSizeMode::Stretch),
+            ("center_crop", crate::DifferenceMatteSizeMode::CenterCrop),
+        ] {
+            assert_eq!(crate::DifferenceMatteSizeMode::from_key(key), Some(mode));
+            assert_eq!(mode.as_key(), key);
+        }
+        assert_eq!(crate::DifferenceMatteSizeMode::Stretch.label(), "拉伸适配");
+        assert_eq!(
+            crate::DifferenceMatteSizeMode::CenterCrop.label(),
+            "中心裁剪"
+        );
+
+        let tolerance = properties
+            .property(&effect_type.property_path("tolerance"))
+            .expect("the tolerance is defined");
+        assert_eq!(tolerance.evaluate(tt(0)), PropertyValue::Float(15.0));
+        assert_eq!(tolerance.descriptor.schema.unit, ParameterUnit::Percent);
+        let softness = properties
+            .property(&effect_type.property_path("softness"))
+            .expect("the softness is defined");
+        assert_eq!(softness.evaluate(tt(0)), PropertyValue::Float(0.0));
+        assert_eq!(softness.descriptor.schema.unit, ParameterUnit::Percent);
+        let blur = properties
+            .property(&effect_type.property_path("blur"))
+            .expect("the blur is defined");
+        assert_eq!(blur.evaluate(tt(0)), PropertyValue::Float(0.0));
+        assert_eq!(blur.descriptor.schema.unit, ParameterUnit::Pixels);
+    }
+
+    #[test]
+    fn difference_matte_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::DifferenceMatte;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            EffectRoiPropagation::FullFrame,
+            "the box average can read any neighbour of the frame"
+        );
+    }
+
+    #[test]
+    fn difference_matte_out_of_range_parameters_are_author_errors() {
+        let builtin_key = "builtin.difference_matte";
+        for (parameter, value, needle) in [
+            ("layer", serde_json::json!(20), "19"),
+            ("blur", serde_json::json!(1001.0), "blur"),
+        ] {
+            let effect = instantiate_effect_node(EffectType::DifferenceMatte)
+                .expect("the difference matte should instantiate");
+            let effect_id = effect.id;
+            let mut document = serde_json::to_value(&effect).expect("serialize the node");
+            overwrite_static_value(
+                &mut document,
+                &format!("difference_matte.{parameter}"),
+                value,
+            );
+            let result: Result<EffectNode, _> = serde_json::from_value(document);
+            if let Ok(effect) = result {
+                let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .expect_err("an out-of-range parameter should fail");
+                match error {
+                    EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                        assert_eq!(effect_key, builtin_key);
+                        assert!(reason.contains(needle), "{reason}");
+                    }
+                    other => panic!("unexpected error {other:?} for {effect_id}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn difference_matte_tolerance_changes_the_hash() {
+        let build = |tolerance: f32| {
+            let effect = author_difference_matte(&[("tolerance", PropertyValue::Float(tolerance))]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored difference matte should compile");
+            let (grade, ..) =
+                difference_matte_node(&graph).expect("the matte is never built as absent");
+            EffectRenderOp::DifferenceMatte { grade }
+        };
+        use std::hash::Hasher;
+        let mut left = std::collections::hash_map::DefaultHasher::new();
+        build(15.0).hash_signature(&mut left);
+        let mut right = std::collections::hash_map::DefaultHasher::new();
+        build(45.0).hash_signature(&mut right);
+        assert_ne!(
+            left.finish(),
+            right.finish(),
+            "the tolerance is part of the render identity"
+        );
+    }
+
+    #[test]
+    fn difference_matte_size_mode_selects_the_auxiliary_sampling() {
+        let build = |mode: &str| {
+            let effect =
+                author_difference_matte(&[("size_mode", PropertyValue::Enum(mode.to_owned()))]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored difference matte should compile");
+            let (_, role, sampling, _) =
+                difference_matte_node(&graph).expect("the matte is never built as absent");
+            (role, sampling)
+        };
+        let (stretch_role, stretch) = build("stretch");
+        let (crop_role, crop) = build("center_crop");
+        assert_eq!(stretch_role, crate::AuxiliaryRole::Layer);
+        assert_eq!(crop_role, crate::AuxiliaryRole::Layer);
+        assert_eq!(
+            stretch,
+            crate::AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP
+        );
+        assert_eq!(
+            crop,
+            crate::AuxiliarySampling::new(
+                crate::AuxiliaryCoordinateMapping::FrameTransform,
+                crate::AuxiliaryFilter::Linear,
+                crate::AuxiliaryOutOfBounds::Transparent,
+            )
+        );
+        assert_ne!(
+            stretch, crop,
+            "the size mode changes how the reference is read"
+        );
+    }
+
+    #[test]
+    fn difference_matte_blur_widens_the_halo_and_keeps_the_slot() {
+        let effect = author_difference_matte(&[
+            ("layer", PropertyValue::Int(12)),
+            ("size_mode", PropertyValue::Enum("center_crop".to_owned())),
+            ("tolerance", PropertyValue::Float(35.0)),
+            ("softness", PropertyValue::Float(20.0)),
+            ("blur", PropertyValue::Float(10.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored difference matte should compile");
+        let (grade, role, sampling, auxiliary) =
+            difference_matte_node(&graph).expect("the authored matte is never absent");
+        assert_eq!(grade.layer(), 12);
+        assert_eq!(
+            grade.size_mode(),
+            crate::DifferenceMatteSizeMode::CenterCrop
+        );
+        assert_eq!(grade.tolerance(), 35.0);
+        assert_eq!(grade.softness(), 20.0);
+        assert_eq!(grade.blur(), 10.0);
+        assert_eq!(role, crate::AuxiliaryRole::Layer);
+        assert_eq!(
+            sampling,
+            crate::AuxiliarySampling::new(
+                crate::AuxiliaryCoordinateMapping::FrameTransform,
+                crate::AuxiliaryFilter::Linear,
+                crate::AuxiliaryOutOfBounds::Transparent,
+            ),
+            "a crop window outside the reference reads transparent, not the border texel"
+        );
+        match &graph.node(auxiliary).expect("the reference input exists").kind {
+            EffectGraphNodeKind::ExternalInput { slot, .. } => assert_eq!(*slot, 12),
+            other => panic!("unexpected reference input {other:?}"),
+        }
+        let op = EffectRenderOp::DifferenceMatte { grade };
+        let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
+            &op,
+            crate::AuxiliaryRole::Layer,
+            sampling,
+            Some(12),
+        )
+        .expect("the authored grade reaches the auxiliary lowering");
+        assert_eq!((pass.horizontal_halo(), pass.vertical_halo()), (11, 11));
+        assert_eq!(
+            grade.gpu_controls(),
+            ([0.35, 0.2, 2.0, 0.0], [10.0, 1.0 / 21.0, 0.0, 12.0])
+        );
+
+        use std::hash::Hasher;
+        let mut left = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut left);
+        let mut right = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::DifferenceMatte {
+            grade: crate::DifferenceMatteGrade::documented_defaults(),
+        }
+        .hash_signature(&mut right);
+        assert_ne!(
+            left.finish(),
+            right.finish(),
+            "the authored layer and matte controls are part of the render identity"
         );
     }
 

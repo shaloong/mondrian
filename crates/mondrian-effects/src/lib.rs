@@ -9,6 +9,12 @@ pub mod set_matte;
 pub use set_matte::{set_matte_frame_f32, SetMatteChannel, SetMatteGrade};
 mod auxiliary_preview;
 pub use auxiliary_preview::{AuxiliaryPreviewFallback, AuxiliaryPreviewFallbackCause};
+pub mod difference_matte;
+pub use difference_matte::{
+    apply_difference_matte_controlled, apply_difference_matte_f32, DifferenceMatteError,
+    DifferenceMatteGrade, DifferenceMatteSizeMode, DEFAULT_LAYER, DIFFERENCE_MATTE_MAX_BLUR_PIXELS,
+    MAX_LAYER, MAX_SOFTNESS, MAX_TOLERANCE, MIN_LAYER, MIN_SOFTNESS, MIN_TOLERANCE,
+};
 pub mod displacement_map;
 pub use displacement_map::{
     apply_displacement_map_controlled, displacement_map_frame_f32, DisplacementMapBehavior,

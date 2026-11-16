@@ -3281,7 +3281,8 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::Reshape { .. }
         | EffectRenderOp::DetailPreservingUpscale { .. }
         | EffectRenderOp::VideoCollage { .. }
-        | EffectRenderOp::Glass { .. } => EffectImplementationRequirements {
+        | EffectRenderOp::Glass { .. }
+        | EffectRenderOp::DifferenceMatte { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
