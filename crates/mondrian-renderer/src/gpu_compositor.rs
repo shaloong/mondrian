@@ -22101,6 +22101,191 @@ mod tests {
         }
     }
 
+    /// A straight-alpha fixture with a smooth colour ramp plus two texels above
+    /// 1.0. The film look only blooms and halates texels the highlight
+    /// extraction finds above 0.6 luma, so a ramp that never clips would leave
+    /// the glow and halation paths untested. Alpha never reaches zero: fully
+    /// transparent pixels canonicalise through the straight-to-premultiplied
+    /// round trip and the kernel skips them anyway.
+    fn film_look_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = x as f32 / (width as f32 - 1.0);
+                let v = y as f32 / (height as f32 - 1.0);
+                let mut colour = [
+                    0.04 + 0.72 * u,
+                    0.07 + 0.5 * u + 0.22 * v,
+                    0.09 + 0.34 * (1.0 - u) + 0.18 * v,
+                ];
+                if x == 3 && y == 2 {
+                    colour = [1.35, 1.12, 0.94];
+                }
+                if x == 12 && y == 7 {
+                    colour = [1.08, 1.42, 1.18];
+                }
+                let alpha = 0.35 + 0.6 * x as f32 / (width as f32 - 1.0);
+                pixels.push([colour[0], colour[1], colour[2], alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_film_look_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph, spatial_pass_for,
+            EffectColorDomain, EffectFloatFrameView, EffectFrameExtent, EffectGraphBuilderState,
+            EffectRenderOp, EffectValueFormat, EffectWorkingPrecision, FilmLookGrade,
+            FilmLookParameters, FilmStock,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping film look parity test: no GPU adapter available");
+            return;
+        };
+        let width = 16;
+        let height = 10;
+        let pixels = film_look_test_pixels(width, height);
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = mondrian_core::ImageSampling::UNIT_SQUARE;
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            width,
+            height,
+            color_space: space,
+            data: pixels.clone(),
+        });
+
+        let defaults = FilmLookParameters::default();
+        let cases: [(&str, FilmLookParameters, f64); 3] = [
+            (
+                "documented portra defaults with grain 40 and glow 60",
+                FilmLookParameters { grain: 40.0, glow: 60.0, ..defaults },
+                // A non-zero seed: the grain hash must vary per frame.
+                7.0,
+            ),
+            (
+                "cinestill 800t with halation 80, strength 70 and fade 30",
+                FilmLookParameters {
+                    stock: FilmStock::Cinestill800T,
+                    halation: 80.0,
+                    strength: 70.0,
+                    fade: 30.0,
+                    ..defaults
+                },
+                3.0,
+            ),
+            (
+                "ilford hp5 with contrast 60, fade 50 and grain 25",
+                FilmLookParameters {
+                    stock: FilmStock::IlfordHp5,
+                    contrast: 60.0,
+                    fade: 50.0,
+                    grain: 25.0,
+                    ..defaults
+                },
+                11.0,
+            ),
+        ];
+        for (label, parameters, frame_coordinate) in cases {
+            let grade = FilmLookGrade::new(parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"))
+                .at_frame(frame_coordinate);
+            let op = EffectRenderOp::FilmLook { grade };
+            let pass = spatial_pass_for(&op)
+                .unwrap_or_else(|| panic!("{label}: the spatial pass must be admitted"));
+            assert_eq!(pass.name(), "film_look", "{label}: pass name");
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            assert_eq!(passes, 3, "{label}: three full-screen draws");
+
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(op);
+            let graph = compile_reference_render_graph(builder.finish())
+                .unwrap_or_else(|| panic!("{label}: the graph must compile"));
+            let pipeline = mondrian_effects::lower_effect_graph_to_gpu_pipeline(&graph)
+                .unwrap_or_else(|error| panic!("{label} lowered pipeline: {error:?}"));
+            let view = EffectFloatFrameView::new(
+                extent,
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    ColorFrameAlpha::StraightCoverage,
+                ),
+                sampling,
+                &pixels,
+            );
+            let cpu = apply_compiled_effect_graph_rgba_f32(view, &graph, 0)
+                .unwrap_or_else(|error| panic!("{label} CPU graph: {error:?}"));
+            assert!(
+                cpu.pixels() != pixels.as_slice(),
+                "{label}: the fixture must actually move"
+            );
+
+            let entries = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context, &entries, width, height, space,
+            );
+            assert_eq!(
+                diagnostics.spatial_effect_layers, 1,
+                "{label}: one spatial layer"
+            );
+            assert_eq!(
+                diagnostics.spatial_effect_passes, 3,
+                "{label}: the chain records three draws"
+            );
+            assert!(
+                diagnostics.spatial_scratch_textures_peak >= 3,
+                "{label}: the two bloom planes and the graded frame need three scratch textures, \
+                 got {}",
+                diagnostics.spatial_scratch_textures_peak
+            );
+            assert_eq!(
+                diagnostics.spatial_point_stages, 0,
+                "{label}: the film look contributes no point stage"
+            );
+            assert_eq!(
+                diagnostics.cpu_fallback_composites, 0,
+                "{label}: the whole chain must stay on the GPU"
+            );
+
+            assert_eq!(
+                actual.len(),
+                cpu.pixels().len(),
+                "{label}: mismatched pixel count"
+            );
+            let mut max_rgb = 0.0_f32;
+            let mut max_alpha = 0.0_f32;
+            for (pixel_index, (expected_pixel, actual_pixel)) in
+                cpu.pixels().iter().zip(actual.iter()).enumerate()
+            {
+                for channel in 0..3 {
+                    let difference = (expected_pixel[channel] - actual_pixel[channel]).abs();
+                    assert!(
+                        difference <= 2.0e-4,
+                        "{label} pixel {pixel_index} channel {channel}: \
+                         cpu {expected_pixel:?} gpu {actual_pixel:?}"
+                    );
+                    max_rgb = max_rgb.max(difference);
+                }
+                let difference = (expected_pixel[3] - actual_pixel[3]).abs();
+                assert!(
+                    difference <= 1.0e-5,
+                    "{label} pixel {pixel_index} alpha: \
+                     cpu {expected_pixel:?} gpu {actual_pixel:?}"
+                );
+                max_alpha = max_alpha.max(difference);
+            }
+            eprintln!("film look {label}, max abs error rgb {max_rgb:.9e}, alpha {max_alpha:.9e}");
+        }
+    }
+
     #[tokio::test]
     async fn gpu_chromatic_aberration_removal_matches_the_cpu_layer() {
         use mondrian_effects::{

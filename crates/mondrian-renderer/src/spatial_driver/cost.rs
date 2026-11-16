@@ -397,6 +397,9 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // shadow adds eight ring taps, so the tap budget only reaches twelve,
         // which keeps the pass below the two-pass neighbourhood kernels.
         "radial_shadow" => 2.2,
+        // Three full-screen draws: two separable tents that each fold the
+        // highlight extraction into their taps, plus the grade combine.
+        "film_look" => 2.4,
         "bilateral_blur" => 70.0,
         // The arc remap is a four-tap bilinear read and one write.
         "warp" => 0.6,
@@ -471,6 +474,9 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // One clamped bilinear tap, or the twelve-tap average when the shadow
         // is soft, plus the straight-alpha composite the kernel writes back.
         "radial_shadow" => 4.0,
+        // Three row-band passes over the whole frame: two tent sweeps plus the
+        // grade that reads the source, the plane and the grain hash.
+        "film_look" => 4.2,
         "basic_3d" => 4.0,
         "camera_view" => 2.6,
         "grow_bounds" => 1.1,

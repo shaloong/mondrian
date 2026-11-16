@@ -93,6 +93,9 @@ pub(crate) struct EffectSpatialGpu {
     cartoon_horizontal: wgpu::RenderPipeline,
     cartoon_vertical: wgpu::RenderPipeline,
     cartoon: wgpu::RenderPipeline,
+    film_look_horizontal: wgpu::RenderPipeline,
+    film_look_vertical: wgpu::RenderPipeline,
+    film_look: wgpu::RenderPipeline,
     basic_3d: wgpu::RenderPipeline,
     camera_view: wgpu::RenderPipeline,
     grow_bounds: wgpu::RenderPipeline,
@@ -1107,6 +1110,67 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        // Film look also uses two separable tent planes, but its taps carry the
+        // highlight extraction and the plane is not premultiplied, so it needs
+        // its own entry points rather than abstraction's or cartoon's.
+        let film_look_horizontal = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.film-look-horizontal"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_film_look_horizontal"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let film_look_vertical = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.film-look-vertical"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_film_look_vertical"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let basic_3d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.basic-3d"),
             layout: Some(&layout),
@@ -1583,6 +1647,37 @@ impl EffectSpatialGpu {
             fragment: Some(wgpu::FragmentState {
                 module: &composite_shader,
                 entry_point: Some("fs_cartoon"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        // The film look combine reads the original frame and the vertical bloom
+        // plane, so it belongs on the two-texture composite layout as well.
+        let film_look = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.film-look"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_film_look"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba32Float,
@@ -2532,6 +2627,9 @@ impl EffectSpatialGpu {
             cartoon_horizontal,
             cartoon_vertical,
             cartoon,
+            film_look_horizontal,
+            film_look_vertical,
+            film_look,
             basic_3d,
             camera_view,
             grow_bounds,
@@ -3376,6 +3474,91 @@ impl EffectSpatialGpu {
         Ok(scratch[2].clone())
     }
 
+    /// Records the film look's highlight extraction, separable bloom and grade.
+    ///
+    /// The blur passes carry the authored radius in `extra.z`; the combine pass
+    /// carries the seven graded cells plus the exact grain seed. `gpu_controls`
+    /// already folds the authored grain into `aces.w`, so the amplitude is
+    /// packed verbatim like every other cell.
+    fn record_film_look(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::FilmLookGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        // Two bloom planes plus the graded frame: the vertical pass reads the
+        // horizontal plane and the combine needs the original frame alongside
+        // the vertical plane, so none of the three can be reused in place.
+        if scratch.len() < 3 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "film_look_scratch_geometry",
+            ));
+        }
+        let (params, extra, aces, extra1) = grade.gpu_controls();
+        let seed = grade.grain_seed();
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let horizontal_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        let vertical_view = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+        let destination_view = scratch[2].create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Only the bloom radius reaches the two tent passes; the grading cells
+        // are read by the combine pass alone.
+        let blur_uniform = SpatialPassUniform {
+            size: [width as f32, height as f32, 0.0, 0.0],
+            params: [0.0; 4],
+            extra: [0.0, 0.0, extra[2], 0.0],
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        self.record_pass(
+            device,
+            encoder,
+            &self.film_look_horizontal,
+            &source_view,
+            &horizontal_view,
+            &blur_uniform,
+        );
+        self.record_pass(
+            device,
+            encoder,
+            &self.film_look_vertical,
+            &horizontal_view,
+            &vertical_view,
+            &blur_uniform,
+        );
+
+        // `extra.w` carries the seed as f32 for the documented contract, but a
+        // u32 near 4e9 does not round-trip through f32. The shader therefore
+        // rebuilds the exact seed from the two spare `size` words, which hold
+        // its low and high 16-bit halves.
+        let combine_uniform = SpatialPassUniform {
+            size: [
+                width as f32,
+                height as f32,
+                (seed & 0xFFFF) as f32,
+                (seed >> 16) as f32,
+            ],
+            params,
+            extra,
+            aces,
+            extra1,
+        };
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.film_look,
+            &source_view,
+            &vertical_view,
+            &destination_view,
+            &combine_uniform,
+        );
+        Ok(scratch[2].clone())
+    }
+
     /// Records the lens flare stage.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_lens_flare(
@@ -3698,6 +3881,9 @@ impl EffectSpatialGpu {
             // 512 MiB spatial scratch budget while DCI 4K (566,231,040 bytes)
             // does not; the limit is identical to the key cleaner chain.
             EffectGpuSpatialPass::Abstraction { .. } => Ok(3),
+            // The same two separable tent passes plus the grade combine, which reads
+            // the original frame and the vertical bloom plane.
+            EffectGpuSpatialPass::FilmLook { .. } => Ok(3),
             // The same two separable tent passes plus the combine pass, which
             // needs the original frame alongside the vertical plane. Three
             // scratch textures carry the same UHD-fits / DCI-4K-does-not
@@ -3766,6 +3952,10 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Cartoon { grade } => {
                 return self
                     .record_cartoon(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::FilmLook { grade } => {
+                return self
+                    .record_film_look(device, encoder, *grade, source, scratch, width, height);
             }
             EffectGpuSpatialPass::BilateralBlur { grade } => {
                 let output = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
@@ -9335,6 +9525,59 @@ fn fs_cartoon_vertical(@builtin(position) position: vec4<f32>) -> @location(0) v
     return cartoon_tent(vec2<i32>(floor(position.xy)), 1.0);
 }
 
+// The film look bloom plane is the CPU kernel's highlight extraction: the
+// straight colour of each texel, scaled by the smoothstep highlight energy.
+// `.rgb` is the energy-weighted colour and `.w` the energy itself. Unlike the
+// cartoon tent this plane is never premultiplied, because the combine divides
+// `.rgb` by `.w` instead of un-premultiplying by alpha.
+fn film_look_extract(pixel: vec2<i32>) -> vec4<f32> {
+    let source = unpremultiply(load_clamped(pixel));
+    let luma = dot(source.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let energy = smoothstep(0.6, 1.2, luma);
+    return vec4<f32>(source.rgb * energy, energy);
+}
+
+fn film_look_radius() -> i32 {
+    return i32(round(uniforms.extra.z));
+}
+
+// Horizontal pass: extract and blur along the rows, writing the plane.
+@fragment
+fn fs_film_look_horizontal(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let radius = film_look_radius();
+    if (radius <= 0) {
+        return film_look_extract(pixel);
+    }
+    var sum = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var offset = -radius; offset <= radius; offset = offset + 1) {
+        let weight = 1.0 / (1.0 + f32(offset * offset));
+        sum += film_look_extract(pixel + vec2<i32>(offset, 0)) * weight;
+        weight_sum += weight;
+    }
+    return sum / weight_sum;
+}
+
+// Vertical pass: blur the already-extracted plane along the columns. The plane
+// is averaged as-is; both `.rgb` and `.w` are weighted, exactly like the CPU.
+@fragment
+fn fs_film_look_vertical(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let radius = film_look_radius();
+    if (radius <= 0) {
+        return load_clamped(pixel);
+    }
+    var sum = vec4<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var offset = -radius; offset <= radius; offset = offset + 1) {
+        let weight = 1.0 / (1.0 + f32(offset * offset));
+        sum += load_clamped(pixel + vec2<i32>(0, offset)) * weight;
+        weight_sum += weight;
+    }
+    return sum / weight_sum;
+}
+
 // One bilinear read in pixel coordinates, clamped to the frame edge. The CPU
 // kernel samples the straight-alpha texels directly, so the shader does too.
 fn highlight_bilinear(pixel: vec2<i32>, offset: vec2<f32>) -> vec3<f32> {
@@ -10481,6 +10724,82 @@ fn fs_cartoon(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> 
         result = result * (1.0 - darken);
     }
     return vec4<f32>(result, alpha);
+}
+
+// The film look combine pass. Binding 0 is the original frame, binding 1 the
+// vertical bloom plane whose `.w` is the accumulated highlight energy and
+// `.rgb` the energy-weighted colour. `params` is `[strength, contrast, fade,
+// saturation]`, `extra` is `[glow gain, halation gain, radius, grain seed]`,
+// `aces` is `[shadow r, shadow g, shadow b, grain amplitude]` and `extra1` is
+// `[highlight r, highlight g, highlight b, 0]`.
+//
+// The grain seed travels as an exact u32 split across `size.z` and `size.w`:
+// the `extra.w` cell carries the documented `u32` seed cast to f32, but a u32
+// near 4e9 cannot round-trip through f32, so the exact seed is split there too.
+fn film_look_luma(colour: vec3<f32>) -> f32 {
+    return dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn film_look_noise(seed: u32, x: u32, y: u32) -> f32 {
+    var hash = seed ^ (x * 0x9E3779B1u) ^ (y * 0x85EBCA6Bu);
+    hash = hash ^ (hash >> 16u);
+    hash = hash * 0x7FEB352Du;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x846CA68Bu;
+    hash = hash ^ (hash >> 16u);
+    return f32(hash) / f32(0xFFFFFFFFu) * 2.0 - 1.0;
+}
+
+@fragment
+fn fs_film_look(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let source_pixel = load_clamped_from(original_texture, pixel);
+    let strength = uniforms.params.x;
+    if (strength <= 0.0) {
+        return source_pixel;
+    }
+    let alpha = clamp(source_pixel.a, 0.0, 1.0);
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let source = source_pixel.rgb / alpha;
+    let source_luma = film_look_luma(source);
+    let tone = smoothstep(0.15, 0.85, source_luma);
+    let shadow = uniforms.aces.rgb;
+    let highlight = uniforms.extra1.rgb;
+    let gain = shadow + (highlight - shadow) * tone;
+    var graded = source * gain;
+    graded = vec3<f32>(source_luma) + (graded - vec3<f32>(source_luma)) * uniforms.params.w;
+    let contrast = clamp(uniforms.params.y, -0.95, 2.0);
+    graded = (graded - vec3<f32>(0.18)) * (1.0 + contrast) + vec3<f32>(0.18);
+    let lift = uniforms.params.z * 0.35;
+    graded = graded * (1.0 - lift) + vec3<f32>(0.12 * lift);
+
+    let grain_amount = uniforms.aces.w;
+    if (grain_amount > 0.0) {
+        let seed = u32(uniforms.size.z) | (u32(uniforms.size.w) << 16u);
+        let noise = film_look_noise(seed, u32(pixel.x), u32(pixel.y));
+        let falloff = 1.0 - 0.6 * clamp(source_luma, 0.0, 1.0);
+        graded += vec3<f32>(noise * grain_amount * falloff);
+    }
+
+    let bloom = load_clamped_from(auxiliary_texture, pixel);
+    let bloom_amount = bloom.w;
+    if (bloom_amount > 0.0) {
+        let bloom_rgb = bloom.rgb / max(bloom_amount, 1e-4);
+        if (uniforms.extra.x > 0.0) {
+            graded += bloom_rgb * uniforms.extra.x * bloom_amount;
+        }
+        if (uniforms.extra.y > 0.0) {
+            graded += vec3<f32>(1.0, 0.32, 0.26) * uniforms.extra.y * bloom_amount;
+        }
+    }
+
+    // The CPU kernel mixes first and clamps the mixed colour to zero after,
+    // so the clamp here is on the mix rather than on the graded colour.
+    let mixed = source + (graded - source) * strength;
+    let out = max(mixed, vec3<f32>(0.0));
+    return vec4<f32>(out * alpha, alpha);
 }
 
 // The blend helpers below mirror the compositor's WGSL helpers in
