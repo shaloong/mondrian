@@ -4097,3 +4097,24 @@ parameter-builtin-zoom-blur-border-type-replicate = 复制边缘
 parameter-builtin-zoom-blur-border-type-mirror = 镜像
 parameter-builtin-zoom-blur-border-type-black = 黑色
 parameter-builtin-zoom-blur-border-type-white = 白色
+
+## Page Turn 翻页
+effect-page-turn = 翻页
+parameter-group-page-turn = 翻页
+parameter-mondrian-effect-builtin-page-turn-controls-label = 控制
+parameter-mondrian-effect-builtin-page-turn-fold-position-label = 折角位置
+parameter-mondrian-effect-builtin-page-turn-fold-direction-label = 折角方向
+parameter-mondrian-effect-builtin-page-turn-fold-radius-label = 折角半径
+parameter-mondrian-effect-builtin-page-turn-light-direction-label = 光照方向
+parameter-mondrian-effect-builtin-page-turn-render-label = 渲染
+parameter-mondrian-effect-builtin-page-turn-back-page-label = 背页
+parameter-mondrian-effect-builtin-page-turn-back-opacity-label = 背页不透明度
+parameter-mondrian-effect-builtin-page-turn-paper-colour-label = 纸张颜色
+parameter-builtin-page-turn-controls-classic = 经典界面
+parameter-builtin-page-turn-controls-top-left = 左上角
+parameter-builtin-page-turn-controls-top-right = 右上角
+parameter-builtin-page-turn-controls-bottom-left = 左下角
+parameter-builtin-page-turn-controls-bottom-right = 右下角
+parameter-builtin-page-turn-render-front-and-back = 正面与背面
+parameter-builtin-page-turn-render-back-page = 背面
+parameter-builtin-page-turn-render-front-page = 正面

@@ -4169,3 +4169,24 @@ parameter-builtin-zoom-blur-border-type-replicate = Replicate
 parameter-builtin-zoom-blur-border-type-mirror = Mirror
 parameter-builtin-zoom-blur-border-type-black = Black
 parameter-builtin-zoom-blur-border-type-white = White
+
+## Page Turn 翻页
+effect-page-turn = Page Turn
+parameter-group-page-turn = Page Turn
+parameter-mondrian-effect-builtin-page-turn-controls-label = Controls
+parameter-mondrian-effect-builtin-page-turn-fold-position-label = Fold position
+parameter-mondrian-effect-builtin-page-turn-fold-direction-label = Fold direction
+parameter-mondrian-effect-builtin-page-turn-fold-radius-label = Fold radius
+parameter-mondrian-effect-builtin-page-turn-light-direction-label = Light direction
+parameter-mondrian-effect-builtin-page-turn-render-label = Render
+parameter-mondrian-effect-builtin-page-turn-back-page-label = Back page
+parameter-mondrian-effect-builtin-page-turn-back-opacity-label = Back page opacity
+parameter-mondrian-effect-builtin-page-turn-paper-colour-label = Paper colour
+parameter-builtin-page-turn-controls-classic = Classic
+parameter-builtin-page-turn-controls-top-left = Top left
+parameter-builtin-page-turn-controls-top-right = Top right
+parameter-builtin-page-turn-controls-bottom-left = Bottom left
+parameter-builtin-page-turn-controls-bottom-right = Bottom right
+parameter-builtin-page-turn-render-front-and-back = Front and back
+parameter-builtin-page-turn-render-back-page = Back page
+parameter-builtin-page-turn-render-front-page = Front page

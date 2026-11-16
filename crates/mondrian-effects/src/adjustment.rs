@@ -639,6 +639,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::PageTurn { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "page_turn",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::FilmLook { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "film_look",
@@ -1500,6 +1506,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::RadialShadow { .. } => 1,
         EffectRenderOp::FilmLook { .. } => 2,
         EffectRenderOp::ZoomBlur { .. } => 0,
+        EffectRenderOp::PageTurn { .. } => 0,
     }
 }
 
@@ -2068,6 +2075,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             )
         }
         EffectRenderOp::ZoomBlur { grade } => crate::zoom_blur::apply_zoom_blur_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            *grade,
+            checkpoint,
+        ),
+        EffectRenderOp::PageTurn { grade } => crate::page_turn::apply_page_turn_f32_controlled(
             working,
             region.width as usize,
             region.height as usize,

@@ -268,6 +268,9 @@ pub enum EffectType {
     /// Film look: one built-in film stock's cast, contrast, grain, halation,
     /// and fade over three spatial passes.
     FilmLook,
+    /// Page turn: fold the frame around an authorable corner and shade the
+    /// revealed back page with an optional paper colour and opacity.
+    PageTurn,
 }
 
 impl EffectType {
@@ -326,6 +329,7 @@ impl EffectType {
             Self::Tritone => "builtin.tritone".to_string(),
             Self::RadialBlur => "builtin.radial_blur".to_string(),
             Self::ZoomBlur => "builtin.zoom_blur".to_string(),
+            Self::PageTurn => "builtin.page_turn".to_string(),
             Self::Convolution => "builtin.convolution".to_string(),
             Self::Offset => "builtin.offset".to_string(),
             Self::Twirl => "builtin.twirl".to_string(),
@@ -476,6 +480,7 @@ impl EffectType {
             "builtin.tritone" => Self::Tritone,
             "builtin.radial_blur" => Self::RadialBlur,
             "builtin.zoom_blur" => Self::ZoomBlur,
+            "builtin.page_turn" => Self::PageTurn,
             "builtin.convolution" => Self::Convolution,
             "builtin.offset" => Self::Offset,
             "builtin.twirl" => Self::Twirl,
@@ -629,6 +634,7 @@ impl EffectType {
             Self::Tritone => "三色调",
             Self::RadialBlur => "径向模糊",
             Self::ZoomBlur => "缩放模糊",
+            Self::PageTurn => "翻页",
             Self::Convolution => "卷积核",
             Self::Offset => "偏移",
             Self::Twirl => "旋转扭曲",
@@ -784,6 +790,7 @@ impl EffectType {
             Self::Tritone => vec!["颜色/调色"],
             Self::RadialBlur => vec!["颜色", "模糊与锐化"],
             Self::ZoomBlur => vec!["颜色", "模糊与锐化"],
+            Self::PageTurn => vec!["变形"],
             Self::Convolution => vec!["颜色", "调色"],
             Self::Offset => vec!["变换与尺寸"],
             Self::Twirl => vec!["变形"],
@@ -924,6 +931,7 @@ impl EffectType {
             Self::Tritone => "tritone".to_string(),
             Self::RadialBlur => "radial_blur".to_string(),
             Self::ZoomBlur => "zoom_blur".to_string(),
+            Self::PageTurn => "page_turn".to_string(),
             Self::Convolution => "convolution".to_string(),
             Self::Offset => "offset".to_string(),
             Self::Twirl => "twirl".to_string(),
@@ -1448,6 +1456,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Tritone => Ok(()),
             Self::RadialBlur => Ok(()),
             Self::ZoomBlur => Ok(()),
+            Self::PageTurn => Ok(()),
             Self::Convolution => Ok(()),
             Self::Offset => Ok(()),
             Self::Twirl => Ok(()),

@@ -1375,6 +1375,12 @@ pub enum EffectRenderOp {
         /// Authored smoothing, zoom amount, blur type, centre and quality.
         grade: crate::ZoomBlurGrade,
     },
+    /// Page turn: folds the frame around an authorable corner and shades the
+    /// revealed back page.
+    PageTurn {
+        /// Authored controls, fold, light, render mode and paper colour.
+        grade: crate::PageTurnGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1845,6 +1851,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::ZoomBlur { grade } => {
                 formatter.debug_struct("ZoomBlur").field("grade", grade).finish()
+            }
+            Self::PageTurn { grade } => {
+                formatter.debug_struct("PageTurn").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -3026,6 +3035,13 @@ impl EffectRenderOp {
                 // values, so the grade hashes every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::PageTurn { grade } => {
+                145u8.hash(state);
+                // The controls, the fold, the light, the render mode, the back
+                // page and the paper colour all read the authored values, so
+                // the grade hashes every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3317,6 +3333,7 @@ impl EffectRenderOp {
             EffectRenderOp::RadialShadow { .. } => 4,
             EffectRenderOp::FilmLook { .. } => 3,
             EffectRenderOp::ZoomBlur { .. } => 3,
+            EffectRenderOp::PageTurn { .. } => 3,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3851,7 +3868,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 144] {
+fn builtin_effect_types() -> [EffectType; 145] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3997,6 +4014,7 @@ fn builtin_effect_types() -> [EffectType; 144] {
         EffectType::RadialShadow,
         EffectType::FilmLook,
         EffectType::ZoomBlur,
+        EffectType::PageTurn,
     ]
 }
 
@@ -15634,6 +15652,134 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::PageTurn => {
+            // The nine authored values mirror the kernel: the corner controls,
+            // the fold position, direction and radius, the light direction, the
+            // render mode, the back page offset and opacity, and the paper
+            // colour.
+            const GROUP: &str = "翻页";
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "controls",
+                GROUP,
+                "控制",
+                crate::PageTurnControls::DEFAULT.as_key(),
+                crate::PageTurnControls::ALL
+                    .iter()
+                    .map(|controls| {
+                        ParameterEnumOption::new(
+                            controls.as_key(),
+                            controls.label(),
+                            format!("builtin.page_turn.controls.{}", controls.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fold_position",
+                GROUP,
+                "折角位置",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::PAGE_TURN_DEFAULT_FOLD_POSITION[0],
+                    crate::PAGE_TURN_DEFAULT_FOLD_POSITION[1],
+                )),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fold_direction",
+                GROUP,
+                "折角方向",
+                PropertyValue::Float(crate::PAGE_TURN_DEFAULT_FOLD_DIRECTION),
+                Some(crate::PAGE_TURN_MIN_FOLD_DIRECTION as f64),
+                Some(crate::PAGE_TURN_MAX_FOLD_DIRECTION as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fold_radius",
+                GROUP,
+                "折角半径",
+                PropertyValue::Float(crate::PAGE_TURN_DEFAULT_FOLD_RADIUS),
+                Some(crate::PAGE_TURN_MIN_FOLD_RADIUS as f64),
+                Some(crate::PAGE_TURN_MAX_FOLD_RADIUS as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "light_direction",
+                GROUP,
+                "光照方向",
+                PropertyValue::Float(crate::PAGE_TURN_DEFAULT_LIGHT_DIRECTION),
+                Some(crate::PAGE_TURN_MIN_LIGHT_DIRECTION as f64),
+                Some(crate::PAGE_TURN_MAX_LIGHT_DIRECTION as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "render",
+                GROUP,
+                "渲染",
+                crate::PageTurnRender::DEFAULT.as_key(),
+                crate::PageTurnRender::ALL
+                    .iter()
+                    .map(|render| {
+                        ParameterEnumOption::new(
+                            render.as_key(),
+                            render.label(),
+                            format!("builtin.page_turn.render.{}", render.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "back_page",
+                GROUP,
+                "背页",
+                PropertyValue::Float(crate::PAGE_TURN_DEFAULT_BACK_PAGE),
+                Some(crate::PAGE_TURN_MIN_BACK_PAGE as f64),
+                Some(crate::PAGE_TURN_MAX_BACK_PAGE as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "back_opacity",
+                GROUP,
+                "背页不透明度",
+                PropertyValue::Float(crate::PAGE_TURN_DEFAULT_BACK_OPACITY),
+                Some(crate::PAGE_TURN_MIN_BACK_OPACITY as f64),
+                Some(crate::PAGE_TURN_MAX_BACK_OPACITY as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "paper_colour",
+                GROUP,
+                "纸张颜色",
+                PropertyValue::Color(Color {
+                    r: crate::PAGE_TURN_DEFAULT_PAPER_COLOUR[0],
+                    g: crate::PAGE_TURN_DEFAULT_PAPER_COLOUR[1],
+                    b: crate::PAGE_TURN_DEFAULT_PAPER_COLOUR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -16836,6 +16982,17 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             "blur_type" | "channel_adjust" | "center_position" | "advanced_controls" | "quality"
             | "border_type" | "follow_sizing" | "blur_alpha",
         ) => ParameterUnit::Unitless,
+        // The fold position is normalized to the frame; the two directions are
+        // degrees, the fold radius is pixels and the back page opacity is a
+        // percentage. The menus, the back page offset and the paper colour are
+        // plain numbers that already carry their own scale.
+        (EffectType::PageTurn, "fold_position") => ParameterUnit::Normalized,
+        (EffectType::PageTurn, "fold_direction" | "light_direction") => ParameterUnit::Degrees,
+        (EffectType::PageTurn, "fold_radius") => ParameterUnit::Pixels,
+        (EffectType::PageTurn, "back_opacity") => ParameterUnit::Percent,
+        (EffectType::PageTurn, "controls" | "render" | "back_page" | "paper_colour") => {
+            ParameterUnit::Unitless
+        }
         _ => ParameterUnit::Unitless,
     }
 }
@@ -17389,6 +17546,15 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // can land anywhere up to the frame diagonal; an input tile cannot
             // be narrowed, though the result is still a pure function of the
             // current frame.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::PageTurn => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Every output can sample the folded half of the frame, the lifted
+            // back page or the far side of the fold, so an input tile cannot be
+            // narrowed; the result is still a pure function of the current
+            // frame.
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
@@ -25114,6 +25280,124 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::PageTurn => {
+            let fold_position_id = builtin_parameter_id(effect_type, "fold_position");
+            let paper_colour_id = builtin_parameter_id(effect_type, "paper_colour");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read_number(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("翻页的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_menu<T: Copy>(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    name: &str,
+                    from_key: fn(&str) -> Option<T>,
+                ) -> Result<Option<T>, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                            Some(value) => Ok(Some(value)),
+                            None => Err(invalid(format!("翻页的{name}没有对应的菜单项 {key}"))),
+                        },
+                        Some(_) => Err(invalid(format!("翻页的{name}必须是菜单项"))),
+                        None => Ok(None),
+                    }
+                }
+                let defaults = crate::PageTurnParameters::default();
+                let mut parameters = defaults;
+                if let Some(value) = read_menu(
+                    effect,
+                    context,
+                    &invalid,
+                    "controls",
+                    "控制",
+                    crate::PageTurnControls::from_key,
+                )? {
+                    parameters.controls = value;
+                }
+                match effect.evaluate_parameter(&fold_position_id, context.time) {
+                    Some(PropertyValue::Vec2(position)) => {
+                        parameters.fold_position = [position.x, position.y];
+                    }
+                    Some(_) => return Err(invalid("翻页的折角位置必须是二维坐标".to_string())),
+                    None => {}
+                }
+                parameters.fold_direction = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "fold_direction",
+                    defaults.fold_direction,
+                )?;
+                parameters.fold_radius = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "fold_radius",
+                    defaults.fold_radius,
+                )?;
+                parameters.light_direction = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "light_direction",
+                    defaults.light_direction,
+                )?;
+                if let Some(value) = read_menu(
+                    effect,
+                    context,
+                    &invalid,
+                    "render",
+                    "渲染",
+                    crate::PageTurnRender::from_key,
+                )? {
+                    parameters.render = value;
+                }
+                parameters.back_page =
+                    read_number(effect, context, &invalid, "back_page", defaults.back_page)?;
+                parameters.back_opacity = read_number(
+                    effect,
+                    context,
+                    &invalid,
+                    "back_opacity",
+                    defaults.back_opacity,
+                )?;
+                match effect.evaluate_parameter(&paper_colour_id, context.time) {
+                    Some(PropertyValue::Color(colour)) => {
+                        parameters.paper_colour = [colour.r, colour.g, colour.b];
+                    }
+                    Some(_) => return Err(invalid("翻页的纸张颜色必须是颜色值".to_string())),
+                    None => {}
+                }
+                let grade = crate::PageTurnGrade::new(parameters).map_err(|error| {
+                    invalid(format!("翻页的参数 {} 必须是数值", error.parameter()))
+                })?;
+                // The fold, the shading and the back page always change the
+                // frame, so the grade is never the identity and the spatial
+                // node is always built.
+                graph.append_unary(EffectRenderOp::PageTurn { grade });
+                Ok(())
+            }))
+        }
         EffectType::Highlight => {
             let mask_id = builtin_parameter_id(effect_type, "highlight_mask");
             let mask_layer_id = builtin_parameter_id(effect_type, "mask_layer");
@@ -26714,6 +26998,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::RadialShadow => "径向阴影",
         EffectType::FilmLook => "胶片外观",
         EffectType::ZoomBlur => "缩放模糊",
+        EffectType::PageTurn => "翻页",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -28132,6 +28417,7 @@ mod tests {
             EffectType::RadialShadow,
             EffectType::FilmLook,
             EffectType::ZoomBlur,
+            EffectType::PageTurn,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -37428,7 +37714,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 144);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 145);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -37956,7 +38242,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 144);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 145);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -40915,7 +41201,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 144);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 145);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -42051,7 +42337,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 144);
+        assert_eq!(builtin_effect_types().len(), 145);
     }
 
     #[test]
@@ -45291,6 +45577,280 @@ mod tests {
             }
             other => panic!("unexpected point lowering {other:?}"),
         }
+    }
+
+    fn page_turn_op(graph: &EffectRenderGraph) -> Option<crate::PageTurnGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::PageTurn { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::PageTurn { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_page_turn(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::PageTurn)
+            .expect("the page turn should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::PageTurn.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the page turn parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn page_turn_defaults_build_one_spatial_op() {
+        let effect = instantiate_effect_node(EffectType::PageTurn)
+            .expect("the page turn should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = page_turn_op(&graph).expect("the defaults are never the identity");
+        assert_eq!(grade.parameters(), crate::PageTurnParameters::default());
+        assert_eq!(grade.cost(), 3);
+        assert_eq!(graph.nodes.len(), 2, "the source plus one fold node");
+        let op = EffectRenderOp::PageTurn { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the fold pass samples the source plane in place"
+        );
+        assert_eq!(op.estimated_cost(), 3);
+        let pass = crate::spatial_pass_for(&op).expect("the page turn is a spatial pass");
+        assert_eq!(pass, crate::EffectGpuSpatialPass::PageTurn { grade });
+        assert_eq!(pass.name(), "page_turn");
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            145
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::PageTurn { grade: crate::PageTurnGrade::documented_defaults() }
+            .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the documented defaults"
+        );
+    }
+
+    #[test]
+    fn page_turn_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::PageTurn;
+        let properties = default_properties_for(effect_type.clone());
+        for parameter in [
+            "controls",
+            "fold_position",
+            "fold_direction",
+            "fold_radius",
+            "light_direction",
+            "render",
+            "back_page",
+            "back_opacity",
+            "paper_colour",
+        ] {
+            assert!(
+                properties.property(&effect_type.property_path(parameter)).is_some(),
+                "the {parameter} value is authored"
+            );
+        }
+
+        let controls = properties
+            .property(&effect_type.property_path("controls"))
+            .expect("the controls menu is defined");
+        assert_eq!(
+            controls.evaluate(tt(0)),
+            PropertyValue::Enum("bottom_right".to_owned())
+        );
+        let options = &controls.descriptor.schema.enum_options;
+        let keys = [
+            "classic",
+            "top_left",
+            "top_right",
+            "bottom_left",
+            "bottom_right",
+        ];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, key);
+            assert_eq!(
+                option.message_id,
+                format!("builtin.page_turn.controls.{key}")
+            );
+        }
+        for (key, controls) in [
+            ("classic", crate::PageTurnControls::Classic),
+            ("top_left", crate::PageTurnControls::TopLeft),
+            ("top_right", crate::PageTurnControls::TopRight),
+            ("bottom_left", crate::PageTurnControls::BottomLeft),
+            ("bottom_right", crate::PageTurnControls::BottomRight),
+        ] {
+            assert_eq!(crate::PageTurnControls::from_key(key), Some(controls));
+            assert_eq!(controls.as_key(), key);
+        }
+        assert_eq!(crate::PageTurnControls::Classic.label(), "经典界面");
+        assert_eq!(crate::PageTurnControls::BottomRight.label(), "右下角");
+
+        let render = properties
+            .property(&effect_type.property_path("render"))
+            .expect("the render menu is defined");
+        assert_eq!(
+            render.evaluate(tt(0)),
+            PropertyValue::Enum("front_and_back".to_owned())
+        );
+        let options = &render.descriptor.schema.enum_options;
+        let keys = ["front_and_back", "back_page", "front_page"];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, key);
+            assert_eq!(option.message_id, format!("builtin.page_turn.render.{key}"));
+        }
+        for (key, render) in [
+            ("front_and_back", crate::PageTurnRender::FrontAndBack),
+            ("back_page", crate::PageTurnRender::BackPage),
+            ("front_page", crate::PageTurnRender::FrontPage),
+        ] {
+            assert_eq!(crate::PageTurnRender::from_key(key), Some(render));
+            assert_eq!(render.as_key(), key);
+        }
+        assert_eq!(crate::PageTurnRender::FrontAndBack.label(), "正面与背面");
+        assert_eq!(crate::PageTurnRender::FrontPage.label(), "正面");
+    }
+
+    #[test]
+    fn page_turn_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::PageTurn;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            EffectRoiPropagation::FullFrame,
+            "the fold can sample anywhere in the frame"
+        );
+    }
+
+    #[test]
+    fn page_turn_out_of_range_parameter_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::PageTurn)
+            .expect("the page turn should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::PageTurn.property_path("fold_radius"),
+                value: PropertyValue::Float(2000.0),
+            })
+            .expect_err("a fold radius above one thousand should fail");
+        let message = error.to_string();
+        assert!(message.contains("page_turn.fold_radius"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect = instantiate_effect_node(EffectType::PageTurn)
+            .expect("the page turn should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "page_turn.fold_radius",
+            serde_json::json!(2000.0),
+        );
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a fold radius above one thousand should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.page_turn");
+                    assert!(reason.contains("fold_radius"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn page_turn_lowering_carries_the_authored_grade() {
+        let effect = author_page_turn(&[
+            ("controls", PropertyValue::Enum("top_left".to_owned())),
+            (
+                "fold_position",
+                PropertyValue::Vec2(glam::Vec2::new(0.25, 0.75)),
+            ),
+            ("fold_direction", PropertyValue::Float(-120.0)),
+            ("fold_radius", PropertyValue::Float(80.0)),
+            ("light_direction", PropertyValue::Float(45.0)),
+            ("render", PropertyValue::Enum("back_page".to_owned())),
+            ("back_page", PropertyValue::Float(12.0)),
+            ("back_opacity", PropertyValue::Float(40.0)),
+            (
+                "paper_colour",
+                PropertyValue::Color(Color { r: 0.5, g: 0.6, b: 0.7, a: 1.0 }),
+            ),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored page turn should compile");
+        let grade = page_turn_op(&graph).expect("the authored page turn is never built as absent");
+        let parameters = grade.parameters();
+        assert_eq!(parameters.controls, crate::PageTurnControls::TopLeft);
+        assert_eq!(parameters.fold_position, [0.25, 0.75]);
+        assert_eq!(parameters.fold_direction, -120.0);
+        assert_eq!(parameters.fold_radius, 80.0);
+        assert_eq!(parameters.light_direction, 45.0);
+        assert_eq!(parameters.render, crate::PageTurnRender::BackPage);
+        assert_eq!(parameters.back_page, 12.0);
+        assert_eq!(parameters.back_opacity, 40.0);
+        assert_eq!(parameters.paper_colour, [0.5, 0.6, 0.7]);
+
+        let op = EffectRenderOp::PageTurn { grade };
+        assert_eq!(
+            crate::spatial_pass_for(&op),
+            Some(crate::EffectGpuSpatialPass::PageTurn { grade }),
+            "the authored grade reaches the spatial pass unmodified"
+        );
+        match crate::gpu_plan::lower_point_op(graph.nodes[1].id, &op) {
+            Err(crate::gpu_plan::EffectGpuPlanBlocker::UnsupportedOperation {
+                op: name, ..
+            }) => {
+                assert_eq!(name, "page_turn", "the spatial pass is refused by name");
+            }
+            other => panic!("unexpected point lowering {other:?}"),
+        }
+    }
+
+    #[test]
+    fn page_turn_light_direction_changes_the_hash() {
+        let build = |light_direction: f32| {
+            let effect =
+                author_page_turn(&[("light_direction", PropertyValue::Float(light_direction))]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored page turn should compile");
+            EffectRenderOp::PageTurn {
+                grade: page_turn_op(&graph).expect("the page turn is never the identity"),
+            }
+        };
+        use std::hash::Hasher;
+        let mut left = std::collections::hash_map::DefaultHasher::new();
+        build(30.0).hash_signature(&mut left);
+        let mut right = std::collections::hash_map::DefaultHasher::new();
+        build(-30.0).hash_signature(&mut right);
+        assert_ne!(
+            left.finish(),
+            right.finish(),
+            "the light direction is part of the render identity"
+        );
     }
 
     fn film_look_op(graph: &EffectRenderGraph) -> Option<crate::FilmLookGrade> {

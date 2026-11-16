@@ -3275,6 +3275,7 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         | EffectRenderOp::Highlight { .. }
         | EffectRenderOp::RadialShadow { .. }
         | EffectRenderOp::ZoomBlur { .. }
+        | EffectRenderOp::PageTurn { .. }
         | EffectRenderOp::GrowBounds { .. }
         | EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }

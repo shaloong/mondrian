@@ -292,6 +292,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored centre, sweep length, tap distribution, and borders.
         grade: crate::ZoomBlurGrade,
     },
+    /// Page lifted along a fold line and rolled over the cylinder.
+    PageTurn {
+        /// Authored fold, cylinder, light, render mode, and paper.
+        grade: crate::PageTurnGrade,
+    },
     /// Radial correction around the green reference channel.
     ChromaticAberrationRemoval {
         /// Authored amounts, edge scale, and normalized centre.
@@ -503,6 +508,7 @@ impl EffectGpuSpatialPass {
             Self::RadialShadow { .. } => "radial_shadow",
             Self::FilmLook { .. } => "film_look",
             Self::ZoomBlur { .. } => "zoom_blur",
+            Self::PageTurn { .. } => "page_turn",
             Self::Highlight { .. } => "highlight",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
@@ -619,6 +625,9 @@ impl EffectGpuSpatialPass {
             Self::FilmLook { .. } => crate::FILM_LOOK_HALO,
             // The sweep can reach the frame diagonal, so the plane is never tiled.
             Self::ZoomBlur { .. } => u32::MAX,
+            // The sheet samples across half the frame, so the plane is never
+            // tiled either.
+            Self::PageTurn { .. } => u32::MAX,
             // The authored length is a fraction of the frame width, so the ray
             // can reach any distance and the plane is never tiled.
             Self::Highlight { .. } => u32::MAX,
@@ -718,6 +727,7 @@ impl EffectGpuSpatialPass {
             Self::FilmLook { .. } => crate::FILM_LOOK_HALO,
             // The sweep can reach the frame diagonal, so the plane is never tiled.
             Self::ZoomBlur { .. } => u32::MAX,
+            Self::PageTurn { .. } => u32::MAX,
             Self::Highlight { .. } => u32::MAX,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
@@ -1317,6 +1327,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::ZoomBlur { grade } => {
             Some(EffectGpuSpatialPass::ZoomBlur { grade: *grade })
+        }
+        EffectRenderOp::PageTurn { grade } => {
+            Some(EffectGpuSpatialPass::PageTurn { grade: *grade })
         }
         EffectRenderOp::Highlight { grade } => {
             Some(EffectGpuSpatialPass::Highlight { grade: *grade })

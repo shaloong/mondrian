@@ -3686,6 +3686,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::RadialShadow { .. } => "radial_shadow",
         crate::EffectRenderOp::FilmLook { .. } => "film_look",
         crate::EffectRenderOp::ZoomBlur { .. } => "zoom_blur",
+        crate::EffectRenderOp::PageTurn { .. } => "page_turn",
         crate::EffectRenderOp::SetMatte { .. } => "set_matte",
         crate::EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         crate::EffectRenderOp::GrowBounds { .. } => "grow_bounds",

@@ -3257,6 +3257,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::RadialShadow { .. } => "radial_shadow",
         EffectRenderOp::FilmLook { .. } => "film_look",
         EffectRenderOp::ZoomBlur { .. } => "zoom_blur",
+        EffectRenderOp::PageTurn { .. } => "page_turn",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",

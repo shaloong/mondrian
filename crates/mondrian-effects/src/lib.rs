@@ -191,6 +191,7 @@ pub mod mosaic;
 pub mod motion_tile;
 pub mod noise;
 pub mod offset;
+pub mod page_turn;
 pub(crate) mod parallel;
 pub mod photo_filter;
 pub mod polar_coordinates;
@@ -677,6 +678,17 @@ pub use noise::{
 };
 pub use offset::{
     offset_frame_f32, OffsetError, OffsetGrade, OFFSET_MAX_BLEND_PERCENT, OFFSET_MAX_SHIFT_PIXELS,
+};
+pub use page_turn::{
+    page_turn_frame_f32, PageTurnControls, PageTurnError, PageTurnGpuControls, PageTurnGrade,
+    PageTurnParameters, PageTurnRender, PAGE_TURN_DEFAULT_BACK_OPACITY,
+    PAGE_TURN_DEFAULT_BACK_PAGE, PAGE_TURN_DEFAULT_FOLD_DIRECTION, PAGE_TURN_DEFAULT_FOLD_POSITION,
+    PAGE_TURN_DEFAULT_FOLD_RADIUS, PAGE_TURN_DEFAULT_LIGHT_DIRECTION,
+    PAGE_TURN_DEFAULT_PAPER_COLOUR, PAGE_TURN_MAX_BACK_OPACITY, PAGE_TURN_MAX_BACK_PAGE,
+    PAGE_TURN_MAX_FOLD_DIRECTION, PAGE_TURN_MAX_FOLD_POSITION, PAGE_TURN_MAX_FOLD_RADIUS,
+    PAGE_TURN_MAX_LIGHT_DIRECTION, PAGE_TURN_MIN_BACK_OPACITY, PAGE_TURN_MIN_BACK_PAGE,
+    PAGE_TURN_MIN_FOLD_DIRECTION, PAGE_TURN_MIN_FOLD_POSITION, PAGE_TURN_MIN_FOLD_RADIUS,
+    PAGE_TURN_MIN_LIGHT_DIRECTION,
 };
 pub use photo_filter::{
     photo_filter_frame_f32, PhotoFilterError, PhotoFilterGrade, PhotoFilterPreset,
