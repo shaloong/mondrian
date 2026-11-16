@@ -287,6 +287,11 @@ pub enum EffectGpuPointOp {
     LightSweep {
         grade: crate::LightSweepGrade,
     },
+    /// Strobe: the flash colour, weight, mode and operator fill the point
+    /// uniform; the schedule has already been resolved on the CPU.
+    Strobe {
+        grade: crate::StrobeGrade,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -1022,6 +1027,7 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::AcesTransform { grade: *grade })
         }
         EffectRenderOp::LightSweep { grade } => Ok(EffectGpuPointOp::LightSweep { grade: *grade }),
+        EffectRenderOp::Strobe { grade } => Ok(EffectGpuPointOp::Strobe { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
             Ok(EffectGpuPointOp::CircleEllipse { grade: *grade })
@@ -1175,6 +1181,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
         EffectRenderOp::AcesTransform { .. } => "aces_transform",
         EffectRenderOp::LightSweep { .. } => "light_sweep",
+        EffectRenderOp::Strobe { .. } => "strobe",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

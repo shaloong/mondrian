@@ -203,6 +203,7 @@ pub mod shift_channels;
 pub mod smart_blur;
 pub mod star_burst;
 pub(crate) mod straight_alpha;
+pub mod strobe;
 pub mod temporal_execution;
 pub mod test_signals;
 #[cfg(test)]
@@ -977,6 +978,15 @@ pub use roughen_edges::{
     ROUGHEN_EDGES_MIN_STRETCH, ROUGHEN_EDGES_MIN_STRETCH_FACTOR, ROUGHEN_EDGES_RUST_SALT,
 };
 pub use shift_channels::{ChannelSource, ShiftChannelsGrade};
+pub use strobe::{
+    strobe_frame_f32, StrobeError, StrobeGpuControls, StrobeGrade, StrobeMode, StrobeOperator,
+    StrobeParameters, STROBE_DEFAULT_BLEND_WITH_ORIGINAL, STROBE_DEFAULT_COLOR,
+    STROBE_DEFAULT_DURATION, STROBE_DEFAULT_INTERVAL, STROBE_DEFAULT_RANDOM_PROBABILITY,
+    STROBE_DEFAULT_RANDOM_SEED, STROBE_MAX_BLEND_WITH_ORIGINAL, STROBE_MAX_DURATION,
+    STROBE_MAX_INTERVAL, STROBE_MAX_RANDOM_PROBABILITY, STROBE_MAX_RANDOM_SEED,
+    STROBE_MIN_BLEND_WITH_ORIGINAL, STROBE_MIN_DURATION, STROBE_MIN_INTERVAL,
+    STROBE_MIN_RANDOM_PROBABILITY, STROBE_MIN_RANDOM_SEED,
+};
 pub use test_signals::{
     test_signals_frame_f32, TestSignalsError, TestSignalsGrade, TestSignalsPattern,
     TEST_SIGNALS_DEFAULT_INTENSITY, TEST_SIGNALS_MAX_INTENSITY, TEST_SIGNALS_MIN_INTENSITY,

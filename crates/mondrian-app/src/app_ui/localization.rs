@@ -423,6 +423,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "色彩空间转换" => Some("parameter-group-color-space-transform"),
         "ACES 转换" => Some("parameter-group-aces-transform"),
         "扫光" => Some("parameter-group-light-sweep"),
+        "频闪" => Some("parameter-group-strobe"),
         _ => None,
     }
 }

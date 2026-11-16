@@ -3252,6 +3252,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
         EffectRenderOp::AcesTransform { .. } => "aces_transform",
         EffectRenderOp::LightSweep { .. } => "light_sweep",
+        EffectRenderOp::Strobe { .. } => "strobe",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",

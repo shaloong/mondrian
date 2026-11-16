@@ -1353,6 +1353,11 @@ pub enum EffectRenderOp {
         /// Authored beam geometry, intensities, tint and reception mode.
         grade: crate::LightSweepGrade,
     },
+    /// Strobe: flashes the frame to a colour, or masks its layer, on a schedule.
+    Strobe {
+        /// Authored flash colour, schedule, mode and operator.
+        grade: crate::StrobeGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1811,6 +1816,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::LightSweep { grade } => {
                 formatter.debug_struct("LightSweep").field("grade", grade).finish()
+            }
+            Self::Strobe { grade } => {
+                formatter.debug_struct("Strobe").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2965,6 +2973,12 @@ impl EffectRenderOp {
                 // so the grade hashes the whole configuration.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Strobe { grade } => {
+                140u8.hash(state);
+                // Every flash control, the mode and the operator change the
+                // pixels, so the grade hashes the whole configuration.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3252,6 +3266,7 @@ impl EffectRenderOp {
             EffectRenderOp::ColorSpaceTransform { .. } => 4,
             EffectRenderOp::AcesTransform { .. } => 5,
             EffectRenderOp::LightSweep { .. } => 1,
+            EffectRenderOp::Strobe { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3786,7 +3801,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 140] {
+fn builtin_effect_types() -> [EffectType; 141] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3928,6 +3943,7 @@ fn builtin_effect_types() -> [EffectType; 140] {
         EffectType::ColorSpaceTransform,
         EffectType::AcesTransform,
         EffectType::LightSweep,
+        EffectType::Strobe,
     ]
 }
 
@@ -14997,6 +15013,118 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Strobe => {
+            // The eight authored values mirror the kernel: the flash colour,
+            // the mix weight, the schedule, the random gate, the mode, the
+            // operator and the seed.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color",
+                "频闪",
+                "闪光颜色",
+                PropertyValue::Color(Color {
+                    r: crate::STROBE_DEFAULT_COLOR[0],
+                    g: crate::STROBE_DEFAULT_COLOR[1],
+                    b: crate::STROBE_DEFAULT_COLOR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                "频闪",
+                "与原始图像混合",
+                PropertyValue::Float(crate::STROBE_DEFAULT_BLEND_WITH_ORIGINAL),
+                Some(crate::STROBE_MIN_BLEND_WITH_ORIGINAL as f64),
+                Some(crate::STROBE_MAX_BLEND_WITH_ORIGINAL as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "duration",
+                "频闪",
+                "闪光持续时间",
+                PropertyValue::Float(crate::STROBE_DEFAULT_DURATION),
+                Some(crate::STROBE_MIN_DURATION as f64),
+                Some(crate::STROBE_MAX_DURATION as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "interval",
+                "频闪",
+                "闪光间隔时间",
+                PropertyValue::Float(crate::STROBE_DEFAULT_INTERVAL),
+                Some(crate::STROBE_MIN_INTERVAL as f64),
+                Some(crate::STROBE_MAX_INTERVAL as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "random_probability",
+                "频闪",
+                "随机闪光概率",
+                PropertyValue::Float(crate::STROBE_DEFAULT_RANDOM_PROBABILITY),
+                Some(crate::STROBE_MIN_RANDOM_PROBABILITY as f64),
+                Some(crate::STROBE_MAX_RANDOM_PROBABILITY as f64),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "strobe",
+                "频闪",
+                "闪光",
+                crate::StrobeMode::ColorOnly.as_key(),
+                crate::StrobeMode::ALL
+                    .iter()
+                    .map(|mode| {
+                        ParameterEnumOption::new(
+                            mode.as_key(),
+                            mode.label(),
+                            format!("builtin.strobe.strobe.{}", mode.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "operator",
+                "频闪",
+                "闪光运算符",
+                crate::StrobeOperator::Copy.as_key(),
+                crate::StrobeOperator::ALL
+                    .iter()
+                    .map(|operator| {
+                        ParameterEnumOption::new(
+                            operator.as_key(),
+                            operator.label(),
+                            format!("builtin.strobe.operator.{}", operator.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "random_seed",
+                "频闪",
+                "随机植入",
+                PropertyValue::Float(crate::STROBE_DEFAULT_RANDOM_SEED),
+                Some(crate::STROBE_MIN_RANDOM_SEED as f64),
+                Some(crate::STROBE_MAX_RANDOM_SEED as f64),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -16145,6 +16273,12 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::LightSweep, "width" | "edge_thickness") => ParameterUnit::Pixels,
         (EffectType::LightSweep, "direction") => ParameterUnit::Degrees,
         (EffectType::LightSweep, "sweep_intensity" | "edge_intensity") => ParameterUnit::Percent,
+        (EffectType::Strobe, "blend_with_original" | "random_probability") => {
+            ParameterUnit::Percent
+        }
+        // The schedule and the seed are plain numbers; the labels carry the
+        // seconds, so no unit is attached here.
+        (EffectType::Strobe, "duration" | "interval" | "random_seed") => ParameterUnit::Unitless,
         (EffectType::Cartoon, "detail_radius" | "width") => ParameterUnit::Pixels,
         (
             EffectType::Cartoon,
@@ -16678,6 +16812,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The beam is evaluated from the same pixel, the authored geometry
             // and intensities, so no neighbour or history enters the result.
+            ..cpu_linear
+        },
+        EffectType::Strobe => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The flash is evaluated from the same pixel and the authored
+            // controls, so no neighbour or history enters the result.
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -23974,6 +24114,96 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Strobe => {
+            let color_id = builtin_parameter_id(effect_type, "color");
+            let blend_with_original_id = builtin_parameter_id(effect_type, "blend_with_original");
+            let duration_id = builtin_parameter_id(effect_type, "duration");
+            let interval_id = builtin_parameter_id(effect_type, "interval");
+            let random_probability_id = builtin_parameter_id(effect_type, "random_probability");
+            let strobe_id = builtin_parameter_id(effect_type, "strobe");
+            let operator_id = builtin_parameter_id(effect_type, "operator");
+            let random_seed_id = builtin_parameter_id(effect_type, "random_seed");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read_enum<T: Copy>(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    id: &ParameterId,
+                    name: &str,
+                    from_key: fn(&str) -> Option<T>,
+                ) -> Result<Option<T>, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                            Some(value) => Ok(Some(value)),
+                            None => Err(invalid(format!("频闪的{name}没有对应的菜单项 {key}"))),
+                        },
+                        Some(_) => Err(invalid(format!("频闪的{name}必须是菜单项"))),
+                        None => Ok(None),
+                    }
+                }
+                let defaults = crate::StrobeParameters::default();
+                let mut parameters = defaults;
+                match effect.evaluate_parameter(&color_id, context.time) {
+                    Some(PropertyValue::Color(color)) => {
+                        parameters.color = [color.r, color.g, color.b];
+                    }
+                    Some(_) => return Err(invalid("频闪的闪光颜色必须是颜色值".to_string())),
+                    None => {}
+                }
+                parameters.blend_with_original = effect.evaluate_f32_parameter(
+                    &blend_with_original_id,
+                    context.time,
+                    defaults.blend_with_original,
+                );
+                parameters.duration =
+                    effect.evaluate_f32_parameter(&duration_id, context.time, defaults.duration);
+                parameters.interval =
+                    effect.evaluate_f32_parameter(&interval_id, context.time, defaults.interval);
+                parameters.random_probability = effect.evaluate_f32_parameter(
+                    &random_probability_id,
+                    context.time,
+                    defaults.random_probability,
+                );
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &strobe_id,
+                    "闪光",
+                    crate::StrobeMode::from_key,
+                )? {
+                    parameters.strobe_mode = value;
+                }
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &operator_id,
+                    "闪光运算符",
+                    crate::StrobeOperator::from_key,
+                )? {
+                    parameters.operator = value;
+                }
+                parameters.random_seed = effect.evaluate_f32_parameter(
+                    &random_seed_id,
+                    context.time,
+                    defaults.random_seed,
+                );
+                let grade = crate::StrobeGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                // The schedule decides whether this frame flashes at all; between
+                // flashes the effect contributes nothing to the graph.
+                if let Some(grade) = grade.at_time(context.time.to_f64()) {
+                    graph.append_unary(EffectRenderOp::Strobe { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Highlight => {
             let mask_id = builtin_parameter_id(effect_type, "highlight_mask");
             let mask_layer_id = builtin_parameter_id(effect_type, "mask_layer");
@@ -25570,6 +25800,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ColorSpaceTransform => "色彩空间转换",
         EffectType::AcesTransform => "ACES 转换",
         EffectType::LightSweep => "扫光",
+        EffectType::Strobe => "频闪",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -26984,6 +27215,7 @@ mod tests {
             EffectType::ColorSpaceTransform,
             EffectType::AcesTransform,
             EffectType::LightSweep,
+            EffectType::Strobe,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -36280,7 +36512,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 140);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 141);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -36808,7 +37040,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 140);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 141);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -39767,7 +39999,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 140);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 141);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -40903,7 +41135,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 140);
+        assert_eq!(builtin_effect_types().len(), 141);
     }
 
     #[test]
@@ -43382,6 +43614,238 @@ mod tests {
             }
             other => panic!("unexpected lowered point op {other:?}"),
         }
+    }
+
+    fn strobe_op(graph: &EffectRenderGraph) -> Option<crate::StrobeGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Strobe { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Strobe { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_strobe(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Strobe).expect("the strobe should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Strobe.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the strobe parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn strobe_identity_builds_no_node() {
+        let effect = author_strobe(&[("blend_with_original", PropertyValue::Float(100.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the invisible flash should compile");
+        assert!(
+            strobe_op(&graph).is_none(),
+            "blending the flash away completely is the identity"
+        );
+    }
+
+    #[test]
+    fn strobe_defaults_build_one_point_op() {
+        let effect =
+            instantiate_effect_node(EffectType::Strobe).expect("the strobe should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = strobe_op(&graph).expect("the defaults flash at the start of the cycle");
+        assert_eq!(grade, crate::StrobeGrade::documented_defaults());
+        assert_eq!(graph.nodes.len(), 2, "the source plus one flash node");
+        let op = EffectRenderOp::Strobe { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the flash decides each pixel in place"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the flash is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            141
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::Strobe {
+            grade: crate::StrobeGrade::new(crate::StrobeParameters::default())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn strobe_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::Strobe;
+        let properties = default_properties_for(effect_type.clone());
+        let menus: [(&str, &str, &[&str]); 2] = [
+            ("strobe", "color_only", &["color_only", "masks_layer"]),
+            (
+                "operator",
+                "copy",
+                &[
+                    "copy",
+                    "add",
+                    "subtract",
+                    "multiply",
+                    "difference",
+                    "and",
+                    "or",
+                    "xor",
+                    "lighter",
+                    "darker",
+                    "minimum",
+                    "maximum",
+                    "screen",
+                ],
+            ),
+        ];
+        for (parameter, default, keys) in menus {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the menu is defined");
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Enum(default.to_owned()),
+                "{parameter}"
+            );
+            let options = &property.descriptor.schema.enum_options;
+            assert_eq!(options.len(), keys.len(), "{parameter}");
+            for (option, key) in options.iter().zip(keys) {
+                assert_eq!(option.key, *key, "{parameter}");
+                assert_eq!(
+                    option.message_id,
+                    format!("builtin.strobe.{parameter}.{key}")
+                );
+            }
+        }
+
+        use crate::{StrobeMode, StrobeOperator};
+        for (key, mode) in [
+            ("color_only", StrobeMode::ColorOnly),
+            ("masks_layer", StrobeMode::MasksLayer),
+        ] {
+            assert_eq!(StrobeMode::from_key(key), Some(mode));
+            assert_eq!(mode.as_key(), key);
+        }
+        for (index, operator) in StrobeOperator::ALL.into_iter().enumerate() {
+            assert_eq!(StrobeOperator::from_key(operator.as_key()), Some(operator));
+            assert_eq!(operator.as_u8(), index as u8 + 1);
+        }
+    }
+
+    #[test]
+    fn strobe_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::Strobe;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::PixelLocal);
+    }
+
+    #[test]
+    fn strobe_out_of_range_parameter_is_an_author_error() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Strobe).expect("the strobe should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Strobe.property_path("duration"),
+                value: PropertyValue::Float(40000.0),
+            })
+            .expect_err("a duration above thirty-two seconds should fail");
+        let message = error.to_string();
+        assert!(message.contains("strobe.duration"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect =
+            instantiate_effect_node(EffectType::Strobe).expect("the strobe should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(&mut document, "strobe.duration", serde_json::json!(40000.0));
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a duration above thirty-two seconds should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.strobe");
+                    assert!(reason.contains("duration"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn strobe_point_lowering_exposes_the_three_control_cells() {
+        let effect = author_strobe(&[
+            (
+                "color",
+                PropertyValue::Color(Color { r: 0.2, g: 0.6, b: 0.9, a: 1.0 }),
+            ),
+            ("blend_with_original", PropertyValue::Float(50.0)),
+            ("strobe", PropertyValue::Enum("masks_layer".to_owned())),
+            ("operator", PropertyValue::Enum("screen".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored flash should compile");
+        let grade = strobe_op(&graph).expect("the authored flash is not the identity");
+        let op = EffectRenderOp::Strobe { grade };
+        let node_id = graph.nodes[1].id;
+        let lowered =
+            crate::gpu_plan::lower_point_op(node_id, &op).expect("the flash is point-lowerable");
+        match lowered {
+            crate::gpu_plan::EffectGpuPointOp::Strobe { grade: lowered } => {
+                let cells = lowered.gpu_controls();
+                assert_eq!(
+                    cells,
+                    grade.gpu_controls(),
+                    "the lowered grade is carried whole"
+                );
+                assert_eq!(cells.0, [0.2, 0.6, 0.9, 0.5], "the flash colour and weight");
+                assert_eq!(cells.1[0], 2.0, "the masks-layer mode tag");
+                assert_eq!(cells.1[1], 13.0, "the screen operator tag");
+                assert_eq!(
+                    (cells.0.len(), cells.1.len(), cells.2.len()),
+                    (4, 4, 4),
+                    "the point pass reads three four-component cells"
+                );
+            }
+            other => panic!("unexpected lowered point op {other:?}"),
+        }
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the flash decides each pixel in place"
+        );
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the flash is a fused point operation, not a spatial pass"
+        );
     }
 
     fn cartoon_op(graph: &EffectRenderGraph) -> Option<crate::CartoonGrade> {
