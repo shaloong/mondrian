@@ -627,6 +627,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::RadialShadow { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "radial_shadow",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Basic3D { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "basic_3d",
@@ -1478,6 +1484,8 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Abstraction { .. } => 2,
         // The shade pre-blur and the ink edge pass each keep one plane.
         EffectRenderOp::Cartoon { .. } => 2,
+        // The kernel snapshots the straight-alpha source before rewriting it.
+        EffectRenderOp::RadialShadow { .. } => 1,
     }
 }
 
@@ -2036,6 +2044,15 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             grade,
             checkpoint,
         ),
+        EffectRenderOp::RadialShadow { grade } => {
+            crate::radial_shadow::apply_radial_shadow_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                grade,
+                checkpoint,
+            )
+        }
         EffectRenderOp::Deinterlace { grade } => {
             crate::deinterlace::apply_deinterlace_f32_controlled(
                 working,

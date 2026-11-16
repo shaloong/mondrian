@@ -287,6 +287,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored amounts, edge scale, and normalized centre.
         grade: crate::ChromaticAberrationRemovalGrade,
     },
+    /// Offset shadow cast from the layer along rays from a light source.
+    RadialShadow {
+        /// Authored light, distance, softness, and render controls.
+        grade: crate::RadialShadowGrade,
+    },
     /// Ray-marched highlight streak along an authored direction.
     Highlight {
         /// Authored threshold, streak geometry and merge controls.
@@ -485,6 +490,7 @@ impl EffectGpuSpatialPass {
             Self::Watercolor { .. } => "watercolor",
             Self::Abstraction { .. } => "abstraction",
             Self::Cartoon { .. } => "cartoon",
+            Self::RadialShadow { .. } => "radial_shadow",
             Self::Highlight { .. } => "highlight",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
@@ -595,6 +601,9 @@ impl EffectGpuSpatialPass {
             Self::Abstraction { grade } => grade.input_halo().0,
             // The shade pre-blur and the ink edge pass need one more pixel.
             Self::Cartoon { grade } => grade.input_halo().0,
+            // The softness radius is a fraction of the frame, so the ring taps
+            // can reach any distance and the plane is never tiled.
+            Self::RadialShadow { .. } => u32::MAX,
             // The authored length is a fraction of the frame width, so the ray
             // can reach any distance and the plane is never tiled.
             Self::Highlight { .. } => u32::MAX,
@@ -690,6 +699,7 @@ impl EffectGpuSpatialPass {
             // Same reach as the horizontal halo.
             Self::Cartoon { grade } => grade.input_halo().1,
             // Same unbounded reach as the horizontal halo.
+            Self::RadialShadow { .. } => u32::MAX,
             Self::Highlight { .. } => u32::MAX,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
@@ -1281,6 +1291,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::Abstraction { grade: *grade })
         }
         EffectRenderOp::Cartoon { grade } => Some(EffectGpuSpatialPass::Cartoon { grade: *grade }),
+        EffectRenderOp::RadialShadow { grade } => {
+            Some(EffectGpuSpatialPass::RadialShadow { grade: *grade })
+        }
         EffectRenderOp::Highlight { grade } => {
             Some(EffectGpuSpatialPass::Highlight { grade: *grade })
         }

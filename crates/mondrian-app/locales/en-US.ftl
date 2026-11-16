@@ -4106,3 +4106,18 @@ parameter-builtin-strobe-operator-darker = Darker
 parameter-builtin-strobe-operator-minimum = Minimum
 parameter-builtin-strobe-operator-maximum = Maximum
 parameter-builtin-strobe-operator-screen = Screen
+
+## Radial Shadow 径向阴影
+effect-radial-shadow = Radial Shadow
+parameter-group-radial-shadow = Radial Shadow
+parameter-mondrian-effect-builtin-radial-shadow-shadow-color-label = Shadow color
+parameter-mondrian-effect-builtin-radial-shadow-opacity-label = Opacity
+parameter-mondrian-effect-builtin-radial-shadow-light-label = Light
+parameter-mondrian-effect-builtin-radial-shadow-projection-distance-label = Projection distance
+parameter-mondrian-effect-builtin-radial-shadow-softness-label = Softness
+parameter-mondrian-effect-builtin-radial-shadow-render-label = Render
+parameter-mondrian-effect-builtin-radial-shadow-color-influence-label = Color influence
+parameter-mondrian-effect-builtin-radial-shadow-shadow-only-label = Shadow only
+parameter-mondrian-effect-builtin-radial-shadow-resize-layer-label = Resize layer
+parameter-builtin-radial-shadow-render-regular = Regular
+parameter-builtin-radial-shadow-render-glass-edge = Glass Edge

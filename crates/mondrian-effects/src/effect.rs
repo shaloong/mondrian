@@ -1358,6 +1358,12 @@ pub enum EffectRenderOp {
         /// Authored flash colour, schedule, mode and operator.
         grade: crate::StrobeGrade,
     },
+    /// Radial shadow: projects the frame's coverage away from a point light
+    /// onto a plane behind it, with optional softness and a glass-edge tint.
+    RadialShadow {
+        /// Authored light, projection distance, softness and render controls.
+        grade: crate::RadialShadowGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1819,6 +1825,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Strobe { grade } => {
                 formatter.debug_struct("Strobe").field("grade", grade).finish()
+            }
+            Self::RadialShadow { grade } => {
+                formatter.debug_struct("RadialShadow").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2979,6 +2988,13 @@ impl EffectRenderOp {
                 // pixels, so the grade hashes the whole configuration.
                 grade.hash_state(state);
             }
+            EffectRenderOp::RadialShadow { grade } => {
+                141u8.hash(state);
+                // The light, the projection distance, the softness and the
+                // render mode all read the authored values, so the grade
+                // hashes every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3267,6 +3283,7 @@ impl EffectRenderOp {
             EffectRenderOp::AcesTransform { .. } => 5,
             EffectRenderOp::LightSweep { .. } => 1,
             EffectRenderOp::Strobe { .. } => 1,
+            EffectRenderOp::RadialShadow { .. } => 4,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3801,7 +3818,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 141] {
+fn builtin_effect_types() -> [EffectType; 142] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3944,6 +3961,7 @@ fn builtin_effect_types() -> [EffectType; 141] {
         EffectType::AcesTransform,
         EffectType::LightSweep,
         EffectType::Strobe,
+        EffectType::RadialShadow,
     ]
 }
 
@@ -15125,6 +15143,127 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::RadialShadow => {
+            // The nine authored values mirror the kernel: the shadow colour
+            // and opacity, the point light, the projection distance, the
+            // softness, the render mode, the colour influence and the two
+            // toggles.
+            const GROUP: &str = "径向阴影";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_color",
+                GROUP,
+                "阴影颜色",
+                PropertyValue::Color(Color {
+                    r: crate::RADIAL_SHADOW_DEFAULT_COLOR[0],
+                    g: crate::RADIAL_SHADOW_DEFAULT_COLOR[1],
+                    b: crate::RADIAL_SHADOW_DEFAULT_COLOR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                GROUP,
+                "不透明度",
+                PropertyValue::Float(crate::RADIAL_SHADOW_DEFAULT_OPACITY),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "light",
+                GROUP,
+                "光源",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::RADIAL_SHADOW_DEFAULT_LIGHT[0],
+                    crate::RADIAL_SHADOW_DEFAULT_LIGHT[1],
+                )),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "projection_distance",
+                GROUP,
+                "投影距离",
+                PropertyValue::Float(crate::RADIAL_SHADOW_DEFAULT_PROJECTION_DISTANCE),
+                Some(0.0),
+                Some(crate::RADIAL_SHADOW_MAX_PROJECTION_DISTANCE as f64),
+                Some(0.1),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "softness",
+                GROUP,
+                "柔和度",
+                PropertyValue::Float(crate::RADIAL_SHADOW_DEFAULT_SOFTNESS),
+                Some(0.0),
+                Some(crate::RADIAL_SHADOW_MAX_SOFTNESS as f64),
+                Some(0.1),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "render",
+                GROUP,
+                "渲染",
+                crate::RadialShadowRender::Regular.as_key(),
+                crate::RadialShadowRender::ALL
+                    .iter()
+                    .map(|render| {
+                        ParameterEnumOption::new(
+                            render.as_key(),
+                            render.label(),
+                            format!("builtin.radial_shadow.render.{}", render.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "color_influence",
+                GROUP,
+                "颜色影响",
+                PropertyValue::Float(crate::RADIAL_SHADOW_DEFAULT_COLOR_INFLUENCE),
+                Some(0.0),
+                Some(crate::RADIAL_SHADOW_MAX_COLOR_INFLUENCE as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_only",
+                GROUP,
+                "仅阴影",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "resize_layer",
+                GROUP,
+                "调整图层大小",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -16290,6 +16429,17 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Cartoon, "shadow_steps" | "edge_black_level" | "edge_contrast" | "render") => {
             ParameterUnit::Unitless
         }
+        // The light point is normalized to the frame; the projection distance
+        // is the depth of the shadow plane and the softness is a percentage of
+        // the shorter frame side.
+        (EffectType::RadialShadow, "light") => ParameterUnit::Normalized,
+        (EffectType::RadialShadow, "projection_distance") => ParameterUnit::Pixels,
+        (EffectType::RadialShadow, "softness") => ParameterUnit::Percent,
+        // The opacity, the colour weight and the toggles are plain numbers that
+        // already carry their own scale.
+        (EffectType::RadialShadow, "opacity" | "color_influence" | "resize_layer") => {
+            ParameterUnit::Unitless
+        }
         _ => ParameterUnit::Unitless,
     }
 }
@@ -16818,6 +16968,15 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The flash is evaluated from the same pixel and the authored
             // controls, so no neighbour or history enters the result.
+            ..cpu_linear
+        },
+        EffectType::RadialShadow => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Each output samples the source at a point projected towards the
+            // light and, once softness is authored, a disc around it, so an
+            // input tile cannot be narrowed; the result is still a pure
+            // function of the current frame.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -24204,6 +24363,87 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::RadialShadow => {
+            let shadow_color_id = builtin_parameter_id(effect_type, "shadow_color");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let light_id = builtin_parameter_id(effect_type, "light");
+            let projection_distance_id = builtin_parameter_id(effect_type, "projection_distance");
+            let softness_id = builtin_parameter_id(effect_type, "softness");
+            let render_id = builtin_parameter_id(effect_type, "render");
+            let color_influence_id = builtin_parameter_id(effect_type, "color_influence");
+            let shadow_only_id = builtin_parameter_id(effect_type, "shadow_only");
+            let resize_layer_id = builtin_parameter_id(effect_type, "resize_layer");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let defaults = crate::RadialShadowParameters::default();
+                let mut parameters = defaults;
+                match effect.evaluate_parameter(&shadow_color_id, context.time) {
+                    Some(PropertyValue::Color(color)) => {
+                        parameters.shadow_color = [color.r, color.g, color.b];
+                    }
+                    Some(_) => return Err(invalid("径向阴影的阴影颜色必须是颜色值".to_string())),
+                    None => {}
+                }
+                parameters.opacity =
+                    effect.evaluate_f32_parameter(&opacity_id, context.time, defaults.opacity);
+                match effect.evaluate_parameter(&light_id, context.time) {
+                    Some(PropertyValue::Vec2(light)) => {
+                        parameters.light = [light.x, light.y];
+                    }
+                    Some(_) => return Err(invalid("径向阴影的光源必须是二维坐标".to_string())),
+                    None => {}
+                }
+                parameters.projection_distance = effect.evaluate_f32_parameter(
+                    &projection_distance_id,
+                    context.time,
+                    defaults.projection_distance,
+                );
+                parameters.softness =
+                    effect.evaluate_f32_parameter(&softness_id, context.time, defaults.softness);
+                match effect.evaluate_parameter(&render_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        parameters.render =
+                            crate::RadialShadowRender::from_key(&key).ok_or_else(|| {
+                                invalid(format!("径向阴影的渲染没有对应的菜单项 {key}"))
+                            })?;
+                    }
+                    Some(_) => return Err(invalid("径向阴影的渲染必须是菜单项".to_string())),
+                    None => {}
+                }
+                parameters.color_influence = effect.evaluate_f32_parameter(
+                    &color_influence_id,
+                    context.time,
+                    defaults.color_influence,
+                );
+                let read_toggle = |id: &ParameterId, name: &str| match effect
+                    .evaluate_parameter(id, context.time)
+                {
+                    Some(PropertyValue::Bool(value)) => Ok(value),
+                    None => Ok(false),
+                    Some(_) => Err(invalid(format!("径向阴影的{name}必须是布尔值"))),
+                };
+                parameters.shadow_only = read_toggle(&shadow_only_id, "仅阴影")?;
+                parameters.resize_layer = read_toggle(&resize_layer_id, "调整图层大小")?;
+                let grade = crate::RadialShadowGrade::new(parameters).map_err(|error| {
+                    if error.parameter() == "shadow_color" {
+                        invalid("径向阴影的阴影颜色必须是颜色值".to_string())
+                    } else {
+                        invalid(format!("径向阴影的参数 {} 必须是数值", error.parameter()))
+                    }
+                })?;
+                // The kernel resolves the light position and the softness radius
+                // from the frame size when it runs, so the builder never reads
+                // the frame and the stored grade stays frame-relative.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::RadialShadow { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Highlight => {
             let mask_id = builtin_parameter_id(effect_type, "highlight_mask");
             let mask_layer_id = builtin_parameter_id(effect_type, "mask_layer");
@@ -25801,6 +26041,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::AcesTransform => "ACES 转换",
         EffectType::LightSweep => "扫光",
         EffectType::Strobe => "频闪",
+        EffectType::RadialShadow => "径向阴影",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -27216,6 +27457,7 @@ mod tests {
             EffectType::AcesTransform,
             EffectType::LightSweep,
             EffectType::Strobe,
+            EffectType::RadialShadow,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -36512,7 +36754,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 141);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 142);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -37040,7 +37282,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 141);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 142);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -39999,7 +40241,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 141);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 142);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -41135,7 +41377,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 141);
+        assert_eq!(builtin_effect_types().len(), 142);
     }
 
     #[test]
@@ -43846,6 +44088,236 @@ mod tests {
             crate::spatial_pass_for(&op).is_none(),
             "the flash is a fused point operation, not a spatial pass"
         );
+    }
+
+    fn radial_shadow_op(graph: &EffectRenderGraph) -> Option<crate::RadialShadowGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::RadialShadow { grade }, ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::RadialShadow { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_radial_shadow(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::RadialShadow)
+            .expect("the radial shadow should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::RadialShadow.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the radial shadow parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn radial_shadow_identity_builds_no_node() {
+        let effect = author_radial_shadow(&[("opacity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the invisible shadow should compile");
+        assert!(
+            radial_shadow_op(&graph).is_none(),
+            "a fully transparent shadow is the identity"
+        );
+    }
+
+    #[test]
+    fn radial_shadow_defaults_build_one_spatial_op() {
+        let effect = instantiate_effect_node(EffectType::RadialShadow)
+            .expect("the radial shadow should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = radial_shadow_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::RadialShadowGrade::documented_defaults());
+        assert_eq!(grade.cost(), 4);
+        assert_eq!(graph.nodes.len(), 2, "the source plus one shadow node");
+        let op = EffectRenderOp::RadialShadow { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            1,
+            "the spatial pass reads the source through one scratch frame"
+        );
+        assert_eq!(op.estimated_cost(), 4);
+        let pass = crate::spatial_pass_for(&op).expect("the shadow is a spatial pass");
+        assert_eq!(pass, crate::EffectGpuSpatialPass::RadialShadow { grade });
+        assert_eq!(pass.name(), "radial_shadow");
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            142
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::RadialShadow {
+            grade: crate::RadialShadowGrade::new(crate::RadialShadowParameters::default())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn radial_shadow_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::RadialShadow;
+        let properties = default_properties_for(effect_type.clone());
+        for parameter in [
+            "shadow_color",
+            "opacity",
+            "light",
+            "projection_distance",
+            "softness",
+            "render",
+            "color_influence",
+            "shadow_only",
+            "resize_layer",
+        ] {
+            assert!(
+                properties.property(&effect_type.property_path(parameter)).is_some(),
+                "the {parameter} value is authored"
+            );
+        }
+        let property = properties
+            .property(&effect_type.property_path("render"))
+            .expect("the render menu is defined");
+        assert_eq!(
+            property.evaluate(tt(0)),
+            PropertyValue::Enum("regular".to_owned())
+        );
+        let options = &property.descriptor.schema.enum_options;
+        let keys = ["regular", "glass_edge"];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, key);
+            assert_eq!(
+                option.message_id,
+                format!("builtin.radial_shadow.render.{key}")
+            );
+        }
+        for (key, render) in [
+            ("regular", crate::RadialShadowRender::Regular),
+            ("glass_edge", crate::RadialShadowRender::GlassEdge),
+        ] {
+            assert_eq!(crate::RadialShadowRender::from_key(key), Some(render));
+            assert_eq!(render.as_key(), key);
+        }
+        assert_eq!(crate::RadialShadowRender::Regular.label(), "常规");
+        assert_eq!(crate::RadialShadowRender::GlassEdge.label(), "玻璃边缘");
+    }
+
+    #[test]
+    fn radial_shadow_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::RadialShadow;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            EffectRoiPropagation::FullFrame,
+            "the shadow samples the projected and softened neighbourhood"
+        );
+    }
+
+    #[test]
+    fn radial_shadow_out_of_range_parameter_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::RadialShadow)
+            .expect("the radial shadow should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::RadialShadow.property_path("softness"),
+                value: PropertyValue::Float(150.0),
+            })
+            .expect_err("a softness above one hundred should fail");
+        let message = error.to_string();
+        assert!(message.contains("radial_shadow.softness"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect = instantiate_effect_node(EffectType::RadialShadow)
+            .expect("the radial shadow should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "radial_shadow.softness",
+            serde_json::json!(150.0),
+        );
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a softness above one hundred should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.radial_shadow");
+                    assert!(reason.contains("softness"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn radial_shadow_lowering_carries_the_authored_grade() {
+        let effect = author_radial_shadow(&[
+            (
+                "shadow_color",
+                PropertyValue::Color(Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 }),
+            ),
+            ("opacity", PropertyValue::Float(0.8)),
+            ("light", PropertyValue::Vec2(glam::Vec2::new(0.2, 0.7))),
+            ("projection_distance", PropertyValue::Float(40.0)),
+            ("softness", PropertyValue::Float(25.0)),
+            ("render", PropertyValue::Enum("glass_edge".to_owned())),
+            ("color_influence", PropertyValue::Float(1.5)),
+            ("shadow_only", PropertyValue::Bool(true)),
+            ("resize_layer", PropertyValue::Bool(true)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored shadow should compile");
+        let grade = radial_shadow_op(&graph).expect("the authored shadow is not the identity");
+        let parameters = grade.parameters();
+        assert_eq!(parameters.shadow_color, [0.1, 0.2, 0.3]);
+        assert_eq!(parameters.opacity, 0.8);
+        assert_eq!(parameters.light, [0.2, 0.7]);
+        assert_eq!(parameters.projection_distance, 40.0);
+        assert_eq!(parameters.softness, 25.0);
+        assert_eq!(parameters.render, crate::RadialShadowRender::GlassEdge);
+        assert_eq!(parameters.color_influence, 1.5);
+        assert!(parameters.shadow_only);
+        assert!(parameters.resize_layer);
+
+        let op = EffectRenderOp::RadialShadow { grade };
+        assert_eq!(
+            crate::spatial_pass_for(&op),
+            Some(crate::EffectGpuSpatialPass::RadialShadow { grade }),
+            "the authored grade reaches the spatial pass unmodified"
+        );
+        match crate::gpu_plan::lower_point_op(graph.nodes[1].id, &op) {
+            Err(crate::gpu_plan::EffectGpuPlanBlocker::UnsupportedOperation {
+                op: name, ..
+            }) => {
+                assert_eq!(name, "radial_shadow", "the spatial pass is refused by name");
+            }
+            other => panic!("unexpected point lowering {other:?}"),
+        }
     }
 
     fn cartoon_op(graph: &EffectRenderGraph) -> Option<crate::CartoonGrade> {

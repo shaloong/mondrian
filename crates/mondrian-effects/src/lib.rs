@@ -94,6 +94,7 @@ pub mod fractal;
 pub mod fractal_noise;
 mod project_properties;
 pub mod radial_blur;
+pub mod radial_shadow;
 pub(crate) mod resample;
 pub mod ripple;
 pub mod roughen_edges;
@@ -702,6 +703,14 @@ pub use qualifier::{
 pub use radial_blur::{
     radial_blur_frame_f32, radial_blur_jitter, RadialBlurError, RadialBlurGrade, RadialBlurMode,
     RADIAL_BLUR_AUTHOR_MAX_AMOUNT, RADIAL_BLUR_MAX_TAPS,
+};
+pub use radial_shadow::{
+    radial_shadow_frame_f32, RadialShadowError, RadialShadowGpuControls, RadialShadowGrade,
+    RadialShadowParameters, RadialShadowRender, RADIAL_SHADOW_DEFAULT_COLOR,
+    RADIAL_SHADOW_DEFAULT_COLOR_INFLUENCE, RADIAL_SHADOW_DEFAULT_LIGHT,
+    RADIAL_SHADOW_DEFAULT_OPACITY, RADIAL_SHADOW_DEFAULT_PROJECTION_DISTANCE,
+    RADIAL_SHADOW_DEFAULT_SOFTNESS, RADIAL_SHADOW_MAX_COLOR_INFLUENCE,
+    RADIAL_SHADOW_MAX_PROJECTION_DISTANCE, RADIAL_SHADOW_MAX_SOFTNESS,
 };
 pub use ramp::{
     ramp_frame_f32, RampError, RampGrade, RampShape, RAMP_DITHER_SALT, RAMP_MAX_BLEND,

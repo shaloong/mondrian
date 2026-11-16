@@ -4034,3 +4034,18 @@ parameter-builtin-strobe-operator-darker = 变暗
 parameter-builtin-strobe-operator-minimum = 最小值
 parameter-builtin-strobe-operator-maximum = 最大值
 parameter-builtin-strobe-operator-screen = 滤色
+
+## Radial Shadow 径向阴影
+effect-radial-shadow = 径向阴影
+parameter-group-radial-shadow = 径向阴影
+parameter-mondrian-effect-builtin-radial-shadow-shadow-color-label = 阴影颜色
+parameter-mondrian-effect-builtin-radial-shadow-opacity-label = 不透明度
+parameter-mondrian-effect-builtin-radial-shadow-light-label = 光源
+parameter-mondrian-effect-builtin-radial-shadow-projection-distance-label = 投影距离
+parameter-mondrian-effect-builtin-radial-shadow-softness-label = 柔和度
+parameter-mondrian-effect-builtin-radial-shadow-render-label = 渲染
+parameter-mondrian-effect-builtin-radial-shadow-color-influence-label = 颜色影响
+parameter-mondrian-effect-builtin-radial-shadow-shadow-only-label = 仅阴影
+parameter-mondrian-effect-builtin-radial-shadow-resize-layer-label = 调整图层大小
+parameter-builtin-radial-shadow-render-regular = 常规
+parameter-builtin-radial-shadow-render-glass-edge = 玻璃边缘

@@ -260,6 +260,9 @@ pub enum EffectType {
     LightSweep,
     /// Flash the frame to a colour, or drop its alpha, on a periodic schedule.
     Strobe,
+    /// Radial shadow: project the layer's alpha away from a point light onto a
+    /// plane behind the layer, with optional softness and a glass-edge tint.
+    RadialShadow,
 }
 
 impl EffectType {
@@ -405,6 +408,7 @@ impl EffectType {
             Self::AcesTransform => "builtin.aces_transform".to_string(),
             Self::LightSweep => "builtin.light_sweep".to_string(),
             Self::Strobe => "builtin.strobe".to_string(),
+            Self::RadialShadow => "builtin.radial_shadow".to_string(),
             Self::ColorDifferenceKey => "builtin.color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -552,6 +556,7 @@ impl EffectType {
             "builtin.aces_transform" => Self::AcesTransform,
             "builtin.light_sweep" => Self::LightSweep,
             "builtin.strobe" => Self::Strobe,
+            "builtin.radial_shadow" => Self::RadialShadow,
             "builtin.color_difference_key" => Self::ColorDifferenceKey,
             other => Self::External(other.to_string()),
         }
@@ -699,6 +704,7 @@ impl EffectType {
             Self::AcesTransform => "ACES 转换",
             Self::LightSweep => "扫光",
             Self::Strobe => "频闪",
+            Self::RadialShadow => "径向阴影",
             Self::ColorDifferenceKey => "颜色差值键",
             Self::External(name) => name,
         }
@@ -841,6 +847,7 @@ impl EffectType {
             Self::LightLeak => vec!["胶片质感"],
             Self::Highlight => vec!["光效"],
             Self::LightSweep => vec!["光效"],
+            Self::RadialShadow => vec!["光效"],
             Self::Strobe => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
@@ -988,6 +995,7 @@ impl EffectType {
             Self::AcesTransform => "aces_transform".to_string(),
             Self::LightSweep => "light_sweep".to_string(),
             Self::Strobe => "strobe".to_string(),
+            Self::RadialShadow => "radial_shadow".to_string(),
             Self::ColorDifferenceKey => "color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -1514,6 +1522,9 @@ impl crate::AuthoringFootprint for EffectType {
             Self::AcesTransform => Ok(()),
             Self::LightSweep => Ok(()),
             Self::Strobe => Ok(()),
+            // The shadow is projected from the source coverage only, so it can
+            // never paint a region the source left empty.
+            Self::RadialShadow => Ok(()),
             Self::ColorDifferenceKey => Ok(()),
         }
     }

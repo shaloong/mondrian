@@ -1183,6 +1183,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::LightSweep { .. } => "light_sweep",
         EffectRenderOp::Strobe { .. } => "strobe",
         EffectRenderOp::Highlight { .. } => "highlight",
+        EffectRenderOp::RadialShadow { .. } => "radial_shadow",
         EffectRenderOp::SetMatte { .. } => "set_matte",
         EffectRenderOp::DisplacementMap { .. } => "displacement_map",
         EffectRenderOp::GrowBounds { .. } => "grow_bounds",

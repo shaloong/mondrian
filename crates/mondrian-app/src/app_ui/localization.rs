@@ -298,6 +298,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "广播安全" => Some("parameter-group-broadcast-safe"),
         "HDR 色调映射" => Some("parameter-group-hdr-tone-mapping"),
         "径向模糊" => Some("parameter-group-radial-blur"),
+        "径向阴影" => Some("parameter-group-radial-shadow"),
         "投影" => Some("parameter-group-drop-shadow"),
         "抠像" => Some("parameter-group-chroma-key"),
         "拼贴" => Some("parameter-group-motion-tile"),
