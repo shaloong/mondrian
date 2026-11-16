@@ -4121,3 +4121,21 @@ parameter-mondrian-effect-builtin-radial-shadow-shadow-only-label = Shadow only
 parameter-mondrian-effect-builtin-radial-shadow-resize-layer-label = Resize layer
 parameter-builtin-radial-shadow-render-regular = Regular
 parameter-builtin-radial-shadow-render-glass-edge = Glass Edge
+
+## Film Look 胶片外观
+effect-film-look = Film Look
+parameter-group-film-look = Film Look
+parameter-mondrian-effect-builtin-film-look-stock-label = Film stock
+parameter-mondrian-effect-builtin-film-look-strength-label = Strength
+parameter-mondrian-effect-builtin-film-look-grain-label = Grain
+parameter-mondrian-effect-builtin-film-look-halation-label = Halation
+parameter-mondrian-effect-builtin-film-look-glow-label = Glow
+parameter-mondrian-effect-builtin-film-look-tint-label = Tint
+parameter-mondrian-effect-builtin-film-look-contrast-label = Contrast
+parameter-mondrian-effect-builtin-film-look-fade-label = Fade
+parameter-builtin-film-look-stock-kodak-portra = Kodak Portra 400
+parameter-builtin-film-look-stock-kodak-ektar = Kodak Ektar 100
+parameter-builtin-film-look-stock-fuji-velvia = Fuji Velvia 50
+parameter-builtin-film-look-stock-cinestill-800t = CineStill 800T
+parameter-builtin-film-look-stock-ilford-hp5 = Ilford HP5 Plus
+parameter-builtin-film-look-stock-kodachrome-64 = Kodachrome 64

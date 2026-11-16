@@ -87,6 +87,7 @@ pub mod dust_scratches;
 pub mod echo;
 pub mod effect;
 pub mod emboss;
+pub mod film_look;
 pub mod find_edges;
 pub mod flip;
 pub mod four_color_gradient;
@@ -897,6 +898,15 @@ pub use echo::{
 };
 pub use emboss::{
     EmbossError, EmbossGrade, EMBOSS_HALO_PIXELS, EMBOSS_MAX_CONTRAST_PERCENT, EMBOSS_MAX_RELIEF,
+};
+pub use film_look::{
+    film_look_frame_f32, FilmLookError, FilmLookGpuControls, FilmLookGrade, FilmLookParameters,
+    FilmStock, FilmStockProfile, FILM_LOOK_BLOOM_RADIUS, FILM_LOOK_DEFAULT_CONTRAST,
+    FILM_LOOK_DEFAULT_FADE, FILM_LOOK_DEFAULT_GLOW, FILM_LOOK_DEFAULT_GRAIN,
+    FILM_LOOK_DEFAULT_HALATION, FILM_LOOK_DEFAULT_STOCK, FILM_LOOK_DEFAULT_STRENGTH,
+    FILM_LOOK_DEFAULT_TINT, FILM_LOOK_HALO, FILM_LOOK_MAX_AMOUNT, FILM_LOOK_MAX_CONTRAST,
+    FILM_LOOK_MAX_FADE, FILM_LOOK_MAX_STRENGTH, FILM_LOOK_MIN_AMOUNT, FILM_LOOK_MIN_CONTRAST,
+    FILM_LOOK_MIN_FADE, FILM_LOOK_MIN_STRENGTH,
 };
 pub use find_edges::{
     FindEdgesError, FindEdgesGrade, FIND_EDGES_HALO_PIXELS, FIND_EDGES_MAX_HALO_PIXELS,

@@ -1364,6 +1364,12 @@ pub enum EffectRenderOp {
         /// Authored light, projection distance, softness and render controls.
         grade: crate::RadialShadowGrade,
     },
+    /// One built-in film stock's cast, contrast, grain, halation, and fade over
+    /// three spatial passes.
+    FilmLook {
+        /// Authored film stock, strength, grain, halation, glow, tint, contrast and fade.
+        grade: crate::FilmLookGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1828,6 +1834,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::RadialShadow { grade } => {
                 formatter.debug_struct("RadialShadow").field("grade", grade).finish()
+            }
+            Self::FilmLook { grade } => {
+                formatter.debug_struct("FilmLook").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -2995,6 +3004,13 @@ impl EffectRenderOp {
                 // hashes every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::FilmLook { grade } => {
+                142u8.hash(state);
+                // The stock, the strengths, the tint, the contrast and the
+                // per-frame grain seed all read the authored values, so the
+                // grade hashes every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3284,6 +3300,7 @@ impl EffectRenderOp {
             EffectRenderOp::LightSweep { .. } => 1,
             EffectRenderOp::Strobe { .. } => 1,
             EffectRenderOp::RadialShadow { .. } => 4,
+            EffectRenderOp::FilmLook { .. } => 3,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3818,7 +3835,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 142] {
+fn builtin_effect_types() -> [EffectType; 143] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -3962,6 +3979,7 @@ fn builtin_effect_types() -> [EffectType; 142] {
         EffectType::LightSweep,
         EffectType::Strobe,
         EffectType::RadialShadow,
+        EffectType::FilmLook,
     ]
 }
 
@@ -15264,6 +15282,112 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::FilmLook => {
+            // The eight authored values mirror the kernel: the stock, the
+            // strength, the grain, the halation, the glow, the tint, the
+            // contrast and the fade.
+            const GROUP: &str = "胶片外观";
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "stock",
+                GROUP,
+                "胶片型号",
+                crate::FilmStock::KodakPortra.as_key(),
+                crate::FilmStock::ALL
+                    .iter()
+                    .map(|stock| {
+                        ParameterEnumOption::new(
+                            stock.as_key(),
+                            stock.label(),
+                            format!("builtin.film_look.stock.{}", stock.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "strength",
+                GROUP,
+                "强度",
+                PropertyValue::Float(crate::FILM_LOOK_DEFAULT_STRENGTH),
+                Some(crate::FILM_LOOK_MIN_STRENGTH as f64),
+                Some(crate::FILM_LOOK_MAX_STRENGTH as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "grain",
+                GROUP,
+                "颗粒",
+                PropertyValue::Float(crate::FILM_LOOK_DEFAULT_GRAIN),
+                Some(crate::FILM_LOOK_MIN_AMOUNT as f64),
+                Some(crate::FILM_LOOK_MAX_AMOUNT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "halation",
+                GROUP,
+                "Halation",
+                PropertyValue::Float(crate::FILM_LOOK_DEFAULT_HALATION),
+                Some(crate::FILM_LOOK_MIN_AMOUNT as f64),
+                Some(crate::FILM_LOOK_MAX_AMOUNT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "glow",
+                GROUP,
+                "光晕",
+                PropertyValue::Float(crate::FILM_LOOK_DEFAULT_GLOW),
+                Some(crate::FILM_LOOK_MIN_AMOUNT as f64),
+                Some(crate::FILM_LOOK_MAX_AMOUNT as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "tint",
+                GROUP,
+                "色偏",
+                PropertyValue::Color(Color {
+                    r: crate::FILM_LOOK_DEFAULT_TINT[0],
+                    g: crate::FILM_LOOK_DEFAULT_TINT[1],
+                    b: crate::FILM_LOOK_DEFAULT_TINT[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "contrast",
+                GROUP,
+                "对比",
+                PropertyValue::Float(crate::FILM_LOOK_DEFAULT_CONTRAST),
+                Some(crate::FILM_LOOK_MIN_CONTRAST as f64),
+                Some(crate::FILM_LOOK_MAX_CONTRAST as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fade",
+                GROUP,
+                "褪色",
+                PropertyValue::Float(crate::FILM_LOOK_DEFAULT_FADE),
+                Some(crate::FILM_LOOK_MIN_FADE as f64),
+                Some(crate::FILM_LOOK_MAX_FADE as f64),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -16440,6 +16564,12 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::RadialShadow, "opacity" | "color_influence" | "resize_layer") => {
             ParameterUnit::Unitless
         }
+        // The strength, the grain, the halation, the glow and the fade are
+        // percentages; the contrast excursion is a signed plain-number offset.
+        (EffectType::FilmLook, "strength" | "grain" | "halation" | "glow" | "fade") => {
+            ParameterUnit::Percent
+        }
+        (EffectType::FilmLook, "contrast") => ParameterUnit::Unitless,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -16977,6 +17107,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // input tile cannot be narrowed; the result is still a pure
             // function of the current frame.
             roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
+        EffectType::FilmLook => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The grain, the halation bloom and the glow read a fixed 13-pixel
+            // halo, so an input tile grows by that fixed envelope; the result
+            // is a pure function of the current frame and its seed.
+            roi_propagation: EffectRoiPropagation::PixelLocal,
             ..cpu_linear
         },
         EffectType::ChromaticAberrationRemoval => EffectExecutionContract {
@@ -24444,6 +24582,74 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::FilmLook => {
+            let stock_id = builtin_parameter_id(effect_type, "stock");
+            let strength_id = builtin_parameter_id(effect_type, "strength");
+            let grain_id = builtin_parameter_id(effect_type, "grain");
+            let halation_id = builtin_parameter_id(effect_type, "halation");
+            let glow_id = builtin_parameter_id(effect_type, "glow");
+            let tint_id = builtin_parameter_id(effect_type, "tint");
+            let contrast_id = builtin_parameter_id(effect_type, "contrast");
+            let fade_id = builtin_parameter_id(effect_type, "fade");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let defaults = crate::FilmLookParameters::default();
+                let mut parameters = defaults;
+                match effect.evaluate_parameter(&stock_id, context.time) {
+                    Some(PropertyValue::Enum(key)) => {
+                        parameters.stock = crate::FilmStock::from_key(&key).ok_or_else(|| {
+                            invalid(format!("胶片外观的胶片型号没有对应的菜单项 {key}"))
+                        })?;
+                    }
+                    Some(_) => return Err(invalid("胶片外观的胶片型号必须是菜单项".to_string())),
+                    None => {}
+                }
+                parameters.strength =
+                    effect.evaluate_f32_parameter(&strength_id, context.time, defaults.strength);
+                parameters.grain =
+                    effect.evaluate_f32_parameter(&grain_id, context.time, defaults.grain);
+                parameters.halation =
+                    effect.evaluate_f32_parameter(&halation_id, context.time, defaults.halation);
+                parameters.glow =
+                    effect.evaluate_f32_parameter(&glow_id, context.time, defaults.glow);
+                match effect.evaluate_parameter(&tint_id, context.time) {
+                    Some(PropertyValue::Color(color)) => {
+                        parameters.tint = [color.r, color.g, color.b];
+                    }
+                    Some(_) => return Err(invalid("胶片外观的色偏必须是颜色值".to_string())),
+                    None => {}
+                }
+                parameters.contrast =
+                    effect.evaluate_f32_parameter(&contrast_id, context.time, defaults.contrast);
+                parameters.fade =
+                    effect.evaluate_f32_parameter(&fade_id, context.time, defaults.fade);
+                let grade = crate::FilmLookGrade::new(parameters).map_err(|error| {
+                    if error.parameter() == "tint" {
+                        invalid("胶片外观的色偏必须是颜色值".to_string())
+                    } else {
+                        invalid(format!("胶片外观的参数 {} 必须是数值", error.parameter()))
+                    }
+                })?;
+                // A zero strength leaves the layer untouched, so the effect
+                // contributes nothing to the graph.
+                if grade.is_identity() {
+                    return Ok(());
+                }
+                // Grain is the only time-varying component, seeded from the
+                // frame coordinate of the owning sequence when one is known.
+                let frame_coordinate = context
+                    .frame_context
+                    .map(|frames| frames.frame_coordinate(context.time))
+                    .unwrap_or_else(|| context.time.to_f64() * 24.0);
+                let grade = grade.at_frame(frame_coordinate);
+                graph.append_unary(EffectRenderOp::FilmLook { grade });
+                Ok(())
+            }))
+        }
         EffectType::Highlight => {
             let mask_id = builtin_parameter_id(effect_type, "highlight_mask");
             let mask_layer_id = builtin_parameter_id(effect_type, "mask_layer");
@@ -26042,6 +26248,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::LightSweep => "扫光",
         EffectType::Strobe => "频闪",
         EffectType::RadialShadow => "径向阴影",
+        EffectType::FilmLook => "胶片外观",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -27458,6 +27665,7 @@ mod tests {
             EffectType::LightSweep,
             EffectType::Strobe,
             EffectType::RadialShadow,
+            EffectType::FilmLook,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -36754,7 +36962,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 142);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 143);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -37282,7 +37490,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 142);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 143);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -40241,7 +40449,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 142);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 143);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -41377,7 +41585,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 142);
+        assert_eq!(builtin_effect_types().len(), 143);
     }
 
     #[test]
@@ -44318,6 +44526,253 @@ mod tests {
             }
             other => panic!("unexpected point lowering {other:?}"),
         }
+    }
+
+    fn film_look_op(graph: &EffectRenderGraph) -> Option<crate::FilmLookGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::FilmLook { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::FilmLook { grade }, ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_film_look(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::FilmLook)
+            .expect("the film look should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::FilmLook.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the film look parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn film_look_identity_builds_no_node() {
+        let effect = author_film_look(&[("strength", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the zero-strength film look should compile");
+        assert!(
+            film_look_op(&graph).is_none(),
+            "a zero strength leaves every pixel untouched"
+        );
+    }
+
+    #[test]
+    fn film_look_defaults_build_one_spatial_op() {
+        let effect = instantiate_effect_node(EffectType::FilmLook)
+            .expect("the film look should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = film_look_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::FilmLookGrade::documented_defaults());
+        assert_eq!(grade.cost(), 3);
+        assert_eq!(graph.nodes.len(), 2, "the source plus one film look node");
+        let op = EffectRenderOp::FilmLook { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            2,
+            "the film look reads the source through two scratch frames"
+        );
+        assert_eq!(op.estimated_cost(), 3);
+        let pass = crate::spatial_pass_for(&op).expect("the film look is a spatial pass");
+        assert_eq!(pass, crate::EffectGpuSpatialPass::FilmLook { grade });
+        assert_eq!(pass.name(), "film_look");
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            143
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::FilmLook {
+            grade: crate::FilmLookGrade::new(crate::FilmLookParameters::default())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn film_look_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::FilmLook;
+        let properties = default_properties_for(effect_type.clone());
+        for parameter in [
+            "stock", "strength", "grain", "halation", "glow", "tint", "contrast", "fade",
+        ] {
+            assert!(
+                properties.property(&effect_type.property_path(parameter)).is_some(),
+                "the {parameter} value is authored"
+            );
+        }
+        let property = properties
+            .property(&effect_type.property_path("stock"))
+            .expect("the stock menu is defined");
+        assert_eq!(
+            property.evaluate(tt(0)),
+            PropertyValue::Enum("kodak_portra".to_owned())
+        );
+        let options = &property.descriptor.schema.enum_options;
+        let keys = [
+            "kodak_portra",
+            "kodak_ektar",
+            "fuji_velvia",
+            "cinestill_800t",
+            "ilford_hp5",
+            "kodachrome_64",
+        ];
+        assert_eq!(options.len(), keys.len());
+        for (option, key) in options.iter().zip(keys) {
+            assert_eq!(option.key, key);
+            assert_eq!(option.message_id, format!("builtin.film_look.stock.{key}"));
+        }
+        for (key, stock) in [
+            ("kodak_portra", crate::FilmStock::KodakPortra),
+            ("kodak_ektar", crate::FilmStock::KodakEktar),
+            ("fuji_velvia", crate::FilmStock::FujiVelvia),
+            ("cinestill_800t", crate::FilmStock::Cinestill800T),
+            ("ilford_hp5", crate::FilmStock::IlfordHp5),
+            ("kodachrome_64", crate::FilmStock::Kodachrome64),
+        ] {
+            assert_eq!(crate::FilmStock::from_key(key), Some(stock));
+            assert_eq!(stock.as_key(), key);
+        }
+        assert_eq!(crate::FilmStock::KodakPortra.label(), "柯达 Portra 400");
+        assert_eq!(crate::FilmStock::Kodachrome64.label(), "柯达 Kodachrome 64");
+    }
+
+    #[test]
+    fn film_look_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::FilmLook;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            EffectRoiPropagation::PixelLocal,
+            "the film look only reads its own pixel plus a fixed halo"
+        );
+    }
+
+    #[test]
+    fn film_look_out_of_range_parameter_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::FilmLook)
+            .expect("the film look should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::FilmLook.property_path("strength"),
+                value: PropertyValue::Float(150.0),
+            })
+            .expect_err("a strength above one hundred should fail");
+        let message = error.to_string();
+        assert!(message.contains("film_look.strength"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect = instantiate_effect_node(EffectType::FilmLook)
+            .expect("the film look should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "film_look.strength",
+            serde_json::json!(150.0),
+        );
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a strength above one hundred should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.film_look");
+                    assert!(reason.contains("strength"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn film_look_lowering_carries_the_authored_grade() {
+        let effect = author_film_look(&[
+            ("stock", PropertyValue::Enum("ilford_hp5".to_owned())),
+            ("strength", PropertyValue::Float(80.0)),
+            ("grain", PropertyValue::Float(50.0)),
+            ("halation", PropertyValue::Float(30.0)),
+            ("glow", PropertyValue::Float(20.0)),
+            (
+                "tint",
+                PropertyValue::Color(Color { r: 0.6, g: 0.4, b: 0.35, a: 1.0 }),
+            ),
+            ("contrast", PropertyValue::Float(25.0)),
+            ("fade", PropertyValue::Float(15.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored film look should compile");
+        let grade = film_look_op(&graph).expect("the authored film look is not the identity");
+        let parameters = grade.parameters();
+        assert_eq!(parameters.stock, crate::FilmStock::IlfordHp5);
+        assert_eq!(parameters.strength, 80.0);
+        assert_eq!(parameters.grain, 50.0);
+        assert_eq!(parameters.halation, 30.0);
+        assert_eq!(parameters.glow, 20.0);
+        assert_eq!(parameters.tint, [0.6, 0.4, 0.35]);
+        assert_eq!(parameters.contrast, 25.0);
+        assert_eq!(parameters.fade, 15.0);
+
+        let op = EffectRenderOp::FilmLook { grade };
+        assert_eq!(
+            crate::spatial_pass_for(&op),
+            Some(crate::EffectGpuSpatialPass::FilmLook { grade }),
+            "the authored grade reaches the spatial pass unmodified"
+        );
+        match crate::gpu_plan::lower_point_op(graph.nodes[1].id, &op) {
+            Err(crate::gpu_plan::EffectGpuPlanBlocker::UnsupportedOperation {
+                op: name, ..
+            }) => {
+                assert_eq!(name, "film_look", "the spatial pass is refused by name");
+            }
+            other => panic!("unexpected point lowering {other:?}"),
+        }
+
+        // Grain is the only time-varying component, so the per-frame seed must
+        // follow the frame coordinate while every authored value stays put.
+        let effect = author_film_look(&[("grain", PropertyValue::Float(50.0))]);
+        let first =
+            build_effect_render_graph(std::slice::from_ref(&effect), tt(0), TEST_WORKING_SPACE)
+                .expect("the first frame should compile");
+        let second = build_effect_render_graph(&[effect], tt(25), TEST_WORKING_SPACE)
+            .expect("the second frame should compile");
+        let first_grade = film_look_op(&first).expect("the grainy film look is not the identity");
+        let second_grade = film_look_op(&second).expect("the grainy film look is not the identity");
+        assert_eq!(first_grade.parameters(), second_grade.parameters());
+        assert_ne!(
+            first_grade.grain_seed(),
+            second_grade.grain_seed(),
+            "the grain pattern changes with the frame coordinate"
+        );
+        assert_eq!(
+            second_grade.grain_seed(),
+            crate::FilmLookGrade::seed_for_frame(24.0),
+            "one second at twenty-five frames is frame twenty-four"
+        );
     }
 
     fn cartoon_op(graph: &EffectRenderGraph) -> Option<crate::CartoonGrade> {

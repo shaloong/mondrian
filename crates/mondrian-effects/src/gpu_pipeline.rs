@@ -282,6 +282,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored shade detail, edge ink and render mode controls.
         grade: crate::CartoonGrade,
     },
+    /// One film stock's cast, contrast, grain, halation, and fade.
+    FilmLook {
+        /// Authored stock, component amounts, tint, and frozen grain seed.
+        grade: crate::FilmLookGrade,
+    },
     /// Radial correction around the green reference channel.
     ChromaticAberrationRemoval {
         /// Authored amounts, edge scale, and normalized centre.
@@ -491,6 +496,7 @@ impl EffectGpuSpatialPass {
             Self::Abstraction { .. } => "abstraction",
             Self::Cartoon { .. } => "cartoon",
             Self::RadialShadow { .. } => "radial_shadow",
+            Self::FilmLook { .. } => "film_look",
             Self::Highlight { .. } => "highlight",
             Self::BilateralBlur { .. } => "bilateral_blur",
             Self::ChromaticAberrationRemoval { .. } => "chromatic_aberration_removal",
@@ -604,6 +610,7 @@ impl EffectGpuSpatialPass {
             // The softness radius is a fraction of the frame, so the ring taps
             // can reach any distance and the plane is never tiled.
             Self::RadialShadow { .. } => u32::MAX,
+            Self::FilmLook { .. } => crate::FILM_LOOK_HALO,
             // The authored length is a fraction of the frame width, so the ray
             // can reach any distance and the plane is never tiled.
             Self::Highlight { .. } => u32::MAX,
@@ -700,6 +707,7 @@ impl EffectGpuSpatialPass {
             Self::Cartoon { grade } => grade.input_halo().1,
             // Same unbounded reach as the horizontal halo.
             Self::RadialShadow { .. } => u32::MAX,
+            Self::FilmLook { .. } => crate::FILM_LOOK_HALO,
             Self::Highlight { .. } => u32::MAX,
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
@@ -1291,6 +1299,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             Some(EffectGpuSpatialPass::Abstraction { grade: *grade })
         }
         EffectRenderOp::Cartoon { grade } => Some(EffectGpuSpatialPass::Cartoon { grade: *grade }),
+        EffectRenderOp::FilmLook { grade } => {
+            Some(EffectGpuSpatialPass::FilmLook { grade: *grade })
+        }
         EffectRenderOp::RadialShadow { grade } => {
             Some(EffectGpuSpatialPass::RadialShadow { grade: *grade })
         }

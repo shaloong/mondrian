@@ -3256,6 +3256,14 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        EffectRenderOp::FilmLook { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The grain, the halation bloom and the glow reach a fixed
+            // thirteen-pixel halo, so the input tile grows by that fixed
+            // envelope rather than the whole frame.
+            roi_from_effect_input: EffectRoiPropagation::PixelLocal,
+            ..cpu_float
+        },
         EffectRenderOp::BilateralBlur { .. }
         | EffectRenderOp::SmartBlur { .. }
         | EffectRenderOp::ChromaticAberrationRemoval { .. }

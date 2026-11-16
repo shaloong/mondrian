@@ -633,6 +633,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::FilmLook { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "film_look",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Basic3D { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "basic_3d",
@@ -1486,6 +1492,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Cartoon { .. } => 2,
         // The kernel snapshots the straight-alpha source before rewriting it.
         EffectRenderOp::RadialShadow { .. } => 1,
+        EffectRenderOp::FilmLook { .. } => 2,
     }
 }
 
@@ -2053,6 +2060,13 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 checkpoint,
             )
         }
+        EffectRenderOp::FilmLook { grade } => crate::film_look::apply_film_look_f32_controlled(
+            working,
+            region.width as usize,
+            region.height as usize,
+            grade,
+            checkpoint,
+        ),
         EffectRenderOp::Deinterlace { grade } => {
             crate::deinterlace::apply_deinterlace_f32_controlled(
                 working,

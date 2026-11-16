@@ -4049,3 +4049,21 @@ parameter-mondrian-effect-builtin-radial-shadow-shadow-only-label = 仅阴影
 parameter-mondrian-effect-builtin-radial-shadow-resize-layer-label = 调整图层大小
 parameter-builtin-radial-shadow-render-regular = 常规
 parameter-builtin-radial-shadow-render-glass-edge = 玻璃边缘
+
+## Film Look 胶片外观
+effect-film-look = 胶片外观
+parameter-group-film-look = 胶片外观
+parameter-mondrian-effect-builtin-film-look-stock-label = 胶片型号
+parameter-mondrian-effect-builtin-film-look-strength-label = 强度
+parameter-mondrian-effect-builtin-film-look-grain-label = 颗粒
+parameter-mondrian-effect-builtin-film-look-halation-label = Halation
+parameter-mondrian-effect-builtin-film-look-glow-label = 光晕
+parameter-mondrian-effect-builtin-film-look-tint-label = 色偏
+parameter-mondrian-effect-builtin-film-look-contrast-label = 对比
+parameter-mondrian-effect-builtin-film-look-fade-label = 褪色
+parameter-builtin-film-look-stock-kodak-portra = 柯达 Portra 400
+parameter-builtin-film-look-stock-kodak-ektar = 柯达 Ektar 100
+parameter-builtin-film-look-stock-fuji-velvia = 富士 Velvia 50
+parameter-builtin-film-look-stock-cinestill-800t = CineStill 800T
+parameter-builtin-film-look-stock-ilford-hp5 = 伊尔福 HP5 Plus
+parameter-builtin-film-look-stock-kodachrome-64 = 柯达 Kodachrome 64

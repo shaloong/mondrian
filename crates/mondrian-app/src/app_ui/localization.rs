@@ -425,6 +425,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "ACES 转换" => Some("parameter-group-aces-transform"),
         "扫光" => Some("parameter-group-light-sweep"),
         "频闪" => Some("parameter-group-strobe"),
+        "胶片外观" => Some("parameter-group-film-look"),
         _ => None,
     }
 }

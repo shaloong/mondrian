@@ -263,6 +263,9 @@ pub enum EffectType {
     /// Radial shadow: project the layer's alpha away from a point light onto a
     /// plane behind the layer, with optional softness and a glass-edge tint.
     RadialShadow,
+    /// Film look: one built-in film stock's cast, contrast, grain, halation,
+    /// and fade over three spatial passes.
+    FilmLook,
 }
 
 impl EffectType {
@@ -409,6 +412,7 @@ impl EffectType {
             Self::LightSweep => "builtin.light_sweep".to_string(),
             Self::Strobe => "builtin.strobe".to_string(),
             Self::RadialShadow => "builtin.radial_shadow".to_string(),
+            Self::FilmLook => "builtin.film_look".to_string(),
             Self::ColorDifferenceKey => "builtin.color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -557,6 +561,7 @@ impl EffectType {
             "builtin.light_sweep" => Self::LightSweep,
             "builtin.strobe" => Self::Strobe,
             "builtin.radial_shadow" => Self::RadialShadow,
+            "builtin.film_look" => Self::FilmLook,
             "builtin.color_difference_key" => Self::ColorDifferenceKey,
             other => Self::External(other.to_string()),
         }
@@ -705,6 +710,7 @@ impl EffectType {
             Self::LightSweep => "扫光",
             Self::Strobe => "频闪",
             Self::RadialShadow => "径向阴影",
+            Self::FilmLook => "胶片外观",
             Self::ColorDifferenceKey => "颜色差值键",
             Self::External(name) => name,
         }
@@ -848,6 +854,7 @@ impl EffectType {
             Self::Highlight => vec!["光效"],
             Self::LightSweep => vec!["光效"],
             Self::RadialShadow => vec!["光效"],
+            Self::FilmLook => vec!["风格化"],
             Self::Strobe => vec!["风格化"],
             Self::External(_) => vec!["外部效果"],
         }
@@ -996,6 +1003,7 @@ impl EffectType {
             Self::LightSweep => "light_sweep".to_string(),
             Self::Strobe => "strobe".to_string(),
             Self::RadialShadow => "radial_shadow".to_string(),
+            Self::FilmLook => "film_look".to_string(),
             Self::ColorDifferenceKey => "color_difference_key".to_string(),
             Self::External(key) => key.clone(),
         }
@@ -1525,6 +1533,9 @@ impl crate::AuthoringFootprint for EffectType {
             // The shadow is projected from the source coverage only, so it can
             // never paint a region the source left empty.
             Self::RadialShadow => Ok(()),
+            // Film look reworks the source layer's own pixels, so it can never
+            // paint a region the source left empty.
+            Self::FilmLook => Ok(()),
             Self::ColorDifferenceKey => Ok(()),
         }
     }
