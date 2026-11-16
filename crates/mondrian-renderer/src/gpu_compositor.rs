@@ -3223,6 +3223,76 @@ fn aces_transform_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> {
     return vec4<f32>(encoded, pixel.a);
 }
 
+fn light_sweep_profile(distance: f32, half_width: f32, edge: f32, shape: u32) -> f32 {
+    // Each shape mirrors the CPU kernel, including its guard for a zero edge
+    // thickness. smoothstep is only reached with two distinct bounds, so the
+    // WGSL built-in cannot divide by zero on the degenerate authored values.
+    if (shape == 0u) {
+        if (distance <= half_width) {
+            return 1.0;
+        }
+        if (edge > 0.0) {
+            return 1.0 - smoothstep(half_width, half_width + edge, distance);
+        }
+        return 0.0;
+    }
+    if (shape == 1u) {
+        let ramp = max(edge + edge, 1e-6);
+        return clamp((half_width + edge - distance) / ramp, 0.0, 1.0);
+    }
+    if (edge > 0.0) {
+        return 1.0 - smoothstep(max(half_width - edge, 0.0), half_width + edge, distance);
+    }
+    if (distance <= half_width) {
+        return 1.0;
+    }
+    return 0.0;
+}
+
+fn light_sweep_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
+    // Transparent pixels are never invented into coverage, matching the CPU
+    // kernel's positive coverage test.
+    if (pixel.a <= 0.0) {
+        return pixel;
+    }
+    // `position` is the fragment centre offset by -0.5, so adding 0.5 back
+    // yields the same pixel coordinates the CPU kernel uses (`column + 0.5`)
+    // without a second scale: `scanlines_apply` divides this same value by
+    // `uniforms.geometry.z` to normalise it.
+    let point = position + vec2<f32>(0.5);
+    let frame_size = uniforms.geometry.zw;
+    // params carries the resolved rotation as [cos theta, sin theta, width,
+    // edge]; the CPU normal is (sin theta, -cos theta).
+    let band_normal = vec2<f32>(effect.params.y, -effect.params.x);
+    let band_centre = effect.color.xy * frame_size;
+    let band_distance = abs(dot(point - band_centre, band_normal));
+    let half_width = effect.params.z * 0.5;
+    let edge = effect.params.w;
+    let shape_tag = u32(effect.extra0.w + 0.5);
+    let band_profile = light_sweep_profile(band_distance, half_width, edge, shape_tag);
+    var intensity = effect.color.z * band_profile;
+    if (effect.color.w > 0.0) {
+        let sigma = max(edge * 0.5, 0.5);
+        let rim_offset = (band_distance - half_width) / sigma;
+        intensity = intensity + effect.color.w * exp(-(rim_offset * rim_offset));
+    }
+    if (intensity <= 0.0) {
+        return pixel;
+    }
+    let reception_tag = u32(effect.extra1.x + 0.5);
+    var result = pixel.rgb;
+    if (reception_tag == 1u) {
+        result = result + effect.extra0.xyz * intensity;
+    } else if (reception_tag == 2u) {
+        let coverage = clamp(intensity, 0.0, 1.0);
+        result = pixel.rgb * (1.0 - coverage) + effect.extra0.xyz * coverage;
+    } else {
+        let band_light = effect.extra0.xyz * intensity;
+        result = vec3<f32>(1.0) - (vec3<f32>(1.0) - result) * (vec3<f32>(1.0) - band_light);
+    }
+    return vec4<f32>(result, pixel.a);
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -4302,6 +4372,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = color_space_transform_apply(pixel, effect);
         } else if (effect.header.x == 55u) {
             pixel = aces_transform_apply(pixel, effect);
+        } else if (effect.header.x == 56u) {
+            pixel = light_sweep_apply(pixel, position, effect);
         }
     }
     return pixel;
@@ -8892,6 +8964,18 @@ fn effect_uniforms_for_ops(
                     extra1,
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::LightSweep { grade } => {
+                let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [56, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2,
+                    extra3,
                 }
             }
             EffectGpuPointOp::Scanlines { grade } => {
@@ -14289,6 +14373,117 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU ACES transform accuracy budget exceeded for {label}: {report:?}"
+            );
+        }
+    }
+
+    fn light_sweep_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            for column in 0..width {
+                let u = column as f32 / (width - 1) as f32;
+                let v = row as f32 / (height - 1) as f32;
+                // Alpha never reaches zero, so the straight to premultiplied
+                // round trip cannot hide a dropped coverage value, while the
+                // colour ramp keeps screen, add and normal distinguishable.
+                let alpha = 0.25 + 0.7 * column as f32 / (width - 1) as f32;
+                data.push([0.08 + 0.72 * u, 0.12 + 0.5 * v, 0.9 - 0.6 * u, alpha]);
+            }
+        }
+        data
+    }
+
+    #[tokio::test]
+    async fn gpu_light_sweep_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp, LightSweepGrade, LightSweepParameters,
+            LightSweepReception, LightSweepShape,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU light sweep parity test: no GPU adapter available");
+            return;
+        };
+        let defaults = LightSweepParameters::default();
+        let cases = [
+            ("documented defaults", 12_u32, 9_u32, defaults),
+            (
+                "vertical band at 90 degrees",
+                12,
+                9,
+                LightSweepParameters {
+                    direction: 90.0,
+                    width: 16.0,
+                    edge_thickness: 6.0,
+                    ..defaults
+                },
+            ),
+            (
+                "hard band with normal reception",
+                32,
+                12,
+                LightSweepParameters {
+                    shape: LightSweepShape::Hard,
+                    reception: LightSweepReception::Normal,
+                    width: 30.0,
+                    ..defaults
+                },
+            ),
+        ];
+        for (label, width, height, parameters) in cases {
+            let grade = LightSweepGrade::new(parameters).expect("valid light sweep grade");
+            let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width,
+                height,
+                color_space: WorkingColorSpace::LinearRec709,
+                data: light_sweep_test_pixels(width, height),
+            });
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::LightSweep { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let mut expected = light_sweep_test_pixels(width, height);
+            assert!(mondrian_effects::light_sweep::light_sweep_frame_f32(
+                &mut expected,
+                width as usize,
+                height as usize,
+                &grade,
+            ));
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                width,
+                height,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU light sweep accuracy budget exceeded for {label}: {report:?}"
             );
         }
     }
