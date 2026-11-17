@@ -4171,3 +4171,12 @@ parameter-mondrian-effect-compound-arithmetic-overflow-wrap = 回绕
 parameter-mondrian-effect-compound-arithmetic-overflow-scale = 缩放
 parameter-mondrian-effect-compound-arithmetic-stretch-stretch = 伸缩适配
 parameter-mondrian-effect-compound-arithmetic-stretch-original = 保持原始尺寸
+## Compound Blur 复合模糊
+effect-compound-blur = 复合模糊
+parameter-group-compound-blur = 复合模糊
+parameter-mondrian-effect-builtin-compound-blur-blur-layer-label = 模糊图层
+parameter-mondrian-effect-builtin-compound-blur-max-blur-label = 最大模糊
+parameter-mondrian-effect-builtin-compound-blur-size-mode-label = 如果图层大小不同
+parameter-mondrian-effect-builtin-compound-blur-invert-blur-label = 反转模糊
+parameter-mondrian-effect-compound-blur-size-mode-stretch = 拉伸适配
+parameter-mondrian-effect-compound-blur-size-mode-center-crop = 中心裁剪

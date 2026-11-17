@@ -1402,6 +1402,12 @@ pub enum EffectRenderOp {
         /// Authored layer slot, operator, channels, overflow, stretch and mix.
         grade: crate::CompoundArithmeticGrade,
     },
+    /// Compound blur: blurs the frame with a second layer delivered on another
+    /// layer as the per-pixel radius map.
+    CompoundBlur {
+        /// Authored layer slot, maximum radius, size mode and invert flag.
+        grade: crate::CompoundBlurGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1882,6 +1888,9 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Blend { grade } => formatter.debug_struct("Blend").field("grade", grade).finish(),
             Self::CompoundArithmetic { grade } => {
                 formatter.debug_struct("CompoundArithmetic").field("grade", grade).finish()
+            }
+            Self::CompoundBlur { grade } => {
+                formatter.debug_struct("CompoundBlur").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -3093,6 +3102,13 @@ impl EffectRenderOp {
                 // the grade hashes every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::CompoundBlur { grade } => {
+                149u8.hash(state);
+                // The layer slot, the largest radius, the size mode and the
+                // invert flag all read the authored values, so the grade hashes
+                // every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3388,6 +3404,7 @@ impl EffectRenderOp {
             EffectRenderOp::DifferenceMatte { .. } => 3,
             EffectRenderOp::Blend { .. } => 1,
             EffectRenderOp::CompoundArithmetic { .. } => 1,
+            EffectRenderOp::CompoundBlur { .. } => 5,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3922,7 +3939,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 148] {
+fn builtin_effect_types() -> [EffectType; 149] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4072,6 +4089,7 @@ fn builtin_effect_types() -> [EffectType; 148] {
         EffectType::DifferenceMatte,
         EffectType::Blend,
         EffectType::CompoundArithmetic,
+        EffectType::CompoundBlur,
     ]
 }
 
@@ -16082,6 +16100,61 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::CompoundBlur => {
+            const GROUP: &str = "复合模糊";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blur_layer",
+                GROUP,
+                "模糊图层",
+                PropertyValue::Int(crate::COMPOUND_BLUR_DEFAULT_LAYER as i64),
+                Some(crate::COMPOUND_BLUR_MIN_LAYER as f64),
+                Some(crate::COMPOUND_BLUR_MAX_LAYER as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "max_blur",
+                GROUP,
+                "最大模糊",
+                PropertyValue::Float(crate::COMPOUND_BLUR_DEFAULT_MAX_BLUR),
+                Some(0.0),
+                Some(crate::COMPOUND_BLUR_MAX_BLUR_PIXELS as f64),
+                Some(1.0),
+            );
+            let size_modes = crate::CompoundBlurSizeMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    ParameterEnumOption::new(
+                        mode.as_key(),
+                        mode.label(),
+                        format!("mondrian.effect.compound_blur.size_mode.{}", mode.as_key()),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "size_mode",
+                GROUP,
+                "如果图层大小不同",
+                crate::CompoundBlurSizeMode::Stretch.as_key(),
+                size_modes,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "invert_blur",
+                GROUP,
+                "反转模糊",
+                PropertyValue::Bool(false),
+                None,
+                None,
+                None,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -17314,6 +17387,12 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             "layer" | "operator" | "channels" | "overflow" | "stretch",
         ) => ParameterUnit::Unitless,
         (EffectType::CompoundArithmetic, "blend_with_original") => ParameterUnit::Percent,
+        // The layer is a slot number, the size mode is a menu and the invert
+        // flag is a toggle; the radius is measured in pixels.
+        (EffectType::CompoundBlur, "blur_layer" | "size_mode" | "invert_blur") => {
+            ParameterUnit::Unitless
+        }
+        (EffectType::CompoundBlur, "max_blur") => ParameterUnit::Pixels,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -17355,6 +17434,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::DifferenceMatte
                 | EffectType::Blend
                 | EffectType::CompoundArithmetic
+                | EffectType::CompoundBlur
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -17639,6 +17719,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The operator reads one sample of each input at the same output
             // coordinate, so the pixel-local ROI default stays exact.
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::CompoundBlur => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The radius reaches up to `max_blur` pixels into the frame, so the
+            // definition-level envelope cannot narrow the input to a tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
@@ -24237,6 +24325,95 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::CompoundBlur => {
+            let blur_layer_id = builtin_parameter_id(effect_type, "blur_layer");
+            let max_blur_id = builtin_parameter_id(effect_type, "max_blur");
+            let size_mode_id = builtin_parameter_id(effect_type, "size_mode");
+            let invert_blur_id = builtin_parameter_id(effect_type, "invert_blur");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let blur_layer = match effect.evaluate_parameter(&blur_layer_id, context.time) {
+                    Some(PropertyValue::Int(value))
+                        if (crate::COMPOUND_BLUR_MIN_LAYER as i64
+                            ..=crate::COMPOUND_BLUR_MAX_LAYER as i64)
+                            .contains(&value) =>
+                    {
+                        value as u32
+                    }
+                    Some(_) => {
+                        return Err(invalid(format!(
+                            "复合模糊的模糊图层必须在 {} 到 {} 之间",
+                            crate::COMPOUND_BLUR_MIN_LAYER,
+                            crate::COMPOUND_BLUR_MAX_LAYER
+                        )));
+                    }
+                    None => crate::COMPOUND_BLUR_DEFAULT_LAYER,
+                };
+                let max_blur = match effect.evaluate_parameter(&max_blur_id, context.time) {
+                    Some(PropertyValue::Float(value)) => value,
+                    Some(_) => {
+                        return Err(invalid("复合模糊的最大模糊参数必须是数值".to_string()));
+                    }
+                    None => crate::COMPOUND_BLUR_DEFAULT_MAX_BLUR,
+                };
+                let size_mode = effect
+                    .evaluate_enum_parameter(&size_mode_id, context.time)
+                    .and_then(|key| crate::CompoundBlurSizeMode::from_key(&key))
+                    .unwrap_or(crate::CompoundBlurSizeMode::Stretch);
+                let invert_blur = match effect.evaluate_parameter(&invert_blur_id, context.time) {
+                    Some(PropertyValue::Bool(value)) => value,
+                    Some(_) => {
+                        return Err(invalid("复合模糊的反转模糊参数必须是开关".to_string()));
+                    }
+                    None => false,
+                };
+                let grade =
+                    crate::CompoundBlurGrade::new(blur_layer, max_blur, size_mode, invert_blur)
+                        .map_err(|error| {
+                            invalid(format!("复合模糊的参数 {} 超出范围", error.parameter()))
+                        })?;
+                // Layer 0 means "no radius map" and a non-positive maximum radius
+                // is a pixel-for-pixel identity, so neither needs a node.
+                if grade.is_identity() {
+                    return Ok(());
+                }
+                let auxiliary = graph.append_external_input(
+                    blur_layer,
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                );
+                // The sampler only ever reads the primary grid: the fit ratio
+                // lives in the kernel's reference uv, so no delivery affine may
+                // be applied a second time.
+                let sampling = match size_mode {
+                    crate::CompoundBlurSizeMode::Stretch => {
+                        crate::AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP
+                    }
+                    crate::CompoundBlurSizeMode::CenterCrop => crate::AuxiliarySampling::new(
+                        crate::AuxiliaryCoordinateMapping::PrimaryGrid,
+                        crate::AuxiliaryFilter::Linear,
+                        crate::AuxiliaryOutOfBounds::Transparent,
+                    ),
+                };
+                let output = graph.add_auxiliary_effect(
+                    graph.current_output(),
+                    auxiliary,
+                    EffectRenderOp::CompoundBlur { grade },
+                    crate::AuxiliaryRole::Map,
+                    sampling,
+                );
+                graph.set_current_output(output);
+                Ok(())
+            }))
+        }
         EffectType::ChromaticAberrationRemoval => {
             let lateral_id = builtin_parameter_id(effect_type, "lateral");
             let longitudinal_id = builtin_parameter_id(effect_type, "longitudinal");
@@ -27618,6 +27795,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::DifferenceMatte => "差值遮罩",
         EffectType::Blend => "混合",
         EffectType::CompoundArithmetic => "复合运算",
+        EffectType::CompoundBlur => "复合模糊",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -29040,6 +29218,7 @@ mod tests {
             EffectType::DifferenceMatte,
             EffectType::Blend,
             EffectType::CompoundArithmetic,
+            EffectType::CompoundBlur,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -38336,7 +38515,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 148);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 149);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -38864,7 +39043,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 148);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 149);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -41823,7 +42002,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 148);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 149);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -42959,7 +43138,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 148);
+        assert_eq!(builtin_effect_types().len(), 149);
     }
 
     #[test]
@@ -47492,6 +47671,295 @@ mod tests {
                 "layer 0 and a full mix with the original need no node: {parameters:?}"
             );
         }
+    }
+
+    fn compound_blur_node(
+        graph: &EffectRenderGraph,
+    ) -> Option<(
+        crate::CompoundBlurGrade,
+        crate::AuxiliaryRole,
+        crate::AuxiliarySampling,
+        crate::EffectGraphNodeId,
+    )> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                op: EffectRenderOp::CompoundBlur { grade },
+                auxiliary,
+                role,
+                sampling,
+                ..
+            } => Some((*grade, *role, *sampling, *auxiliary)),
+            _ => None,
+        })
+    }
+
+    fn author_compound_blur(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::CompoundBlur)
+            .expect("the compound blur should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::CompoundBlur.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the compound blur parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn compound_blur_defaults_build_one_auxiliary_node() {
+        let effect = instantiate_effect_node(EffectType::CompoundBlur)
+            .expect("registered CompoundBlur definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the default compound blur");
+        let (grade, role, sampling, auxiliary) =
+            compound_blur_node(&graph).expect("the defaults already key the sixth layer");
+        assert_eq!(
+            grade,
+            crate::CompoundBlurGrade::new(6, 20.0, crate::CompoundBlurSizeMode::Stretch, false,)
+                .expect("the documented defaults are within range"),
+            "the documented defaults are deliberately not the identity"
+        );
+        assert_eq!(role, crate::AuxiliaryRole::Map);
+        assert_eq!(
+            sampling,
+            crate::AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP
+        );
+        match &graph.node(auxiliary).expect("the map input exists").kind {
+            EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                assert_eq!(*slot, 6, "the default blur layer names the sixth input");
+            }
+            other => panic!("unexpected map input {other:?}"),
+        }
+        let op = EffectRenderOp::CompoundBlur { grade };
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(&op), 1);
+        assert_eq!(crate::auxiliary::render_op_auxiliary_scratch_frames(&op), 1);
+        assert_eq!(op.estimated_cost(), 5);
+        assert_eq!(crate::spatial_pass_for(&op), None);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            149
+        );
+        let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
+            &op,
+            crate::AuxiliaryRole::Map,
+            sampling,
+            Some(6),
+        )
+        .expect("the auxiliary lowering carries the compound blur kernel");
+        assert_eq!(pass.name(), "compound_blur");
+        assert_eq!(
+            (pass.horizontal_halo(), pass.vertical_halo()),
+            (u32::MAX, u32::MAX)
+        );
+        assert_eq!(pass.auxiliary_slot(), Some(Some(6)));
+        assert!(matches!(
+            pass,
+            crate::EffectGpuSpatialPass::CompoundBlur { .. }
+        ));
+    }
+
+    #[test]
+    fn compound_blur_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::CompoundBlur;
+        let properties = default_properties_for(effect_type.clone());
+        for (parameter, unit) in [
+            ("blur_layer", ParameterUnit::Unitless),
+            ("max_blur", ParameterUnit::Pixels),
+            ("size_mode", ParameterUnit::Unitless),
+            ("invert_blur", ParameterUnit::Unitless),
+        ] {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .unwrap_or_else(|| panic!("the {parameter} value is authored"));
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("复合模糊"),
+                "the {parameter} control sits in the compound blur group"
+            );
+            assert_eq!(property.descriptor.schema.unit, unit);
+        }
+        let blur_layer = properties
+            .property(&effect_type.property_path("blur_layer"))
+            .expect("the blur layer slot is defined");
+        assert_eq!(blur_layer.descriptor.display_name, "模糊图层");
+        assert_eq!(blur_layer.evaluate(tt(0)), PropertyValue::Int(6));
+        let max_blur = properties
+            .property(&effect_type.property_path("max_blur"))
+            .expect("the maximum radius is defined");
+        assert_eq!(max_blur.descriptor.display_name, "最大模糊");
+        assert_eq!(max_blur.evaluate(tt(0)), PropertyValue::Float(20.0));
+        let invert_blur = properties
+            .property(&effect_type.property_path("invert_blur"))
+            .expect("the invert toggle is defined");
+        assert_eq!(invert_blur.descriptor.display_name, "反转模糊");
+        assert_eq!(invert_blur.evaluate(tt(0)), PropertyValue::Bool(false));
+
+        let size_modes: Vec<(&str, &str)> = crate::CompoundBlurSizeMode::ALL
+            .iter()
+            .map(|mode| (mode.as_key(), mode.label()))
+            .collect();
+        let size_mode = properties
+            .property(&effect_type.property_path("size_mode"))
+            .expect("the size mode menu is defined");
+        assert_eq!(size_mode.descriptor.display_name, "如果图层大小不同");
+        assert_eq!(
+            size_mode.evaluate(tt(0)),
+            PropertyValue::Enum("stretch".to_owned())
+        );
+        let options = &size_mode.descriptor.schema.enum_options;
+        assert_eq!(options.len(), size_modes.len());
+        for (option, (key, label)) in options.iter().zip(&size_modes) {
+            assert_eq!(option.key, *key);
+            assert_eq!(option.display_name, *label);
+            assert_eq!(
+                option.message_id,
+                format!("mondrian.effect.compound_blur.size_mode.{key}")
+            );
+        }
+        assert_eq!(crate::CompoundBlurSizeMode::Stretch.code(), 1);
+        assert_eq!(crate::CompoundBlurSizeMode::CenterCrop.code(), 2);
+        for mode in crate::CompoundBlurSizeMode::ALL {
+            assert_eq!(
+                crate::CompoundBlurSizeMode::from_key(mode.as_key()),
+                Some(mode)
+            );
+            assert_eq!(
+                crate::CompoundBlurSizeMode::from_code(mode.code()),
+                Some(mode)
+            );
+        }
+    }
+
+    #[test]
+    fn compound_blur_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let contract = effect_definition(&EffectType::CompoundBlur)
+            .expect("registered CompoundBlur definition")
+            .execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            crate::EffectRoiPropagation::FullFrame,
+            "the radius reaches into the whole frame"
+        );
+        assert_eq!(contract.topology, crate::EffectGraphTopology::GeneralDag);
+    }
+
+    #[test]
+    fn compound_blur_out_of_range_parameters_are_author_errors() {
+        let builtin_key = "builtin.compound_blur";
+        for (parameter, value, needle, prefix) in [
+            (
+                "blur_layer",
+                serde_json::json!(20),
+                "19",
+                "复合模糊的模糊图层",
+            ),
+            (
+                "max_blur",
+                serde_json::json!(4000.5),
+                "max_blur",
+                "复合模糊的参数",
+            ),
+        ] {
+            let effect = instantiate_effect_node(EffectType::CompoundBlur)
+                .expect("the compound blur should instantiate");
+            let effect_id = effect.id;
+            let mut document = serde_json::to_value(&effect).expect("serialize the node");
+            overwrite_static_value(&mut document, &format!("compound_blur.{parameter}"), value);
+            let result: Result<EffectNode, _> = serde_json::from_value(document);
+            if let Ok(effect) = result {
+                let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .expect_err("an out-of-range parameter should fail");
+                match error {
+                    EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                        assert_eq!(effect_key, builtin_key);
+                        assert!(reason.contains(needle), "{reason}");
+                        assert!(reason.starts_with(prefix), "{reason}");
+                    }
+                    other => panic!("unexpected error {other:?} for {effect_id}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compound_blur_max_blur_changes_the_hash() {
+        let build = |max_blur: f32| {
+            let effect = author_compound_blur(&[("max_blur", PropertyValue::Float(max_blur))]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored compound blur should compile");
+            let (grade, ..) = compound_blur_node(&graph).expect("the map builds the node");
+            EffectRenderOp::CompoundBlur { grade }
+        };
+        use std::hash::Hasher;
+        let hash = |op: EffectRenderOp| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            op.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(
+            hash(build(20.0)),
+            hash(build(40.0)),
+            "the largest radius is part of the render identity"
+        );
+    }
+
+    #[test]
+    fn compound_blur_invert_changes_the_hash() {
+        let build = |invert: bool| {
+            let effect = author_compound_blur(&[("invert_blur", PropertyValue::Bool(invert))]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored compound blur should compile");
+            let (grade, ..) = compound_blur_node(&graph).expect("the map builds the node");
+            EffectRenderOp::CompoundBlur { grade }
+        };
+        use std::hash::Hasher;
+        let hash = |op: EffectRenderOp| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            op.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(
+            hash(build(false)),
+            hash(build(true)),
+            "the invert flag is part of the render identity"
+        );
+    }
+
+    #[test]
+    fn compound_blur_center_crop_changes_the_sampling() {
+        let build = |size_mode: &str| {
+            let effect =
+                author_compound_blur(&[("size_mode", PropertyValue::Enum(size_mode.to_owned()))]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored compound blur should compile");
+            compound_blur_node(&graph).expect("the map builds the node").2
+        };
+        assert_eq!(
+            build("stretch"),
+            crate::AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP
+        );
+        assert_eq!(
+            build("center_crop"),
+            crate::AuxiliarySampling::new(
+                crate::AuxiliaryCoordinateMapping::PrimaryGrid,
+                crate::AuxiliaryFilter::Linear,
+                crate::AuxiliaryOutOfBounds::Transparent,
+            )
+        );
+        assert_ne!(
+            build("stretch"),
+            build("center_crop"),
+            "the size mode changes the declared sampling"
+        );
     }
 
     fn film_look_op(graph: &EffectRenderGraph) -> Option<crate::FilmLookGrade> {

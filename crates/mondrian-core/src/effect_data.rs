@@ -280,6 +280,9 @@ pub enum EffectType {
     /// Compound arithmetic: run one of the fifteen documented operators on the
     /// frame and a second layer, over one channel set, with an overflow rule.
     CompoundArithmetic,
+    /// Compound blur: blur the frame with a second layer as the per-pixel
+    /// radius map, optionally inverted, with a documented size fit.
+    CompoundBlur,
 }
 
 impl EffectType {
@@ -342,6 +345,7 @@ impl EffectType {
             Self::DifferenceMatte => "builtin.difference_matte".to_string(),
             Self::Blend => "builtin.blend".to_string(),
             Self::CompoundArithmetic => "builtin.compound_arithmetic".to_string(),
+            Self::CompoundBlur => "builtin.compound_blur".to_string(),
             Self::Convolution => "builtin.convolution".to_string(),
             Self::Offset => "builtin.offset".to_string(),
             Self::Twirl => "builtin.twirl".to_string(),
@@ -496,6 +500,7 @@ impl EffectType {
             "builtin.difference_matte" => Self::DifferenceMatte,
             "builtin.blend" => Self::Blend,
             "builtin.compound_arithmetic" => Self::CompoundArithmetic,
+            "builtin.compound_blur" => Self::CompoundBlur,
             "builtin.convolution" => Self::Convolution,
             "builtin.offset" => Self::Offset,
             "builtin.twirl" => Self::Twirl,
@@ -653,6 +658,7 @@ impl EffectType {
             Self::DifferenceMatte => "差值遮罩",
             Self::Blend => "混合",
             Self::CompoundArithmetic => "复合运算",
+            Self::CompoundBlur => "复合模糊",
             Self::Convolution => "卷积核",
             Self::Offset => "偏移",
             Self::Twirl => "旋转扭曲",
@@ -812,6 +818,7 @@ impl EffectType {
             Self::DifferenceMatte => vec!["抠像"],
             Self::Blend => vec!["通道"],
             Self::CompoundArithmetic => vec!["通道"],
+            Self::CompoundBlur => vec!["模糊与锐化"],
             Self::Convolution => vec!["颜色", "调色"],
             Self::Offset => vec!["变换与尺寸"],
             Self::Twirl => vec!["变形"],
@@ -956,6 +963,7 @@ impl EffectType {
             Self::DifferenceMatte => "difference_matte".to_string(),
             Self::Blend => "blend".to_string(),
             Self::CompoundArithmetic => "compound_arithmetic".to_string(),
+            Self::CompoundBlur => "compound_blur".to_string(),
             Self::Convolution => "convolution".to_string(),
             Self::Offset => "offset".to_string(),
             Self::Twirl => "twirl".to_string(),
@@ -1484,6 +1492,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::DifferenceMatte => Ok(()),
             Self::Blend => Ok(()),
             Self::CompoundArithmetic => Ok(()),
+            Self::CompoundBlur => Ok(()),
             Self::Convolution => Ok(()),
             Self::Offset => Ok(()),
             Self::Twirl => Ok(()),

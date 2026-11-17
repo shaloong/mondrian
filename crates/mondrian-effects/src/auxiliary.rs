@@ -408,6 +408,7 @@ pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
             | EffectRenderOp::DifferenceMatte { .. }
             | EffectRenderOp::Blend { .. }
             | EffectRenderOp::CompoundArithmetic { .. }
+            | EffectRenderOp::CompoundBlur { .. }
             | EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::ChannelCombiner { .. }
             | EffectRenderOp::SetMatte { .. }
@@ -447,6 +448,11 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
     }
     if let EffectRenderOp::CompoundArithmetic { grade } = op {
         return crate::apply_compound_arithmetic_controlled(
+            primary, width, height, frame, sampling, grade, checkpoint,
+        );
+    }
+    if let EffectRenderOp::CompoundBlur { grade } = op {
+        return crate::apply_compound_blur_controlled(
             primary, width, height, frame, sampling, grade, checkpoint,
         );
     }
@@ -490,6 +496,12 @@ pub(crate) fn apply_auxiliary_effect_f32_region<E>(
         // Displacement reads complete-frame coordinates and may outset its
         // output, so a partial region cannot be lowered exactly here. Fail
         // closed exactly like the other full-frame-only operations.
+        return Ok(false);
+    }
+    if matches!(op, EffectRenderOp::CompoundBlur { .. }) {
+        // The authored radius reaches across the whole frame and every tap is
+        // clamped against the complete picture, so a retained region cannot
+        // reproduce a full-frame run exactly. Fail closed.
         return Ok(false);
     }
     let width = region.width();

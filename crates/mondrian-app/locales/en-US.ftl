@@ -4243,3 +4243,12 @@ parameter-mondrian-effect-compound-arithmetic-overflow-wrap = Wrap
 parameter-mondrian-effect-compound-arithmetic-overflow-scale = Scale
 parameter-mondrian-effect-compound-arithmetic-stretch-stretch = Stretch to fit
 parameter-mondrian-effect-compound-arithmetic-stretch-original = Original size
+## Compound Blur 复合模糊
+effect-compound-blur = Compound Blur
+parameter-group-compound-blur = Compound Blur
+parameter-mondrian-effect-builtin-compound-blur-blur-layer-label = Blur Layer
+parameter-mondrian-effect-builtin-compound-blur-max-blur-label = Max Blur
+parameter-mondrian-effect-builtin-compound-blur-size-mode-label = If Layer Sizes Differ
+parameter-mondrian-effect-builtin-compound-blur-invert-blur-label = Invert Blur
+parameter-mondrian-effect-compound-blur-size-mode-stretch = Stretch to Fit
+parameter-mondrian-effect-compound-blur-size-mode-center-crop = Center Crop

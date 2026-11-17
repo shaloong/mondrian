@@ -399,6 +399,17 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Blur the frame with a separately sampled picture as the per-pixel radius.
+    CompoundBlur {
+        /// Authored layer slot, maximum radius, size mode and invert flag.
+        grade: crate::CompoundBlurGrade,
+        /// Reconstruction and boundary behavior of the blur map.
+        sampling: crate::AuxiliarySampling,
+        /// Presence marker for the bound blur map raster.
+        auxiliary: Option<crate::AuxiliarySampling>,
+        /// Host slot for a linear chain, or a graph-local input if absent.
+        external_slot: Option<u32>,
+    },
     /// Remap a source picture inside an evaluated mask boundary.
     Smear {
         /// Geometry and controls resolved for the current graph evaluation.
@@ -467,6 +478,7 @@ impl EffectGpuSpatialPass {
             | Self::DifferenceMatte { external_slot, .. }
             | Self::Blend { external_slot, .. }
             | Self::CompoundArithmetic { external_slot, .. }
+            | Self::CompoundBlur { external_slot, .. }
             | Self::Glass { auxiliary: Some(_), external_slot, .. } => Some(external_slot),
             _ => None,
         }
@@ -556,6 +568,7 @@ impl EffectGpuSpatialPass {
             Self::DifferenceMatte { .. } => "difference_matte",
             Self::Blend { .. } => "blend",
             Self::CompoundArithmetic { .. } => "compound_arithmetic",
+            Self::CompoundBlur { .. } => "compound_blur",
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
@@ -680,9 +693,10 @@ impl EffectGpuSpatialPass {
             // one covers a fractional radius. Unlike the resampling passes this
             // reach is finite, so the plane can still be tiled.
             Self::DifferenceMatte { grade, .. } => (grade.blur().ceil() as u32).saturating_add(1),
-            Self::DisplacementMap { .. } | Self::Glass { .. } | Self::VideoCollage { .. } => {
-                u32::MAX
-            }
+            Self::DisplacementMap { .. }
+            | Self::CompoundBlur { .. }
+            | Self::Glass { .. }
+            | Self::VideoCollage { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[0],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -786,9 +800,10 @@ impl EffectGpuSpatialPass {
             // one covers a fractional radius. Unlike the resampling passes this
             // reach is finite, so the plane can still be tiled.
             Self::DifferenceMatte { grade, .. } => (grade.blur().ceil() as u32).saturating_add(1),
-            Self::DisplacementMap { .. } | Self::Glass { .. } | Self::VideoCollage { .. } => {
-                u32::MAX
-            }
+            Self::DisplacementMap { .. }
+            | Self::CompoundBlur { .. }
+            | Self::Glass { .. }
+            | Self::VideoCollage { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[1],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -837,6 +852,14 @@ pub(crate) fn lower_auxiliary_spatial_pass(
         }
         (EffectRenderOp::CompoundArithmetic { grade }, crate::AuxiliaryRole::Layer) => {
             Some(EffectGpuSpatialPass::CompoundArithmetic {
+                grade: *grade,
+                sampling,
+                auxiliary: Some(sampling),
+                external_slot,
+            })
+        }
+        (EffectRenderOp::CompoundBlur { grade }, crate::AuxiliaryRole::Map) => {
+            Some(EffectGpuSpatialPass::CompoundBlur {
                 grade: *grade,
                 sampling,
                 auxiliary: Some(sampling),
@@ -1453,6 +1476,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         // Compound arithmetic also reads a second raster, so a unary node has no
         // slot to lower; the auxiliary path supplies one.
         EffectRenderOp::CompoundArithmetic { .. } => None,
+        // Compound blur also reads a second raster, so a unary node has no slot
+        // to lower; the auxiliary path supplies one.
+        EffectRenderOp::CompoundBlur { .. } => None,
         _ => None,
     }
 }

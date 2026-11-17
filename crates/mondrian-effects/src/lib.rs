@@ -94,6 +94,13 @@ pub use compound_arithmetic::{
     COMPOUND_DEFAULT_BLEND_WITH_ORIGINAL, COMPOUND_DEFAULT_LAYER, COMPOUND_MAX_LAYER,
     COMPOUND_MIN_LAYER,
 };
+pub mod compound_blur;
+pub use compound_blur::{
+    apply_compound_blur_controlled, apply_compound_blur_f32, compound_blur_frame_f32,
+    CompoundBlurError, CompoundBlurGrade, CompoundBlurSizeMode, COMPOUND_BLUR_DEFAULT_LAYER,
+    COMPOUND_BLUR_DEFAULT_MAX_BLUR, COMPOUND_BLUR_GOLDEN_ANGLE, COMPOUND_BLUR_MAX_BLUR_PIXELS,
+    COMPOUND_BLUR_MAX_LAYER, COMPOUND_BLUR_MIN_LAYER, COMPOUND_BLUR_TAPS,
+};
 pub mod convolution;
 pub mod corner_pin;
 pub mod coverage;

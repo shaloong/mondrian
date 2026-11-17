@@ -1237,6 +1237,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::DifferenceMatte { .. } => "difference_matte",
         EffectRenderOp::Blend { .. } => "blend",
         EffectRenderOp::CompoundArithmetic { .. } => "compound_arithmetic",
+        EffectRenderOp::CompoundBlur { .. } => "compound_blur",
         EffectRenderOp::Custom { .. } => "custom",
     }
 }

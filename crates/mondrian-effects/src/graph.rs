@@ -3209,6 +3209,13 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             // pixel-local envelope stays exact.
             ..cpu_float
         },
+        EffectRenderOp::CompoundBlur { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The disc taps reach up to `max_blur` pixels into the frame, so the
+            // input envelope cannot be narrowed to a tile.
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::Grid { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float

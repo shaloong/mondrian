@@ -290,6 +290,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "差值遮罩" => Some("parameter-group-difference-matte"),
         "混合" => Some("parameter-group-blend"),
         "复合运算" => Some("parameter-group-compound-arithmetic"),
+        "复合模糊" => Some("parameter-group-compound-blur"),
         "分离" => Some("parameter-group-split"),
         "卷积核" => Some("parameter-group-convolution"),
         "反转" => Some("parameter-group-invert"),
