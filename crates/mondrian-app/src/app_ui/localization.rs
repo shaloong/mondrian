@@ -285,6 +285,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "凹痕" => Some("parameter-group-dent"),
         "弯曲" => Some("parameter-group-warp"),
         "网格变形" => Some("parameter-group-grid-warp"),
+        "纹理化" => Some("parameter-group-texturize"),
         "祛线" => Some("parameter-group-wire-removal"),
         "分形噪波" => Some("parameter-group-fractal-noise"),
         "差值遮罩" => Some("parameter-group-difference-matte"),

@@ -409,6 +409,7 @@ pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
             | EffectRenderOp::Blend { .. }
             | EffectRenderOp::CompoundArithmetic { .. }
             | EffectRenderOp::CompoundBlur { .. }
+            | EffectRenderOp::Texturize { .. }
             | EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::ChannelCombiner { .. }
             | EffectRenderOp::SetMatte { .. }
@@ -453,6 +454,11 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
     }
     if let EffectRenderOp::CompoundBlur { grade } = op {
         return crate::apply_compound_blur_controlled(
+            primary, width, height, frame, sampling, grade, checkpoint,
+        );
+    }
+    if let EffectRenderOp::Texturize { grade } = op {
+        return crate::apply_texturize_controlled(
             primary, width, height, frame, sampling, grade, checkpoint,
         );
     }
@@ -502,6 +508,12 @@ pub(crate) fn apply_auxiliary_effect_f32_region<E>(
         // The authored radius reaches across the whole frame and every tap is
         // clamped against the complete picture, so a retained region cannot
         // reproduce a full-frame run exactly. Fail closed.
+        return Ok(false);
+    }
+    if matches!(op, EffectRenderOp::Texturize { .. }) {
+        // The kernel resolves the reference uv from the complete frame extent,
+        // so a retained region cannot reproduce a full-frame run exactly. Fail
+        // closed like the other full-frame-only operations.
         return Ok(false);
     }
     let width = region.width();

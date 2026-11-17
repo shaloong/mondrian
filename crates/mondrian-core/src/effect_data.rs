@@ -283,6 +283,9 @@ pub enum EffectType {
     /// Compound blur: blur the frame with a second layer as the per-pixel
     /// radius map, optionally inverted, with a documented size fit.
     CompoundBlur,
+    /// Texturize: light the frame with a second layer used as a per-pixel
+    /// height map, projected along an authored light direction.
+    Texturize,
 }
 
 impl EffectType {
@@ -346,6 +349,7 @@ impl EffectType {
             Self::Blend => "builtin.blend".to_string(),
             Self::CompoundArithmetic => "builtin.compound_arithmetic".to_string(),
             Self::CompoundBlur => "builtin.compound_blur".to_string(),
+            Self::Texturize => "builtin.texturize".to_string(),
             Self::Convolution => "builtin.convolution".to_string(),
             Self::Offset => "builtin.offset".to_string(),
             Self::Twirl => "builtin.twirl".to_string(),
@@ -501,6 +505,7 @@ impl EffectType {
             "builtin.blend" => Self::Blend,
             "builtin.compound_arithmetic" => Self::CompoundArithmetic,
             "builtin.compound_blur" => Self::CompoundBlur,
+            "builtin.texturize" => Self::Texturize,
             "builtin.convolution" => Self::Convolution,
             "builtin.offset" => Self::Offset,
             "builtin.twirl" => Self::Twirl,
@@ -659,6 +664,7 @@ impl EffectType {
             Self::Blend => "混合",
             Self::CompoundArithmetic => "复合运算",
             Self::CompoundBlur => "复合模糊",
+            Self::Texturize => "纹理化",
             Self::Convolution => "卷积核",
             Self::Offset => "偏移",
             Self::Twirl => "旋转扭曲",
@@ -819,6 +825,7 @@ impl EffectType {
             Self::Blend => vec!["通道"],
             Self::CompoundArithmetic => vec!["通道"],
             Self::CompoundBlur => vec!["模糊与锐化"],
+            Self::Texturize => vec!["风格化"],
             Self::Convolution => vec!["颜色", "调色"],
             Self::Offset => vec!["变换与尺寸"],
             Self::Twirl => vec!["变形"],
@@ -964,6 +971,7 @@ impl EffectType {
             Self::Blend => "blend".to_string(),
             Self::CompoundArithmetic => "compound_arithmetic".to_string(),
             Self::CompoundBlur => "compound_blur".to_string(),
+            Self::Texturize => "texturize".to_string(),
             Self::Convolution => "convolution".to_string(),
             Self::Offset => "offset".to_string(),
             Self::Twirl => "twirl".to_string(),
@@ -1493,6 +1501,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Blend => Ok(()),
             Self::CompoundArithmetic => Ok(()),
             Self::CompoundBlur => Ok(()),
+            Self::Texturize => Ok(()),
             Self::Convolution => Ok(()),
             Self::Offset => Ok(()),
             Self::Twirl => Ok(()),

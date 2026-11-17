@@ -130,6 +130,14 @@ pub mod spherize;
 pub mod spill_suppressor;
 pub mod split;
 pub mod stroke;
+pub mod texturize;
+pub use texturize::{
+    apply_texturize_controlled, apply_texturize_f32, TexturizeError, TexturizeGrade,
+    TexturizePlacement, TEXTURIZE_DEFAULT_CONTRAST, TEXTURIZE_DEFAULT_LAYER,
+    TEXTURIZE_DEFAULT_LIGHT_DIRECTION, TEXTURIZE_MAX_CONTRAST, TEXTURIZE_MAX_LAYER,
+    TEXTURIZE_MAX_LIGHT_DIRECTION, TEXTURIZE_MIN_CONTRAST, TEXTURIZE_MIN_LAYER,
+    TEXTURIZE_MIN_LIGHT_DIRECTION,
+};
 pub mod threshold;
 pub mod tint;
 pub mod transform;

@@ -669,6 +669,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Texturize { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "texturize",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::FilmLook { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "film_look",
@@ -1425,6 +1431,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The kernel stages the whole source picture so the clamped disc taps
         // read an unmodified frame: exactly one frame of scratch.
         EffectRenderOp::CompoundBlur { .. } => 1,
+        // The kernel reads only the source pixel and the height map, so no
+        // scratch frame is needed beyond the destination.
+        EffectRenderOp::Texturize { .. } => 0,
         EffectRenderOp::GrowBounds { .. } => 0,
         EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 1,
         EffectRenderOp::DetailPreservingUpscale { .. } => 1,
@@ -2057,6 +2066,9 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         // Compound blur reads a second raster and samples the whole frame, so
         // the unary dispatch cannot lower it; the auxiliary path owns the kernel.
         EffectRenderOp::CompoundBlur { .. } => Ok(false),
+        // Texturize reads a second raster and reads it on its own grid, so the
+        // unary dispatch cannot lower it; the auxiliary path owns the kernel.
+        EffectRenderOp::Texturize { .. } => Ok(false),
         // Glass uses the complete graph's raster and auxiliary inputs.
         EffectRenderOp::Glass { .. } | EffectRenderOp::VideoCollage { .. } => Ok(false),
         EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),

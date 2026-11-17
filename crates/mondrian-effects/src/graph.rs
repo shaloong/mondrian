@@ -3216,6 +3216,13 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        EffectRenderOp::Texturize { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The height map is sampled on its own grid and the tiled placement
+            // wraps, so the input envelope cannot be narrowed to a tile.
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::Grid { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float

@@ -2948,6 +2948,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::Blend { .. } => 147,
         EffectRenderOp::CompoundArithmetic { .. } => 148,
         EffectRenderOp::CompoundBlur { .. } => 149,
+        EffectRenderOp::Texturize { .. } => 150,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
         EffectRenderOp::Reshape { .. } => 123,
@@ -4128,7 +4129,9 @@ fn execute_cpu_dag_prefix(
             }
             | EffectGraphNodeKind::AuxiliaryEffect {
                 op:
-                    op @ (EffectRenderOp::DisplacementMap { .. } | EffectRenderOp::CompoundBlur { .. }),
+                    op @ (EffectRenderOp::DisplacementMap { .. }
+                    | EffectRenderOp::CompoundBlur { .. }
+                    | EffectRenderOp::Texturize { .. }),
                 role: crate::AuxiliaryRole::Map,
                 sampling,
                 ..
@@ -4860,6 +4863,21 @@ fn prepare_gpu_suffix(
                                         pass,
                                     }
                                 }
+                                crate::EffectGpuSpatialPass::Texturize { .. } => {
+                                    // The same shared picture-and-auxiliary dispatch
+                                    // shape: the pass itself carries the texturize
+                                    // kernel, so the renderer records it through the
+                                    // generic auxiliary path.
+                                    PreparedHeterogeneousGpuDispatch::ChannelCombinerLayer {
+                                        node: *node_id,
+                                        input: *input,
+                                        auxiliary: *auxiliary,
+                                        output: *output,
+                                        waits: Arc::clone(waits),
+                                        signal: *signal,
+                                        pass,
+                                    }
+                                }
                                 crate::EffectGpuSpatialPass::Glass { .. } => {
                                     PreparedHeterogeneousGpuDispatch::GlassMap {
                                         node: *node_id,
@@ -5379,6 +5397,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Blend { .. }
             | crate::EffectRenderOp::CompoundArithmetic { .. }
             | crate::EffectRenderOp::CompoundBlur { .. }
+            | crate::EffectRenderOp::Texturize { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::SetMatte { .. }
             | crate::EffectRenderOp::Grid { .. }

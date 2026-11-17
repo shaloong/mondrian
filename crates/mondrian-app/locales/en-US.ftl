@@ -4252,3 +4252,13 @@ parameter-mondrian-effect-builtin-compound-blur-size-mode-label = If Layer Sizes
 parameter-mondrian-effect-builtin-compound-blur-invert-blur-label = Invert Blur
 parameter-mondrian-effect-compound-blur-size-mode-stretch = Stretch to Fit
 parameter-mondrian-effect-compound-blur-size-mode-center-crop = Center Crop
+## Texturize 纹理化
+effect-texturize = Texturize
+parameter-group-texturize = Texturize
+parameter-mondrian-effect-builtin-texturize-texture-layer-label = Texture Layer
+parameter-mondrian-effect-builtin-texturize-light-direction-label = Light Direction
+parameter-mondrian-effect-builtin-texturize-texture-contrast-label = Texture Contrast
+parameter-mondrian-effect-builtin-texturize-texture-placement-label = Texture Placement
+parameter-mondrian-effect-texturize-placement-tile = Tile Texture
+parameter-mondrian-effect-texturize-placement-center = Center Texture
+parameter-mondrian-effect-texturize-placement-stretch = Stretch Texture to Fit

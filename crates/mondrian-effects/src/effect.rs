@@ -1408,6 +1408,12 @@ pub enum EffectRenderOp {
         /// Authored layer slot, maximum radius, size mode and invert flag.
         grade: crate::CompoundBlurGrade,
     },
+    /// Texturize: lights the frame with a second layer delivered on another
+    /// layer, used as the per-pixel height map.
+    Texturize {
+        /// Authored layer slot, light direction, contrast and placement.
+        grade: crate::TexturizeGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1891,6 +1897,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::CompoundBlur { grade } => {
                 formatter.debug_struct("CompoundBlur").field("grade", grade).finish()
+            }
+            Self::Texturize { grade } => {
+                formatter.debug_struct("Texturize").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -3109,6 +3118,13 @@ impl EffectRenderOp {
                 // every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Texturize { grade } => {
+                150u8.hash(state);
+                // The layer slot, the light direction, the contrast and the
+                // placement all read the authored values, so the grade hashes
+                // every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3405,6 +3421,7 @@ impl EffectRenderOp {
             EffectRenderOp::Blend { .. } => 1,
             EffectRenderOp::CompoundArithmetic { .. } => 1,
             EffectRenderOp::CompoundBlur { .. } => 5,
+            EffectRenderOp::Texturize { .. } => 3,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3939,7 +3956,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 149] {
+fn builtin_effect_types() -> [EffectType; 150] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4090,6 +4107,7 @@ fn builtin_effect_types() -> [EffectType; 149] {
         EffectType::Blend,
         EffectType::CompoundArithmetic,
         EffectType::CompoundBlur,
+        EffectType::Texturize,
     ]
 }
 
@@ -16155,6 +16173,61 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
+        EffectType::Texturize => {
+            const GROUP: &str = "纹理化";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "texture_layer",
+                GROUP,
+                "纹理图层",
+                PropertyValue::Int(crate::TEXTURIZE_DEFAULT_LAYER as i64),
+                Some(crate::TEXTURIZE_MIN_LAYER as f64),
+                Some(crate::TEXTURIZE_MAX_LAYER as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "light_direction",
+                GROUP,
+                "灯光方向",
+                PropertyValue::Float(crate::TEXTURIZE_DEFAULT_LIGHT_DIRECTION),
+                Some(crate::TEXTURIZE_MIN_LIGHT_DIRECTION as f64),
+                Some(crate::TEXTURIZE_MAX_LIGHT_DIRECTION as f64),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "texture_contrast",
+                GROUP,
+                "纹理对比度",
+                PropertyValue::Float(crate::TEXTURIZE_DEFAULT_CONTRAST),
+                Some(crate::TEXTURIZE_MIN_CONTRAST as f64),
+                Some(crate::TEXTURIZE_MAX_CONTRAST as f64),
+                Some(0.01),
+            );
+            let placements = crate::TexturizePlacement::ALL
+                .into_iter()
+                .map(|placement| {
+                    ParameterEnumOption::new(
+                        placement.as_key(),
+                        placement.label(),
+                        format!("mondrian.effect.texturize.placement.{}", placement.as_key()),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "texture_placement",
+                GROUP,
+                "纹理位置",
+                crate::TexturizePlacement::Tile.as_key(),
+                placements,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -17393,6 +17466,12 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Unitless
         }
         (EffectType::CompoundBlur, "max_blur") => ParameterUnit::Pixels,
+        // The layer is a slot number, the contrast is a scale and the placement
+        // is a menu; the light direction is measured in degrees.
+        (EffectType::Texturize, "texture_layer" | "texture_contrast" | "texture_placement") => {
+            ParameterUnit::Unitless
+        }
+        (EffectType::Texturize, "light_direction") => ParameterUnit::Degrees,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -17435,6 +17514,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::Blend
                 | EffectType::CompoundArithmetic
                 | EffectType::CompoundBlur
+                | EffectType::Texturize
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -17726,6 +17806,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The radius reaches up to `max_blur` pixels into the frame, so the
             // definition-level envelope cannot narrow the input to a tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::Texturize => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The texture is sampled on its own grid, so the differencing
+            // reaches one texel and the tiled placement can wrap anywhere.
             roi_propagation: EffectRoiPropagation::FullFrame,
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
@@ -24414,6 +24502,111 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Texturize => {
+            let texture_layer_id = builtin_parameter_id(effect_type, "texture_layer");
+            let light_direction_id = builtin_parameter_id(effect_type, "light_direction");
+            let texture_contrast_id = builtin_parameter_id(effect_type, "texture_contrast");
+            let texture_placement_id = builtin_parameter_id(effect_type, "texture_placement");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let texture_layer = match effect.evaluate_parameter(&texture_layer_id, context.time)
+                {
+                    Some(PropertyValue::Int(value))
+                        if (crate::TEXTURIZE_MIN_LAYER as i64
+                            ..=crate::TEXTURIZE_MAX_LAYER as i64)
+                            .contains(&value) =>
+                    {
+                        value as u32
+                    }
+                    Some(_) => {
+                        return Err(invalid(format!(
+                            "纹理化的纹理图层必须在 {} 到 {} 之间",
+                            crate::TEXTURIZE_MIN_LAYER,
+                            crate::TEXTURIZE_MAX_LAYER
+                        )));
+                    }
+                    None => crate::TEXTURIZE_DEFAULT_LAYER,
+                };
+                let light_direction =
+                    match effect.evaluate_parameter(&light_direction_id, context.time) {
+                        Some(PropertyValue::Float(value)) => value,
+                        Some(_) => {
+                            return Err(invalid("纹理化的灯光方向参数必须是数值".to_string()));
+                        }
+                        None => crate::TEXTURIZE_DEFAULT_LIGHT_DIRECTION,
+                    };
+                if !light_direction.is_finite()
+                    || !(crate::TEXTURIZE_MIN_LIGHT_DIRECTION
+                        ..=crate::TEXTURIZE_MAX_LIGHT_DIRECTION)
+                        .contains(&light_direction)
+                {
+                    return Err(invalid(format!(
+                        "纹理化的灯光方向必须在 {} 到 {} 度之间",
+                        crate::TEXTURIZE_MIN_LIGHT_DIRECTION,
+                        crate::TEXTURIZE_MAX_LIGHT_DIRECTION
+                    )));
+                }
+                let texture_contrast =
+                    match effect.evaluate_parameter(&texture_contrast_id, context.time) {
+                        Some(PropertyValue::Float(value)) => value,
+                        Some(_) => {
+                            return Err(invalid("纹理化的纹理对比度参数必须是数值".to_string()));
+                        }
+                        None => crate::TEXTURIZE_DEFAULT_CONTRAST,
+                    };
+                if !texture_contrast.is_finite()
+                    || !(crate::TEXTURIZE_MIN_CONTRAST..=crate::TEXTURIZE_MAX_CONTRAST)
+                        .contains(&texture_contrast)
+                {
+                    return Err(invalid(format!(
+                        "纹理化的纹理对比度必须在 {} 到 {} 之间",
+                        crate::TEXTURIZE_MIN_CONTRAST,
+                        crate::TEXTURIZE_MAX_CONTRAST
+                    )));
+                }
+                let texture_placement = effect
+                    .evaluate_enum_parameter(&texture_placement_id, context.time)
+                    .and_then(|key| crate::TexturizePlacement::from_key(&key))
+                    .unwrap_or(crate::TexturizePlacement::Tile);
+                let grade = crate::TexturizeGrade::new(
+                    texture_layer,
+                    light_direction,
+                    texture_contrast,
+                    texture_placement,
+                )
+                .map_err(|error| invalid(format!("纹理化的参数 {} 超出范围", error.parameter())))?;
+                // Layer 0 means "no height map" and zero contrast is a
+                // pixel-for-pixel identity, so neither needs a node.
+                if grade.is_identity() {
+                    return Ok(());
+                }
+                let auxiliary = graph.append_external_input(
+                    texture_layer,
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                );
+                // The placement transform lives in the kernel's reference uv, so
+                // the sampler only ever reads the primary grid.
+                let sampling = crate::AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP;
+                let output = graph.add_auxiliary_effect(
+                    graph.current_output(),
+                    auxiliary,
+                    EffectRenderOp::Texturize { grade },
+                    crate::AuxiliaryRole::Map,
+                    sampling,
+                );
+                graph.set_current_output(output);
+                Ok(())
+            }))
+        }
         EffectType::ChromaticAberrationRemoval => {
             let lateral_id = builtin_parameter_id(effect_type, "lateral");
             let longitudinal_id = builtin_parameter_id(effect_type, "longitudinal");
@@ -27796,6 +27989,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Blend => "混合",
         EffectType::CompoundArithmetic => "复合运算",
         EffectType::CompoundBlur => "复合模糊",
+        EffectType::Texturize => "纹理化",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -29219,6 +29413,7 @@ mod tests {
             EffectType::Blend,
             EffectType::CompoundArithmetic,
             EffectType::CompoundBlur,
+            EffectType::Texturize,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -38515,7 +38710,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 149);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 150);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -39043,7 +39238,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 149);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 150);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -42002,7 +42197,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 149);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 150);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -43138,7 +43333,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 149);
+        assert_eq!(builtin_effect_types().len(), 150);
     }
 
     #[test]
@@ -47959,6 +48154,309 @@ mod tests {
             build("stretch"),
             build("center_crop"),
             "the size mode changes the declared sampling"
+        );
+    }
+
+    fn texturize_node(
+        graph: &EffectRenderGraph,
+    ) -> Option<(
+        crate::TexturizeGrade,
+        crate::AuxiliaryRole,
+        crate::AuxiliarySampling,
+        crate::EffectGraphNodeId,
+    )> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                op: EffectRenderOp::Texturize { grade },
+                auxiliary,
+                role,
+                sampling,
+                ..
+            } => Some((*grade, *role, *sampling, *auxiliary)),
+            _ => None,
+        })
+    }
+
+    fn author_texturize(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::Texturize)
+            .expect("the texturize should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Texturize.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the texturize parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn texturize_defaults_are_the_identity_and_build_no_node() {
+        let defaults = crate::TexturizeGrade::documented_defaults();
+        assert_eq!(
+            defaults,
+            crate::TexturizeGrade::new(
+                0,
+                crate::TEXTURIZE_DEFAULT_LIGHT_DIRECTION,
+                crate::TEXTURIZE_DEFAULT_CONTRAST,
+                crate::TexturizePlacement::Tile,
+            )
+            .expect("the documented defaults are within range")
+        );
+        assert!(defaults.is_identity(), "layer 0 is the documented identity");
+        let effect = instantiate_effect_node(EffectType::Texturize)
+            .expect("registered Texturize definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the default texturize");
+        assert!(
+            texturize_node(&graph).is_none(),
+            "the documented defaults need no node"
+        );
+        let effect = author_texturize(&[("texture_contrast", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate a zero contrast texturize");
+        assert!(
+            texturize_node(&graph).is_none(),
+            "zero contrast is a pixel-for-pixel identity"
+        );
+    }
+
+    #[test]
+    fn texturize_builds_one_auxiliary_node() {
+        let effect = author_texturize(&[("texture_layer", PropertyValue::Int(1))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the authored texturize");
+        let (grade, role, sampling, auxiliary) =
+            texturize_node(&graph).expect("the authored layer builds the node");
+        assert_eq!(
+            grade,
+            crate::TexturizeGrade::new(1, 135.0, 1.0, crate::TexturizePlacement::Tile,)
+                .expect("the authored values are within range")
+        );
+        assert_eq!(role, crate::AuxiliaryRole::Map);
+        assert_eq!(
+            sampling,
+            crate::AuxiliarySampling::PRIMARY_GRID_LINEAR_CLAMP
+        );
+        match &graph.node(auxiliary).expect("the height map exists").kind {
+            EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                assert_eq!(*slot, 1, "the texture layer names the first input");
+            }
+            other => panic!("unexpected height map input {other:?}"),
+        }
+        let op = EffectRenderOp::Texturize { grade };
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(&op), 0);
+        assert_eq!(crate::auxiliary::render_op_auxiliary_scratch_frames(&op), 0);
+        assert_eq!(op.estimated_cost(), 3);
+        assert_eq!(crate::spatial_pass_for(&op), None);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            150
+        );
+        let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
+            &op,
+            crate::AuxiliaryRole::Map,
+            sampling,
+            Some(1),
+        )
+        .expect("the auxiliary lowering carries the texturize kernel");
+        assert_eq!(pass.name(), "texturize");
+        assert_eq!((pass.horizontal_halo(), pass.vertical_halo()), (2, 2));
+        assert_eq!(pass.auxiliary_slot(), Some(Some(1)));
+        assert!(matches!(
+            pass,
+            crate::EffectGpuSpatialPass::Texturize { .. }
+        ));
+    }
+
+    #[test]
+    fn texturize_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::Texturize;
+        let properties = default_properties_for(effect_type.clone());
+        for (parameter, unit) in [
+            ("texture_layer", ParameterUnit::Unitless),
+            ("light_direction", ParameterUnit::Degrees),
+            ("texture_contrast", ParameterUnit::Unitless),
+            ("texture_placement", ParameterUnit::Unitless),
+        ] {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .unwrap_or_else(|| panic!("the {parameter} value is authored"));
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("纹理化"),
+                "the {parameter} control sits in the texturize group"
+            );
+            assert_eq!(property.descriptor.schema.unit, unit);
+        }
+        let texture_layer = properties
+            .property(&effect_type.property_path("texture_layer"))
+            .expect("the texture layer slot is defined");
+        assert_eq!(texture_layer.descriptor.display_name, "纹理图层");
+        assert_eq!(texture_layer.evaluate(tt(0)), PropertyValue::Int(0));
+        let light_direction = properties
+            .property(&effect_type.property_path("light_direction"))
+            .expect("the light direction is defined");
+        assert_eq!(light_direction.descriptor.display_name, "灯光方向");
+        assert_eq!(light_direction.evaluate(tt(0)), PropertyValue::Float(135.0));
+        let texture_contrast = properties
+            .property(&effect_type.property_path("texture_contrast"))
+            .expect("the contrast is defined");
+        assert_eq!(texture_contrast.descriptor.display_name, "纹理对比度");
+        assert_eq!(texture_contrast.evaluate(tt(0)), PropertyValue::Float(1.0));
+
+        let placements: Vec<(&str, &str)> = crate::TexturizePlacement::ALL
+            .iter()
+            .map(|placement| (placement.as_key(), placement.label()))
+            .collect();
+        let texture_placement = properties
+            .property(&effect_type.property_path("texture_placement"))
+            .expect("the placement menu is defined");
+        assert_eq!(texture_placement.descriptor.display_name, "纹理位置");
+        assert_eq!(
+            texture_placement.evaluate(tt(0)),
+            PropertyValue::Enum("tile".to_owned())
+        );
+        let options = &texture_placement.descriptor.schema.enum_options;
+        assert_eq!(options.len(), placements.len());
+        for (option, (key, label)) in options.iter().zip(&placements) {
+            assert_eq!(option.key, *key);
+            assert_eq!(option.display_name, *label);
+            assert_eq!(
+                option.message_id,
+                format!("mondrian.effect.texturize.placement.{key}")
+            );
+        }
+        assert_eq!(crate::TexturizePlacement::Tile.code(), 1);
+        assert_eq!(crate::TexturizePlacement::Center.code(), 2);
+        assert_eq!(crate::TexturizePlacement::Stretch.code(), 3);
+        for placement in crate::TexturizePlacement::ALL {
+            assert_eq!(
+                crate::TexturizePlacement::from_key(placement.as_key()),
+                Some(placement)
+            );
+            assert_eq!(
+                crate::TexturizePlacement::from_code(placement.code()),
+                Some(placement)
+            );
+        }
+    }
+
+    #[test]
+    fn texturize_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let contract = effect_definition(&EffectType::Texturize)
+            .expect("registered Texturize definition")
+            .execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            crate::EffectRoiPropagation::FullFrame,
+            "the texture is sampled on its own grid, so the whole frame is read"
+        );
+        assert_eq!(contract.topology, crate::EffectGraphTopology::GeneralDag);
+    }
+
+    #[test]
+    fn texturize_out_of_range_parameters_are_author_errors() {
+        let builtin_key = "builtin.texturize";
+        for (parameter, value, needle, prefix) in [
+            (
+                "texture_layer",
+                serde_json::json!(20),
+                "19",
+                "纹理化的纹理图层",
+            ),
+            (
+                "light_direction",
+                serde_json::json!(360.5),
+                "360",
+                "纹理化的灯光方向",
+            ),
+            (
+                "texture_contrast",
+                serde_json::json!(2.5),
+                "2",
+                "纹理化的纹理对比度",
+            ),
+        ] {
+            let effect = instantiate_effect_node(EffectType::Texturize)
+                .expect("the texturize should instantiate");
+            let effect_id = effect.id;
+            let mut document = serde_json::to_value(&effect).expect("serialize the node");
+            overwrite_static_value(&mut document, &format!("texturize.{parameter}"), value);
+            let result: Result<EffectNode, _> = serde_json::from_value(document);
+            if let Ok(effect) = result {
+                let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .expect_err("an out-of-range parameter should fail");
+                match error {
+                    EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                        assert_eq!(effect_key, builtin_key);
+                        assert!(reason.contains(needle), "{reason}");
+                        assert!(reason.starts_with(prefix), "{reason}");
+                    }
+                    other => panic!("unexpected error {other:?} for {effect_id}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn texturize_light_direction_changes_the_hash() {
+        let build = |light_direction: f32| {
+            let effect = author_texturize(&[
+                ("texture_layer", PropertyValue::Int(2)),
+                ("light_direction", PropertyValue::Float(light_direction)),
+            ]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored texturize should compile");
+            let (grade, ..) = texturize_node(&graph).expect("the height map builds the node");
+            EffectRenderOp::Texturize { grade }
+        };
+        use std::hash::Hasher;
+        let hash = |op: EffectRenderOp| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            op.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(
+            hash(build(0.0)),
+            hash(build(135.0)),
+            "the light direction is part of the render identity"
+        );
+    }
+
+    #[test]
+    fn texturize_placement_changes_the_hash() {
+        let build = |placement: &str| {
+            let effect = author_texturize(&[
+                ("texture_layer", PropertyValue::Int(2)),
+                (
+                    "texture_placement",
+                    PropertyValue::Enum(placement.to_owned()),
+                ),
+            ]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored texturize should compile");
+            let (grade, ..) = texturize_node(&graph).expect("the height map builds the node");
+            EffectRenderOp::Texturize { grade }
+        };
+        use std::hash::Hasher;
+        let hash = |op: EffectRenderOp| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            op.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(
+            hash(build("tile")),
+            hash(build("stretch")),
+            "the placement is part of the render identity"
         );
     }
 

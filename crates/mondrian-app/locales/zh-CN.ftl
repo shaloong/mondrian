@@ -4180,3 +4180,13 @@ parameter-mondrian-effect-builtin-compound-blur-size-mode-label = 如果图层�
 parameter-mondrian-effect-builtin-compound-blur-invert-blur-label = 反转模糊
 parameter-mondrian-effect-compound-blur-size-mode-stretch = 拉伸适配
 parameter-mondrian-effect-compound-blur-size-mode-center-crop = 中心裁剪
+## Texturize 纹理化
+effect-texturize = 纹理化
+parameter-group-texturize = 纹理化
+parameter-mondrian-effect-builtin-texturize-texture-layer-label = 纹理图层
+parameter-mondrian-effect-builtin-texturize-light-direction-label = 灯光方向
+parameter-mondrian-effect-builtin-texturize-texture-contrast-label = 纹理对比度
+parameter-mondrian-effect-builtin-texturize-texture-placement-label = 纹理位置
+parameter-mondrian-effect-texturize-placement-tile = 拼贴纹理
+parameter-mondrian-effect-texturize-placement-center = 居中纹理
+parameter-mondrian-effect-texturize-placement-stretch = 拉伸纹理以适合

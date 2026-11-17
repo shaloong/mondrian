@@ -410,6 +410,17 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Light the frame with a separately sampled picture as the height map.
+    Texturize {
+        /// Authored layer slot, light direction, contrast and placement.
+        grade: crate::TexturizeGrade,
+        /// Reconstruction and boundary behavior of the height map.
+        sampling: crate::AuxiliarySampling,
+        /// Presence marker for the bound height map raster.
+        auxiliary: Option<crate::AuxiliarySampling>,
+        /// Host slot for a linear chain, or a graph-local input if absent.
+        external_slot: Option<u32>,
+    },
     /// Remap a source picture inside an evaluated mask boundary.
     Smear {
         /// Geometry and controls resolved for the current graph evaluation.
@@ -479,6 +490,7 @@ impl EffectGpuSpatialPass {
             | Self::Blend { external_slot, .. }
             | Self::CompoundArithmetic { external_slot, .. }
             | Self::CompoundBlur { external_slot, .. }
+            | Self::Texturize { external_slot, .. }
             | Self::Glass { auxiliary: Some(_), external_slot, .. } => Some(external_slot),
             _ => None,
         }
@@ -569,6 +581,7 @@ impl EffectGpuSpatialPass {
             Self::Blend { .. } => "blend",
             Self::CompoundArithmetic { .. } => "compound_arithmetic",
             Self::CompoundBlur { .. } => "compound_blur",
+            Self::Texturize { .. } => "texturize",
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
@@ -697,6 +710,9 @@ impl EffectGpuSpatialPass {
             | Self::CompoundBlur { .. }
             | Self::Glass { .. }
             | Self::VideoCollage { .. } => u32::MAX,
+            // The differencing reads one map texel either side of the sample, so
+            // the reach is bounded even though the tiled map wraps freely.
+            Self::Texturize { .. } => crate::texturize::TEXTURIZE_HALO_PIXELS,
             Self::GrowBounds { grade } => grade.output_outset()[0],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -804,6 +820,7 @@ impl EffectGpuSpatialPass {
             | Self::CompoundBlur { .. }
             | Self::Glass { .. }
             | Self::VideoCollage { .. } => u32::MAX,
+            Self::Texturize { .. } => crate::texturize::TEXTURIZE_HALO_PIXELS,
             Self::GrowBounds { grade } => grade.output_outset()[1],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -860,6 +877,14 @@ pub(crate) fn lower_auxiliary_spatial_pass(
         }
         (EffectRenderOp::CompoundBlur { grade }, crate::AuxiliaryRole::Map) => {
             Some(EffectGpuSpatialPass::CompoundBlur {
+                grade: *grade,
+                sampling,
+                auxiliary: Some(sampling),
+                external_slot,
+            })
+        }
+        (EffectRenderOp::Texturize { grade }, crate::AuxiliaryRole::Map) => {
+            Some(EffectGpuSpatialPass::Texturize {
                 grade: *grade,
                 sampling,
                 auxiliary: Some(sampling),
@@ -1479,6 +1504,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         // Compound blur also reads a second raster, so a unary node has no slot
         // to lower; the auxiliary path supplies one.
         EffectRenderOp::CompoundBlur { .. } => None,
+        EffectRenderOp::Texturize { .. } => None,
         _ => None,
     }
 }
