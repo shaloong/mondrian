@@ -421,6 +421,11 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Resample a framed, rotated, filled and shadowed window over the frame.
+    PictureInPicture {
+        /// Authored window geometry, content fit, border, fill and shadow.
+        grade: crate::PictureInPictureGrade,
+    },
     /// Remap a source picture inside an evaluated mask boundary.
     Smear {
         /// Geometry and controls resolved for the current graph evaluation.
@@ -582,6 +587,7 @@ impl EffectGpuSpatialPass {
             Self::CompoundArithmetic { .. } => "compound_arithmetic",
             Self::CompoundBlur { .. } => "compound_blur",
             Self::Texturize { .. } => "texturize",
+            Self::PictureInPicture { .. } => "picture_in_picture",
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
@@ -713,6 +719,9 @@ impl EffectGpuSpatialPass {
             // The differencing reads one map texel either side of the sample, so
             // the reach is bounded even though the tiled map wraps freely.
             Self::Texturize { .. } => crate::texturize::TEXTURIZE_HALO_PIXELS,
+            // The window resamples the source at an arbitrary scale, rotation
+            // and pan, so the stage always needs the complete frame raster.
+            Self::PictureInPicture { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[0],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -821,6 +830,9 @@ impl EffectGpuSpatialPass {
             | Self::Glass { .. }
             | Self::VideoCollage { .. } => u32::MAX,
             Self::Texturize { .. } => crate::texturize::TEXTURIZE_HALO_PIXELS,
+            // The window resamples on both axes, so the stage always needs the
+            // complete frame raster vertically as well.
+            Self::PictureInPicture { .. } => u32::MAX,
             Self::GrowBounds { grade } => grade.output_outset()[1],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -1444,6 +1456,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::RadialShadow { grade } => {
             Some(EffectGpuSpatialPass::RadialShadow { grade: *grade })
+        }
+        EffectRenderOp::PictureInPicture { grade } => {
+            Some(EffectGpuSpatialPass::PictureInPicture { grade: *grade })
         }
         EffectRenderOp::ZoomBlur { grade } => {
             Some(EffectGpuSpatialPass::ZoomBlur { grade: *grade })

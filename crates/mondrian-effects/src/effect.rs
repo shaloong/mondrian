@@ -1419,6 +1419,12 @@ pub enum EffectRenderOp {
         /// Authored layer slot, light direction, contrast and placement.
         grade: crate::TexturizeGrade,
     },
+    /// Picture in picture: composites a resampled, framed window of the frame
+    /// over itself, with an optional border, fill and drop shadow.
+    PictureInPicture {
+        /// The thirty-five authored controls.
+        grade: crate::PictureInPictureGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1906,6 +1912,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Texturize { grade } => {
                 formatter.debug_struct("Texturize").field("grade", grade).finish()
+            }
+            Self::PictureInPicture { grade } => {
+                formatter.debug_struct("PictureInPicture").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -3131,6 +3140,12 @@ impl EffectRenderOp {
                 // every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::PictureInPicture { grade } => {
+                152u8.hash(state);
+                // All thirty-five controls change the pixels, so the grade hashes
+                // every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::Beam { grade } => {
                 151u8.hash(state);
                 // Every endpoint, thickness, falloff and tint control changes
@@ -3435,6 +3450,7 @@ impl EffectRenderOp {
             EffectRenderOp::CompoundArithmetic { .. } => 1,
             EffectRenderOp::CompoundBlur { .. } => 5,
             EffectRenderOp::Texturize { .. } => 3,
+            EffectRenderOp::PictureInPicture { .. } => 5,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3969,7 +3985,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 151] {
+fn builtin_effect_types() -> [EffectType; 152] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4121,6 +4137,7 @@ fn builtin_effect_types() -> [EffectType; 151] {
         EffectType::CompoundArithmetic,
         EffectType::CompoundBlur,
         EffectType::Texturize,
+        EffectType::PictureInPicture,
         EffectType::Beam,
     ]
 }
@@ -16385,6 +16402,394 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 placements,
             );
         }
+        EffectType::PictureInPicture => {
+            const GROUP: &str = "画中画";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "content",
+                GROUP,
+                "内容",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(2.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "scale",
+                GROUP,
+                "缩放",
+                PropertyValue::Float(crate::PIP_DEFAULT_SCALE),
+                Some(0.01),
+                Some(20.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "pan_x",
+                GROUP,
+                "平移",
+                PropertyValue::Float(crate::PIP_DEFAULT_PAN_X),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "pan_y",
+                GROUP,
+                "竖移",
+                PropertyValue::Float(crate::PIP_DEFAULT_PAN_Y),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "anti_alias",
+                GROUP,
+                "柔化",
+                PropertyValue::Float(crate::PIP_DEFAULT_ANTI_ALIAS),
+                Some(0.0),
+                Some(16.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "anchor",
+                GROUP,
+                "位置",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(8.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "lock_aspect",
+                GROUP,
+                "Lock Aspect Ratio",
+                PropertyValue::Float(0.0),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "width",
+                GROUP,
+                "宽度",
+                PropertyValue::Float(crate::PIP_DEFAULT_WIDTH),
+                Some(0.01),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "height",
+                GROUP,
+                "高度",
+                PropertyValue::Float(crate::PIP_DEFAULT_HEIGHT),
+                Some(0.01),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "aspect_ratio",
+                GROUP,
+                "Aspect Ratio",
+                PropertyValue::Float(crate::PIP_DEFAULT_ASPECT_RATIO),
+                Some(0.05),
+                Some(20.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "style",
+                GROUP,
+                "样式",
+                PropertyValue::Float(1.0),
+                Some(1.0),
+                Some(2.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "rounding",
+                GROUP,
+                "圆角",
+                PropertyValue::Float(crate::PIP_DEFAULT_ROUNDING),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "rotation",
+                GROUP,
+                "旋转",
+                PropertyValue::Float(crate::PIP_DEFAULT_ROTATION),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                GROUP,
+                "不透明度",
+                PropertyValue::Float(crate::PIP_DEFAULT_OPACITY),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "border",
+                GROUP,
+                "边框",
+                PropertyValue::Float(crate::PIP_DEFAULT_BORDER),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "border_width",
+                GROUP,
+                "边框宽度",
+                PropertyValue::Float(crate::PIP_DEFAULT_BORDER_WIDTH),
+                Some(-0.5),
+                Some(0.5),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "border_red",
+                GROUP,
+                "边框颜色 Red",
+                PropertyValue::Float(crate::PIP_DEFAULT_BORDER_RED),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "border_green",
+                GROUP,
+                "边框颜色 Green",
+                PropertyValue::Float(crate::PIP_DEFAULT_BORDER_GREEN),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "border_blue",
+                GROUP,
+                "边框颜色 Blue",
+                PropertyValue::Float(crate::PIP_DEFAULT_BORDER_BLUE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "border_opacity",
+                GROUP,
+                "边框不透明度",
+                PropertyValue::Float(crate::PIP_DEFAULT_BORDER_OPACITY),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_matching",
+                GROUP,
+                "填充与边框一致",
+                PropertyValue::Float(crate::PIP_DEFAULT_FILL_MATCHING),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill",
+                GROUP,
+                "填充",
+                PropertyValue::Float(crate::PIP_DEFAULT_FILL),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_red",
+                GROUP,
+                "填充颜色 Red",
+                PropertyValue::Float(crate::PIP_DEFAULT_FILL_RED),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_green",
+                GROUP,
+                "填充颜色 Green",
+                PropertyValue::Float(crate::PIP_DEFAULT_FILL_GREEN),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_blue",
+                GROUP,
+                "填充颜色 Blue",
+                PropertyValue::Float(crate::PIP_DEFAULT_FILL_BLUE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_opacity",
+                GROUP,
+                "填充不透明度",
+                PropertyValue::Float(crate::PIP_DEFAULT_FILL_OPACITY),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow",
+                GROUP,
+                "下拉阴影",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW),
+                Some(0.0),
+                Some(1.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_strength",
+                GROUP,
+                "强度",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW_STRENGTH),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_red",
+                GROUP,
+                "颜色 Red",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW_RED),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_green",
+                GROUP,
+                "颜色 Green",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW_GREEN),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_blue",
+                GROUP,
+                "颜色 Blue",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW_BLUE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_angle",
+                GROUP,
+                "投影角度",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW_ANGLE),
+                Some(-180.0),
+                Some(180.0),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_distance",
+                GROUP,
+                "投影距离",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW_DISTANCE),
+                Some(-0.5),
+                Some(0.5),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_zoom",
+                GROUP,
+                "扩展",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW_ZOOM),
+                Some(0.0),
+                Some(5.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "shadow_blur",
+                GROUP,
+                "模糊",
+                PropertyValue::Float(crate::PIP_DEFAULT_SHADOW_BLUR),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -17636,6 +18041,11 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Unitless
         }
         (EffectType::Texturize, "light_direction") => ParameterUnit::Degrees,
+        // The softness is the only length the window honours in pixels; the
+        // rotation and the shadow angle stay in degrees and the rest are
+        // fractions of the frame or of the window.
+        (EffectType::PictureInPicture, "anti_alias") => ParameterUnit::Pixels,
+        (EffectType::PictureInPicture, "rotation" | "shadow_angle") => ParameterUnit::Degrees,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -17657,9 +18067,8 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
         default_properties_for(effect_type.clone()),
         EffectColorDomainContract::SCENE_LINEAR,
     )
-    .with_category(category)
-    .with_execution_contract(builtin_effect_execution_contract(&effect_type));
-    if let Some(graph_preparer) = builtin_graph_preparer_for(&effect_type) {
+    .with_category(category);
+    let definition = if let Some(graph_preparer) = builtin_graph_preparer_for(&effect_type) {
         definition.with_prepared_graph_builder(graph_preparer)
     } else if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
         if matches!(
@@ -17686,7 +18095,11 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
         }
     } else {
         definition
-    }
+    };
+    // The authored contract owns the topology: the builder wiring only installs
+    // the evaluator, and `with_graph_builder` would otherwise force every
+    // non-branching effect back to a linear chain.
+    definition.with_execution_contract(builtin_effect_execution_contract(&effect_type))
 }
 
 fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutionContract {
@@ -17978,6 +18391,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The texture is sampled on its own grid, so the differencing
             // reaches one texel and the tiled placement can wrap anywhere.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::PictureInPicture => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The window resamples the whole frame at an arbitrary offset, so the
+            // definition-level envelope cannot narrow the input to a tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
@@ -26270,6 +26691,119 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::PictureInPicture => {
+            let content_id = builtin_parameter_id(effect_type, "content");
+            let scale_id = builtin_parameter_id(effect_type, "scale");
+            let pan_x_id = builtin_parameter_id(effect_type, "pan_x");
+            let pan_y_id = builtin_parameter_id(effect_type, "pan_y");
+            let anti_alias_id = builtin_parameter_id(effect_type, "anti_alias");
+            let anchor_id = builtin_parameter_id(effect_type, "anchor");
+            let lock_aspect_id = builtin_parameter_id(effect_type, "lock_aspect");
+            let width_id = builtin_parameter_id(effect_type, "width");
+            let height_id = builtin_parameter_id(effect_type, "height");
+            let aspect_ratio_id = builtin_parameter_id(effect_type, "aspect_ratio");
+            let style_id = builtin_parameter_id(effect_type, "style");
+            let rounding_id = builtin_parameter_id(effect_type, "rounding");
+            let rotation_id = builtin_parameter_id(effect_type, "rotation");
+            let opacity_id = builtin_parameter_id(effect_type, "opacity");
+            let border_id = builtin_parameter_id(effect_type, "border");
+            let border_width_id = builtin_parameter_id(effect_type, "border_width");
+            let border_red_id = builtin_parameter_id(effect_type, "border_red");
+            let border_green_id = builtin_parameter_id(effect_type, "border_green");
+            let border_blue_id = builtin_parameter_id(effect_type, "border_blue");
+            let border_opacity_id = builtin_parameter_id(effect_type, "border_opacity");
+            let fill_matching_id = builtin_parameter_id(effect_type, "fill_matching");
+            let fill_id = builtin_parameter_id(effect_type, "fill");
+            let fill_red_id = builtin_parameter_id(effect_type, "fill_red");
+            let fill_green_id = builtin_parameter_id(effect_type, "fill_green");
+            let fill_blue_id = builtin_parameter_id(effect_type, "fill_blue");
+            let fill_opacity_id = builtin_parameter_id(effect_type, "fill_opacity");
+            let shadow_id = builtin_parameter_id(effect_type, "shadow");
+            let shadow_strength_id = builtin_parameter_id(effect_type, "shadow_strength");
+            let shadow_red_id = builtin_parameter_id(effect_type, "shadow_red");
+            let shadow_green_id = builtin_parameter_id(effect_type, "shadow_green");
+            let shadow_blue_id = builtin_parameter_id(effect_type, "shadow_blue");
+            let shadow_angle_id = builtin_parameter_id(effect_type, "shadow_angle");
+            let shadow_distance_id = builtin_parameter_id(effect_type, "shadow_distance");
+            let shadow_zoom_id = builtin_parameter_id(effect_type, "shadow_zoom");
+            let shadow_blur_id = builtin_parameter_id(effect_type, "shadow_blur");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let defaults = crate::PictureInPictureParameters::default();
+                let mut parameters = defaults;
+                let numeric = |id: &ParameterId, default: f32| {
+                    effect.evaluate_f32_parameter(id, context.time, default)
+                };
+                // The four menu-shaped controls are authored as numbers, so the
+                // builder rounds them onto their enum codes and rejects anything
+                // that falls outside the authored range.
+                let code = |value: f32, name: &str, minimum: u8, maximum: u8| {
+                    let rounded = value.round();
+                    if !(f32::from(minimum)..=f32::from(maximum)).contains(&rounded) {
+                        return Err(invalid(format!(
+                            "画中画的参数 {name} 必须是 {minimum} 到 {maximum} 之间的整数"
+                        )));
+                    }
+                    Ok(rounded as u8)
+                };
+                let content = code(numeric(&content_id, 0.0), "内容", 0, 2)?;
+                parameters.content = crate::PictureInPictureContent::from_code(content)
+                    .ok_or_else(|| invalid("画中画的内容必须是 0、1 或 2".to_string()))?;
+                let anchor = code(numeric(&anchor_id, 0.0), "位置", 0, 8)?;
+                parameters.anchor = crate::PictureInPictureAnchor::from_code(anchor)
+                    .ok_or_else(|| invalid("画中画的位置必须是 0 到 8".to_string()))?;
+                let style = code(numeric(&style_id, 1.0), "样式", 1, 2)?;
+                parameters.style = crate::PictureInPictureStyle::from_code(style)
+                    .ok_or_else(|| invalid("画中画的样式必须是 1 或 2".to_string()))?;
+                parameters.lock_aspect =
+                    code(numeric(&lock_aspect_id, 0.0), "Lock Aspect Ratio", 0, 1)? != 0;
+                parameters.scale = numeric(&scale_id, defaults.scale);
+                parameters.pan_x = numeric(&pan_x_id, defaults.pan_x);
+                parameters.pan_y = numeric(&pan_y_id, defaults.pan_y);
+                parameters.anti_alias = numeric(&anti_alias_id, defaults.anti_alias);
+                parameters.width = numeric(&width_id, defaults.width);
+                parameters.height = numeric(&height_id, defaults.height);
+                parameters.aspect_ratio = numeric(&aspect_ratio_id, defaults.aspect_ratio);
+                parameters.rounding = numeric(&rounding_id, defaults.rounding);
+                parameters.rotation = numeric(&rotation_id, defaults.rotation);
+                parameters.opacity = numeric(&opacity_id, defaults.opacity);
+                parameters.border = numeric(&border_id, defaults.border);
+                parameters.border_width = numeric(&border_width_id, defaults.border_width);
+                parameters.border_red = numeric(&border_red_id, defaults.border_red);
+                parameters.border_green = numeric(&border_green_id, defaults.border_green);
+                parameters.border_blue = numeric(&border_blue_id, defaults.border_blue);
+                parameters.border_opacity = numeric(&border_opacity_id, defaults.border_opacity);
+                parameters.fill_matching = numeric(&fill_matching_id, defaults.fill_matching);
+                parameters.fill = numeric(&fill_id, defaults.fill);
+                parameters.fill_red = numeric(&fill_red_id, defaults.fill_red);
+                parameters.fill_green = numeric(&fill_green_id, defaults.fill_green);
+                parameters.fill_blue = numeric(&fill_blue_id, defaults.fill_blue);
+                parameters.fill_opacity = numeric(&fill_opacity_id, defaults.fill_opacity);
+                parameters.shadow = numeric(&shadow_id, defaults.shadow);
+                parameters.shadow_strength = numeric(&shadow_strength_id, defaults.shadow_strength);
+                parameters.shadow_red = numeric(&shadow_red_id, defaults.shadow_red);
+                parameters.shadow_green = numeric(&shadow_green_id, defaults.shadow_green);
+                parameters.shadow_blue = numeric(&shadow_blue_id, defaults.shadow_blue);
+                parameters.shadow_angle = numeric(&shadow_angle_id, defaults.shadow_angle);
+                parameters.shadow_distance = numeric(&shadow_distance_id, defaults.shadow_distance);
+                parameters.shadow_zoom = numeric(&shadow_zoom_id, defaults.shadow_zoom);
+                parameters.shadow_blur = numeric(&shadow_blur_id, defaults.shadow_blur);
+                let grade = crate::PictureInPictureGrade::new(parameters).map_err(|error| {
+                    invalid(format!("画中画的参数 {} 必须是数值", error.parameter()))
+                })?;
+                // The kernel resolves the window size, the centre and the shadow
+                // from the frame size when it runs, so the builder never reads the
+                // frame and the stored grade stays frame-relative.
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::PictureInPicture { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::FilmLook => {
             let stock_id = builtin_parameter_id(effect_type, "stock");
             let strength_id = builtin_parameter_id(effect_type, "strength");
@@ -28252,6 +28786,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::CompoundArithmetic => "复合运算",
         EffectType::CompoundBlur => "复合模糊",
         EffectType::Texturize => "纹理化",
+        EffectType::PictureInPicture => "画中画",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -29676,6 +30211,7 @@ mod tests {
             EffectType::CompoundArithmetic,
             EffectType::CompoundBlur,
             EffectType::Texturize,
+            EffectType::PictureInPicture,
             EffectType::Beam,
         ]
         .into_iter()
@@ -38973,7 +39509,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 151);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 152);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -39501,7 +40037,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 151);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 152);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -42460,7 +42996,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 151);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 152);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -43596,7 +44132,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 151);
+        assert_eq!(builtin_effect_types().len(), 152);
     }
 
     #[test]
@@ -46834,6 +47370,435 @@ mod tests {
             }
             other => panic!("unexpected point lowering {other:?}"),
         }
+    }
+
+    fn picture_in_picture_op(graph: &EffectRenderGraph) -> Option<crate::PictureInPictureGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::PictureInPicture { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::PictureInPicture { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_picture_in_picture(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::PictureInPicture)
+            .expect("the picture in picture should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::PictureInPicture.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the picture in picture parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn picture_in_picture_defaults_build_one_spatial_node() {
+        let effect = instantiate_effect_node(EffectType::PictureInPicture)
+            .expect("the picture in picture should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = picture_in_picture_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::PictureInPictureGrade::documented_defaults());
+        assert_eq!(grade.cost(), 5);
+        assert_eq!(grade.input_halo(), (0, 0));
+        assert_eq!(graph.nodes.len(), 2, "the source plus one window node");
+        let op = EffectRenderOp::PictureInPicture { grade };
+        assert_eq!(op.estimated_cost(), 5);
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the frozen budget charges no scratch frame beyond the destination"
+        );
+        let pass = crate::spatial_pass_for(&op).expect("the window is a spatial pass");
+        assert_eq!(
+            pass,
+            crate::EffectGpuSpatialPass::PictureInPicture { grade }
+        );
+        assert_eq!(pass.name(), "picture_in_picture");
+        assert_eq!(
+            (pass.horizontal_halo(), pass.vertical_halo()),
+            (u32::MAX, u32::MAX),
+            "the window resamples the complete source raster"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            152
+        );
+    }
+
+    #[test]
+    fn picture_in_picture_identity_builds_no_node() {
+        let effect = author_picture_in_picture(&[
+            ("opacity", PropertyValue::Float(0.0)),
+            ("shadow", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the invisible window should compile");
+        assert!(
+            picture_in_picture_op(&graph).is_none(),
+            "an invisible window without a shadow, border or fill is the identity"
+        );
+
+        for (parameter, value) in [("fill", 1.0), ("border", 1.0)] {
+            let effect = author_picture_in_picture(&[
+                ("opacity", PropertyValue::Float(0.0)),
+                ("shadow", PropertyValue::Float(0.0)),
+                (parameter, PropertyValue::Float(value)),
+            ]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the {parameter} window should compile");
+            assert!(
+                picture_in_picture_op(&graph).is_some(),
+                "a {parameter} keeps the node even when the content is invisible"
+            );
+        }
+    }
+
+    #[test]
+    fn picture_in_picture_schema_round_trips_its_thirty_five_parameters() {
+        let effect_type = EffectType::PictureInPicture;
+        let properties = default_properties_for(effect_type.clone());
+        let defaults = crate::PictureInPictureParameters::default();
+        let expected = [
+            ("content", "内容", ParameterUnit::Unitless, 0.0_f32),
+            ("scale", "缩放", ParameterUnit::Unitless, defaults.scale),
+            ("pan_x", "平移", ParameterUnit::Unitless, defaults.pan_x),
+            ("pan_y", "竖移", ParameterUnit::Unitless, defaults.pan_y),
+            (
+                "anti_alias",
+                "柔化",
+                ParameterUnit::Pixels,
+                defaults.anti_alias,
+            ),
+            ("anchor", "位置", ParameterUnit::Unitless, 0.0),
+            (
+                "lock_aspect",
+                "Lock Aspect Ratio",
+                ParameterUnit::Unitless,
+                0.0,
+            ),
+            ("width", "宽度", ParameterUnit::Unitless, defaults.width),
+            ("height", "高度", ParameterUnit::Unitless, defaults.height),
+            (
+                "aspect_ratio",
+                "Aspect Ratio",
+                ParameterUnit::Unitless,
+                defaults.aspect_ratio,
+            ),
+            ("style", "样式", ParameterUnit::Unitless, 1.0),
+            (
+                "rounding",
+                "圆角",
+                ParameterUnit::Unitless,
+                defaults.rounding,
+            ),
+            (
+                "rotation",
+                "旋转",
+                ParameterUnit::Degrees,
+                defaults.rotation,
+            ),
+            (
+                "opacity",
+                "不透明度",
+                ParameterUnit::Unitless,
+                defaults.opacity,
+            ),
+            ("border", "边框", ParameterUnit::Unitless, defaults.border),
+            (
+                "border_width",
+                "边框宽度",
+                ParameterUnit::Unitless,
+                defaults.border_width,
+            ),
+            (
+                "border_red",
+                "边框颜色 Red",
+                ParameterUnit::Unitless,
+                defaults.border_red,
+            ),
+            (
+                "border_green",
+                "边框颜色 Green",
+                ParameterUnit::Unitless,
+                defaults.border_green,
+            ),
+            (
+                "border_blue",
+                "边框颜色 Blue",
+                ParameterUnit::Unitless,
+                defaults.border_blue,
+            ),
+            (
+                "border_opacity",
+                "边框不透明度",
+                ParameterUnit::Unitless,
+                defaults.border_opacity,
+            ),
+            (
+                "fill_matching",
+                "填充与边框一致",
+                ParameterUnit::Unitless,
+                defaults.fill_matching,
+            ),
+            ("fill", "填充", ParameterUnit::Unitless, defaults.fill),
+            (
+                "fill_red",
+                "填充颜色 Red",
+                ParameterUnit::Unitless,
+                defaults.fill_red,
+            ),
+            (
+                "fill_green",
+                "填充颜色 Green",
+                ParameterUnit::Unitless,
+                defaults.fill_green,
+            ),
+            (
+                "fill_blue",
+                "填充颜色 Blue",
+                ParameterUnit::Unitless,
+                defaults.fill_blue,
+            ),
+            (
+                "fill_opacity",
+                "填充不透明度",
+                ParameterUnit::Unitless,
+                defaults.fill_opacity,
+            ),
+            (
+                "shadow",
+                "下拉阴影",
+                ParameterUnit::Unitless,
+                defaults.shadow,
+            ),
+            (
+                "shadow_strength",
+                "强度",
+                ParameterUnit::Unitless,
+                defaults.shadow_strength,
+            ),
+            (
+                "shadow_red",
+                "颜色 Red",
+                ParameterUnit::Unitless,
+                defaults.shadow_red,
+            ),
+            (
+                "shadow_green",
+                "颜色 Green",
+                ParameterUnit::Unitless,
+                defaults.shadow_green,
+            ),
+            (
+                "shadow_blue",
+                "颜色 Blue",
+                ParameterUnit::Unitless,
+                defaults.shadow_blue,
+            ),
+            (
+                "shadow_angle",
+                "投影角度",
+                ParameterUnit::Degrees,
+                defaults.shadow_angle,
+            ),
+            (
+                "shadow_distance",
+                "投影距离",
+                ParameterUnit::Unitless,
+                defaults.shadow_distance,
+            ),
+            (
+                "shadow_zoom",
+                "扩展",
+                ParameterUnit::Unitless,
+                defaults.shadow_zoom,
+            ),
+            (
+                "shadow_blur",
+                "模糊",
+                ParameterUnit::Unitless,
+                defaults.shadow_blur,
+            ),
+        ];
+        assert_eq!(
+            expected.len(),
+            35,
+            "the design authors thirty-five controls"
+        );
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit, default)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert!(
+                property.descriptor.schema.enum_options.is_empty(),
+                "{parameter} is authored as a number, not a menu"
+            );
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Float(*default),
+                "{parameter} evaluates to its documented default"
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("画中画")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        assert_eq!(crate::PictureInPictureContent::Stretch.code(), 0);
+        assert_eq!(crate::PictureInPictureStyle::RoundedRect.code(), 1);
+        assert_eq!(crate::PictureInPictureAnchor::TopLeft.code(), 0);
+        assert_eq!(crate::PictureInPictureAnchor::BottomRight.code(), 8);
+    }
+
+    #[test]
+    fn picture_in_picture_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::PictureInPicture;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            EffectRoiPropagation::FullFrame,
+            "the window resamples the complete source raster"
+        );
+        assert_eq!(
+            contract.topology,
+            crate::EffectGraphTopology::GeneralDag,
+            "the window reads the same raster it writes"
+        );
+    }
+
+    #[test]
+    fn picture_in_picture_out_of_range_parameter_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::PictureInPicture)
+            .expect("the picture in picture should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::PictureInPicture.property_path("width"),
+                value: PropertyValue::Float(2.0),
+            })
+            .expect_err("a width above one should fail");
+        let message = error.to_string();
+        assert!(message.contains("picture_in_picture.width"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        for (parameter, value, hint) in [
+            ("content", 2.6_f64, "内容"),
+            ("anchor", 9.0, "位置"),
+            ("style", 3.0, "样式"),
+            ("rotation", 400.0, "rotation"),
+        ] {
+            let effect = instantiate_effect_node(EffectType::PictureInPicture)
+                .expect("the picture in picture should instantiate");
+            let mut document = serde_json::to_value(&effect).expect("serialize the node");
+            overwrite_static_value(
+                &mut document,
+                &format!("picture_in_picture.{parameter}"),
+                serde_json::json!(value),
+            );
+            let result: Result<EffectNode, _> = serde_json::from_value(document);
+            if let Ok(effect) = result {
+                let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .expect_err("an out-of-range control should fail");
+                match error {
+                    EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                        assert_eq!(effect_key, "builtin.picture_in_picture");
+                        assert!(reason.contains(hint), "{parameter}: {reason}");
+                    }
+                    other => panic!("unexpected error {other:?} for {parameter}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn picture_in_picture_width_changes_the_hash() {
+        use std::hash::Hasher;
+
+        let narrow = instantiate_effect_node(EffectType::PictureInPicture)
+            .expect("the picture in picture should instantiate");
+        let narrow = build_effect_render_graph(&[narrow], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let narrow = picture_in_picture_op(&narrow).expect("the defaults are not the identity");
+
+        let wide = author_picture_in_picture(&[("width", PropertyValue::Float(0.5))]);
+        let wide = build_effect_render_graph(&[wide], tt(0), TEST_WORKING_SPACE)
+            .expect("the wider window should compile");
+        let wide = picture_in_picture_op(&wide).expect("the wider window is not the identity");
+        assert_ne!(wide, narrow, "the authored width reaches the grade");
+
+        let mut narrow_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::PictureInPicture { grade: narrow }.hash_signature(&mut narrow_hasher);
+        let mut wide_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::PictureInPicture { grade: wide }.hash_signature(&mut wide_hasher);
+        assert_ne!(
+            narrow_hasher.finish(),
+            wide_hasher.finish(),
+            "the width is part of the identity"
+        );
+
+        let op = EffectRenderOp::PictureInPicture { grade: wide };
+        assert_eq!(
+            crate::spatial_pass_for(&op),
+            Some(crate::EffectGpuSpatialPass::PictureInPicture { grade: wide }),
+            "the authored grade reaches the spatial pass unmodified"
+        );
+        let (cells, _) = wide.gpu_controls(24, 16);
+        assert_eq!(
+            cells[1][0], 12.0,
+            "the window width resolves at record time"
+        );
+    }
+
+    #[test]
+    fn picture_in_picture_grade_carries_no_frame_extent() {
+        use std::hash::Hasher;
+
+        let effect = instantiate_effect_node(EffectType::PictureInPicture)
+            .expect("the picture in picture should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = picture_in_picture_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::PictureInPictureGrade::documented_defaults());
+
+        let mut first = std::collections::hash_map::DefaultHasher::new();
+        grade.hash_state(&mut first);
+        let before = first.finish();
+        let (small, _) = grade.gpu_controls(24, 16);
+        let (large, _) = grade.gpu_controls(1920, 1080);
+        assert_eq!(small[0][0], 24.0);
+        assert_eq!(large[0][0], 1920.0);
+        assert_eq!(small[1][0], 6.0, "24 * 0.25");
+        assert_eq!(large[1][0], 480.0, "1920 * 0.25");
+        let mut second = std::collections::hash_map::DefaultHasher::new();
+        grade.hash_state(&mut second);
+        assert_eq!(
+            before,
+            second.finish(),
+            "the authored grade is immutable and carries no frame extent"
+        );
     }
 
     fn zoom_blur_op(graph: &EffectRenderGraph) -> Option<crate::ZoomBlurGrade> {

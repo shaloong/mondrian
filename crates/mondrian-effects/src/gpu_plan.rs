@@ -1246,6 +1246,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CompoundArithmetic { .. } => "compound_arithmetic",
         EffectRenderOp::CompoundBlur { .. } => "compound_blur",
         EffectRenderOp::Texturize { .. } => "texturize",
+        EffectRenderOp::PictureInPicture { .. } => "picture_in_picture",
         EffectRenderOp::Custom { .. } => "custom",
     }
 }

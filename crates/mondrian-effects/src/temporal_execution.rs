@@ -3740,6 +3740,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::CompoundArithmetic { .. } => "compound_arithmetic",
         crate::EffectRenderOp::CompoundBlur { .. } => "compound_blur",
         crate::EffectRenderOp::Texturize { .. } => "texturize",
+        crate::EffectRenderOp::PictureInPicture { .. } => "picture_in_picture",
         crate::EffectRenderOp::Custom { .. } => "custom",
     }
 }

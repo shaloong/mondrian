@@ -2949,6 +2949,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::CompoundArithmetic { .. } => 148,
         EffectRenderOp::CompoundBlur { .. } => 149,
         EffectRenderOp::Texturize { .. } => 150,
+        EffectRenderOp::PictureInPicture { .. } => 152,
         EffectRenderOp::Beam { .. } => 151,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
@@ -5400,6 +5401,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::CompoundArithmetic { .. }
             | crate::EffectRenderOp::CompoundBlur { .. }
             | crate::EffectRenderOp::Texturize { .. }
+            | crate::EffectRenderOp::PictureInPicture { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::SetMatte { .. }
             | crate::EffectRenderOp::Grid { .. }

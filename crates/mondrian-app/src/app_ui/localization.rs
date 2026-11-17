@@ -297,6 +297,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "反转" => Some("parameter-group-invert"),
         "发光" => Some("parameter-group-glow"),
         "变换" => Some("parameter-group-transform"),
+        "画中画" => Some("parameter-group-picture-in-picture"),
         "去色带" => Some("parameter-group-deband"),
         "噪点" => Some("parameter-group-noise"),
         "基础校正" => Some("parameter-group-basic-correction"),

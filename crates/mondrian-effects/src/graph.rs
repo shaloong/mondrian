@@ -3223,6 +3223,13 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
+        EffectRenderOp::PictureInPicture { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The window resamples the source raster at an arbitrary scale,
+            // rotation and pan, so the input envelope cannot be narrowed.
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
         EffectRenderOp::Grid { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float

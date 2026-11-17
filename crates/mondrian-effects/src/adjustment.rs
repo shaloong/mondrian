@@ -681,6 +681,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::PictureInPicture { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "picture_in_picture",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::FilmLook { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "film_look",
@@ -1440,6 +1446,10 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The kernel reads only the source pixel and the height map, so no
         // scratch frame is needed beyond the destination.
         EffectRenderOp::Texturize { .. } => 0,
+        // The frozen TRF-04 budget charges no scratch frame beyond the
+        // destination, even though the kernel snapshots the source raster so
+        // the resampled taps never read rewritten pixels.
+        EffectRenderOp::PictureInPicture { .. } => 0,
         EffectRenderOp::GrowBounds { .. } => 0,
         EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 1,
         EffectRenderOp::DetailPreservingUpscale { .. } => 1,
@@ -2076,6 +2086,20 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         // Texturize reads a second raster and reads it on its own grid, so the
         // unary dispatch cannot lower it; the auxiliary path owns the kernel.
         EffectRenderOp::Texturize { .. } => Ok(false),
+        // Picture in picture resamples the complete source raster, so the
+        // unary region dispatch cannot lower a partial region.
+        EffectRenderOp::PictureInPicture { grade } => {
+            if !region.is_full_frame() {
+                return Ok(false);
+            }
+            crate::picture_in_picture::apply_picture_in_picture_controlled(
+                working.as_mut_slice(),
+                width,
+                height,
+                grade,
+                checkpoint,
+            )
+        }
         // Glass uses the complete graph's raster and auxiliary inputs.
         EffectRenderOp::Glass { .. } | EffectRenderOp::VideoCollage { .. } => Ok(false),
         EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),
