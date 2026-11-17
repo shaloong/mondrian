@@ -146,6 +146,7 @@ pub(crate) struct EffectSpatialGpu {
     blend: wgpu::RenderPipeline,
     compound_arithmetic: wgpu::RenderPipeline,
     compound_blur: wgpu::RenderPipeline,
+    texturize: wgpu::RenderPipeline,
     temporal_blend: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
@@ -1863,6 +1864,7 @@ impl EffectSpatialGpu {
         );
         let compound_blur =
             auxiliary_pipeline("mondrian.effect-spatial.compound-blur", "fs_compound_blur");
+        let texturize = auxiliary_pipeline("mondrian.effect-spatial.texturize", "fs_texturize");
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
             layout: Some(&composite_layout),
@@ -2766,6 +2768,7 @@ impl EffectSpatialGpu {
             blend,
             compound_arithmetic,
             compound_blur,
+            texturize,
             temporal_blend,
             bindings,
             composite_bindings,
@@ -4159,6 +4162,94 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    /// Records the STY-08 texturize stage.
+    ///
+    /// One draw reads the premultiplied primary texel, takes the central
+    /// difference of the height field at the four neighbouring map texels,
+    /// projects it onto the authored light direction and multiplies the colour
+    /// by the resulting shade. The stage preserves the raster, so the delivery
+    /// keeps the input extent and the map only feeds the sampler.
+    #[allow(clippy::too_many_arguments)]
+    fn record_texturize(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        primary: &wgpu::Texture,
+        auxiliary: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        transform: [f32; 6],
+        grade: mondrian_effects::TexturizeGrade,
+        sampling: mondrian_effects::AuxiliarySampling,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if primary.width() == 0
+            || primary.height() == 0
+            || auxiliary.width() == 0
+            || auxiliary.height() == 0
+        {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        if transform.iter().any(|component| !component.is_finite()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "texturize_transform",
+            ));
+        }
+        if (destination.width(), destination.height()) != (primary.width(), primary.height()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "texturize_output_extent",
+            ));
+        }
+        // The kernel derives the map uv itself (design §3), so the placement is
+        // expressed as the two pixel-scale ratios and `size.w == 0` keeps
+        // `sample_auxiliary` from applying any delivery affine a second time.
+        let tiles = [
+            primary.width() as f32 / auxiliary.width() as f32,
+            primary.height() as f32 / auxiliary.height() as f32,
+        ];
+        if tiles.iter().any(|tile| !tile.is_finite() || *tile <= 0.0) {
+            return Err(EffectSpatialGpuError::UnsupportedPass("texturize_geometry"));
+        }
+        let (controls, _) = grade.gpu_controls();
+        // `gpu_controls` publishes `[contrast, cos, sin, placement]`, but the
+        // fourth lane is the linear-filter flag that every auxiliary pass
+        // overwrites. The placement code therefore travels in the third lane
+        // and the sine in `aces.w`, the one lane the delivery affine leaves free
+        // (design §5).
+        let placement = grade.texture_placement().code() as f32;
+        let mut params = [controls[0], controls[1], placement, 0.0];
+        params[3] = f32::from(u8::from(sampling.filter == AuxiliaryFilter::Linear));
+        // The delivery affine is published for the shared uniform block but the
+        // fixed-grid kernel never applies it (`size.w == 0`), which matches the
+        // CPU kernel: the mapping is `PrimaryGrid`, so the transform is ignored.
+        let [a, b, tx, c, d, ty] = transform;
+        let uniforms = SpatialPassUniform {
+            size: [
+                primary.width() as f32,
+                primary.height() as f32,
+                f32::from(u8::from(
+                    sampling.out_of_bounds == AuxiliaryOutOfBounds::Transparent,
+                )),
+                0.0,
+            ],
+            params,
+            extra: [tiles[0], tiles[1], 0.0, 0.0],
+            aces: [a, b, tx, controls[2]],
+            extra1: [c, d, ty, 0.0],
+        };
+        let primary_view = primary.create_view(&wgpu::TextureViewDescriptor::default());
+        let auxiliary_view = auxiliary.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.texturize,
+            &primary_view,
+            &auxiliary_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
+
     /// Sample an independent texture while processing the primary frame.
     ///
     /// `scratch` supplies the intermediate planes that a multi-pass auxiliary
@@ -4214,6 +4305,18 @@ impl EffectSpatialGpu {
         }
         if let EffectGpuSpatialPass::CompoundBlur { grade, sampling, .. } = *pass {
             return self.record_compound_blur(
+                device,
+                encoder,
+                primary,
+                auxiliary,
+                destination,
+                transform,
+                grade,
+                sampling,
+            );
+        }
+        if let EffectGpuSpatialPass::Texturize { grade, sampling, .. } = *pass {
+            return self.record_texturize(
                 device,
                 encoder,
                 primary,
@@ -4570,6 +4673,12 @@ impl EffectSpatialGpu {
             // (design §6). At UHD that is 2 x 132,710,400 = 265,420,800 B and
             // at DCI 4K 2 x 141,557,760 = 283,115,520 B.
             EffectGpuSpatialPass::CompoundBlur { .. } => Ok(1),
+            // One draw folds the four height samples, the central difference and
+            // the shade into the written texel, so the pool is
+            // `pass_count + 1` = two textures (design §5). At UHD that is
+            // 2 x 132,710,400 = 265,420,800 B and at DCI 4K
+            // 2 x 141,557,760 = 283,115,520 B.
+            EffectGpuSpatialPass::Texturize { .. } => Ok(1),
         }
     }
 
@@ -4670,6 +4779,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::Blend { .. }
             | EffectGpuSpatialPass::CompoundArithmetic { .. }
             | EffectGpuSpatialPass::CompoundBlur { .. }
+            | EffectGpuSpatialPass::Texturize { .. }
             | EffectGpuSpatialPass::Glass { auxiliary: Some(_), .. } => {
                 return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
             }
@@ -11263,7 +11373,7 @@ fn spatial_composite_shader_source() -> String {
         "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
          const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
          const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
-         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}\n{}",
+         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         mondrian_effects::PIXEL_CENTRE,
         f32::MAX.to_bits(),
         include_str!("channel_combiner.wgsl"),
@@ -11272,6 +11382,7 @@ fn spatial_composite_shader_source() -> String {
         include_str!("blend.wgsl"),
         include_str!("compound_arithmetic.wgsl"),
         include_str!("compound_blur.wgsl"),
+        include_str!("texturize.wgsl"),
     )
 }
 

@@ -454,6 +454,11 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // bilinear source taps: the disc sampling is the expensive half, so the
         // draw sits above the single-tap composites.
         "compound_blur" => 3.5,
+        // Four bilinear map reads in the central difference plus the one
+        // premultiplied source load; the taps are single-texel steps, so the
+        // draw sits below the compound-blur disc and above the one-tap
+        // composites.
+        "texturize" => 2.2,
         "grow_bounds" => 0.8,
         "smear" | "reshape" => 2.4,
         "detail_preserving_upscale" => 28.0,
@@ -544,6 +549,10 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // The map sample plus 25 bilinear premultiplied taps per pixel, and the
         // scalar kernel premultiplies the whole frame up front.
         "compound_blur" => 8.0,
+        // The scalar kernel shades the frame in place without a premultiply pass and
+        // reads four bilinear map taps per pixel for the central difference; that
+        // sample count sits far below the compound-blur disc.
+        "texturize" => 5.0,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
         // Same sliding histogram as the median plus the deviation gate.
