@@ -3349,6 +3349,57 @@ fn strobe_apply(pixel: vec4<f32>, effect: EffectUniform) -> vec4<f32> {
     return vec4<f32>(result, pixel.a);
 }
 
+// Beam is a pure point op: the authored segment is normalised to the frame, so
+// the shader needs only the fragment centre. Every step mirrors
+// `mondrian-effects/src/beam.rs`.
+fn beam_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
+    // `position` is the fragment centre offset by -0.5, so adding 0.5 back
+    // yields the pixel centre the CPU kernel uses (`column + 0.5`).
+    let point = position + vec2<f32>(0.5);
+    let frame_size = uniforms.geometry.zw;
+    // params is [length, time, thickness_start, thickness_end]: the beam runs
+    // from `extra0.xy` towards `extra0.zw`, shortened by `length`. The axis is
+    // scaled directly, exactly like the CPU kernel, so no cancellation can
+    // widen the parity budget.
+    let start_point = effect.extra0.xy * frame_size;
+    let end_point = effect.extra0.zw * frame_size;
+    let axis = (end_point - start_point) * clamp(effect.params.x, 0.0, 1.0);
+    let axis_length2 = max(dot(axis, axis), 1e-6);
+    let s = clamp(dot(point - start_point, axis) / axis_length2, 0.0, 1.0);
+    let nearest = start_point + axis * s;
+    let distance = length(point - nearest);
+    // color is [softness, perspective, composite, 0]. The perspective term is
+    // asymmetric around the midpoint: 0.5x at the start, 1.5x at the end.
+    let base_half = mix(effect.params.z, effect.params.w, s) * 0.5;
+    let half = max(base_half * (1.0 + effect.color.y * (s - 0.5)), 0.0);
+    let core = 1.0 - smoothstep(0.0, max(half, 0.5), distance);
+    let band = max(half * (1.0 + effect.color.x * 4.0), half + 0.5);
+    let halo = 1.0 - smoothstep(max(half, 0.5), band, distance);
+    // The CPU kernel returns the input untouched when the halo is empty, which
+    // is the only way a transparent pixel stays bit-identical.
+    if (halo <= 0.0) {
+        return pixel;
+    }
+    // extra1 is [inside r, inside g, inside b, beam tag] and extra2 is the
+    // outside colour.
+    let colour = mix(effect.extra2.xyz, effect.extra1.xyz, core);
+    let pulse = 1.0 - smoothstep(0.02, 0.25, abs(s - effect.params.y));
+    // `gain` is formed before the colour product so the three channels follow
+    // the CPU kernel's operation order.
+    let gain = halo * (1.0 + 0.75 * pulse);
+    let light = colour * gain;
+    let blend = clamp(effect.color.z, 0.0, 1.0);
+    // composite = 0 adds the light, composite = 1 covers the source by the
+    // halo. RGB is never clamped, so the beam itself may exceed 1.
+    let added = pixel.rgb + light;
+    let covered = mix(pixel.rgb, light, halo);
+    let alpha = mix(clamp(pixel.a + halo, 0.0, 1.0), max(pixel.a, halo), blend);
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    return vec4<f32>(mix(added, covered, blend), alpha);
+}
+
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
     // Appearance zero leaves the source untouched; the CPU kernel short-circuits
     // the same configuration, so both paths return the pixel bit for bit.
@@ -4432,6 +4483,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = light_sweep_apply(pixel, position, effect);
         } else if (effect.header.x == 57u) {
             pixel = strobe_apply(pixel, effect);
+        } else if (effect.header.x == 58u) {
+            pixel = beam_apply(pixel, position, effect);
         }
     }
     return pixel;
@@ -9119,6 +9172,18 @@ fn effect_uniforms_for_ops(
                     extra1,
                     extra2: [0.0; 4],
                     extra3: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::Beam { grade } => {
+                let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [58, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2,
+                    extra3,
                 }
             }
             EffectGpuPointOp::Scanlines { grade } => {
@@ -14746,6 +14811,115 @@ mod tests {
             assert!(
                 report.within_budget,
                 "GPU strobe accuracy budget exceeded for {label}: {report:?}"
+            );
+        }
+    }
+
+    fn beam_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            for column in 0..width {
+                let u = column as f32 / (width - 1) as f32;
+                let v = row as f32 / (height - 1) as f32;
+                // Alpha never reaches zero: the straight to premultiplied round
+                // trip canonicalises a fully transparent pixel. The ramp keeps
+                // the additive and the covering composite distinguishable, and
+                // the colour floor keeps a dropped halo visible.
+                let alpha = 0.3 + 0.6 * column as f32 / (width - 1) as f32;
+                data.push([0.06 + 0.7 * u, 0.1 + 0.55 * v, 0.85 - 0.55 * u, alpha]);
+            }
+        }
+        data
+    }
+
+    #[tokio::test]
+    async fn gpu_beam_matches_the_cpu_kernel() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, BeamGrade,
+            BeamParameters, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU beam parity test: no GPU adapter available");
+            return;
+        };
+        const WIDTH: u32 = 16;
+        const HEIGHT: u32 = 9;
+        let defaults = BeamParameters::default();
+        let cases = [
+            ("documented defaults", defaults),
+            (
+                "thick beam, perspective 1, additive",
+                BeamParameters {
+                    thickness_start: 30.0,
+                    thickness_end: 40.0,
+                    perspective: 1.0,
+                    composite: 0.0,
+                    ..defaults
+                },
+            ),
+            (
+                "hard falloff, cover",
+                BeamParameters { softness: 0.0, composite: 1.0, ..defaults },
+            ),
+            (
+                "short beam, early highlight",
+                BeamParameters { length: 0.6, time: 0.2, ..defaults },
+            ),
+        ];
+        for (label, parameters) in cases {
+            let grade = BeamGrade::new(parameters).expect("valid beam grade");
+            let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width: WIDTH,
+                height: HEIGHT,
+                color_space: WorkingColorSpace::LinearRec709,
+                data: beam_test_pixels(WIDTH, HEIGHT),
+            });
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Beam { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let mut expected = beam_test_pixels(WIDTH, HEIGHT);
+            assert!(mondrian_effects::apply_beam_f32(
+                &mut expected,
+                WIDTH,
+                HEIGHT,
+                &grade,
+            ));
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&frame),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+                &context,
+                &[layer],
+                WIDTH,
+                HEIGHT,
+                WorkingColorSpace::LinearRec709,
+            );
+            assert_eq!(diagnostics.execution.fused_point_operations, 1);
+            let report = compare_linear_rgba(
+                &expected,
+                &actual,
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                    alpha: LinearAccuracyBudget::finite(1.0e-5, 1.0e-5, 1.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            assert!(
+                report.within_budget,
+                "GPU beam accuracy budget exceeded for {label}: {report:?}"
             );
         }
     }
