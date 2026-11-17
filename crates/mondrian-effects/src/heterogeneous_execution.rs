@@ -2946,6 +2946,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::PageTurn { .. } => 145,
         EffectRenderOp::DifferenceMatte { .. } => 146,
         EffectRenderOp::Blend { .. } => 147,
+        EffectRenderOp::CompoundArithmetic { .. } => 148,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
         EffectRenderOp::Reshape { .. } => 123,
@@ -4118,7 +4119,8 @@ fn execute_cpu_dag_prefix(
                     op @ (EffectRenderOp::ChannelCombiner { .. }
                     | EffectRenderOp::SetMatte { .. }
                     | EffectRenderOp::DifferenceMatte { .. }
-                    | EffectRenderOp::Blend { .. }),
+                    | EffectRenderOp::Blend { .. }
+                    | EffectRenderOp::CompoundArithmetic { .. }),
                 role: crate::AuxiliaryRole::Layer,
                 sampling,
                 ..
@@ -5358,6 +5360,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::DisplacementMap { .. }
             | crate::EffectRenderOp::DifferenceMatte { .. }
             | crate::EffectRenderOp::Blend { .. }
+            | crate::EffectRenderOp::CompoundArithmetic { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::SetMatte { .. }
             | crate::EffectRenderOp::Grid { .. }

@@ -388,6 +388,17 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Run one compound operator on the frame and a separately sampled layer.
+    CompoundArithmetic {
+        /// Authored layer slot, operator, channels, overflow, fit and mix.
+        grade: crate::CompoundArithmeticGrade,
+        /// Reconstruction and boundary behavior of the layer picture.
+        sampling: crate::AuxiliarySampling,
+        /// Presence marker for the bound layer raster.
+        auxiliary: Option<crate::AuxiliarySampling>,
+        /// Host slot for a linear chain, or a graph-local input if absent.
+        external_slot: Option<u32>,
+    },
     /// Remap a source picture inside an evaluated mask boundary.
     Smear {
         /// Geometry and controls resolved for the current graph evaluation.
@@ -455,6 +466,7 @@ impl EffectGpuSpatialPass {
             | Self::DisplacementMap { external_slot, .. }
             | Self::DifferenceMatte { external_slot, .. }
             | Self::Blend { external_slot, .. }
+            | Self::CompoundArithmetic { external_slot, .. }
             | Self::Glass { auxiliary: Some(_), external_slot, .. } => Some(external_slot),
             _ => None,
         }
@@ -543,6 +555,7 @@ impl EffectGpuSpatialPass {
             Self::DisplacementMap { .. } => "displacement_map",
             Self::DifferenceMatte { .. } => "difference_matte",
             Self::Blend { .. } => "blend",
+            Self::CompoundArithmetic { .. } => "compound_arithmetic",
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
@@ -661,7 +674,8 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. }
             | Self::ChannelCombinerLayer { .. }
             | Self::SetMatte { .. }
-            | Self::Blend { .. } => 0,
+            | Self::Blend { .. }
+            | Self::CompoundArithmetic { .. } => 0,
             // The box average reads at most the rounded radius; the ceiling plus
             // one covers a fractional radius. Unlike the resampling passes this
             // reach is finite, so the plane can still be tiled.
@@ -766,7 +780,8 @@ impl EffectGpuSpatialPass {
             Self::FillMatte { .. }
             | Self::ChannelCombinerLayer { .. }
             | Self::SetMatte { .. }
-            | Self::Blend { .. } => 0,
+            | Self::Blend { .. }
+            | Self::CompoundArithmetic { .. } => 0,
             // The box average reads at most the rounded radius; the ceiling plus
             // one covers a fractional radius. Unlike the resampling passes this
             // reach is finite, so the plane can still be tiled.
@@ -819,6 +834,14 @@ pub(crate) fn lower_auxiliary_spatial_pass(
         }
         (EffectRenderOp::Blend { grade }, crate::AuxiliaryRole::Layer) => {
             Some(EffectGpuSpatialPass::Blend { grade: *grade, sampling, external_slot })
+        }
+        (EffectRenderOp::CompoundArithmetic { grade }, crate::AuxiliaryRole::Layer) => {
+            Some(EffectGpuSpatialPass::CompoundArithmetic {
+                grade: *grade,
+                sampling,
+                auxiliary: Some(sampling),
+                external_slot,
+            })
         }
         (EffectRenderOp::Glass { grade, lighting, projection }, crate::AuxiliaryRole::Map) => {
             Some(EffectGpuSpatialPass::Glass {
@@ -1427,6 +1450,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         // A blend always reads a second raster, so a unary node has no slot to
         // lower; the auxiliary path supplies one.
         EffectRenderOp::Blend { .. } => None,
+        // Compound arithmetic also reads a second raster, so a unary node has no
+        // slot to lower; the auxiliary path supplies one.
+        EffectRenderOp::CompoundArithmetic { .. } => None,
         _ => None,
     }
 }

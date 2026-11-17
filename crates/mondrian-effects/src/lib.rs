@@ -87,6 +87,13 @@ pub mod color_balance;
 pub mod color_curves;
 pub mod color_emboss;
 pub mod color_offset;
+pub mod compound_arithmetic;
+pub use compound_arithmetic::{
+    apply_compound_arithmetic_controlled, apply_compound_arithmetic_f32, CompoundArithmeticError,
+    CompoundArithmeticGrade, CompoundChannels, CompoundOperator, CompoundOverflow, CompoundStretch,
+    COMPOUND_DEFAULT_BLEND_WITH_ORIGINAL, COMPOUND_DEFAULT_LAYER, COMPOUND_MAX_LAYER,
+    COMPOUND_MIN_LAYER,
+};
 pub mod convolution;
 pub mod corner_pin;
 pub mod coverage;

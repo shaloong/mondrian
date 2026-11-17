@@ -277,6 +277,9 @@ pub enum EffectType {
     /// Blend: composite the frame with a second layer using one of five
     /// documented modes, a mix with the original image, and a size fit.
     Blend,
+    /// Compound arithmetic: run one of the fifteen documented operators on the
+    /// frame and a second layer, over one channel set, with an overflow rule.
+    CompoundArithmetic,
 }
 
 impl EffectType {
@@ -338,6 +341,7 @@ impl EffectType {
             Self::PageTurn => "builtin.page_turn".to_string(),
             Self::DifferenceMatte => "builtin.difference_matte".to_string(),
             Self::Blend => "builtin.blend".to_string(),
+            Self::CompoundArithmetic => "builtin.compound_arithmetic".to_string(),
             Self::Convolution => "builtin.convolution".to_string(),
             Self::Offset => "builtin.offset".to_string(),
             Self::Twirl => "builtin.twirl".to_string(),
@@ -491,6 +495,7 @@ impl EffectType {
             "builtin.page_turn" => Self::PageTurn,
             "builtin.difference_matte" => Self::DifferenceMatte,
             "builtin.blend" => Self::Blend,
+            "builtin.compound_arithmetic" => Self::CompoundArithmetic,
             "builtin.convolution" => Self::Convolution,
             "builtin.offset" => Self::Offset,
             "builtin.twirl" => Self::Twirl,
@@ -647,6 +652,7 @@ impl EffectType {
             Self::PageTurn => "翻页",
             Self::DifferenceMatte => "差值遮罩",
             Self::Blend => "混合",
+            Self::CompoundArithmetic => "复合运算",
             Self::Convolution => "卷积核",
             Self::Offset => "偏移",
             Self::Twirl => "旋转扭曲",
@@ -805,6 +811,7 @@ impl EffectType {
             Self::PageTurn => vec!["变形"],
             Self::DifferenceMatte => vec!["抠像"],
             Self::Blend => vec!["通道"],
+            Self::CompoundArithmetic => vec!["通道"],
             Self::Convolution => vec!["颜色", "调色"],
             Self::Offset => vec!["变换与尺寸"],
             Self::Twirl => vec!["变形"],
@@ -948,6 +955,7 @@ impl EffectType {
             Self::PageTurn => "page_turn".to_string(),
             Self::DifferenceMatte => "difference_matte".to_string(),
             Self::Blend => "blend".to_string(),
+            Self::CompoundArithmetic => "compound_arithmetic".to_string(),
             Self::Convolution => "convolution".to_string(),
             Self::Offset => "offset".to_string(),
             Self::Twirl => "twirl".to_string(),
@@ -1475,6 +1483,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::PageTurn => Ok(()),
             Self::DifferenceMatte => Ok(()),
             Self::Blend => Ok(()),
+            Self::CompoundArithmetic => Ok(()),
             Self::Convolution => Ok(()),
             Self::Offset => Ok(()),
             Self::Twirl => Ok(()),

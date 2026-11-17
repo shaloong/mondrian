@@ -1396,6 +1396,12 @@ pub enum EffectRenderOp {
         /// Authored layer slot, mode, mix with the original and size mode.
         grade: crate::BlendGrade,
     },
+    /// Compound arithmetic: runs one of the fifteen documented operators on the
+    /// frame and a second layer delivered on another layer.
+    CompoundArithmetic {
+        /// Authored layer slot, operator, channels, overflow, stretch and mix.
+        grade: crate::CompoundArithmeticGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1874,6 +1880,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 formatter.debug_struct("DifferenceMatte").field("grade", grade).finish()
             }
             Self::Blend { grade } => formatter.debug_struct("Blend").field("grade", grade).finish(),
+            Self::CompoundArithmetic { grade } => {
+                formatter.debug_struct("CompoundArithmetic").field("grade", grade).finish()
+            }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
                 .field("grade", grade)
@@ -3077,6 +3086,13 @@ impl EffectRenderOp {
                 // every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::CompoundArithmetic { grade } => {
+                148u8.hash(state);
+                // The layer slot, the operator, the channel set, the overflow
+                // rule, the fit and the mix all read the authored values, so
+                // the grade hashes every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3371,6 +3387,7 @@ impl EffectRenderOp {
             EffectRenderOp::PageTurn { .. } => 3,
             EffectRenderOp::DifferenceMatte { .. } => 3,
             EffectRenderOp::Blend { .. } => 1,
+            EffectRenderOp::CompoundArithmetic { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3905,7 +3922,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 147] {
+fn builtin_effect_types() -> [EffectType; 148] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4054,6 +4071,7 @@ fn builtin_effect_types() -> [EffectType; 147] {
         EffectType::PageTurn,
         EffectType::DifferenceMatte,
         EffectType::Blend,
+        EffectType::CompoundArithmetic,
     ]
 }
 
@@ -15951,6 +15969,119 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 size_modes,
             );
         }
+        EffectType::CompoundArithmetic => {
+            const GROUP: &str = "复合运算";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "layer",
+                GROUP,
+                "第二个源图层",
+                PropertyValue::Int(crate::COMPOUND_DEFAULT_LAYER as i64),
+                Some(crate::COMPOUND_MIN_LAYER as f64),
+                Some(crate::COMPOUND_MAX_LAYER as f64),
+                Some(1.0),
+            );
+            let operators = crate::CompoundOperator::ALL
+                .into_iter()
+                .map(|operator| {
+                    ParameterEnumOption::new(
+                        operator.as_key(),
+                        operator.label(),
+                        format!(
+                            "mondrian.effect.compound_arithmetic.operator.{}",
+                            operator.as_key()
+                        ),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "operator",
+                GROUP,
+                "运算符",
+                crate::CompoundOperator::Copy.as_key(),
+                operators,
+            );
+            let channels = crate::CompoundChannels::ALL
+                .into_iter()
+                .map(|mode| {
+                    ParameterEnumOption::new(
+                        mode.as_key(),
+                        mode.label(),
+                        format!(
+                            "mondrian.effect.compound_arithmetic.channels.{}",
+                            mode.as_key()
+                        ),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "channels",
+                GROUP,
+                "在通道上运算",
+                crate::CompoundChannels::Rgb.as_key(),
+                channels,
+            );
+            let overflows = crate::CompoundOverflow::ALL
+                .into_iter()
+                .map(|rule| {
+                    ParameterEnumOption::new(
+                        rule.as_key(),
+                        rule.label(),
+                        format!(
+                            "mondrian.effect.compound_arithmetic.overflow.{}",
+                            rule.as_key()
+                        ),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "overflow",
+                GROUP,
+                "溢出特性",
+                crate::CompoundOverflow::Clip.as_key(),
+                overflows,
+            );
+            let stretches = crate::CompoundStretch::ALL
+                .into_iter()
+                .map(|fit| {
+                    ParameterEnumOption::new(
+                        fit.as_key(),
+                        fit.label(),
+                        format!(
+                            "mondrian.effect.compound_arithmetic.stretch.{}",
+                            fit.as_key()
+                        ),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "stretch",
+                GROUP,
+                "伸缩第二个源以适合",
+                crate::CompoundStretch::Stretch.as_key(),
+                stretches,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                GROUP,
+                "与原始图像混合",
+                PropertyValue::Float(crate::COMPOUND_DEFAULT_BLEND_WITH_ORIGINAL),
+                Some(0.0),
+                Some(100.0),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -17176,6 +17307,13 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Blend, "layer" | "mode" | "blend_with_original" | "size_mode") => {
             ParameterUnit::Unitless
         }
+        // The layer is a slot number, the four menus carry their own scale and
+        // the mix with the original image is authored in percent.
+        (
+            EffectType::CompoundArithmetic,
+            "layer" | "operator" | "channels" | "overflow" | "stretch",
+        ) => ParameterUnit::Unitless,
+        (EffectType::CompoundArithmetic, "blend_with_original") => ParameterUnit::Percent,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -17216,6 +17354,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::VideoCollage
                 | EffectType::DifferenceMatte
                 | EffectType::Blend
+                | EffectType::CompoundArithmetic
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -17493,6 +17632,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Both inputs are sampled at the same output coordinate, so the
             // pixel-local ROI default stays exact.
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::CompoundArithmetic => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The operator reads one sample of each input at the same output
+            // coordinate, so the pixel-local ROI default stays exact.
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
@@ -23989,6 +24135,108 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::CompoundArithmetic => {
+            let layer_id = builtin_parameter_id(effect_type, "layer");
+            let operator_id = builtin_parameter_id(effect_type, "operator");
+            let channels_id = builtin_parameter_id(effect_type, "channels");
+            let overflow_id = builtin_parameter_id(effect_type, "overflow");
+            let stretch_id = builtin_parameter_id(effect_type, "stretch");
+            let blend_with_original_id = builtin_parameter_id(effect_type, "blend_with_original");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let layer = match effect.evaluate_parameter(&layer_id, context.time) {
+                    Some(PropertyValue::Int(value))
+                        if (crate::COMPOUND_MIN_LAYER as i64
+                            ..=crate::COMPOUND_MAX_LAYER as i64)
+                            .contains(&value) =>
+                    {
+                        value as u32
+                    }
+                    Some(_) => {
+                        return Err(invalid(format!(
+                            "复合运算的第二个源图层必须在 {} 到 {} 之间",
+                            crate::COMPOUND_MIN_LAYER,
+                            crate::COMPOUND_MAX_LAYER
+                        )));
+                    }
+                    None => crate::COMPOUND_DEFAULT_LAYER,
+                };
+                let operator = effect
+                    .evaluate_enum_parameter(&operator_id, context.time)
+                    .and_then(|key| crate::CompoundOperator::from_key(&key))
+                    .unwrap_or(crate::CompoundOperator::Copy);
+                let channels = effect
+                    .evaluate_enum_parameter(&channels_id, context.time)
+                    .and_then(|key| crate::CompoundChannels::from_key(&key))
+                    .unwrap_or(crate::CompoundChannels::Rgb);
+                let overflow = effect
+                    .evaluate_enum_parameter(&overflow_id, context.time)
+                    .and_then(|key| crate::CompoundOverflow::from_key(&key))
+                    .unwrap_or(crate::CompoundOverflow::Clip);
+                let stretch = effect
+                    .evaluate_enum_parameter(&stretch_id, context.time)
+                    .and_then(|key| crate::CompoundStretch::from_key(&key))
+                    .unwrap_or(crate::CompoundStretch::Stretch);
+                let blend_with_original =
+                    match effect.evaluate_parameter(&blend_with_original_id, context.time) {
+                        Some(PropertyValue::Float(value)) => value,
+                        Some(_) => {
+                            return Err(invalid(
+                                "复合运算的与原始图像混合参数必须是数值".to_string(),
+                            ));
+                        }
+                        None => crate::COMPOUND_DEFAULT_BLEND_WITH_ORIGINAL,
+                    };
+                let grade = crate::CompoundArithmeticGrade::new(
+                    layer,
+                    operator,
+                    channels,
+                    overflow,
+                    stretch,
+                    blend_with_original,
+                )
+                .map_err(|error| {
+                    invalid(format!("复合运算的参数 {} 超出范围", error.parameter()))
+                })?;
+                // Layer 0 means "no second layer" and the documented maximum mix
+                // with the original is the identity, so neither needs a node.
+                if grade.layer() == crate::COMPOUND_MIN_LAYER
+                    || grade.blend_with_original() >= 100.0
+                {
+                    return Ok(());
+                }
+                let auxiliary = graph.append_external_input(
+                    layer,
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                );
+                // Both fits read the layer on this frame's own grid; the size
+                // ratio lives in the kernel's reference uv, so no delivery
+                // affine may be applied a second time.
+                let sampling = crate::AuxiliarySampling::new(
+                    crate::AuxiliaryCoordinateMapping::PrimaryGrid,
+                    crate::AuxiliaryFilter::Linear,
+                    crate::AuxiliaryOutOfBounds::Transparent,
+                );
+                let output = graph.add_auxiliary_effect(
+                    graph.current_output(),
+                    auxiliary,
+                    EffectRenderOp::CompoundArithmetic { grade },
+                    crate::AuxiliaryRole::Layer,
+                    sampling,
+                );
+                graph.set_current_output(output);
+                Ok(())
+            }))
+        }
         EffectType::ChromaticAberrationRemoval => {
             let lateral_id = builtin_parameter_id(effect_type, "lateral");
             let longitudinal_id = builtin_parameter_id(effect_type, "longitudinal");
@@ -27369,6 +27617,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::PageTurn => "翻页",
         EffectType::DifferenceMatte => "差值遮罩",
         EffectType::Blend => "混合",
+        EffectType::CompoundArithmetic => "复合运算",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -28790,6 +29039,7 @@ mod tests {
             EffectType::PageTurn,
             EffectType::DifferenceMatte,
             EffectType::Blend,
+            EffectType::CompoundArithmetic,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -38086,7 +38336,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 147);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 148);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -38614,7 +38864,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 147);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 148);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -41573,7 +41823,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 147);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 148);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -42709,7 +42959,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 147);
+        assert_eq!(builtin_effect_types().len(), 148);
     }
 
     #[test]
@@ -46893,6 +47143,355 @@ mod tests {
             hash(build("crossfade", 0.25)),
             "the mix with the original is part of the render identity"
         );
+    }
+
+    fn compound_arithmetic_node(
+        graph: &EffectRenderGraph,
+    ) -> Option<(
+        crate::CompoundArithmeticGrade,
+        crate::AuxiliaryRole,
+        crate::AuxiliarySampling,
+        crate::EffectGraphNodeId,
+    )> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                op: EffectRenderOp::CompoundArithmetic { grade },
+                auxiliary,
+                role,
+                sampling,
+                ..
+            } => Some((*grade, *role, *sampling, *auxiliary)),
+            _ => None,
+        })
+    }
+
+    fn author_compound_arithmetic(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::CompoundArithmetic)
+            .expect("the compound arithmetic should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::CompoundArithmetic.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the compound arithmetic parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn compound_arithmetic_defaults_build_one_auxiliary_node() {
+        let effect = instantiate_effect_node(EffectType::CompoundArithmetic)
+            .expect("registered CompoundArithmetic definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate the default compound arithmetic");
+        let (grade, role, sampling, auxiliary) =
+            compound_arithmetic_node(&graph).expect("the defaults already key the sixth layer");
+        assert_eq!(
+            grade,
+            crate::CompoundArithmeticGrade::new(
+                6,
+                crate::CompoundOperator::Copy,
+                crate::CompoundChannels::Rgb,
+                crate::CompoundOverflow::Clip,
+                crate::CompoundStretch::Stretch,
+                0.0,
+            )
+            .expect("the documented defaults are within range"),
+            "the documented defaults are deliberately not the identity"
+        );
+        assert_eq!(role, crate::AuxiliaryRole::Layer);
+        assert_eq!(
+            sampling,
+            crate::AuxiliarySampling::new(
+                crate::AuxiliaryCoordinateMapping::PrimaryGrid,
+                crate::AuxiliaryFilter::Linear,
+                crate::AuxiliaryOutOfBounds::Transparent,
+            ),
+            "the fit ratio lives in the kernel reference uv, so no affine is applied twice"
+        );
+        match &graph.node(auxiliary).expect("the layer input exists").kind {
+            EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                assert_eq!(*slot, 6, "the default layer slot names the sixth input");
+            }
+            other => panic!("unexpected layer input {other:?}"),
+        }
+        let op = EffectRenderOp::CompoundArithmetic { grade };
+        assert_eq!(crate::adjustment::render_op_f32_scratch_frames(&op), 0);
+        assert_eq!(op.estimated_cost(), 1);
+        assert_eq!(crate::spatial_pass_for(&op), None);
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            148
+        );
+        let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
+            &op,
+            crate::AuxiliaryRole::Layer,
+            sampling,
+            Some(6),
+        )
+        .expect("the auxiliary lowering carries the compound kernel");
+        assert_eq!(pass.name(), "compound_arithmetic");
+        assert_eq!((pass.horizontal_halo(), pass.vertical_halo()), (0, 0));
+        assert_eq!(pass.auxiliary_slot(), Some(Some(6)));
+        assert!(matches!(
+            pass,
+            crate::EffectGpuSpatialPass::CompoundArithmetic { .. }
+        ));
+    }
+
+    #[test]
+    fn compound_arithmetic_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::CompoundArithmetic;
+        let properties = default_properties_for(effect_type.clone());
+        for (parameter, unit) in [
+            ("layer", ParameterUnit::Unitless),
+            ("operator", ParameterUnit::Unitless),
+            ("channels", ParameterUnit::Unitless),
+            ("overflow", ParameterUnit::Unitless),
+            ("stretch", ParameterUnit::Unitless),
+            ("blend_with_original", ParameterUnit::Percent),
+        ] {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .unwrap_or_else(|| panic!("the {parameter} value is authored"));
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("复合运算"),
+                "the {parameter} control sits in the compound group"
+            );
+            assert_eq!(property.descriptor.schema.unit, unit);
+        }
+        let layer = properties
+            .property(&effect_type.property_path("layer"))
+            .expect("the layer slot is defined");
+        assert_eq!(layer.descriptor.display_name, "第二个源图层");
+        assert_eq!(layer.evaluate(tt(0)), PropertyValue::Int(6));
+        let blend = properties
+            .property(&effect_type.property_path("blend_with_original"))
+            .expect("the mix with the original is defined");
+        assert_eq!(blend.descriptor.display_name, "与原始图像混合");
+        assert_eq!(blend.evaluate(tt(0)), PropertyValue::Float(0.0));
+
+        let operators: Vec<(&str, &str)> = crate::CompoundOperator::ALL
+            .iter()
+            .map(|operator| (operator.as_key(), operator.label()))
+            .collect();
+        let channels: Vec<(&str, &str)> = crate::CompoundChannels::ALL
+            .iter()
+            .map(|mode| (mode.as_key(), mode.label()))
+            .collect();
+        let overflows: Vec<(&str, &str)> = crate::CompoundOverflow::ALL
+            .iter()
+            .map(|rule| (rule.as_key(), rule.label()))
+            .collect();
+        let stretches: Vec<(&str, &str)> = crate::CompoundStretch::ALL
+            .iter()
+            .map(|fit| (fit.as_key(), fit.label()))
+            .collect();
+        let menus = [
+            ("operator", "运算符", "copy", operators),
+            ("channels", "在通道上运算", "rgb", channels),
+            ("overflow", "溢出特性", "clip", overflows),
+            ("stretch", "伸缩第二个源以适合", "stretch", stretches),
+        ];
+        let mut option_count = 0;
+        for (parameter, display, default, expected) in menus {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .unwrap_or_else(|| panic!("the {parameter} menu is defined"));
+            assert_eq!(property.descriptor.display_name, display);
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Enum(default.to_owned())
+            );
+            let options = &property.descriptor.schema.enum_options;
+            assert_eq!(options.len(), expected.len());
+            option_count += options.len();
+            for (option, (key, label)) in options.iter().zip(&expected) {
+                assert_eq!(option.key, *key);
+                assert_eq!(option.display_name, *label);
+                assert_eq!(
+                    option.message_id,
+                    format!("mondrian.effect.compound_arithmetic.{parameter}.{key}")
+                );
+            }
+        }
+        assert_eq!(
+            option_count, 23,
+            "15 operators, 3 channels, 3 rules, 2 fits"
+        );
+
+        assert_eq!(crate::CompoundOperator::ALL.len(), 15);
+        for (index, operator) in crate::CompoundOperator::ALL.iter().enumerate() {
+            assert_eq!(operator.code(), index as u32 + 1);
+            assert_eq!(
+                crate::CompoundOperator::from_key(operator.as_key()),
+                Some(*operator)
+            );
+            assert_eq!(
+                crate::CompoundOperator::from_code(operator.code()),
+                Some(*operator)
+            );
+        }
+        assert_eq!(crate::CompoundChannels::ALL.len(), 3);
+        for (index, channels) in crate::CompoundChannels::ALL.iter().enumerate() {
+            assert_eq!(channels.code(), index as u32 + 1);
+            assert_eq!(
+                crate::CompoundChannels::from_key(channels.as_key()),
+                Some(*channels)
+            );
+            assert_eq!(
+                crate::CompoundChannels::from_code(channels.code()),
+                Some(*channels)
+            );
+        }
+        assert_eq!(crate::CompoundOverflow::ALL.len(), 3);
+        for (index, overflow) in crate::CompoundOverflow::ALL.iter().enumerate() {
+            assert_eq!(overflow.code(), index as u32 + 1);
+            assert_eq!(
+                crate::CompoundOverflow::from_key(overflow.as_key()),
+                Some(*overflow)
+            );
+            assert_eq!(
+                crate::CompoundOverflow::from_code(overflow.code()),
+                Some(*overflow)
+            );
+        }
+        assert_eq!(crate::CompoundStretch::ALL.len(), 2);
+        for (index, stretch) in crate::CompoundStretch::ALL.iter().enumerate() {
+            assert_eq!(stretch.code(), index as u32 + 1);
+            assert_eq!(
+                crate::CompoundStretch::from_key(stretch.as_key()),
+                Some(*stretch)
+            );
+            assert_eq!(
+                crate::CompoundStretch::from_code(stretch.code()),
+                Some(*stretch)
+            );
+        }
+    }
+
+    #[test]
+    fn compound_arithmetic_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let contract = effect_definition(&EffectType::CompoundArithmetic)
+            .expect("registered CompoundArithmetic definition")
+            .execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal,
+            "both rasters are sampled at the same output coordinate"
+        );
+        assert_eq!(contract.topology, crate::EffectGraphTopology::GeneralDag);
+    }
+
+    #[test]
+    fn compound_arithmetic_out_of_range_parameters_are_author_errors() {
+        let builtin_key = "builtin.compound_arithmetic";
+        for (parameter, value, needle, prefix) in [
+            (
+                "layer",
+                serde_json::json!(20),
+                "19",
+                "复合运算的第二个源图层",
+            ),
+            (
+                "blend_with_original",
+                serde_json::json!(101.0),
+                "blend_with_original",
+                "复合运算的参数",
+            ),
+        ] {
+            let effect = instantiate_effect_node(EffectType::CompoundArithmetic)
+                .expect("the compound arithmetic should instantiate");
+            let effect_id = effect.id;
+            let mut document = serde_json::to_value(&effect).expect("serialize the node");
+            overwrite_static_value(
+                &mut document,
+                &format!("compound_arithmetic.{parameter}"),
+                value,
+            );
+            let result: Result<EffectNode, _> = serde_json::from_value(document);
+            if let Ok(effect) = result {
+                let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .expect_err("an out-of-range parameter should fail");
+                match error {
+                    EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                        assert_eq!(effect_key, builtin_key);
+                        assert!(reason.contains(needle), "{reason}");
+                        assert!(reason.starts_with(prefix), "{reason}");
+                    }
+                    other => panic!("unexpected error {other:?} for {effect_id}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compound_arithmetic_operator_changes_the_hash() {
+        let build = |operator: &str| {
+            let effect = author_compound_arithmetic(&[
+                ("layer", PropertyValue::Int(6)),
+                ("operator", PropertyValue::Enum(operator.to_owned())),
+            ]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored compound arithmetic should compile");
+            let (grade, ..) = compound_arithmetic_node(&graph).expect("the layer builds the node");
+            EffectRenderOp::CompoundArithmetic { grade }
+        };
+        use std::hash::Hasher;
+        let hash = |op: EffectRenderOp| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            op.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(
+            hash(build("copy")),
+            hash(build("screen")),
+            "the operator is part of the render identity"
+        );
+    }
+
+    #[test]
+    fn compound_arithmetic_scale_overflow_still_builds_the_node() {
+        let effect = author_compound_arithmetic(&[
+            ("layer", PropertyValue::Int(3)),
+            ("overflow", PropertyValue::Enum("scale".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the scale rule is executable on the cpu");
+        let (grade, ..) = compound_arithmetic_node(&graph).expect("the layer builds the node");
+        assert_eq!(grade.overflow(), crate::CompoundOverflow::Scale);
+        assert!(
+            !grade.gpu_supported(),
+            "the whole-frame range reduction keeps the gpu pass away"
+        );
+    }
+
+    #[test]
+    fn compound_arithmetic_identity_parameters_build_no_node() {
+        for parameters in [
+            vec![("layer", PropertyValue::Int(0))],
+            vec![
+                ("layer", PropertyValue::Int(6)),
+                ("blend_with_original", PropertyValue::Float(100.0)),
+            ],
+        ] {
+            let effect = author_compound_arithmetic(&parameters);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the identity should compile");
+            assert!(
+                compound_arithmetic_node(&graph).is_none(),
+                "layer 0 and a full mix with the original need no node: {parameters:?}"
+            );
+        }
     }
 
     fn film_look_op(graph: &EffectRenderGraph) -> Option<crate::FilmLookGrade> {

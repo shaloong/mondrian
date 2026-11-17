@@ -3202,7 +3202,8 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
         },
         EffectRenderOp::ChannelCombiner { .. }
         | EffectRenderOp::SetMatte { .. }
-        | EffectRenderOp::Blend { .. } => EffectImplementationRequirements {
+        | EffectRenderOp::Blend { .. }
+        | EffectRenderOp::CompoundArithmetic { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Both inputs are sampled at the same output coordinate, so the
             // pixel-local envelope stays exact.

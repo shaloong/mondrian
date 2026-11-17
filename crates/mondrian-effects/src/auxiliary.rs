@@ -386,6 +386,7 @@ pub const fn render_op_auxiliary_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::DifferenceMatte { .. }
             | EffectRenderOp::Blend { .. }
+            | EffectRenderOp::CompoundArithmetic { .. }
             | EffectRenderOp::Glass { .. }
     ) {
         // These kernels own their whole working set and are charged by
@@ -406,6 +407,7 @@ pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
         EffectRenderOp::Fill { .. }
             | EffectRenderOp::DifferenceMatte { .. }
             | EffectRenderOp::Blend { .. }
+            | EffectRenderOp::CompoundArithmetic { .. }
             | EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::ChannelCombiner { .. }
             | EffectRenderOp::SetMatte { .. }
@@ -440,6 +442,11 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
     }
     if let EffectRenderOp::Blend { grade } = op {
         return crate::apply_blend_controlled(
+            primary, width, height, frame, sampling, grade, checkpoint,
+        );
+    }
+    if let EffectRenderOp::CompoundArithmetic { grade } = op {
+        return crate::apply_compound_arithmetic_controlled(
             primary, width, height, frame, sampling, grade, checkpoint,
         );
     }
@@ -531,6 +538,40 @@ pub(crate) fn apply_auxiliary_effect_f32_region<E>(
                 frame.frame.extent(),
                 sampling.mapping,
                 grade.size_mode(),
+            );
+            *pixel = grade.apply_pixel_from(*pixel, sample_auxiliary_f32(frame, uv, grid_sampling));
+        }
+        checkpoint()?;
+        return Ok(true);
+    }
+    if let EffectRenderOp::CompoundArithmetic { grade } = op {
+        // The scale overflow rule maps every computed component by a whole-frame
+        // range, so a retained region cannot reproduce it; fail closed and let
+        // the caller run the complete frame, exactly like the difference matte.
+        if grade.overflow() == crate::CompoundOverflow::Scale {
+            return Ok(false);
+        }
+        // The layer picture is sampled on the primary grid: the reference uv
+        // already carries the size fit, so the sampler must not apply an affine.
+        let grid_sampling = AuxiliarySampling::new(
+            AuxiliaryCoordinateMapping::PrimaryGrid,
+            sampling.filter,
+            sampling.out_of_bounds,
+        );
+        checkpoint()?;
+        for (index, pixel) in primary.iter_mut().enumerate() {
+            if index % 4096 == 0 {
+                checkpoint()?;
+            }
+            let x = origin_x + index as u32 % width;
+            let y = origin_y + index as u32 / width;
+            let uv = crate::compound_arithmetic::compound_arithmetic_reference_uv(
+                x,
+                y,
+                frame_width,
+                frame_height,
+                frame.frame.extent(),
+                grade.stretch(),
             );
             *pixel = grade.apply_pixel_from(*pixel, sample_auxiliary_f32(frame, uv, grid_sampling));
         }
