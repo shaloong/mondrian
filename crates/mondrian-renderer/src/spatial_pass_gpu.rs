@@ -144,6 +144,7 @@ pub(crate) struct EffectSpatialGpu {
     difference_matte_horizontal: wgpu::RenderPipeline,
     difference_matte: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
+    compound_arithmetic: wgpu::RenderPipeline,
     temporal_blend: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
@@ -1855,6 +1856,10 @@ impl EffectSpatialGpu {
             "fs_difference_matte",
         );
         let blend = auxiliary_pipeline("mondrian.effect-spatial.blend", "fs_blend");
+        let compound_arithmetic = auxiliary_pipeline(
+            "mondrian.effect-spatial.compound-arithmetic",
+            "fs_compound_arithmetic",
+        );
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
             layout: Some(&composite_layout),
@@ -2756,6 +2761,7 @@ impl EffectSpatialGpu {
             difference_matte_horizontal,
             difference_matte,
             blend,
+            compound_arithmetic,
             temporal_blend,
             bindings,
             composite_bindings,
@@ -3973,6 +3979,92 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    /// Records the CHN-03 compound-arithmetic stage.
+    ///
+    /// One draw reads the straight primary texel and one straight auxiliary
+    /// sample, runs the operator, the overflow rule and the channel mode over
+    /// them, mixes the result with the original and writes the premultiplied
+    /// texel. The stage preserves the raster, so the delivery always keeps the
+    /// input extent and the auxiliary raster only feeds the sampler.
+    #[allow(clippy::too_many_arguments)]
+    fn record_compound_arithmetic(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        primary: &wgpu::Texture,
+        auxiliary: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        transform: [f32; 6],
+        grade: mondrian_effects::CompoundArithmeticGrade,
+        sampling: mondrian_effects::AuxiliarySampling,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if primary.width() == 0
+            || primary.height() == 0
+            || auxiliary.width() == 0
+            || auxiliary.height() == 0
+        {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        if transform.iter().any(|component| !component.is_finite()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "compound_arithmetic_transform",
+            ));
+        }
+        if (destination.width(), destination.height()) != (primary.width(), primary.height()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "compound_arithmetic_output_extent",
+            ));
+        }
+        // CHN-03's auxiliary mapping is fixed to the primary grid (design §5):
+        // stretch reads the whole auxiliary frame and the original size mode
+        // reads the top-left window by the extent ratio. The kernel never
+        // applies a delivery affine, so a graph that declares a frame transform
+        // must hand the identity; any other affine is a geometry this pass does
+        // not implement and is refused instead of silently ignored.
+        if sampling.mapping == AuxiliaryCoordinateMapping::FrameTransform
+            && transform != mondrian_effects::IDENTITY_AFFINE
+        {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "compound_arithmetic_geometry",
+            ));
+        }
+        let (mut params, extra) = grade.gpu_controls();
+        params[3] = f32::from(u8::from(sampling.filter == AuxiliaryFilter::Linear));
+        // The published affine stays identity for both supported mappings; it is
+        // part of the shared uniform block, and `size.w == 0` also stops
+        // `sample_auxiliary` from applying it a second time.
+        let [a, b, tx, c, d, ty] = mondrian_effects::IDENTITY_AFFINE;
+        let uniforms = SpatialPassUniform {
+            size: [
+                primary.width() as f32,
+                primary.height() as f32,
+                f32::from(u8::from(
+                    sampling.out_of_bounds == AuxiliaryOutOfBounds::Transparent,
+                )),
+                0.0,
+            ],
+            params,
+            // `extra` is `[stretch code, blend with original / 100, layer, 0]`
+            // (design §6); the kernel reads all three components.
+            extra,
+            aces: [a, b, tx, 0.0],
+            extra1: [c, d, ty, 0.0],
+        };
+        let primary_view = primary.create_view(&wgpu::TextureViewDescriptor::default());
+        let auxiliary_view = auxiliary.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.compound_arithmetic,
+            &primary_view,
+            &auxiliary_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
+
     /// Sample an independent texture while processing the primary frame.
     ///
     /// `scratch` supplies the intermediate planes that a multi-pass auxiliary
@@ -4004,6 +4096,18 @@ impl EffectSpatialGpu {
         }
         if let EffectGpuSpatialPass::Blend { grade, sampling, .. } = *pass {
             return self.record_blend(
+                device,
+                encoder,
+                primary,
+                auxiliary,
+                destination,
+                transform,
+                grade,
+                sampling,
+            );
+        }
+        if let EffectGpuSpatialPass::CompoundArithmetic { grade, sampling, .. } = *pass {
+            return self.record_compound_arithmetic(
                 device,
                 encoder,
                 primary,
@@ -4340,6 +4444,21 @@ impl EffectSpatialGpu {
             // textures. At UHD that is 2 x 132,710,400 = 265,420,800 B and at
             // DCI 4K 2 x 141,557,760 = 283,115,520 B.
             | EffectGpuSpatialPass::Blend { .. } => Ok(1),
+            // One draw folds the auxiliary sample, the fifteen operators, the
+            // overflow rule and the channel mode into the written texel, so the
+            // pool is `pass_count + 1` = two textures (design §6). The `scale`
+            // overflow rule is deliberately refused: it needs a whole-frame
+            // low/high reduction, so the pass declines the layer and the driver
+            // plans the CPU kernel instead of recording a partial GPU chain.
+            EffectGpuSpatialPass::CompoundArithmetic { grade, .. } => {
+                if grade.gpu_supported() {
+                    Ok(1)
+                } else {
+                    Err(EffectSpatialGpuError::UnsupportedPass(
+                        "compound_arithmetic_overflow_scale",
+                    ))
+                }
+            }
         }
     }
 
@@ -4438,6 +4557,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::DisplacementMap { .. }
             | EffectGpuSpatialPass::DifferenceMatte { .. }
             | EffectGpuSpatialPass::Blend { .. }
+            | EffectGpuSpatialPass::CompoundArithmetic { .. }
             | EffectGpuSpatialPass::Glass { auxiliary: Some(_), .. } => {
                 return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
             }
@@ -11031,13 +11151,14 @@ fn spatial_composite_shader_source() -> String {
         "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
          const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
          const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
-         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}",
+         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}",
         mondrian_effects::PIXEL_CENTRE,
         f32::MAX.to_bits(),
         include_str!("channel_combiner.wgsl"),
         include_str!("displacement_map.wgsl"),
         include_str!("difference_matte.wgsl"),
         include_str!("blend.wgsl"),
+        include_str!("compound_arithmetic.wgsl"),
     )
 }
 

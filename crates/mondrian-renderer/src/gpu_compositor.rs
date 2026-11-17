@@ -23655,6 +23655,602 @@ mod tests {
         ));
     }
 
+    // CHN-03 「复合运算」/ Compound Arithmetic: the premultiplied primary texel
+    // and one straight reference sample are unpremultiplied, clamped to 0..1,
+    // run through one of the fifteen documented operators, folded by the
+    // overflow rule, applied to the authored channel set, mixed with the
+    // original in premultiplied space and written premultiplied (design §3 and
+    // §6). The pass table holds one draw, so the shader must match the CPU
+    // kernel for every operator, channel set, overflow rule and stretch mode.
+    #[tokio::test]
+    async fn gpu_compound_arithmetic_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            apply_compound_arithmetic_f32, AuxiliaryCoordinateMapping, AuxiliaryFilter,
+            AuxiliaryFloatFrame, AuxiliaryOutOfBounds, AuxiliaryPolicy, AuxiliaryResolution,
+            AuxiliarySampling, CompoundArithmeticGrade, CompoundChannels, CompoundOperator,
+            CompoundOverflow, CompoundStretch, EffectColorDomain, EffectFloatFrameView,
+            EffectFrameExtent, EffectGpuSpatialPass, EffectValueFormat, EffectWorkingPrecision,
+            IDENTITY_AFFINE,
+        };
+
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("GPU for compound arithmetic parity");
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let (width, height) = (24, 16);
+        // A smaller reference: `original` keeps one reference texel per primary
+        // texel from the top-left corner, so the right and bottom bands of the
+        // frame read transparent.
+        let (aux_width, aux_height) = (13, 10);
+        // The authored fit lives in the kernel's uv, so the sampler runs on the
+        // primary grid and reads the handed uv verbatim.
+        let sampling = AuxiliarySampling::new(
+            AuxiliaryCoordinateMapping::PrimaryGrid,
+            AuxiliaryFilter::Linear,
+            AuxiliaryOutOfBounds::Transparent,
+        );
+
+        // The primary carries a real coverage ramp (never zero) under a
+        // scene-linear colour ramp, premultiplied like the working buffer.
+        let primary_pixels: Vec<[f32; 4]> = (0..width * height)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                let alpha = (1 + i % 7) as f32 / 8.0;
+                [
+                    ((x as f32 + 0.5) / width as f32 * 0.9 + 0.05) * alpha,
+                    ((y as f32 + 0.5) / height as f32 * 0.8 + 0.05) * alpha,
+                    ((i % 11) as f32 / 12.0 + 0.02) * alpha,
+                    alpha,
+                ]
+            })
+            .collect();
+        // The reference keeps transparent zones of its own, and its colour stays
+        // non-negative so the bitwise operators and the luma comparisons see the
+        // same operands on both kernels.
+        let auxiliary_pixels: Vec<[f32; 4]> = (0..aux_width * aux_height)
+            .map(|i| {
+                let transparent = i % 6 == 0 || (i / aux_width) % 5 == 4;
+                [
+                    (i % 13) as f32 / 6.0 * 0.85 + 0.05,
+                    (i % 7) as f32 / 6.0 * 0.8 + 0.05,
+                    (i % 5) as f32 / 4.0 * 0.85 + 0.05,
+                    if transparent {
+                        0.0
+                    } else {
+                        (1 + i % 4) as f32 / 4.0
+                    },
+                ]
+            })
+            .collect();
+        // An uncovered primary texel keeps hidden colour under zero coverage;
+        // the pass must canonicalize it to `(0, 0, 0, 0)`.
+        let uncovered_pixels: Vec<[f32; 4]> = primary_pixels
+            .iter()
+            .enumerate()
+            .map(|(i, pixel)| {
+                if i % 11 == 3 {
+                    [0.3, -0.2, 1.4, 0.0]
+                } else if i % 5 == 0 {
+                    [0.0; 4]
+                } else {
+                    *pixel
+                }
+            })
+            .collect();
+
+        let reference = || AuxiliaryFloatFrame {
+            frame: EffectFloatFrameView::new(
+                EffectFrameExtent::new(aux_width, aux_height),
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &auxiliary_pixels,
+            ),
+            transform: IDENTITY_AFFINE,
+            policy: AuxiliaryPolicy::new(AuxiliaryResolution::Authored),
+        };
+        let grade = |operator: CompoundOperator,
+                     channels: CompoundChannels,
+                     overflow: CompoundOverflow,
+                     stretch: CompoundStretch,
+                     blend_with_original: f32| {
+            CompoundArithmeticGrade::new(
+                6,
+                operator,
+                channels,
+                overflow,
+                stretch,
+                blend_with_original,
+            )
+            .expect("the fixture grade is valid")
+        };
+
+        type CompoundCase<'a> = (
+            &'a str,
+            CompoundArithmeticGrade,
+            AuxiliarySampling,
+            &'a [[f32; 4]],
+        );
+        // Every operator once at full effect, the three channel sets, both
+        // overflow rules the GPU executes, the original-size fit, the zero and
+        // full weights on top of the default, and the uncovered-primary fixture.
+        let cases: [CompoundCase<'_>; 22] = [
+            (
+                "copy",
+                grade(
+                    CompoundOperator::Copy,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "add",
+                grade(
+                    CompoundOperator::Add,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "subtract",
+                grade(
+                    CompoundOperator::Subtract,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "multiply",
+                grade(
+                    CompoundOperator::Multiply,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "difference",
+                grade(
+                    CompoundOperator::Difference,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "and",
+                grade(
+                    CompoundOperator::And,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "or",
+                grade(
+                    CompoundOperator::Or,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "xor",
+                grade(
+                    CompoundOperator::Xor,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "lighter",
+                grade(
+                    CompoundOperator::Lighter,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "darker",
+                grade(
+                    CompoundOperator::Darker,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "minimum",
+                grade(
+                    CompoundOperator::Minimum,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "maximum",
+                grade(
+                    CompoundOperator::Maximum,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "screen",
+                grade(
+                    CompoundOperator::Screen,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "overlay",
+                grade(
+                    CompoundOperator::Overlay,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "hard-light",
+                grade(
+                    CompoundOperator::HardLight,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "argb/lighter",
+                grade(
+                    CompoundOperator::Lighter,
+                    CompoundChannels::Argb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "alpha-only/screen",
+                grade(
+                    CompoundOperator::Screen,
+                    CompoundChannels::Alpha,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "wrap/add",
+                grade(
+                    CompoundOperator::Add,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Wrap,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "original/copy",
+                grade(
+                    CompoundOperator::Copy,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Original,
+                    0.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "half-original/copy",
+                grade(
+                    CompoundOperator::Copy,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    50.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "identity-original/add",
+                grade(
+                    CompoundOperator::Add,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    100.0,
+                ),
+                sampling,
+                &primary_pixels,
+            ),
+            (
+                "copy/uncovered-primary",
+                grade(
+                    CompoundOperator::Copy,
+                    CompoundChannels::Rgb,
+                    CompoundOverflow::Clip,
+                    CompoundStretch::Stretch,
+                    0.0,
+                ),
+                sampling,
+                &uncovered_pixels,
+            ),
+        ];
+
+        let auxiliary = key_cleaner_upload(&context, &auxiliary_pixels, aux_width, aux_height);
+        let mut encoder = context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (label, grade_case, case_sampling, case_primary) in cases {
+            let mut cpu = case_primary.to_vec();
+            assert!(
+                apply_compound_arithmetic_f32(
+                    &mut cpu,
+                    width,
+                    height,
+                    reference(),
+                    case_sampling,
+                    &grade_case,
+                ),
+                "{label}: the CPU kernel rejected the raster"
+            );
+            let pass = EffectGpuSpatialPass::CompoundArithmetic {
+                grade: grade_case,
+                sampling: case_sampling,
+                auxiliary: Some(case_sampling),
+                external_slot: None,
+            };
+            // CHN-03 spends one pass and no scratch plane whatever the operator
+            // or the fit: the whole grade fits in one fragment shader.
+            assert_eq!(
+                crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                    .expect("the compound arithmetic has a pass count"),
+                1,
+                "{label}: recorded pass count"
+            );
+            let primary = key_cleaner_upload(&context, case_primary, width, height);
+            let destination = key_cleaner_scratch(&context, width, height, 1).remove(0);
+            let scratch = key_cleaner_scratch(&context, width, height, 2);
+            let output = executor
+                .record_auxiliary(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &primary,
+                    &auxiliary,
+                    &destination,
+                    scratch.as_slice(),
+                    IDENTITY_AFFINE,
+                )
+                .unwrap_or_else(|error| panic!("{label}: the pass records: {error}"));
+            assert_eq!(
+                (output.width(), output.height()),
+                (width, height),
+                "{label}: the pass returns the primary extent"
+            );
+            let gpu = {
+                context.queue.submit(Some(encoder.finish()));
+                encoder = context
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                key_cleaner_readback(&context, &output, width, height)
+            };
+            let rgb = cpu
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(cpu, gpu)| [cpu[0] - gpu[0], cpu[1] - gpu[1], cpu[2] - gpu[2]])
+                .fold(0.0_f32, |worst, error| worst.max(error.abs()));
+            let alpha = cpu
+                .iter()
+                .zip(&gpu)
+                .map(|(cpu, gpu)| (cpu[3] - gpu[3]).abs())
+                .fold(0.0_f32, f32::max);
+            eprintln!("CHN-03 {label}: rgb={rgb:.3e} alpha={alpha:.3e}");
+            // The three bitwise operators quantize both operands to eight bits
+            // before combining them. A bilinear sample that lands on a rounding
+            // boundary can therefore cross one step between the two samplers,
+            // and the resulting colour difference is one 8-bit step of the
+            // premultiplied pixel, which is the documented resolution of the
+            // operator rather than a colour error.
+            let bitwise = matches!(label, "and" | "or" | "xor");
+            let rgb_budget = if bitwise {
+                1.0 / 255.0 + 2.0e-4
+            } else {
+                2.0e-4
+            };
+            assert!(rgb <= rgb_budget, "{label}: rgb error {rgb:.3e}");
+            assert!(alpha <= 1.0e-5, "{label}: alpha error {alpha:.3e}");
+            for ((input, actual), cpu) in case_primary.iter().zip(&gpu).zip(&cpu) {
+                if input[3] <= 0.0 {
+                    assert_eq!(
+                        actual.map(f32::to_bits),
+                        [0.0_f32; 4].map(f32::to_bits),
+                        "{label}: an uncovered pixel canonicalizes"
+                    );
+                    assert_eq!(
+                        cpu.map(f32::to_bits),
+                        [0.0_f32; 4].map(f32::to_bits),
+                        "{label}: the CPU kernel canonicalizes the fixture"
+                    );
+                }
+            }
+        }
+
+        // The delivery transform is finite by contract, and a NaN transform
+        // would poison every uv, so the pass refuses it before it draws.
+        let guarded_pass = EffectGpuSpatialPass::CompoundArithmetic {
+            grade: grade(
+                CompoundOperator::Copy,
+                CompoundChannels::Rgb,
+                CompoundOverflow::Clip,
+                CompoundStretch::Stretch,
+                0.0,
+            ),
+            sampling,
+            auxiliary: Some(sampling),
+            external_slot: None,
+        };
+        let guarded_primary = key_cleaner_upload(&context, &primary_pixels, width, height);
+        let guarded_destination = key_cleaner_scratch(&context, width, height, 1).remove(0);
+        let guarded_scratch = key_cleaner_scratch(&context, width, height, 2);
+        let nan_transform = [f32::NAN, 0.0, 0.0, 0.0, 1.0, 0.0];
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &guarded_pass,
+                &guarded_primary,
+                &auxiliary,
+                &guarded_destination,
+                guarded_scratch.as_slice(),
+                nan_transform,
+            ),
+            Err(
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "compound_arithmetic_transform"
+                )
+            )
+        ));
+        // A non-identity delivery affine under the frame-transform mapping is a
+        // geometry the fixed-grid pass cannot honour: it would sample a
+        // different pixel than the CPU kernel, so the pass refuses it.
+        let affine_sampling = AuxiliarySampling::new(
+            AuxiliaryCoordinateMapping::FrameTransform,
+            AuxiliaryFilter::Linear,
+            AuxiliaryOutOfBounds::Transparent,
+        );
+        let affine_pass = EffectGpuSpatialPass::CompoundArithmetic {
+            grade: grade(
+                CompoundOperator::Copy,
+                CompoundChannels::Rgb,
+                CompoundOverflow::Clip,
+                CompoundStretch::Stretch,
+                0.0,
+            ),
+            sampling: affine_sampling,
+            auxiliary: Some(affine_sampling),
+            external_slot: None,
+        };
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &affine_pass,
+                &guarded_primary,
+                &auxiliary,
+                &guarded_destination,
+                guarded_scratch.as_slice(),
+                [1.4, 0.0, 0.0, 0.0, 1.0, 0.0],
+            ),
+            Err(
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "compound_arithmetic_geometry"
+                )
+            )
+        ));
+        // The pass writes the primary in place, so a destination of another
+        // extent is a refusal rather than a partial frame.
+        let wide_destination = key_cleaner_scratch(&context, width + 1, height, 1).remove(0);
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &guarded_pass,
+                &guarded_primary,
+                &auxiliary,
+                &wide_destination,
+                guarded_scratch.as_slice(),
+                IDENTITY_AFFINE,
+            ),
+            Err(
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "compound_arithmetic_output_extent"
+                )
+            )
+        ));
+        // A compound pass without its second layer is a plumbing error: the
+        // scratch pool entry point never invents a transparent stand-in.
+        assert!(matches!(
+            executor.record(
+                &context.device,
+                &mut encoder,
+                &guarded_pass,
+                &guarded_primary,
+                &guarded_scratch,
+                width,
+                height,
+            ),
+            Err(crate::spatial_pass_gpu::EffectSpatialGpuError::MissingAuxiliaryInput)
+        ));
+    }
+
     #[tokio::test]
     async fn spatial_chain_bilateral_blur_packs_directly_into_the_layer_output() {
         use mondrian_effects::{bilateral_blur_frame_f32, BilateralBlurGrade, EffectRenderOp};
@@ -25059,6 +25655,145 @@ mod tests {
         let plan = crate::spatial_driver::gpu_spatial_chain_plan(&narrow, width, height)
             .expect("radius three is inside the GPU cap");
         assert_eq!(plan.spatial_passes, 1);
+    }
+
+    // CHN-03 refuses the whole layer when the overflow rule needs the
+    // whole-frame `scale` reduction the single spatial pass cannot perform
+    // (design §6): the plan carries the refusal and the chain falls back to the
+    // CPU kernel instead of failing the frame.
+    #[test]
+    fn gpu_compound_arithmetic_scale_overflow_falls_back_to_cpu() {
+        use mondrian_effects::{
+            apply_compound_arithmetic_f32, AuxiliaryCoordinateMapping, AuxiliaryFilter,
+            AuxiliaryFloatFrame, AuxiliaryOutOfBounds, AuxiliaryPolicy, AuxiliaryResolution,
+            AuxiliarySampling, CompoundArithmeticGrade, CompoundChannels, CompoundOperator,
+            CompoundOverflow, CompoundStretch, EffectColorDomain, EffectFloatFrameView,
+            EffectFrameExtent, EffectRenderOp, EffectValueFormat, EffectWorkingPrecision,
+            IDENTITY_AFFINE,
+        };
+
+        let width = 9;
+        let height = 7;
+        let (aux_width, aux_height) = (5, 4);
+        let auxiliary_pixels = spatial_test_pixels(aux_width, aux_height);
+        let reference = || AuxiliaryFloatFrame {
+            frame: EffectFloatFrameView::new(
+                EffectFrameExtent::new(aux_width, aux_height),
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &auxiliary_pixels,
+            ),
+            transform: IDENTITY_AFFINE,
+            policy: AuxiliaryPolicy::new(AuxiliaryResolution::Authored),
+        };
+        let sampling = AuxiliarySampling::new(
+            AuxiliaryCoordinateMapping::PrimaryGrid,
+            AuxiliaryFilter::Linear,
+            AuxiliaryOutOfBounds::Transparent,
+        );
+        let grade = |overflow: CompoundOverflow| {
+            CompoundArithmeticGrade::new(
+                6,
+                CompoundOperator::Add,
+                CompoundChannels::Rgb,
+                overflow,
+                CompoundStretch::Stretch,
+                0.0,
+            )
+            .expect("valid compound arithmetic grade")
+        };
+
+        // The CPU plan for the same authored state still executes, and it is what
+        // the fallback renders: the same frame in, the same bits out.
+        let scale_grade = grade(CompoundOverflow::Scale);
+        let pixels = spatial_test_pixels(width, height);
+        let mut cpu = pixels.clone();
+        assert!(apply_compound_arithmetic_f32(
+            &mut cpu,
+            width,
+            height,
+            reference(),
+            sampling,
+            &scale_grade,
+        ));
+        let mut again = pixels.clone();
+        assert!(apply_compound_arithmetic_f32(
+            &mut again,
+            width,
+            height,
+            reference(),
+            sampling,
+            &scale_grade,
+        ));
+        for (index, (left, right)) in cpu.iter().zip(again.iter()).enumerate() {
+            assert_eq!(
+                left.map(f32::to_bits),
+                right.map(f32::to_bits),
+                "pixel {index}"
+            );
+        }
+
+        let scale_pass = EffectGpuSpatialPass::CompoundArithmetic {
+            grade: grade(CompoundOverflow::Scale),
+            sampling,
+            auxiliary: Some(sampling),
+            external_slot: Some(6),
+        };
+        let refusal = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&scale_pass)
+            .expect_err("the whole-frame scale rule has no defensible pass count");
+        assert!(
+            matches!(
+                &refusal,
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "compound_arithmetic_overflow_scale"
+                )
+            ),
+            "{refusal:?}"
+        );
+
+        // The planner propagates that refusal as a blocker instead of running a
+        // chain whose scale pass cannot be sized.
+        let blocker = crate::GpuSpatialChainBlocker::UnsupportedPass {
+            pass: "compound_arithmetic_overflow_scale",
+            detail: "the scale overflow rule needs a whole-frame reduction".into(),
+        };
+        assert_eq!(blocker.code(), "spatial_pass_unsupported");
+
+        // A refused chain always chooses the CPU path and keeps the blocker as
+        // the reason, so the layer still renders through the fallback.
+        let choice = crate::choose_spatial_chain_for_plan(
+            Err(&blocker),
+            width,
+            height,
+            true,
+            crate::SpatialChainPreference::Auto,
+        );
+        assert!(!choice.use_gpu, "a blocked chain must fall back to the CPU");
+        assert!(
+            matches!(
+                choice.reason,
+                crate::SpatialChainChoiceReason::PlanUnavailable(_)
+            ),
+            "{:?}",
+            choice.reason
+        );
+
+        // Clip needs no reduction, so the same pass table still sizes it.
+        let clip_pass = EffectGpuSpatialPass::CompoundArithmetic {
+            grade: grade(CompoundOverflow::Clip),
+            sampling,
+            auxiliary: Some(sampling),
+            external_slot: Some(6),
+        };
+        assert_eq!(
+            crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&clip_pass)
+                .expect("clip needs no whole-frame reduction"),
+            1
+        );
     }
 
     #[test]

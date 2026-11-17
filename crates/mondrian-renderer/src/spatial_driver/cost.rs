@@ -446,6 +446,10 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // One clamped or bilinear reference sample, the five grade branches and
         // the straight-alpha write: the same bound as the neighbourhood jobs.
         "blend" => 0.9,
+        // One auxiliary sample, the fifteen-operator switch, the overflow and
+        // channel branches and the premultiplied mix: the same single-draw
+        // bound as the blend composite.
+        "compound_arithmetic" => 0.9,
         "grow_bounds" => 0.8,
         "smear" | "reshape" => 2.4,
         "detail_preserving_upscale" => 28.0,
@@ -528,6 +532,11 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // One reference sample, one luma pair, one chroma flip and the grade
         // mix; the reference is read straight, so there is no staging copy.
         "blend" => 2.0,
+        // One auxiliary sample and the same single-texel grade, but the fifteen
+        // operator branches, the 8-bit quantization and the overflow rule cost
+        // more per pixel than the five blend modes, even in the scalar CPU
+        // kernel.
+        "compound_arithmetic" => 2.6,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
         // Same sliding histogram as the median plus the deviation gate.
