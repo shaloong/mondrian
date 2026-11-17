@@ -3681,6 +3681,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
         crate::EffectRenderOp::AcesTransform { .. } => "aces_transform",
         crate::EffectRenderOp::LightSweep { .. } => "light_sweep",
+        crate::EffectRenderOp::Beam { .. } => "beam",
         crate::EffectRenderOp::Strobe { .. } => "strobe",
         crate::EffectRenderOp::Highlight { .. } => "highlight",
         crate::EffectRenderOp::RadialShadow { .. } => "radial_shadow",

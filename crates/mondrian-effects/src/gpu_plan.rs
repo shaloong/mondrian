@@ -287,6 +287,11 @@ pub enum EffectGpuPointOp {
     LightSweep {
         grade: crate::LightSweepGrade,
     },
+    /// Beam: the endpoints, thicknesses, falloff, tint and highlight fill the
+    /// point uniform, so the shader never rebuilds them.
+    Beam {
+        grade: crate::BeamGrade,
+    },
     /// Strobe: the flash colour, weight, mode and operator fill the point
     /// uniform; the schedule has already been resolved on the CPU.
     Strobe {
@@ -1027,6 +1032,7 @@ pub(crate) fn lower_point_op(
             Ok(EffectGpuPointOp::AcesTransform { grade: *grade })
         }
         EffectRenderOp::LightSweep { grade } => Ok(EffectGpuPointOp::LightSweep { grade: *grade }),
+        EffectRenderOp::Beam { grade } => Ok(EffectGpuPointOp::Beam { grade: *grade }),
         EffectRenderOp::Strobe { grade } => Ok(EffectGpuPointOp::Strobe { grade: *grade }),
         EffectRenderOp::Grid { grade } => Ok(EffectGpuPointOp::Grid { grade: *grade }),
         EffectRenderOp::CircleEllipse { grade } => {
@@ -1181,6 +1187,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ColorSpaceTransform { .. } => "color_space_transform",
         EffectRenderOp::AcesTransform { .. } => "aces_transform",
         EffectRenderOp::LightSweep { .. } => "light_sweep",
+        EffectRenderOp::Beam { .. } => "beam",
         EffectRenderOp::Strobe { .. } => "strobe",
         EffectRenderOp::Highlight { .. } => "highlight",
         EffectRenderOp::RadialShadow { .. } => "radial_shadow",

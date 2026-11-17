@@ -1353,6 +1353,11 @@ pub enum EffectRenderOp {
         /// Authored beam geometry, intensities, tint and reception mode.
         grade: crate::LightSweepGrade,
     },
+    /// Beam: draws a soft line of light between two authored points.
+    Beam {
+        /// Authored endpoints, thickness, falloff, tint and highlight.
+        grade: crate::BeamGrade,
+    },
     /// Strobe: flashes the frame to a colour, or masks its layer, on a schedule.
     Strobe {
         /// Authored flash colour, schedule, mode and operator.
@@ -1873,6 +1878,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::LightSweep { grade } => {
                 formatter.debug_struct("LightSweep").field("grade", grade).finish()
             }
+            Self::Beam { grade } => formatter.debug_struct("Beam").field("grade", grade).finish(),
             Self::Strobe { grade } => {
                 formatter.debug_struct("Strobe").field("grade", grade).finish()
             }
@@ -3125,6 +3131,12 @@ impl EffectRenderOp {
                 // every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Beam { grade } => {
+                151u8.hash(state);
+                // Every endpoint, thickness, falloff and tint control changes
+                // the pixels, so the grade hashes the whole configuration.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3412,6 +3424,7 @@ impl EffectRenderOp {
             EffectRenderOp::ColorSpaceTransform { .. } => 4,
             EffectRenderOp::AcesTransform { .. } => 5,
             EffectRenderOp::LightSweep { .. } => 1,
+            EffectRenderOp::Beam { .. } => 2,
             EffectRenderOp::Strobe { .. } => 1,
             EffectRenderOp::RadialShadow { .. } => 4,
             EffectRenderOp::FilmLook { .. } => 3,
@@ -3956,7 +3969,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 150] {
+fn builtin_effect_types() -> [EffectType; 151] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4108,6 +4121,7 @@ fn builtin_effect_types() -> [EffectType; 150] {
         EffectType::CompoundArithmetic,
         EffectType::CompoundBlur,
         EffectType::Texturize,
+        EffectType::Beam,
     ]
 }
 
@@ -15177,6 +15191,149 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Beam => {
+            // The eleven authored values mirror the kernel: the two endpoints,
+            // the visible length and highlight phase, the two end thicknesses,
+            // the falloff, the two tint colours, the perspective scale and the
+            // compositing weight.
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "start",
+                "光束",
+                "起始点",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::BEAM_DEFAULT_START[0],
+                    crate::BEAM_DEFAULT_START[1],
+                )),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "end",
+                "光束",
+                "结束点",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::BEAM_DEFAULT_END[0],
+                    crate::BEAM_DEFAULT_END[1],
+                )),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "length",
+                "光束",
+                "长度",
+                PropertyValue::Float(crate::BEAM_DEFAULT_LENGTH),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "time",
+                "光束",
+                "时间",
+                PropertyValue::Float(crate::BEAM_DEFAULT_TIME),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "thickness_start",
+                "光束",
+                "起始厚度",
+                PropertyValue::Float(crate::BEAM_DEFAULT_THICKNESS),
+                Some(0.0),
+                Some(crate::BEAM_MAX_THICKNESS as f64),
+                Some(0.5),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "thickness_end",
+                "光束",
+                "结束厚度",
+                PropertyValue::Float(crate::BEAM_DEFAULT_THICKNESS),
+                Some(0.0),
+                Some(crate::BEAM_MAX_THICKNESS as f64),
+                Some(0.5),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "softness",
+                "光束",
+                "柔和度",
+                PropertyValue::Float(crate::BEAM_DEFAULT_SOFTNESS),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "inside_color",
+                "光束",
+                "内部颜色",
+                PropertyValue::Color(Color {
+                    r: crate::BEAM_DEFAULT_INSIDE_COLOUR[0],
+                    g: crate::BEAM_DEFAULT_INSIDE_COLOUR[1],
+                    b: crate::BEAM_DEFAULT_INSIDE_COLOUR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "outside_color",
+                "光束",
+                "外部颜色",
+                PropertyValue::Color(Color {
+                    r: crate::BEAM_DEFAULT_OUTSIDE_COLOUR[0],
+                    g: crate::BEAM_DEFAULT_OUTSIDE_COLOUR[1],
+                    b: crate::BEAM_DEFAULT_OUTSIDE_COLOUR[2],
+                    a: 1.0,
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "perspective",
+                "光束",
+                "3D 透视",
+                PropertyValue::Float(crate::BEAM_DEFAULT_PERSPECTIVE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "composite",
+                "光束",
+                "在原始图像上合成",
+                PropertyValue::Float(crate::BEAM_DEFAULT_COMPOSITE),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+        }
         EffectType::Strobe => {
             // The eight authored values mirror the kernel: the flash colour,
             // the mix weight, the schedule, the random gate, the mode, the
@@ -17376,6 +17533,13 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::LightSweep, "width" | "edge_thickness") => ParameterUnit::Pixels,
         (EffectType::LightSweep, "direction") => ParameterUnit::Degrees,
         (EffectType::LightSweep, "sweep_intensity" | "edge_intensity") => ParameterUnit::Percent,
+        (EffectType::Beam, "thickness_start" | "thickness_end") => ParameterUnit::Pixels,
+        (EffectType::Beam, "start" | "end") => ParameterUnit::Normalized,
+        // The visible length, the highlight phase, the falloff, the
+        // perspective scale and the compositing weight are plain numbers.
+        (EffectType::Beam, "length" | "time" | "softness" | "perspective" | "composite") => {
+            ParameterUnit::Unitless
+        }
         (EffectType::Strobe, "blend_with_original" | "random_probability") => {
             ParameterUnit::Percent
         }
@@ -18030,6 +18194,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The beam is evaluated from the same pixel, the authored geometry
             // and intensities, so no neighbour or history enters the result.
+            ..cpu_linear
+        },
+        EffectType::Beam => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The beam is evaluated from the same pixel, its authored endpoints
+            // and its controls, so no neighbour or history enters the result.
             ..cpu_linear
         },
         EffectType::Strobe => EffectExecutionContract {
@@ -25838,6 +26008,97 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Beam => {
+            let start_id = builtin_parameter_id(effect_type, "start");
+            let end_id = builtin_parameter_id(effect_type, "end");
+            let inside_color_id = builtin_parameter_id(effect_type, "inside_color");
+            let outside_color_id = builtin_parameter_id(effect_type, "outside_color");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("光束的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                let defaults = crate::BeamParameters::default();
+                let mut parameters = defaults;
+                match effect.evaluate_parameter(&start_id, context.time) {
+                    Some(PropertyValue::Vec2(point)) => {
+                        parameters.start = [point.x, point.y];
+                    }
+                    Some(_) => return Err(invalid("光束的起始点必须是二维坐标".to_string())),
+                    None => {}
+                }
+                match effect.evaluate_parameter(&end_id, context.time) {
+                    Some(PropertyValue::Vec2(point)) => {
+                        parameters.end = [point.x, point.y];
+                    }
+                    Some(_) => return Err(invalid("光束的结束点必须是二维坐标".to_string())),
+                    None => {}
+                }
+                parameters.length = read(effect, context, &invalid, "length", defaults.length)?;
+                parameters.time = read(effect, context, &invalid, "time", defaults.time)?;
+                parameters.thickness_start = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "thickness_start",
+                    defaults.thickness_start,
+                )?;
+                parameters.thickness_end = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "thickness_end",
+                    defaults.thickness_end,
+                )?;
+                parameters.softness =
+                    read(effect, context, &invalid, "softness", defaults.softness)?;
+                match effect.evaluate_parameter(&inside_color_id, context.time) {
+                    Some(PropertyValue::Color(color)) => {
+                        parameters.inside_color = [color.r, color.g, color.b];
+                    }
+                    Some(_) => return Err(invalid("光束的内部颜色必须是颜色值".to_string())),
+                    None => {}
+                }
+                match effect.evaluate_parameter(&outside_color_id, context.time) {
+                    Some(PropertyValue::Color(color)) => {
+                        parameters.outside_color = [color.r, color.g, color.b];
+                    }
+                    Some(_) => return Err(invalid("光束的外部颜色必须是颜色值".to_string())),
+                    None => {}
+                }
+                parameters.perspective = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "perspective",
+                    defaults.perspective,
+                )?;
+                parameters.composite =
+                    read(effect, context, &invalid, "composite", defaults.composite)?;
+                let grade = crate::BeamGrade::new(parameters)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Beam { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Strobe => {
             let color_id = builtin_parameter_id(effect_type, "color");
             let blend_with_original_id = builtin_parameter_id(effect_type, "blend_with_original");
@@ -27980,6 +28241,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ColorSpaceTransform => "色彩空间转换",
         EffectType::AcesTransform => "ACES 转换",
         EffectType::LightSweep => "扫光",
+        EffectType::Beam => "光束",
         EffectType::Strobe => "频闪",
         EffectType::RadialShadow => "径向阴影",
         EffectType::FilmLook => "胶片外观",
@@ -29414,6 +29676,7 @@ mod tests {
             EffectType::CompoundArithmetic,
             EffectType::CompoundBlur,
             EffectType::Texturize,
+            EffectType::Beam,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -38710,7 +38973,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 150);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 151);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -39238,7 +39501,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 150);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 151);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -42197,7 +42460,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 150);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 151);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -43333,7 +43596,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 150);
+        assert_eq!(builtin_effect_types().len(), 151);
     }
 
     #[test]
@@ -45797,6 +46060,303 @@ mod tests {
                 assert_eq!(cells.0[2], 120.0, "the beam width");
                 assert_eq!(cells.2[3], 1.0, "the linear shape tag");
                 assert_eq!(cells.3[0], 1.0, "the add reception tag");
+                assert_eq!(
+                    (
+                        cells.0.len(),
+                        cells.1.len(),
+                        cells.2.len(),
+                        cells.3.len(),
+                        cells.4.len(),
+                        cells.5.len(),
+                    ),
+                    (4, 4, 4, 4, 4, 4),
+                    "the point pass reads six four-component cells"
+                );
+            }
+            other => panic!("unexpected lowered point op {other:?}"),
+        }
+    }
+
+    fn beam_op(graph: &EffectRenderGraph) -> Option<crate::BeamGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Beam { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Beam { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_beam(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Beam).expect("the beam should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Beam.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the beam parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn beam_identity_builds_no_node() {
+        let effect = author_beam(&[("length", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the hidden beam should compile");
+        assert!(
+            beam_op(&graph).is_none(),
+            "a zero length beam is the identity"
+        );
+
+        let effect = author_beam(&[
+            ("thickness_start", PropertyValue::Float(0.0)),
+            ("thickness_end", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the flat beam should compile");
+        assert!(
+            beam_op(&graph).is_none(),
+            "both thicknesses at zero is the identity"
+        );
+
+        // The perspective only scales the width, so it never hides the beam.
+        let effect = author_beam(&[("perspective", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the flat perspective beam should compile");
+        assert!(
+            beam_op(&graph).is_some(),
+            "the perspective alone is not the identity"
+        );
+    }
+
+    #[test]
+    fn beam_defaults_build_one_point_op() {
+        let effect =
+            instantiate_effect_node(EffectType::Beam).expect("the beam should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = beam_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::BeamGrade::documented_defaults());
+        assert_eq!(graph.nodes.len(), 2, "the source plus one beam node");
+        let op = EffectRenderOp::Beam { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the beam decides each pixel in place"
+        );
+        assert_eq!(op.estimated_cost(), 2);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the beam is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            151
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::Beam {
+            grade: crate::BeamGrade::new(crate::BeamParameters::default())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn beam_schema_exposes_the_eleven_parameters_and_units() {
+        let effect_type = EffectType::Beam;
+        let properties = default_properties_for(effect_type.clone());
+        let expected = [
+            ("start", "起始点", ParameterUnit::Normalized),
+            ("end", "结束点", ParameterUnit::Normalized),
+            ("length", "长度", ParameterUnit::Unitless),
+            ("time", "时间", ParameterUnit::Unitless),
+            ("thickness_start", "起始厚度", ParameterUnit::Pixels),
+            ("thickness_end", "结束厚度", ParameterUnit::Pixels),
+            ("softness", "柔和度", ParameterUnit::Unitless),
+            ("inside_color", "内部颜色", ParameterUnit::Unitless),
+            ("outside_color", "外部颜色", ParameterUnit::Unitless),
+            ("perspective", "3D 透视", ParameterUnit::Unitless),
+            ("composite", "在原始图像上合成", ParameterUnit::Unitless),
+        ];
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert!(
+                property.descriptor.schema.enum_options.is_empty(),
+                "{parameter} has no menu"
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("光束")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+
+        let defaults = crate::BeamParameters::default();
+        for (parameter, value) in [
+            ("length", defaults.length),
+            ("time", defaults.time),
+            ("thickness_start", defaults.thickness_start),
+            ("thickness_end", defaults.thickness_end),
+            ("softness", defaults.softness),
+            ("perspective", defaults.perspective),
+            ("composite", defaults.composite),
+        ] {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Float(value),
+                "{parameter}"
+            );
+        }
+        let start = properties
+            .property(&effect_type.property_path("start"))
+            .expect("the start point is defined");
+        assert_eq!(
+            start.evaluate(tt(0)),
+            PropertyValue::Vec2(glam::Vec2::new(
+                crate::BEAM_DEFAULT_START[0],
+                crate::BEAM_DEFAULT_START[1],
+            ))
+        );
+        let inside = properties
+            .property(&effect_type.property_path("inside_color"))
+            .expect("the inside colour is defined");
+        assert_eq!(
+            inside.evaluate(tt(0)),
+            PropertyValue::Color(Color {
+                r: crate::BEAM_DEFAULT_INSIDE_COLOUR[0],
+                g: crate::BEAM_DEFAULT_INSIDE_COLOUR[1],
+                b: crate::BEAM_DEFAULT_INSIDE_COLOUR[2],
+                a: 1.0,
+            })
+        );
+    }
+
+    #[test]
+    fn beam_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::Beam;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::PixelLocal);
+    }
+
+    #[test]
+    fn beam_out_of_range_parameter_is_an_author_error() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Beam).expect("the beam should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Beam.property_path("thickness_start"),
+                value: PropertyValue::Float(4001.0),
+            })
+            .expect_err("a thickness above four thousand should fail");
+        let message = error.to_string();
+        assert!(message.contains("beam.thickness_start"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        // A value the property contract cannot see because it is authored
+        // through the serialized document is rejected by the kernel instead.
+        let effect =
+            instantiate_effect_node(EffectType::Beam).expect("the beam should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(
+            &mut document,
+            "beam.thickness_start",
+            serde_json::json!(5000.0),
+        );
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("a thickness above four thousand should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.beam");
+                    assert!(reason.contains("thickness_start"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn beam_point_lowering_keeps_the_six_control_cells() {
+        let effect = author_beam(&[
+            ("start", PropertyValue::Vec2(glam::Vec2::new(0.2, 0.4))),
+            ("end", PropertyValue::Vec2(glam::Vec2::new(0.8, 0.6))),
+            ("length", PropertyValue::Float(0.6)),
+            ("time", PropertyValue::Float(0.2)),
+            ("thickness_start", PropertyValue::Float(120.0)),
+            ("thickness_end", PropertyValue::Float(40.0)),
+            ("perspective", PropertyValue::Float(0.5)),
+            ("composite", PropertyValue::Float(0.25)),
+            (
+                "inside_color",
+                PropertyValue::Color(Color { r: 0.9, g: 0.8, b: 0.7, a: 1.0 }),
+            ),
+            (
+                "outside_color",
+                PropertyValue::Color(Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 }),
+            ),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored beam should compile");
+        let grade = beam_op(&graph).expect("the authored beam is not the identity");
+        let op = EffectRenderOp::Beam { grade };
+        let node_id = graph.nodes[1].id;
+        let lowered =
+            crate::gpu_plan::lower_point_op(node_id, &op).expect("the beam is point-lowerable");
+        match lowered {
+            crate::gpu_plan::EffectGpuPointOp::Beam { grade: lowered } => {
+                let cells = lowered.gpu_controls();
+                assert_eq!(
+                    cells,
+                    grade.gpu_controls(),
+                    "the lowered grade is carried whole"
+                );
+                assert_eq!(
+                    cells.0,
+                    [0.6, 0.2, 120.0, 40.0],
+                    "length, time, thicknesses"
+                );
+                assert_eq!(
+                    cells.1,
+                    [0.5, 0.5, 0.25, 0.0],
+                    "softness, perspective, composite"
+                );
+                assert_eq!(cells.2, [0.2, 0.4, 0.8, 0.6], "the two endpoints");
+                assert_eq!(cells.3, [0.9, 0.8, 0.7, 1.0], "the inside tint and tag");
+                assert_eq!(cells.4, [0.1, 0.2, 0.3, 0.0], "the outside tint");
+                assert_eq!(cells.5, [0.0, 0.0, 0.0, 0.0], "the spare cell");
                 assert_eq!(
                     (
                         cells.0.len(),

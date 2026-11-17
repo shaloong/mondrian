@@ -200,6 +200,7 @@ pub use processor_residency::{
     PreparedEffectProcessorInput,
 };
 pub mod aces_transform;
+pub mod beam;
 pub mod bevel;
 pub mod bezier_warp;
 pub mod broadcast_safe;
@@ -377,6 +378,13 @@ pub use auxiliary::{
     render_op_auxiliary_scratch_frames, sample_auxiliary, sample_auxiliary_f32,
     AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryFrame, AuxiliaryPolicy, AuxiliaryResolution,
     BILINEAR_TAPS, IDENTITY_AFFINE, PIXEL_CENTRE,
+};
+pub use beam::{
+    apply_beam_f32, apply_beam_f32_controlled, BeamError, BeamGpuControls, BeamGrade,
+    BeamParameters, BEAM_DEFAULT_COMPOSITE, BEAM_DEFAULT_END, BEAM_DEFAULT_INSIDE_COLOUR,
+    BEAM_DEFAULT_LENGTH, BEAM_DEFAULT_OUTSIDE_COLOUR, BEAM_DEFAULT_PERSPECTIVE,
+    BEAM_DEFAULT_SOFTNESS, BEAM_DEFAULT_START, BEAM_DEFAULT_THICKNESS, BEAM_DEFAULT_TIME,
+    BEAM_MAX_THICKNESS,
 };
 pub use bevel::{bevel_frame_f32, BevelError, BevelGrade, BEVEL_HALO_PIXELS, BEVEL_MAX_THICKNESS};
 pub use bezier_warp::{

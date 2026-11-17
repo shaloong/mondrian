@@ -603,6 +603,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Beam { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "beam",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Strobe { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "strobe",
@@ -1539,6 +1545,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::ColorSpaceTransform { .. }
         | EffectRenderOp::AcesTransform { .. }
         | EffectRenderOp::LightSweep { .. }
+        | EffectRenderOp::Beam { .. }
         | EffectRenderOp::Strobe { .. }
         | EffectRenderOp::Lut3D { .. } => 0,
         // The two blur passes each keep one full-frame plane.
@@ -2795,6 +2802,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 grade,
                 checkpoint,
             )?;
+            Ok(true)
+        }
+        EffectRenderOp::Beam { grade } => {
+            crate::beam::apply_beam_f32_controlled(working, width, height, grade, checkpoint)?;
             Ok(true)
         }
         EffectRenderOp::Strobe { grade } => {

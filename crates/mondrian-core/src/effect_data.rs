@@ -260,6 +260,8 @@ pub enum EffectType {
     PosterizeTime,
     /// Sweep a beam of light across the frame with an authorable beam and edge.
     LightSweep,
+    /// Draw a soft line of light between two points, with a travelling highlight.
+    Beam,
     /// Flash the frame to a colour, or drop its alpha, on a periodic schedule.
     Strobe,
     /// Radial shadow: project the layer's alpha away from a point light onto a
@@ -437,6 +439,7 @@ impl EffectType {
             Self::ColorSpaceTransform => "builtin.color_space_transform".to_string(),
             Self::AcesTransform => "builtin.aces_transform".to_string(),
             Self::LightSweep => "builtin.light_sweep".to_string(),
+            Self::Beam => "builtin.beam".to_string(),
             Self::Strobe => "builtin.strobe".to_string(),
             Self::RadialShadow => "builtin.radial_shadow".to_string(),
             Self::FilmLook => "builtin.film_look".to_string(),
@@ -593,6 +596,7 @@ impl EffectType {
             "builtin.color_space_transform" => Self::ColorSpaceTransform,
             "builtin.aces_transform" => Self::AcesTransform,
             "builtin.light_sweep" => Self::LightSweep,
+            "builtin.beam" => Self::Beam,
             "builtin.strobe" => Self::Strobe,
             "builtin.radial_shadow" => Self::RadialShadow,
             "builtin.film_look" => Self::FilmLook,
@@ -749,6 +753,7 @@ impl EffectType {
             Self::ColorSpaceTransform => "色彩空间转换",
             Self::AcesTransform => "ACES 转换",
             Self::LightSweep => "扫光",
+            Self::Beam => "光束",
             Self::Strobe => "频闪",
             Self::RadialShadow => "径向阴影",
             Self::FilmLook => "胶片外观",
@@ -901,6 +906,7 @@ impl EffectType {
             Self::LightLeak => vec!["胶片质感"],
             Self::Highlight => vec!["光效"],
             Self::LightSweep => vec!["光效"],
+            Self::Beam => vec!["光效"],
             Self::RadialShadow => vec!["光效"],
             Self::FilmLook => vec!["风格化"],
             Self::Strobe => vec!["风格化"],
@@ -1056,6 +1062,7 @@ impl EffectType {
             Self::ColorSpaceTransform => "color_space_transform".to_string(),
             Self::AcesTransform => "aces_transform".to_string(),
             Self::LightSweep => "light_sweep".to_string(),
+            Self::Beam => "beam".to_string(),
             Self::Strobe => "strobe".to_string(),
             Self::RadialShadow => "radial_shadow".to_string(),
             Self::FilmLook => "film_look".to_string(),
@@ -1591,6 +1598,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ColorSpaceTransform => Ok(()),
             Self::AcesTransform => Ok(()),
             Self::LightSweep => Ok(()),
+            Self::Beam => Ok(()),
             Self::Strobe => Ok(()),
             // The shadow is projected from the source coverage only, so it can
             // never paint a region the source left empty.

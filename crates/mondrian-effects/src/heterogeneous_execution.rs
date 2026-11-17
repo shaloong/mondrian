@@ -2949,6 +2949,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::CompoundArithmetic { .. } => 148,
         EffectRenderOp::CompoundBlur { .. } => 149,
         EffectRenderOp::Texturize { .. } => 150,
+        EffectRenderOp::Beam { .. } => 151,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
         EffectRenderOp::Reshape { .. } => 123,
@@ -5385,6 +5386,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::ColorSpaceTransform { .. }
             | crate::EffectRenderOp::AcesTransform { .. }
             | crate::EffectRenderOp::LightSweep { .. }
+            | crate::EffectRenderOp::Beam { .. }
             | crate::EffectRenderOp::Strobe { .. }
             | crate::EffectRenderOp::Highlight { .. }
             | crate::EffectRenderOp::GrowBounds { .. }

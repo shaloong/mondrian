@@ -3989,6 +3989,21 @@ parameter-builtin-light-sweep-reception-screen = 滤色
 parameter-builtin-light-sweep-reception-add = 相加
 parameter-builtin-light-sweep-reception-normal = 覆盖
 
+## Beam 光束
+effect-beam = 光束
+parameter-group-beam = 光束
+parameter-mondrian-effect-builtin-beam-start-label = 起始点
+parameter-mondrian-effect-builtin-beam-end-label = 结束点
+parameter-mondrian-effect-builtin-beam-length-label = 长度
+parameter-mondrian-effect-builtin-beam-time-label = 时间
+parameter-mondrian-effect-builtin-beam-thickness-start-label = 起始厚度
+parameter-mondrian-effect-builtin-beam-thickness-end-label = 结束厚度
+parameter-mondrian-effect-builtin-beam-softness-label = 柔和度
+parameter-mondrian-effect-builtin-beam-inside-color-label = 内部颜色
+parameter-mondrian-effect-builtin-beam-outside-color-label = 外部颜色
+parameter-mondrian-effect-builtin-beam-perspective-label = 3D 透视
+parameter-mondrian-effect-builtin-beam-composite-label = 在原始图像上合成
+
 ## Cartoon 卡通
 effect-cartoon = 卡通
 parameter-group-cartoon = 卡通

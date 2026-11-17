@@ -429,6 +429,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "色彩空间转换" => Some("parameter-group-color-space-transform"),
         "ACES 转换" => Some("parameter-group-aces-transform"),
         "扫光" => Some("parameter-group-light-sweep"),
+        "光束" => Some("parameter-group-beam"),
         "频闪" => Some("parameter-group-strobe"),
         "胶片外观" => Some("parameter-group-film-look"),
         "缩放模糊" => Some("parameter-group-zoom-blur"),
