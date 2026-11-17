@@ -450,6 +450,10 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // channel branches and the premultiplied mix: the same single-draw
         // bound as the blend composite.
         "compound_arithmetic" => 0.9,
+        // One bilinear map read, the luma dot product and 25 premultiplied
+        // bilinear source taps: the disc sampling is the expensive half, so the
+        // draw sits above the single-tap composites.
+        "compound_blur" => 3.5,
         "grow_bounds" => 0.8,
         "smear" | "reshape" => 2.4,
         "detail_preserving_upscale" => 28.0,
@@ -537,6 +541,9 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // more per pixel than the five blend modes, even in the scalar CPU
         // kernel.
         "compound_arithmetic" => 2.6,
+        // The map sample plus 25 bilinear premultiplied taps per pixel, and the
+        // scalar kernel premultiplies the whole frame up front.
+        "compound_blur" => 8.0,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
         // Same sliding histogram as the median plus the deviation gate.

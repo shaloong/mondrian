@@ -145,6 +145,7 @@ pub(crate) struct EffectSpatialGpu {
     difference_matte: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
     compound_arithmetic: wgpu::RenderPipeline,
+    compound_blur: wgpu::RenderPipeline,
     temporal_blend: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
@@ -1860,6 +1861,8 @@ impl EffectSpatialGpu {
             "mondrian.effect-spatial.compound-arithmetic",
             "fs_compound_arithmetic",
         );
+        let compound_blur =
+            auxiliary_pipeline("mondrian.effect-spatial.compound-blur", "fs_compound_blur");
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
             layout: Some(&composite_layout),
@@ -2762,6 +2765,7 @@ impl EffectSpatialGpu {
             difference_matte,
             blend,
             compound_arithmetic,
+            compound_blur,
             temporal_blend,
             bindings,
             composite_bindings,
@@ -4065,6 +4069,96 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    /// Records the BLR-09 compound-blur stage.
+    ///
+    /// One draw reads the premultiplied primary texel, turns one straight
+    /// blur-map sample into a radius and averages the 25 disc samples spread
+    /// over it. The stage preserves the raster, so the delivery keeps the input
+    /// extent and the auxiliary map only feeds the sampler.
+    #[allow(clippy::too_many_arguments)]
+    fn record_compound_blur(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        primary: &wgpu::Texture,
+        auxiliary: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        transform: [f32; 6],
+        grade: mondrian_effects::CompoundBlurGrade,
+        sampling: mondrian_effects::AuxiliarySampling,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if primary.width() == 0
+            || primary.height() == 0
+            || auxiliary.width() == 0
+            || auxiliary.height() == 0
+        {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        if transform.iter().any(|component| !component.is_finite()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "compound_blur_transform",
+            ));
+        }
+        if (destination.width(), destination.height()) != (primary.width(), primary.height()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "compound_blur_output_extent",
+            ));
+        }
+        // The kernel samples the primary grid (design §4): stretch reads the
+        // whole map at the primary uv, and center crop recentres that uv inside
+        // the smaller aspect window, exactly as the CPU kernel derives it. The
+        // crop factors travel in `extra`, so the shader applies the window and
+        // `size.w == 0` keeps `sample_auxiliary` from re-applying the affine.
+        let primary_aspect = primary.width() as f32 / primary.height() as f32;
+        let auxiliary_aspect = auxiliary.width() as f32 / auxiliary.height() as f32;
+        let (crop_w, crop_h, size_mode) = match grade.size_mode() {
+            mondrian_effects::CompoundBlurSizeMode::Stretch => (1.0, 1.0, 1.0),
+            mondrian_effects::CompoundBlurSizeMode::CenterCrop => (
+                (primary_aspect / auxiliary_aspect).min(1.0),
+                (auxiliary_aspect / primary_aspect).min(1.0),
+                2.0,
+            ),
+        };
+        let mut params = [
+            grade.max_blur(),
+            f32::from(u8::from(grade.invert_blur())),
+            size_mode,
+            0.0,
+        ];
+        params[3] = f32::from(u8::from(sampling.filter == AuxiliaryFilter::Linear));
+        // The delivery affine is published for the shared uniform block but the
+        // fixed-grid kernel never applies it (`size.w == 0`), which matches the
+        // CPU kernel: the mapping is `PrimaryGrid`, so the transform is ignored.
+        let [a, b, tx, c, d, ty] = transform;
+        let uniforms = SpatialPassUniform {
+            size: [
+                primary.width() as f32,
+                primary.height() as f32,
+                f32::from(u8::from(
+                    sampling.out_of_bounds == AuxiliaryOutOfBounds::Transparent,
+                )),
+                0.0,
+            ],
+            params,
+            extra: [crop_w, crop_h, grade.blur_layer() as f32, 0.0],
+            aces: [a, b, tx, 0.0],
+            extra1: [c, d, ty, 0.0],
+        };
+        let primary_view = primary.create_view(&wgpu::TextureViewDescriptor::default());
+        let auxiliary_view = auxiliary.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.compound_blur,
+            &primary_view,
+            &auxiliary_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
+
     /// Sample an independent texture while processing the primary frame.
     ///
     /// `scratch` supplies the intermediate planes that a multi-pass auxiliary
@@ -4108,6 +4202,18 @@ impl EffectSpatialGpu {
         }
         if let EffectGpuSpatialPass::CompoundArithmetic { grade, sampling, .. } = *pass {
             return self.record_compound_arithmetic(
+                device,
+                encoder,
+                primary,
+                auxiliary,
+                destination,
+                transform,
+                grade,
+                sampling,
+            );
+        }
+        if let EffectGpuSpatialPass::CompoundBlur { grade, sampling, .. } = *pass {
+            return self.record_compound_blur(
                 device,
                 encoder,
                 primary,
@@ -4459,6 +4565,11 @@ impl EffectSpatialGpu {
                     ))
                 }
             }
+            // One draw folds the blur-map sample and the 25 disc samples into
+            // the written texel, so the pool is `pass_count + 1` = two textures
+            // (design §6). At UHD that is 2 x 132,710,400 = 265,420,800 B and
+            // at DCI 4K 2 x 141,557,760 = 283,115,520 B.
+            EffectGpuSpatialPass::CompoundBlur { .. } => Ok(1),
         }
     }
 
@@ -4558,6 +4669,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::DifferenceMatte { .. }
             | EffectGpuSpatialPass::Blend { .. }
             | EffectGpuSpatialPass::CompoundArithmetic { .. }
+            | EffectGpuSpatialPass::CompoundBlur { .. }
             | EffectGpuSpatialPass::Glass { auxiliary: Some(_), .. } => {
                 return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
             }
@@ -11151,7 +11263,7 @@ fn spatial_composite_shader_source() -> String {
         "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
          const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
          const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
-         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}",
+         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}\n{}",
         mondrian_effects::PIXEL_CENTRE,
         f32::MAX.to_bits(),
         include_str!("channel_combiner.wgsl"),
@@ -11159,6 +11271,7 @@ fn spatial_composite_shader_source() -> String {
         include_str!("difference_matte.wgsl"),
         include_str!("blend.wgsl"),
         include_str!("compound_arithmetic.wgsl"),
+        include_str!("compound_blur.wgsl"),
     )
 }
 

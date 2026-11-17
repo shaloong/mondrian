@@ -24251,6 +24251,574 @@ mod tests {
         ));
     }
 
+    // BLR-09 「复合模糊」/ Compound Blur: the luminance of the auxiliary map sets
+    // the blur radius, and each primary pixel becomes the average of 25
+    // equal-weight disc samples around it (design §3). The pass table spends one
+    // draw, so the fragment shader has to reproduce the scalar kernel for the
+    // documented defaults, both radius extremes, the inverted map, the
+    // center-crop window on a non-square map, a half-bright map, a delivery
+    // affine and a small radius.
+    #[tokio::test]
+    async fn gpu_compound_blur_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            apply_compound_blur_f32, compile_reference_render_graph,
+            lower_effect_graph_to_gpu_pipeline, AuxiliaryCoordinateMapping, AuxiliaryFilter,
+            AuxiliaryFloatFrame, AuxiliaryOutOfBounds, AuxiliaryPolicy, AuxiliaryResolution,
+            AuxiliarySampling, CompoundBlurGrade, CompoundBlurSizeMode, EffectColorDomain,
+            EffectColorDomainContract, EffectFloatFrameView, EffectFrameExtent,
+            EffectGpuSpatialPass, EffectGraphBuilderState, EffectValueFormat,
+            EffectWorkingPrecision, IDENTITY_AFFINE,
+        };
+
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("GPU for compound blur parity");
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let (width, height) = (24, 16);
+        // The map is deliberately non-square (16:10 against a 3:2 primary), so
+        // the center-crop window has to crop the horizontal axis while leaving
+        // the vertical axis whole.
+        let (map_width, map_height) = (16_u32, 10_u32);
+        // Stretch reads the whole map on the primary grid and clamps at its own
+        // border. Center crop instead reads the authored window and lets the
+        // pixels outside it fall back to transparent, so they keep the source
+        // pixel (design §4).
+        let stretch = AuxiliarySampling::new(
+            AuxiliaryCoordinateMapping::PrimaryGrid,
+            AuxiliaryFilter::Linear,
+            AuxiliaryOutOfBounds::Clamp,
+        );
+        let crop = AuxiliarySampling::new(
+            AuxiliaryCoordinateMapping::PrimaryGrid,
+            AuxiliaryFilter::Linear,
+            AuxiliaryOutOfBounds::Transparent,
+        );
+
+        // The scalar kernel takes the straight working frame, premultiplies it
+        // once and writes premultiplied pixels, so the fixture stays straight
+        // here and is premultiplied only for the GPU upload. The top-left 3×3
+        // corner keeps hidden colour under zero coverage, and the blur has to
+        // spread real coverage into it rather than trustworthy colour.
+        let straight_primary: Vec<[f32; 4]> = (0..width * height)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                let uncovered = x < 3 && y < 3;
+                [
+                    if uncovered {
+                        0.3
+                    } else {
+                        (x as f32 + 0.5) / width as f32 * 0.9 + 0.05
+                    },
+                    if uncovered {
+                        0.4
+                    } else {
+                        (y as f32 + 0.5) / height as f32 * 0.8 + 0.05
+                    },
+                    if uncovered {
+                        1.4
+                    } else {
+                        (i % 11) as f32 / 12.0 + 0.02
+                    },
+                    if uncovered {
+                        0.0
+                    } else {
+                        (1 + i % 7) as f32 / 8.0
+                    },
+                ]
+            })
+            .collect();
+        let premultiply = |pixels: &[[f32; 4]]| -> Vec<[f32; 4]> {
+            pixels
+                .iter()
+                .map(|pixel| {
+                    let alpha = pixel[3].clamp(0.0, 1.0);
+                    [pixel[0] * alpha, pixel[1] * alpha, pixel[2] * alpha, alpha]
+                })
+                .collect()
+        };
+        let premultiplied_primary = premultiply(&straight_primary);
+
+        let gradient_map: Vec<[f32; 4]> = (0..map_width * map_height)
+            .map(|i| {
+                let (x, y) = (i % map_width, i / map_width);
+                [
+                    (x as f32 + 0.5) / map_width as f32,
+                    (y as f32 + 0.5) / map_height as f32,
+                    (i % 5) as f32 / 8.0,
+                    1.0,
+                ]
+            })
+            .collect();
+        let map_texels = (map_width * map_height) as usize;
+        let bright_map = vec![[1.0, 1.0, 1.0, 1.0]; map_texels];
+        let black_map = vec![[0.0, 0.0, 0.0, 1.0]; map_texels];
+        let half_map = vec![[0.5, 0.5, 0.5, 1.0]; map_texels];
+        // Bright only on the two outermost columns, dark in between: the crop
+        // window keeps the middle of the map, so a pass that forgets the window
+        // turns the bright border into a large blur instead of the near
+        // passthrough the kernel produces.
+        let crop_map: Vec<[f32; 4]> = (0..map_width * map_height)
+            .map(|i| {
+                let x = i % map_width;
+                let value = if x == 0 || x == map_width - 1 {
+                    1.0
+                } else {
+                    0.1
+                };
+                [value, value, value, 1.0]
+            })
+            .collect();
+
+        let grade =
+            |blur_layer: u32, max_blur: f32, size_mode: CompoundBlurSizeMode, invert_blur: bool| {
+                CompoundBlurGrade::new(blur_layer, max_blur, size_mode, invert_blur)
+                    .expect("the fixture grade is valid")
+            };
+
+        type CompoundBlurCase<'a> = (
+            &'a str,
+            CompoundBlurGrade,
+            AuxiliarySampling,
+            [f32; 6],
+            &'a [[f32; 4]],
+        );
+        // The documented defaults, the map at both ends of its luminance range,
+        // the inverted map, the crop window on the non-square map, a half-bright
+        // map, a non-identity delivery affine (inert under the primary-grid
+        // mapping on both kernels) and a radius small enough to stay inside one
+        // texel of most pixels.
+        let cases: [CompoundBlurCase<'_>; 8] = [
+            (
+                "documented-defaults",
+                CompoundBlurGrade::documented_defaults(),
+                stretch,
+                IDENTITY_AFFINE,
+                &gradient_map,
+            ),
+            (
+                "all-bright/maximum-radius",
+                grade(6, 20.0, CompoundBlurSizeMode::Stretch, false),
+                stretch,
+                IDENTITY_AFFINE,
+                &bright_map,
+            ),
+            (
+                "all-black/passthrough",
+                grade(6, 20.0, CompoundBlurSizeMode::Stretch, false),
+                stretch,
+                IDENTITY_AFFINE,
+                &black_map,
+            ),
+            (
+                "invert-blur",
+                grade(6, 20.0, CompoundBlurSizeMode::Stretch, true),
+                stretch,
+                IDENTITY_AFFINE,
+                &gradient_map,
+            ),
+            (
+                "center-crop/non-square-map",
+                grade(6, 20.0, CompoundBlurSizeMode::CenterCrop, false),
+                crop,
+                IDENTITY_AFFINE,
+                &crop_map,
+            ),
+            (
+                "half-bright",
+                grade(6, 20.0, CompoundBlurSizeMode::Stretch, false),
+                stretch,
+                IDENTITY_AFFINE,
+                &half_map,
+            ),
+            (
+                "delivery-affine",
+                grade(6, 20.0, CompoundBlurSizeMode::Stretch, false),
+                stretch,
+                [1.1, 0.05, 0.02, -0.03, 0.95, 0.01],
+                &gradient_map,
+            ),
+            (
+                "small-radius",
+                grade(6, 1.2, CompoundBlurSizeMode::Stretch, false),
+                stretch,
+                IDENTITY_AFFINE,
+                &bright_map,
+            ),
+        ];
+
+        let mut encoder = context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (label, grade_case, case_sampling, transform, case_map) in cases {
+            let reference = AuxiliaryFloatFrame {
+                frame: EffectFloatFrameView::new(
+                    EffectFrameExtent::new(map_width, map_height),
+                    EffectValueFormat::new(
+                        EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    case_map,
+                ),
+                transform,
+                policy: AuxiliaryPolicy::new(AuxiliaryResolution::Authored),
+            };
+            let mut cpu = straight_primary.clone();
+            assert!(
+                apply_compound_blur_f32(
+                    &mut cpu,
+                    width,
+                    height,
+                    reference,
+                    case_sampling,
+                    &grade_case,
+                ),
+                "{label}: the CPU kernel rejected the raster"
+            );
+            let pass = EffectGpuSpatialPass::CompoundBlur {
+                grade: grade_case,
+                sampling: case_sampling,
+                auxiliary: Some(case_sampling),
+                external_slot: None,
+            };
+            // BLR-09 spends one pass and no scratch plane whatever the map or
+            // the fit: the whole disc fits in one fragment shader.
+            assert_eq!(
+                crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                    .expect("the compound blur has a pass count"),
+                1,
+                "{label}: recorded pass count"
+            );
+            let primary = key_cleaner_upload(&context, &premultiplied_primary, width, height);
+            let auxiliary = key_cleaner_upload(&context, case_map, map_width, map_height);
+            let destination = key_cleaner_scratch(&context, width, height, 1).remove(0);
+            let scratch = key_cleaner_scratch(&context, width, height, 2);
+            let output = executor
+                .record_auxiliary(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &primary,
+                    &auxiliary,
+                    &destination,
+                    scratch.as_slice(),
+                    transform,
+                )
+                .unwrap_or_else(|error| panic!("{label}: the pass records: {error}"));
+            assert_eq!(
+                (output.width(), output.height()),
+                (width, height),
+                "{label}: the pass returns the primary extent"
+            );
+            let gpu = {
+                context.queue.submit(Some(encoder.finish()));
+                encoder = context
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                key_cleaner_readback(&context, &output, width, height)
+            };
+            let rgb = cpu
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(cpu, gpu)| [cpu[0] - gpu[0], cpu[1] - gpu[1], cpu[2] - gpu[2]])
+                .fold(0.0_f32, |worst, error| worst.max(error.abs()));
+            let alpha = cpu
+                .iter()
+                .zip(&gpu)
+                .map(|(cpu, gpu)| (cpu[3] - gpu[3]).abs())
+                .fold(0.0_f32, f32::max);
+            eprintln!("BLR-09 {label}: rgb={rgb:.3e} alpha={alpha:.3e}");
+            assert!(rgb <= 2.0e-4, "{label}: rgb error {rgb:.3e}");
+            assert!(alpha <= 1.0e-5, "{label}: alpha error {alpha:.3e}");
+            // The disc is only meaningful when it actually spreads coverage:
+            // at the maximum radius the blurred frame cannot equal the source.
+            if label == "all-bright/maximum-radius" {
+                assert!(
+                    gpu.iter()
+                        .zip(&premultiplied_primary)
+                        .any(|(blurred, source)| (blurred[0] - source[0]).abs() > 1.0e-2),
+                    "{label}: the maximum radius must actually blur"
+                );
+            }
+            // A pixel that carries no coverage is canonically `(0, 0, 0, 0)`.
+            // Under a zero radius the source pixel is copied verbatim, and under
+            // a real radius the disc legitimately spreads coverage inward, so
+            // the bitwise rule is asserted exactly where the kernel keeps the
+            // pixel uncovered.
+            for ((input, actual), cpu) in straight_primary.iter().zip(&gpu).zip(&cpu) {
+                if input[3] <= 0.0 && cpu[3] <= 0.0 {
+                    assert_eq!(
+                        actual.map(f32::to_bits),
+                        [0.0_f32; 4].map(f32::to_bits),
+                        "{label}: an uncovered pixel canonicalizes"
+                    );
+                    assert_eq!(
+                        cpu.map(f32::to_bits),
+                        [0.0_f32; 4].map(f32::to_bits),
+                        "{label}: the CPU kernel canonicalizes the fixture"
+                    );
+                }
+            }
+            if label == "all-black/passthrough" {
+                for (input, actual) in straight_primary.iter().zip(&gpu) {
+                    if input[3] <= 0.0 {
+                        assert_eq!(
+                            actual.map(f32::to_bits),
+                            [0.0_f32; 4].map(f32::to_bits),
+                            "{label}: the zero radius copies the uncovered pixel"
+                        );
+                    }
+                }
+            }
+        }
+
+        // The delivery transform is finite by contract, and a NaN transform
+        // would poison every uv, so the pass refuses it before it draws.
+        let guarded_pass = EffectGpuSpatialPass::CompoundBlur {
+            grade: grade(6, 20.0, CompoundBlurSizeMode::Stretch, false),
+            sampling: stretch,
+            auxiliary: Some(stretch),
+            external_slot: None,
+        };
+        let guarded_primary = key_cleaner_upload(&context, &premultiplied_primary, width, height);
+        let guarded_auxiliary = key_cleaner_upload(&context, &gradient_map, map_width, map_height);
+        let guarded_destination = key_cleaner_scratch(&context, width, height, 1).remove(0);
+        let guarded_scratch = key_cleaner_scratch(&context, width, height, 2);
+        let nan_transform = [f32::NAN, 0.0, 0.0, 0.0, 1.0, 0.0];
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &guarded_pass,
+                &guarded_primary,
+                &guarded_auxiliary,
+                &guarded_destination,
+                guarded_scratch.as_slice(),
+                nan_transform,
+            ),
+            Err(
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "compound_blur_transform"
+                )
+            )
+        ));
+        // The pass writes the primary in place, so a destination of another
+        // extent is a refusal rather than a partial frame.
+        let wide_destination = key_cleaner_scratch(&context, width + 1, height, 1).remove(0);
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &guarded_pass,
+                &guarded_primary,
+                &guarded_auxiliary,
+                &wide_destination,
+                guarded_scratch.as_slice(),
+                IDENTITY_AFFINE,
+            ),
+            Err(
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "compound_blur_output_extent"
+                )
+            )
+        ));
+        // A compound blur without its map is a plumbing error: the scratch pool
+        // entry point never invents a transparent stand-in.
+        assert!(matches!(
+            executor.record(
+                &context.device,
+                &mut encoder,
+                &guarded_pass,
+                &guarded_primary,
+                &guarded_scratch,
+                width,
+                height,
+            ),
+            Err(crate::spatial_pass_gpu::EffectSpatialGpuError::MissingAuxiliaryInput)
+        ));
+
+        // The same grade through the compositor: the driver must plan one
+        // spatial pass and the two-texture scratch pool the pass table promises,
+        // and a missing auxiliary binding must be refused before any draw.
+        {
+            let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+            let mut ids = GpuColorFrameIdAllocator::new(1).unwrap();
+            let mut table = GpuColorFrameResourceTable::new();
+            let format = EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            );
+            let map_cpu = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width: map_width,
+                height: map_height,
+                color_space: WorkingColorSpace::LinearRec709,
+                data: gradient_map.clone(),
+            });
+            let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
+                ids.allocate().unwrap(),
+                &map_cpu,
+                product_gpu_working_texture_format(),
+                "compound-blur-test",
+            )
+            .expect("upload plan for the blur map");
+            let uploaded = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
+            let map_handle = uploaded.handle().clone();
+            table.insert(uploaded).unwrap();
+
+            let grade_case = grade(6, 20.0, CompoundBlurSizeMode::Stretch, false);
+            let mut builder = EffectGraphBuilderState::new();
+            let aux =
+                builder.append_external_input(9, format, EffectColorDomainContract::SCENE_LINEAR);
+            let output = builder.add_auxiliary_effect(
+                builder.source(),
+                aux,
+                mondrian_effects::EffectRenderOp::CompoundBlur { grade: grade_case },
+                mondrian_effects::AuxiliaryRole::Map,
+                stretch,
+            );
+            builder.set_current_output(output);
+            let graph =
+                compile_reference_render_graph(builder.finish()).expect("compound blur graph");
+            let mut pipeline =
+                lower_effect_graph_to_gpu_pipeline(&graph).expect("lowered compound blur");
+            if pipeline.requires_image_sampling() {
+                pipeline = pipeline.with_image_sampling(mondrian_core::ImageSampling::UNIT_SQUARE);
+            }
+            assert!(matches!(
+                pipeline.stages(),
+                [EffectGpuStage::Spatial { pass, .. }, ..] if pass.auxiliary_slot() == Some(Some(9))
+            ));
+
+            // The compositor seam carries straight coverage into the pass, while
+            // the scalar kernel premultiplies first. An opaque layer makes the
+            // two conventions identical, so this block exercises the real
+            // compositor wiring without re-testing alpha semantics that the
+            // direct-record cases above already pin down bit for bit.
+            let opaque_primary: Vec<[f32; 4]> = straight_primary
+                .iter()
+                .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
+                .collect();
+            let primary_cpu = CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width,
+                height,
+                color_space: WorkingColorSpace::LinearRec709,
+                data: opaque_primary.clone(),
+            });
+            let layers = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&primary_cpu),
+                spatial_plan: Some(&pipeline),
+            }];
+            let request = || GpuCompositeSpatialRequest {
+                width,
+                height,
+                working_color_space: WorkingColorSpace::LinearRec709,
+                layers: &layers,
+            };
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compound-blur-test"),
+                });
+            let error = compositor
+                .record_with_spatial_effect_chains(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    request(),
+                )
+                .err()
+                .expect("a missing blur map must reject");
+            assert!(matches!(
+                error,
+                GpuCompositeError::SpatialChainFailed { pass: "spatial_auxiliary_missing", .. }
+            ));
+            let policy = AuxiliaryPolicy::new(AuxiliaryResolution::Authored);
+            let gpu_binding = GpuSpatialAuxiliaryRaster {
+                slot: 9,
+                frame: &map_handle,
+                transform: IDENTITY_AFFINE,
+                policy,
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+            };
+            let record = compositor
+                .record_with_auxiliary_spatial_effect_chains(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    request(),
+                    &[&[gpu_binding]],
+                )
+                .expect("record a compound blur pass");
+            assert_eq!(record.diagnostics.spatial_effect_passes, 1);
+            assert_eq!(record.diagnostics.spatial_scratch_textures_peak, 2);
+            let actual = readback_composite_output(
+                &context,
+                encoder,
+                &mut table,
+                &record.output,
+                width,
+                height,
+            );
+            let cpu_binding = mondrian_effects::AuxiliaryFloatInput {
+                slot: 9,
+                raster: AuxiliaryFloatFrame {
+                    frame: EffectFloatFrameView::new(
+                        EffectFrameExtent::new(map_width, map_height),
+                        format,
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &gradient_map,
+                    ),
+                    transform: IDENTITY_AFFINE,
+                    policy,
+                },
+            };
+            let cpu = mondrian_effects::EffectExecutionSession::default()
+                .apply_compiled_rgba_f32_with_auxiliary(
+                    EffectFloatFrameView::new(
+                        EffectFrameExtent::new(width, height),
+                        format,
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                        &opaque_primary,
+                    ),
+                    &graph,
+                    0,
+                    &[cpu_binding],
+                    &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+                )
+                .expect("the CPU reference graph runs");
+            assert_eq!(cpu.extent(), EffectFrameExtent::new(width, height));
+            let expected = cpu
+                .pixels()
+                .iter()
+                .map(|pixel| if pixel[3] <= 0.0 { [0.0; 4] } else { *pixel })
+                .collect::<Vec<_>>();
+            let rgb = expected
+                .iter()
+                .zip(&actual)
+                .flat_map(|(cpu, gpu)| [cpu[0] - gpu[0], cpu[1] - gpu[1], cpu[2] - gpu[2]])
+                .fold(0.0_f32, |worst, error| worst.max(error.abs()));
+            let alpha = expected
+                .iter()
+                .zip(&actual)
+                .map(|(cpu, gpu)| (cpu[3] - gpu[3]).abs())
+                .fold(0.0_f32, f32::max);
+            eprintln!("BLR-09 compositor: rgb={rgb:.3e} alpha={alpha:.3e}");
+            assert!(rgb <= 2.0e-4, "compositor: rgb error {rgb:.3e}");
+            assert!(alpha <= 1.0e-5, "compositor: alpha error {alpha:.3e}");
+        }
+    }
+
     #[tokio::test]
     async fn spatial_chain_bilateral_blur_packs_directly_into_the_layer_output() {
         use mondrian_effects::{bilateral_blur_frame_f32, BilateralBlurGrade, EffectRenderOp};
