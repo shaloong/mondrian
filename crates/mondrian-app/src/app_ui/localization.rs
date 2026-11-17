@@ -298,6 +298,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "发光" => Some("parameter-group-glow"),
         "变换" => Some("parameter-group-transform"),
         "画中画" => Some("parameter-group-picture-in-picture"),
+        "内部/外部键" => Some("parameter-group-inner-outer-key"),
         "去色带" => Some("parameter-group-deband"),
         "噪点" => Some("parameter-group-noise"),
         "基础校正" => Some("parameter-group-basic-correction"),

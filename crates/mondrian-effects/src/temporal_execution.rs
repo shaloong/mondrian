@@ -3741,6 +3741,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::CompoundBlur { .. } => "compound_blur",
         crate::EffectRenderOp::Texturize { .. } => "texturize",
         crate::EffectRenderOp::PictureInPicture { .. } => "picture_in_picture",
+        crate::EffectRenderOp::InnerOuterKey { .. } => "inner_outer_key",
         crate::EffectRenderOp::Custom { .. } => "custom",
     }
 }

@@ -1425,6 +1425,12 @@ pub enum EffectRenderOp {
         /// The thirty-five authored controls.
         grade: crate::PictureInPictureGrade,
     },
+    /// Inner/outer key: keys the frame against a colour sampled at an authored
+    /// point, keeping the pixels on one side of that screen colour.
+    InnerOuterKey {
+        /// The nine authored controls.
+        grade: crate::InnerOuterKeyGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1915,6 +1921,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::PictureInPicture { grade } => {
                 formatter.debug_struct("PictureInPicture").field("grade", grade).finish()
+            }
+            Self::InnerOuterKey { grade } => {
+                formatter.debug_struct("InnerOuterKey").field("grade", grade).finish()
             }
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
@@ -3152,6 +3161,12 @@ impl EffectRenderOp {
                 // the pixels, so the grade hashes the whole configuration.
                 grade.hash_state(state);
             }
+            EffectRenderOp::InnerOuterKey { grade } => {
+                153u8.hash(state);
+                // All nine controls, including both authored points, change the
+                // pixels, so the grade hashes every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3451,6 +3466,7 @@ impl EffectRenderOp {
             EffectRenderOp::CompoundBlur { .. } => 5,
             EffectRenderOp::Texturize { .. } => 3,
             EffectRenderOp::PictureInPicture { .. } => 5,
+            EffectRenderOp::InnerOuterKey { .. } => 4,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3985,7 +4001,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 152] {
+fn builtin_effect_types() -> [EffectType; 153] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4139,6 +4155,7 @@ fn builtin_effect_types() -> [EffectType; 152] {
         EffectType::Texturize,
         EffectType::PictureInPicture,
         EffectType::Beam,
+        EffectType::InnerOuterKey,
     ]
 }
 
@@ -16790,6 +16807,135 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::InnerOuterKey => {
+            const GROUP: &str = "内部/外部键";
+            for (parameter, name, value) in [
+                (
+                    "foreground_colour",
+                    "前景色",
+                    crate::KEY_INNER_OUTER_DEFAULT_FOREGROUND_COLOUR,
+                ),
+                (
+                    "background_colour",
+                    "背景色",
+                    crate::KEY_INNER_OUTER_DEFAULT_BACKGROUND_COLOUR,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    GROUP,
+                    name,
+                    PropertyValue::Color(Color { r: value[0], g: value[1], b: value[2], a: 1.0 }),
+                    None,
+                    None,
+                    None,
+                );
+            }
+            for (parameter, name, value) in [
+                (
+                    "foreground_point",
+                    "前景取样点",
+                    crate::KEY_INNER_OUTER_DEFAULT_FOREGROUND_POINT,
+                ),
+                (
+                    "background_point",
+                    "背景取样点",
+                    crate::KEY_INNER_OUTER_DEFAULT_BACKGROUND_POINT,
+                ),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    GROUP,
+                    name,
+                    PropertyValue::Vec2(glam::Vec2::new(value[0], value[1])),
+                    Some(0.0),
+                    Some(1.0),
+                    Some(0.01),
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "matte_source",
+                GROUP,
+                "遮罩来源",
+                "foreground",
+                vec![
+                    ParameterEnumOption::new(
+                        "foreground",
+                        "前景",
+                        "mondrian.effect.inner_outer_key.matte_source.foreground",
+                    ),
+                    ParameterEnumOption::new(
+                        "background",
+                        "背景",
+                        "mondrian.effect.inner_outer_key.matte_source.background",
+                    ),
+                ],
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "colour_purity",
+                GROUP,
+                "颜色纯度",
+                "loose",
+                vec![
+                    ParameterEnumOption::new(
+                        "loose",
+                        "宽松",
+                        "mondrian.effect.inner_outer_key.colour_purity.loose",
+                    ),
+                    ParameterEnumOption::new(
+                        "standard",
+                        "标准",
+                        "mondrian.effect.inner_outer_key.colour_purity.standard",
+                    ),
+                    ParameterEnumOption::new(
+                        "strict",
+                        "严格",
+                        "mondrian.effect.inner_outer_key.colour_purity.strict",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "choke",
+                GROUP,
+                "收缩扩张",
+                PropertyValue::Float(crate::KEY_INNER_OUTER_DEFAULT_CHOKE_PIXELS),
+                Some(crate::KEY_INNER_OUTER_MIN_CHOKE_PIXELS as f64),
+                Some(crate::KEY_INNER_OUTER_MAX_CHOKE_PIXELS as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "feather",
+                GROUP,
+                "边缘羽化",
+                PropertyValue::Float(crate::KEY_INNER_OUTER_DEFAULT_FEATHER_PIXELS),
+                Some(0.0),
+                Some(crate::KEY_INNER_OUTER_MAX_FEATHER_PIXELS as f64),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "despill",
+                GROUP,
+                "去溢色",
+                PropertyValue::Int(i64::from(crate::KEY_INNER_OUTER_DEFAULT_DESPILL)),
+                Some(0.0),
+                Some(crate::KEY_INNER_OUTER_MAX_DESPILL as f64),
+                Some(1.0),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -18046,6 +18192,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         // fractions of the frame or of the window.
         (EffectType::PictureInPicture, "anti_alias") => ParameterUnit::Pixels,
         (EffectType::PictureInPicture, "rotation" | "shadow_angle") => ParameterUnit::Degrees,
+        (EffectType::InnerOuterKey, "foreground_point" | "background_point") => {
+            ParameterUnit::Normalized
+        }
+        (EffectType::InnerOuterKey, "choke" | "feather") => ParameterUnit::Pixels,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -18401,6 +18551,14 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // definition-level envelope cannot narrow the input to a tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
+        EffectType::InnerOuterKey => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The estimate samples the frame at an authored point, so the
+            // definition-level envelope cannot narrow the input to a tile.
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            topology: EffectGraphTopology::LinearChain,
             ..cpu_linear
         },
         EffectType::ChannelCombiner | EffectType::SetMatte => EffectExecutionContract {
@@ -26804,6 +26962,116 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::InnerOuterKey => {
+            let foreground_colour_id = builtin_parameter_id(effect_type, "foreground_colour");
+            let background_colour_id = builtin_parameter_id(effect_type, "background_colour");
+            let foreground_point_id = builtin_parameter_id(effect_type, "foreground_point");
+            let background_point_id = builtin_parameter_id(effect_type, "background_point");
+            let matte_source_id = builtin_parameter_id(effect_type, "matte_source");
+            let colour_purity_id = builtin_parameter_id(effect_type, "colour_purity");
+            let choke_id = builtin_parameter_id(effect_type, "choke");
+            let feather_id = builtin_parameter_id(effect_type, "feather");
+            let despill_id = builtin_parameter_id(effect_type, "despill");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let defaults = crate::InnerOuterKeyParameters::default();
+                let mut parameters = defaults;
+                let colour = |parameter_id: &ParameterId,
+                              name: &str,
+                              fallback: [f32; 3]|
+                 -> Result<[f32; 3], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Color(color)) => Ok([color.r, color.g, color.b]),
+                        Some(_) => Err(invalid(format!("内部/外部键的{name}必须是颜色值"))),
+                        None => Ok(fallback),
+                    }
+                };
+                // The two sampling points are authored in normalised frame
+                // coordinates; a point outside 0..1 makes the estimate fall
+                // back to the authored colour, which the schema keeps
+                // unreachable by limiting the control to 0..1.
+                let point = |parameter_id: &ParameterId,
+                             name: &str,
+                             fallback: [f32; 2]|
+                 -> Result<[f32; 2], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(parameter_id, context.time) {
+                        Some(PropertyValue::Vec2(point)) => Ok([point.x, point.y]),
+                        Some(PropertyValue::DoubleVec2(point)) => {
+                            Ok([point[0] as f32, point[1] as f32])
+                        }
+                        Some(_) => Err(invalid(format!("内部/外部键的{name}必须是坐标点"))),
+                        None => Ok(fallback),
+                    }
+                };
+                let enumeration =
+                    |parameter_id: &ParameterId,
+                     name: &str|
+                     -> Result<Option<String>, EffectGraphBuildError> {
+                        match effect.evaluate_parameter(parameter_id, context.time) {
+                            Some(PropertyValue::Enum(key)) => Ok(Some(key)),
+                            Some(_) => Err(invalid(format!("内部/外部键的{name}必须是菜单项"))),
+                            None => Ok(None),
+                        }
+                    };
+                parameters.foreground_colour =
+                    colour(&foreground_colour_id, "前景色", defaults.foreground_colour)?;
+                parameters.background_colour =
+                    colour(&background_colour_id, "背景色", defaults.background_colour)?;
+                parameters.foreground_point = point(
+                    &foreground_point_id,
+                    "前景取样点",
+                    defaults.foreground_point,
+                )?;
+                parameters.background_point = point(
+                    &background_point_id,
+                    "背景取样点",
+                    defaults.background_point,
+                )?;
+                if let Some(key) = enumeration(&matte_source_id, "遮罩来源")? {
+                    parameters.matte_source =
+                        crate::MatteSource::from_key(&key).ok_or_else(|| {
+                            invalid(format!("内部/外部键的遮罩来源没有对应的菜单项 {key}"))
+                        })?;
+                }
+                if let Some(key) = enumeration(&colour_purity_id, "颜色纯度")? {
+                    parameters.colour_purity =
+                        crate::ColourPurity::from_key(&key).ok_or_else(|| {
+                            invalid(format!("内部/外部键的颜色纯度没有对应的菜单项 {key}"))
+                        })?;
+                }
+                parameters.choke =
+                    effect.evaluate_f32_parameter(&choke_id, context.time, defaults.choke);
+                parameters.feather =
+                    effect.evaluate_f32_parameter(&feather_id, context.time, defaults.feather);
+                let despill = effect
+                    .evaluate_f32_parameter(
+                        &despill_id,
+                        context.time,
+                        f32::from(defaults.despill.as_code()),
+                    )
+                    .round();
+                parameters.despill =
+                    crate::DespillStrength::from_code(u8::try_from(despill as i64).map_err(
+                        |_| invalid("内部/外部键的去溢色必须是 0 到 2 之间的整数".to_string()),
+                    )?)
+                    .ok_or_else(|| invalid("内部/外部键的去溢色必须是 0、1 或 2".to_string()))?;
+                let grade = crate::InnerOuterKeyGrade::new(parameters).map_err(|error| {
+                    invalid(format!(
+                        "内部/外部键的参数 {} 超出文档范围",
+                        error.parameter()
+                    ))
+                })?;
+                // The default parameters already key the screen colour, so the
+                // node is always appended: the effect has no identity case.
+                debug_assert!(!grade.is_identity());
+                graph.append_unary(EffectRenderOp::InnerOuterKey { grade });
+                Ok(())
+            }))
+        }
         EffectType::FilmLook => {
             let stock_id = builtin_parameter_id(effect_type, "stock");
             let strength_id = builtin_parameter_id(effect_type, "strength");
@@ -28787,6 +29055,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::CompoundBlur => "复合模糊",
         EffectType::Texturize => "纹理化",
         EffectType::PictureInPicture => "画中画",
+        EffectType::InnerOuterKey => "内部/外部键",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -30213,6 +30482,7 @@ mod tests {
             EffectType::Texturize,
             EffectType::PictureInPicture,
             EffectType::Beam,
+            EffectType::InnerOuterKey,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -39509,7 +39779,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 152);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 153);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -40037,7 +40307,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 152);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 153);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -42996,7 +43266,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 152);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 153);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -44132,7 +44402,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 152);
+        assert_eq!(builtin_effect_types().len(), 153);
     }
 
     #[test]
@@ -47792,6 +48062,364 @@ mod tests {
         assert_eq!(large[0][0], 1920.0);
         assert_eq!(small[1][0], 6.0, "24 * 0.25");
         assert_eq!(large[1][0], 480.0, "1920 * 0.25");
+        let mut second = std::collections::hash_map::DefaultHasher::new();
+        grade.hash_state(&mut second);
+        assert_eq!(
+            before,
+            second.finish(),
+            "the authored grade is immutable and carries no frame extent"
+        );
+    }
+
+    fn inner_outer_key_op(graph: &EffectRenderGraph) -> Option<crate::InnerOuterKeyGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::InnerOuterKey { grade },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::InnerOuterKey { grade },
+                ..
+            } => Some(*grade),
+            _ => None,
+        })
+    }
+
+    fn author_inner_outer_key(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect = instantiate_effect_node(EffectType::InnerOuterKey)
+            .expect("the inner/outer key should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::InnerOuterKey.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the inner/outer key parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn inner_outer_key_defaults_build_one_spatial_node() {
+        let effect = instantiate_effect_node(EffectType::InnerOuterKey)
+            .expect("the inner/outer key should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = inner_outer_key_op(&graph)
+            .expect("the defaults key the screen colour, so they are never the identity");
+        assert_eq!(
+            grade,
+            crate::InnerOuterKeyGrade::documented_defaults()
+                .expect("the documented defaults satisfy the documented range")
+        );
+        assert!(!grade.is_identity(), "the effect has no identity case");
+        assert_eq!(grade.cost(), 4);
+        assert_eq!(
+            grade.halo(),
+            1,
+            "no choke and no feather leaves the estimate tap"
+        );
+        assert_eq!(
+            grade.pass_count(),
+            3,
+            "the texture chain pools three planes"
+        );
+        assert_eq!(
+            grade.draw_pass_count(),
+            2,
+            "the estimate pass and the composite"
+        );
+        assert_eq!(graph.nodes.len(), 2, "the source plus one key node");
+
+        let op = EffectRenderOp::InnerOuterKey { grade };
+        assert_eq!(op.estimated_cost(), 4);
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            2,
+            "the matte chain pings two intermediate planes"
+        );
+        let pass = crate::spatial_pass_for(&op).expect("the key is a spatial pass");
+        assert_eq!(pass, crate::EffectGpuSpatialPass::InnerOuterKey { grade });
+        assert_eq!(pass.name(), "inner_outer_key");
+        assert_eq!(
+            (pass.horizontal_halo(), pass.vertical_halo()),
+            (1, 1),
+            "the halo covers the estimate tap when both radii are zero"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            153
+        );
+    }
+
+    #[test]
+    fn inner_outer_key_schema_round_trips_its_nine_parameters() {
+        let effect_type = EffectType::InnerOuterKey;
+        let properties = default_properties_for(effect_type.clone());
+        let defaults = crate::InnerOuterKeyParameters::default();
+        let expected = [
+            (
+                "foreground_colour",
+                "前景色",
+                ParameterUnit::Unitless,
+                PropertyValue::Color(Color {
+                    r: defaults.foreground_colour[0],
+                    g: defaults.foreground_colour[1],
+                    b: defaults.foreground_colour[2],
+                    a: 1.0,
+                }),
+            ),
+            (
+                "background_colour",
+                "背景色",
+                ParameterUnit::Unitless,
+                PropertyValue::Color(Color {
+                    r: defaults.background_colour[0],
+                    g: defaults.background_colour[1],
+                    b: defaults.background_colour[2],
+                    a: 1.0,
+                }),
+            ),
+            (
+                "foreground_point",
+                "前景取样点",
+                ParameterUnit::Normalized,
+                PropertyValue::Vec2(glam::Vec2::new(
+                    defaults.foreground_point[0],
+                    defaults.foreground_point[1],
+                )),
+            ),
+            (
+                "background_point",
+                "背景取样点",
+                ParameterUnit::Normalized,
+                PropertyValue::Vec2(glam::Vec2::new(
+                    defaults.background_point[0],
+                    defaults.background_point[1],
+                )),
+            ),
+            (
+                "matte_source",
+                "遮罩来源",
+                ParameterUnit::Unitless,
+                PropertyValue::Enum("foreground".to_string()),
+            ),
+            (
+                "colour_purity",
+                "颜色纯度",
+                ParameterUnit::Unitless,
+                PropertyValue::Enum("loose".to_string()),
+            ),
+            (
+                "choke",
+                "收缩扩张",
+                ParameterUnit::Pixels,
+                PropertyValue::Float(defaults.choke),
+            ),
+            (
+                "feather",
+                "边缘羽化",
+                ParameterUnit::Pixels,
+                PropertyValue::Float(defaults.feather),
+            ),
+            (
+                "despill",
+                "去溢色",
+                ParameterUnit::Unitless,
+                PropertyValue::Int(1),
+            ),
+        ];
+        assert_eq!(expected.len(), 9, "the design authors nine controls");
+        assert_eq!(properties.iter().count(), expected.len());
+        for (order, (parameter, name, unit, default)) in expected.iter().enumerate() {
+            let path = effect_type.property_path(parameter);
+            let property = properties
+                .property(&path)
+                .unwrap_or_else(|| panic!("{parameter} should be defined"));
+            assert_eq!(property.descriptor.display_name, *name);
+            assert_eq!(property.descriptor.schema.unit, *unit);
+            assert_eq!(
+                property.evaluate(tt(0)),
+                *default,
+                "{parameter} evaluates to its documented default"
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("内部/外部键")
+            );
+            assert_eq!(
+                property.descriptor.ui_metadata.display_order,
+                Some(order as u32)
+            );
+        }
+        let purity = properties
+            .property(&effect_type.property_path("colour_purity"))
+            .expect("the purity menu should be defined");
+        let option_keys = purity
+            .descriptor
+            .schema
+            .enum_options
+            .iter()
+            .map(|option| option.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(option_keys, ["loose", "standard", "strict"]);
+    }
+
+    #[test]
+    fn inner_outer_key_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::InnerOuterKey;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu chain"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            EffectRoiPropagation::FullFrame,
+            "the estimate samples the frame at an authored point"
+        );
+        assert_eq!(
+            contract.topology,
+            crate::EffectGraphTopology::LinearChain,
+            "the key reads only the frame it writes"
+        );
+    }
+
+    #[test]
+    fn inner_outer_key_out_of_range_parameter_is_an_author_error() {
+        let mut effect = instantiate_effect_node(EffectType::InnerOuterKey)
+            .expect("the inner/outer key should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::InnerOuterKey.property_path("choke"),
+                value: PropertyValue::Float(25.0),
+            })
+            .expect_err("a choke above twenty pixels should fail");
+        let message = error.to_string();
+        assert!(message.contains("inner_outer_key.choke"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        for (parameter, value, hint) in [
+            ("despill", serde_json::json!(5), "去溢色"),
+            ("matte_source", serde_json::json!("sideways"), "遮罩来源"),
+            ("colour_purity", serde_json::json!("fuzzy"), "颜色纯度"),
+        ] {
+            let effect = instantiate_effect_node(EffectType::InnerOuterKey)
+                .expect("the inner/outer key should instantiate");
+            let mut document = serde_json::to_value(&effect).expect("serialize the node");
+            overwrite_static_value(
+                &mut document,
+                &format!("inner_outer_key.{parameter}"),
+                value,
+            );
+            let result: Result<EffectNode, _> = serde_json::from_value(document);
+            if let Ok(effect) = result {
+                let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .expect_err("an out-of-range control should fail");
+                match error {
+                    EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                        assert_eq!(effect_key, "builtin.inner_outer_key");
+                        assert!(reason.contains(hint), "{parameter}: {reason}");
+                    }
+                    other => panic!("unexpected error {other:?} for {parameter}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inner_outer_key_changing_the_matte_source_changes_the_hash() {
+        use std::hash::Hasher;
+
+        let foreground = instantiate_effect_node(EffectType::InnerOuterKey)
+            .expect("the inner/outer key should instantiate");
+        let foreground = build_effect_render_graph(&[foreground], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let foreground =
+            inner_outer_key_op(&foreground).expect("the defaults are not the identity");
+
+        let background = author_inner_outer_key(&[(
+            "matte_source",
+            PropertyValue::Enum("background".to_string()),
+        )]);
+        let background = build_effect_render_graph(&[background], tt(0), TEST_WORKING_SPACE)
+            .expect("the background key should compile");
+        let background =
+            inner_outer_key_op(&background).expect("the background key is not the identity");
+        assert_ne!(background, foreground, "the source reaches the grade");
+
+        let mut foreground_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::InnerOuterKey { grade: foreground }.hash_signature(&mut foreground_hasher);
+        let mut background_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::InnerOuterKey { grade: background }.hash_signature(&mut background_hasher);
+        assert_ne!(
+            foreground_hasher.finish(),
+            background_hasher.finish(),
+            "the matte source is part of the identity"
+        );
+    }
+
+    #[test]
+    fn inner_outer_key_choking_and_feathering_widen_the_halo() {
+        let plain = crate::InnerOuterKeyGrade::documented_defaults()
+            .expect("the documented defaults satisfy the documented range");
+        assert_eq!(plain.halo(), 1);
+        assert_eq!(plain.draw_pass_count(), 2);
+        assert_eq!(plain.pass_count(), 3);
+
+        let choked = author_inner_outer_key(&[("choke", PropertyValue::Float(3.0))]);
+        let choked = build_effect_render_graph(&[choked], tt(0), TEST_WORKING_SPACE)
+            .expect("the choked key should compile");
+        let choked = inner_outer_key_op(&choked).expect("the choked key is not the identity");
+        assert_eq!(choked.halo(), 4, "ceil(3) + ceil(0) + 1");
+        assert_eq!(choked.draw_pass_count(), 4, "two extra choke passes");
+        let pass = crate::spatial_pass_for(&EffectRenderOp::InnerOuterKey { grade: choked })
+            .expect("the choked key is a spatial pass");
+        assert_eq!((pass.horizontal_halo(), pass.vertical_halo()), (4, 4));
+
+        let feathered = author_inner_outer_key(&[
+            ("choke", PropertyValue::Float(2.0)),
+            ("feather", PropertyValue::Float(5.0)),
+        ]);
+        let feathered = build_effect_render_graph(&[feathered], tt(0), TEST_WORKING_SPACE)
+            .expect("the feathered key should compile");
+        let feathered =
+            inner_outer_key_op(&feathered).expect("the feathered key is not the identity");
+        assert_eq!(feathered.halo(), 8, "ceil(2) + ceil(5) + 1");
+        assert_eq!(
+            feathered.draw_pass_count(),
+            5,
+            "two choke and one feather pass"
+        );
+    }
+
+    #[test]
+    fn inner_outer_key_grade_carries_no_frame_extent() {
+        use std::hash::Hasher;
+
+        let effect = instantiate_effect_node(EffectType::InnerOuterKey)
+            .expect("the inner/outer key should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = inner_outer_key_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(
+            grade,
+            crate::InnerOuterKeyGrade::documented_defaults()
+                .expect("the documented defaults satisfy the documented range")
+        );
+
+        let matte_controls = grade.matte_gpu_controls();
+        let choke_controls = grade.choke_gpu_controls();
+        let composite_controls = grade.composite_gpu_controls();
+        let mut first = std::collections::hash_map::DefaultHasher::new();
+        grade.hash_state(&mut first);
+        let before = first.finish();
+        assert_eq!(grade.matte_gpu_controls(), matte_controls);
+        assert_eq!(grade.choke_gpu_controls(), choke_controls);
+        assert_eq!(grade.composite_gpu_controls(), composite_controls);
         let mut second = std::collections::hash_map::DefaultHasher::new();
         grade.hash_state(&mut second);
         assert_eq!(

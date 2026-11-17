@@ -194,6 +194,7 @@ pub(crate) mod hsl_space;
 pub mod hue_saturation;
 pub mod invert;
 pub mod key_cleaner;
+pub mod key_inner_outer;
 pub mod keylight;
 pub mod lut;
 pub mod mask;
@@ -1011,6 +1012,17 @@ pub use key_cleaner::{
     KEY_CLEANER_AUTHOR_MAX_EDGE_RADIUS_PIXELS, KEY_CLEANER_DEFAULT_ALPHA_CONTRAST,
     KEY_CLEANER_DEFAULT_EDGE_RADIUS_PIXELS, KEY_CLEANER_DEFAULT_REDUCE_CHATTER,
     KEY_CLEANER_DEFAULT_STRENGTH,
+};
+pub use key_inner_outer::{
+    apply_inner_outer_key_f32_controlled, inner_outer_key_frame_f32, ColourPurity, DespillStrength,
+    InnerOuterKeyError, InnerOuterKeyGpuControls, InnerOuterKeyGrade, InnerOuterKeyParameters,
+    MatteSource, KEY_INNER_OUTER_COST, KEY_INNER_OUTER_DEFAULT_BACKGROUND_COLOUR,
+    KEY_INNER_OUTER_DEFAULT_BACKGROUND_POINT, KEY_INNER_OUTER_DEFAULT_CHOKE_PIXELS,
+    KEY_INNER_OUTER_DEFAULT_DESPILL, KEY_INNER_OUTER_DEFAULT_FEATHER_PIXELS,
+    KEY_INNER_OUTER_DEFAULT_FOREGROUND_COLOUR, KEY_INNER_OUTER_DEFAULT_FOREGROUND_POINT,
+    KEY_INNER_OUTER_MAX_CHOKE_PIXELS, KEY_INNER_OUTER_MAX_DESPILL,
+    KEY_INNER_OUTER_MAX_FEATHER_PIXELS, KEY_INNER_OUTER_MIN_CHOKE_PIXELS,
+    KEY_INNER_OUTER_TEXTURE_PASS_COUNT,
 };
 pub use keylight::{
     keylight_frame_f32, keylight_key_channel, keylight_other_channels, KeylightDisplay,

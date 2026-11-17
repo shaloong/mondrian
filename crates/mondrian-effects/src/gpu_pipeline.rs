@@ -426,6 +426,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored window geometry, content fit, border, fill and shadow.
         grade: crate::PictureInPictureGrade,
     },
+    /// Key the frame against a colour sampled at an authored point.
+    InnerOuterKey {
+        /// The nine authored controls.
+        grade: crate::InnerOuterKeyGrade,
+    },
     /// Remap a source picture inside an evaluated mask boundary.
     Smear {
         /// Geometry and controls resolved for the current graph evaluation.
@@ -588,6 +593,7 @@ impl EffectGpuSpatialPass {
             Self::CompoundBlur { .. } => "compound_blur",
             Self::Texturize { .. } => "texturize",
             Self::PictureInPicture { .. } => "picture_in_picture",
+            Self::InnerOuterKey { .. } => "inner_outer_key",
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
@@ -722,6 +728,10 @@ impl EffectGpuSpatialPass {
             // The window resamples the source at an arbitrary scale, rotation
             // and pan, so the stage always needs the complete frame raster.
             Self::PictureInPicture { .. } => u32::MAX,
+            // The two separable morphologies and the two separable feathers each
+            // read a bounded window, so the halo is the sum of their reaches plus
+            // the sample tap of the estimate.
+            Self::InnerOuterKey { grade } => grade.halo(),
             Self::GrowBounds { grade } => grade.output_outset()[0],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -833,6 +843,7 @@ impl EffectGpuSpatialPass {
             // The window resamples on both axes, so the stage always needs the
             // complete frame raster vertically as well.
             Self::PictureInPicture { .. } => u32::MAX,
+            Self::InnerOuterKey { grade } => grade.halo(),
             Self::GrowBounds { grade } => grade.output_outset()[1],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -1459,6 +1470,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::PictureInPicture { grade } => {
             Some(EffectGpuSpatialPass::PictureInPicture { grade: *grade })
+        }
+        EffectRenderOp::InnerOuterKey { grade } => {
+            Some(EffectGpuSpatialPass::InnerOuterKey { grade: *grade })
         }
         EffectRenderOp::ZoomBlur { grade } => {
             Some(EffectGpuSpatialPass::ZoomBlur { grade: *grade })

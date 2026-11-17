@@ -4315,3 +4315,21 @@ parameter-mondrian-effect-builtin-picture-in-picture-shadow-angle-label = Shadow
 parameter-mondrian-effect-builtin-picture-in-picture-shadow-distance-label = Shadow Distance
 parameter-mondrian-effect-builtin-picture-in-picture-shadow-zoom-label = Shadow Zoom
 parameter-mondrian-effect-builtin-picture-in-picture-shadow-blur-label = Shadow Blur
+
+## Inner/Outer Key 内部/外部键
+effect-inner-outer-key = Inner/Outer Key
+parameter-group-inner-outer-key = Inner/Outer Key
+parameter-mondrian-effect-builtin-inner-outer-key-foreground-colour-label = Foreground Colour
+parameter-mondrian-effect-builtin-inner-outer-key-background-colour-label = Background Colour
+parameter-mondrian-effect-builtin-inner-outer-key-foreground-point-label = Foreground Sample Point
+parameter-mondrian-effect-builtin-inner-outer-key-background-point-label = Background Sample Point
+parameter-mondrian-effect-builtin-inner-outer-key-matte-source-label = Matte Source
+parameter-mondrian-effect-builtin-inner-outer-key-colour-purity-label = Colour Purity
+parameter-mondrian-effect-builtin-inner-outer-key-choke-label = Choke
+parameter-mondrian-effect-builtin-inner-outer-key-feather-label = Edge Feather
+parameter-mondrian-effect-builtin-inner-outer-key-despill-label = Despill
+parameter-mondrian-effect-inner-outer-key-matte-source-foreground = Foreground
+parameter-mondrian-effect-inner-outer-key-matte-source-background = Background
+parameter-mondrian-effect-inner-outer-key-colour-purity-loose = Loose
+parameter-mondrian-effect-inner-outer-key-colour-purity-standard = Standard
+parameter-mondrian-effect-inner-outer-key-colour-purity-strict = Strict

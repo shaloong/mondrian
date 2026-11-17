@@ -4243,3 +4243,21 @@ parameter-mondrian-effect-builtin-picture-in-picture-shadow-angle-label = 投影
 parameter-mondrian-effect-builtin-picture-in-picture-shadow-distance-label = 投影距离
 parameter-mondrian-effect-builtin-picture-in-picture-shadow-zoom-label = 扩展
 parameter-mondrian-effect-builtin-picture-in-picture-shadow-blur-label = 模糊
+
+## Inner/Outer Key 内部/外部键
+effect-inner-outer-key = 内部/外部键
+parameter-group-inner-outer-key = 内部/外部键
+parameter-mondrian-effect-builtin-inner-outer-key-foreground-colour-label = 前景色
+parameter-mondrian-effect-builtin-inner-outer-key-background-colour-label = 背景色
+parameter-mondrian-effect-builtin-inner-outer-key-foreground-point-label = 前景取样点
+parameter-mondrian-effect-builtin-inner-outer-key-background-point-label = 背景取样点
+parameter-mondrian-effect-builtin-inner-outer-key-matte-source-label = 遮罩来源
+parameter-mondrian-effect-builtin-inner-outer-key-colour-purity-label = 颜色纯度
+parameter-mondrian-effect-builtin-inner-outer-key-choke-label = 收缩扩张
+parameter-mondrian-effect-builtin-inner-outer-key-feather-label = 边缘羽化
+parameter-mondrian-effect-builtin-inner-outer-key-despill-label = 去溢色
+parameter-mondrian-effect-inner-outer-key-matte-source-foreground = 前景
+parameter-mondrian-effect-inner-outer-key-matte-source-background = 背景
+parameter-mondrian-effect-inner-outer-key-colour-purity-loose = 宽松
+parameter-mondrian-effect-inner-outer-key-colour-purity-standard = 标准
+parameter-mondrian-effect-inner-outer-key-colour-purity-strict = 严格

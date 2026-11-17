@@ -494,6 +494,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::InnerOuterKey { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "inner_outer_key",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::SetMatte { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "set_matte",
@@ -1450,6 +1456,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // destination, even though the kernel snapshots the source raster so
         // the resampled taps never read rewritten pixels.
         EffectRenderOp::PictureInPicture { .. } => 0,
+        // The chain pings two intermediate planes for the matte, choke and
+        // feather stages, so the frozen budget charges two scratch frames.
+        EffectRenderOp::InnerOuterKey { .. } => 2,
         EffectRenderOp::GrowBounds { .. } => 0,
         EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 1,
         EffectRenderOp::DetailPreservingUpscale { .. } => 1,
@@ -2099,6 +2108,22 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                 grade,
                 checkpoint,
             )
+        }
+        // Inner/outer key samples the estimate from the whole frame and its
+        // separable stages read beyond a partial region, so the unary region
+        // dispatch only lowers the full frame.
+        EffectRenderOp::InnerOuterKey { grade } => {
+            if !region.is_full_frame() {
+                return Ok(false);
+            }
+            crate::key_inner_outer::apply_inner_outer_key_f32_controlled(
+                working.as_mut_slice(),
+                width as usize,
+                height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
         }
         // Glass uses the complete graph's raster and auxiliary inputs.
         EffectRenderOp::Glass { .. } | EffectRenderOp::VideoCollage { .. } => Ok(false),

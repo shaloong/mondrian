@@ -3312,6 +3312,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::CompoundBlur { .. } => "compound_blur",
         EffectRenderOp::Texturize { .. } => "texturize",
         EffectRenderOp::PictureInPicture { .. } => "picture_in_picture",
+        EffectRenderOp::InnerOuterKey { .. } => "inner_outer_key",
         EffectRenderOp::Custom { .. } => "custom",
     }
 }

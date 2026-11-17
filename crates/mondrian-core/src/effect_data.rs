@@ -291,6 +291,9 @@ pub enum EffectType {
     /// Picture in picture: composite a resampled, framed window of the frame
     /// over itself, with a border, a fill and a drop shadow.
     PictureInPicture,
+    /// Inner/outer key: key the frame against a colour sampled at an authored
+    /// point, keeping the pixels on one side of that screen colour.
+    InnerOuterKey,
 }
 
 impl EffectType {
@@ -356,6 +359,7 @@ impl EffectType {
             Self::CompoundBlur => "builtin.compound_blur".to_string(),
             Self::Texturize => "builtin.texturize".to_string(),
             Self::PictureInPicture => "builtin.picture_in_picture".to_string(),
+            Self::InnerOuterKey => "builtin.inner_outer_key".to_string(),
             Self::Convolution => "builtin.convolution".to_string(),
             Self::Offset => "builtin.offset".to_string(),
             Self::Twirl => "builtin.twirl".to_string(),
@@ -514,6 +518,7 @@ impl EffectType {
             "builtin.compound_blur" => Self::CompoundBlur,
             "builtin.texturize" => Self::Texturize,
             "builtin.picture_in_picture" => Self::PictureInPicture,
+            "builtin.inner_outer_key" => Self::InnerOuterKey,
             "builtin.convolution" => Self::Convolution,
             "builtin.offset" => Self::Offset,
             "builtin.twirl" => Self::Twirl,
@@ -675,6 +680,7 @@ impl EffectType {
             Self::CompoundBlur => "复合模糊",
             Self::Texturize => "纹理化",
             Self::PictureInPicture => "画中画",
+            Self::InnerOuterKey => "内部/外部键",
             Self::Convolution => "卷积核",
             Self::Offset => "偏移",
             Self::Twirl => "旋转扭曲",
@@ -838,6 +844,7 @@ impl EffectType {
             Self::CompoundBlur => vec!["模糊与锐化"],
             Self::Texturize => vec!["风格化"],
             Self::PictureInPicture => vec!["变换"],
+            Self::InnerOuterKey => vec!["抠像"],
             Self::Convolution => vec!["颜色", "调色"],
             Self::Offset => vec!["变换与尺寸"],
             Self::Twirl => vec!["变形"],
@@ -986,6 +993,7 @@ impl EffectType {
             Self::CompoundBlur => "compound_blur".to_string(),
             Self::Texturize => "texturize".to_string(),
             Self::PictureInPicture => "picture_in_picture".to_string(),
+            Self::InnerOuterKey => "inner_outer_key".to_string(),
             Self::Convolution => "convolution".to_string(),
             Self::Offset => "offset".to_string(),
             Self::Twirl => "twirl".to_string(),
@@ -1518,6 +1526,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::CompoundBlur => Ok(()),
             Self::Texturize => Ok(()),
             Self::PictureInPicture => Ok(()),
+            Self::InnerOuterKey => Ok(()),
             Self::Convolution => Ok(()),
             Self::Offset => Ok(()),
             Self::Twirl => Ok(()),
