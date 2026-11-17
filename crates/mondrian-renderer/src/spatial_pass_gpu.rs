@@ -147,6 +147,7 @@ pub(crate) struct EffectSpatialGpu {
     compound_arithmetic: wgpu::RenderPipeline,
     compound_blur: wgpu::RenderPipeline,
     texturize: wgpu::RenderPipeline,
+    picture_in_picture: wgpu::RenderPipeline,
     temporal_blend: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
@@ -154,6 +155,7 @@ pub(crate) struct EffectSpatialGpu {
     selective_color_bindings: wgpu::BindGroupLayout,
     stroke_bindings: wgpu::BindGroupLayout,
     bezier_warp_bindings: wgpu::BindGroupLayout,
+    picture_in_picture_bindings: wgpu::BindGroupLayout,
 }
 
 impl EffectSpatialGpu {
@@ -1865,6 +1867,92 @@ impl EffectSpatialGpu {
         let compound_blur =
             auxiliary_pipeline("mondrian.effect-spatial.compound-blur", "fs_compound_blur");
         let texturize = auxiliary_pipeline("mondrian.effect-spatial.texturize", "fs_texturize");
+        // Picture in picture publishes a second uniform block beside the one
+        // every composite pass shares (design §5). The shared bind group layout
+        // stops at binding 2, so the pass carries its own group whose fourth
+        // entry is that block; the fragment entry point is the only stage that
+        // declares it, and wgpu validates pipeline layouts per entry point.
+        let picture_in_picture_bindings =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mondrian.effect-spatial.picture-in-picture-bindings"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let picture_in_picture_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("mondrian.effect-spatial.picture-in-picture-layout"),
+                bind_group_layouts: &[Some(&picture_in_picture_bindings)],
+                immediate_size: 0,
+            });
+        let picture_in_picture = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.picture-in-picture"),
+            layout: Some(&picture_in_picture_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_picture_in_picture"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
             layout: Some(&composite_layout),
@@ -2769,6 +2857,7 @@ impl EffectSpatialGpu {
             compound_arithmetic,
             compound_blur,
             texturize,
+            picture_in_picture,
             temporal_blend,
             bindings,
             composite_bindings,
@@ -2776,6 +2865,7 @@ impl EffectSpatialGpu {
             selective_color_bindings,
             stroke_bindings,
             bezier_warp_bindings,
+            picture_in_picture_bindings,
         }
     }
 
@@ -4250,6 +4340,79 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    /// Records the TRF-04 picture in picture stage.
+    ///
+    /// One draw writes every pixel: it evaluates the window distance field, the
+    /// analytic shadow, resamples the premultiplied source bilinearly and
+    /// composites the shadow, the fill, the content and the border in that
+    /// order (design §3). The stage preserves the raster, so the delivery keeps
+    /// the input extent and the source is only read through the sampler.
+    fn record_picture_in_picture(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::PictureInPictureGrade,
+        primary: &wgpu::Texture,
+        destination: &wgpu::Texture,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if primary.width() == 0 || primary.height() == 0 {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        if (destination.width(), destination.height()) != (primary.width(), primary.height()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "picture_in_picture_output_extent",
+            ));
+        }
+        // The CPU kernel owns the window geometry and publishes both uniform
+        // blocks: the five shared cells and the five colour/shadow cells
+        // (design §5). Sizes here are the delivery raster, so the authored
+        // pixel extents already match what the shader evaluates.
+        let (mut cells, colours) =
+            grade.gpu_controls(primary.width() as usize, primary.height() as usize);
+        if cells
+            .iter()
+            .flatten()
+            .chain(colours.iter().flatten())
+            .any(|component| !component.is_finite())
+        {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "picture_in_picture_geometry",
+            ));
+        }
+        // The fourth lane of `params` is the linear-filter flag every composite
+        // pass publishes; this kernel always resamples bilinearly (design §3.3)
+        // so the lane is always on and the shader keeps the tap weights fixed.
+        cells[1][3] = 1.0;
+        let uniforms = SpatialPassUniform {
+            size: cells[0],
+            params: cells[1],
+            extra: cells[2],
+            aces: cells[3],
+            extra1: cells[4],
+        };
+        let picture_in_picture = PictureInPictureUniform {
+            shadow: colours[0],
+            shadow_geometry: colours[1],
+            fill: colours[2],
+            flags: colours[3],
+            border: colours[4],
+        };
+        let original_view = primary.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        // The kernel reads the primary frame only, so the auxiliary slot of the
+        // bind group repeats the source view instead of opening a second input.
+        self.record_picture_in_picture_pass(
+            device,
+            encoder,
+            &original_view,
+            &original_view,
+            &output_view,
+            &uniforms,
+            &picture_in_picture,
+        );
+        Ok(destination.clone())
+    }
+
     /// Sample an independent texture while processing the primary frame.
     ///
     /// `scratch` supplies the intermediate planes that a multi-pass auxiliary
@@ -4679,6 +4842,12 @@ impl EffectSpatialGpu {
             // 2 x 132,710,400 = 265,420,800 B and at DCI 4K
             // 2 x 141,557,760 = 283,115,520 B.
             EffectGpuSpatialPass::Texturize { .. } => Ok(1),
+            // One draw folds the source resample, the window shape, the fill,
+            // the border ring and the analytic shadow into the written texel,
+            // so the pool is `pass_count + 1` = two textures (design §3). At UHD
+            // that is 2 x 132,710,400 = 265,420,800 B and at DCI 4K
+            // 2 x 141,557,760 = 283,115,520 B.
+            EffectGpuSpatialPass::PictureInPicture { .. } => Ok(1),
         }
     }
 
@@ -4710,6 +4879,16 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::RadialShadow { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return Ok(self.record_radial_shadow(device, encoder, *grade, source, destination));
+            }
+            EffectGpuSpatialPass::PictureInPicture { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                return self.record_picture_in_picture(
+                    device,
+                    encoder,
+                    *grade,
+                    source,
+                    destination,
+                );
             }
             EffectGpuSpatialPass::ZoomBlur { grade } => {
                 return self.record_zoom_blur(device, encoder, *grade, source, scratch);
@@ -7844,6 +8023,79 @@ impl EffectSpatialGpu {
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
+
+    /// Records the picture in picture pass over the original frame.
+    ///
+    /// The pass reads only the original texture, but it publishes a second
+    /// uniform block beside the shared one (design §5), so it carries its own
+    /// bind group whose fourth entry is that block; the auxiliary slot stays in
+    /// the layout unused so the shape matches the other composite passes.
+    #[allow(clippy::too_many_arguments)]
+    fn record_picture_in_picture_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        original: &wgpu::TextureView,
+        auxiliary: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        uniforms: &SpatialPassUniform,
+        picture_in_picture: &PictureInPictureUniform,
+    ) {
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mondrian.effect-spatial.picture-in-picture-uniforms"),
+            contents: bytemuck::bytes_of(uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        // The window colour and shadow cells are too many for the five shared
+        // lanes (design §5), hence the dedicated block at binding 3.
+        let picture_in_picture_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mondrian.effect-spatial.picture-in-picture-grade"),
+                contents: bytemuck::bytes_of(picture_in_picture),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian.effect-spatial.picture-in-picture-bind-group"),
+            layout: &self.picture_in_picture_bindings,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(original),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(auxiliary),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: picture_in_picture_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian.effect-spatial.picture-in-picture-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.picture_in_picture);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..4, 0..1);
+    }
 }
 
 /// Integer/fractional split of an authored box blur radius.
@@ -7879,6 +8131,29 @@ struct SpatialPassUniform {
     // The second spare cell, added for effects that need more than twelve
     // scalars (glow's colour pair).
     extra1: [f32; 4],
+}
+
+/// The second uniform payload of the picture in picture pass.
+///
+/// The pass already spends all five cells of [`SpatialPassUniform`] on the
+/// window geometry, so the window colours, the border and the shadow travel in
+/// their own block at binding 3 (design §5).
+///
+/// ```text
+/// shadow          = [shadow r, g, b, strength]
+/// shadow_geometry = [angle, distance px, zoom, blur px]
+/// fill            = [fill r, g, b, fill opacity]
+/// flags           = [fill flag, fill matches border, shadow flag, border opacity]
+/// border          = [border r, g, b, 0]
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PictureInPictureUniform {
+    shadow: [f32; 4],
+    shadow_geometry: [f32; 4],
+    fill: [f32; 4],
+    flags: [f32; 4],
+    border: [f32; 4],
 }
 
 /// The uniform cell that carries a matte pass's "read the frame alpha" flag.
@@ -11373,7 +11648,7 @@ fn spatial_composite_shader_source() -> String {
         "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
          const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
          const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
-         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         mondrian_effects::PIXEL_CENTRE,
         f32::MAX.to_bits(),
         include_str!("channel_combiner.wgsl"),
@@ -11383,6 +11658,7 @@ fn spatial_composite_shader_source() -> String {
         include_str!("compound_arithmetic.wgsl"),
         include_str!("compound_blur.wgsl"),
         include_str!("texturize.wgsl"),
+        include_str!("picture_in_picture.wgsl"),
     )
 }
 

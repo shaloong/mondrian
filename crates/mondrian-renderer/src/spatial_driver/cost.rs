@@ -459,6 +459,11 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // draw sits below the compound-blur disc and above the one-tap
         // composites.
         "texturize" => 2.2,
+        // One full-screen draw folds the window and shadow distance fields, the
+        // premultiplied bilinear resample and the shadow, fill, content and
+        // border composite together, so it costs roughly two texturize draws
+        // without the map traffic.
+        "picture_in_picture" => 4.0,
         "grow_bounds" => 0.8,
         "smear" | "reshape" => 2.4,
         "detail_preserving_upscale" => 28.0,
@@ -553,6 +558,11 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // reads four bilinear map taps per pixel for the central difference; that
         // sample count sits far below the compound-blur disc.
         "texturize" => 5.0,
+        // The scalar kernel premultiplies the frame, resamples the
+        // premultiplied copy with one bilinear read per window pixel, and
+        // unassociates the whole frame again, so the two full-frame staging
+        // passes dominate the single-draw arithmetic.
+        "picture_in_picture" => 7.5,
         // The sliding histogram touches each window twice per axis.
         "median" => 3.0,
         // Same sliding histogram as the median plus the deviation gate.

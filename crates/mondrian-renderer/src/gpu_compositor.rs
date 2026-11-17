@@ -24432,6 +24432,246 @@ mod tests {
     // documented defaults, both radius extremes, the inverted map, the
     // center-crop window on a non-square map, a half-bright map, a delivery
     // affine and a small radius.
+    /// TRF-04 parity: the scalar kernel and the single draw have to agree on the
+    /// window shape, the bilinear resample, the fill, the border and the
+    /// analytic shadow, and the pass must write the whole frame even when the
+    /// source carries no coverage.
+    #[tokio::test]
+    async fn gpu_picture_in_picture_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            apply_picture_in_picture_f32, EffectGpuSpatialPass, PictureInPictureContent,
+            PictureInPictureGrade, PictureInPictureParameters, PictureInPictureStyle,
+        };
+
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("GPU for picture in picture parity");
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let (width, height) = (24, 16);
+        // The seam is straight coverage on both sides: the scalar kernel
+        // premultiplies its working copy for the bilinear resample and
+        // unassociates before it returns, and the draw does the same. No fixture
+        // pixel may carry zero coverage, because an uncovered pixel is
+        // canonically transparent black on both sides and that would hide the
+        // window instead of comparing it.
+        let straight_primary: Vec<[f32; 4]> = (0..width * height)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                [
+                    (x as f32 + 0.5) / width as f32 * 1.1 + 0.05,
+                    (y as f32 + 0.5) / height as f32 * 0.9 + 0.04,
+                    (i % 11) as f32 / 9.0 + 0.02,
+                    0.55 + (i % 4) as f32 / 4.0 * 0.45,
+                ]
+            })
+            .collect();
+
+        // The documented defaults, the ellipse family with a bright border and a
+        // visible fill band, a locked pixel aspect with a rotated window, a
+        // contained cover scaled past the window with a broad shadow, and a
+        // cover fit with the shadow disabled and half opacity.
+        let cases: [(&str, PictureInPictureParameters); 5] = [
+            ("documented-defaults", PictureInPictureParameters::default()),
+            (
+                "ellipse/border-fill",
+                PictureInPictureParameters {
+                    style: PictureInPictureStyle::Ellipse,
+                    width: 0.5,
+                    height: 0.5,
+                    border: 1.0,
+                    border_width: 0.06,
+                    border_red: 0.9,
+                    border_green: 0.1,
+                    border_blue: 0.2,
+                    fill: 1.0,
+                    fill_matching: 0.0,
+                    fill_red: 0.15,
+                    fill_green: 0.8,
+                    fill_blue: 0.35,
+                    ..PictureInPictureParameters::default()
+                },
+            ),
+            (
+                "locked-aspect/rotation-30",
+                PictureInPictureParameters {
+                    lock_aspect: true,
+                    aspect_ratio: 2.0,
+                    width: 0.45,
+                    height: 0.2,
+                    rotation: 30.0,
+                    rounding: 0.2,
+                    ..PictureInPictureParameters::default()
+                },
+            ),
+            (
+                "contain/scale-pan/large-shadow",
+                PictureInPictureParameters {
+                    content: PictureInPictureContent::Contain,
+                    width: 0.55,
+                    height: 0.45,
+                    scale: 1.35,
+                    pan_x: 0.08,
+                    pan_y: -0.06,
+                    shadow_blur: 1.0,
+                    shadow_strength: 1.0,
+                    shadow_distance: 0.12,
+                    shadow_zoom: 1.4,
+                    ..PictureInPictureParameters::default()
+                },
+            ),
+            (
+                "cover/no-shadow/opacity-0.5",
+                PictureInPictureParameters {
+                    content: PictureInPictureContent::Cover,
+                    width: 0.6,
+                    height: 0.7,
+                    opacity: 0.5,
+                    rounding: 0.0,
+                    shadow: 0.0,
+                    ..PictureInPictureParameters::default()
+                },
+            ),
+        ];
+
+        let mut encoder = context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (label, parameters) in cases {
+            let grade = PictureInPictureGrade::new(parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            let mut cpu = straight_primary.clone();
+            assert!(
+                apply_picture_in_picture_f32(&mut cpu, width, height, &grade),
+                "{label}: the CPU kernel rejected the raster"
+            );
+            let pass = EffectGpuSpatialPass::PictureInPicture { grade };
+            // One draw folds the window distance field, the shadow, the resample
+            // and the three nested composites, so the pool is `pass count + 1`.
+            assert_eq!(
+                crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                    .expect("the picture in picture has a pass count"),
+                1,
+                "{label}: recorded pass count"
+            );
+            let primary = key_cleaner_upload(&context, &straight_primary, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, 2);
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &primary,
+                    scratch.as_slice(),
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label}: the pass records: {error}"));
+            assert_eq!(
+                (output.width(), output.height()),
+                (width, height),
+                "{label}: the pass returns the primary extent"
+            );
+            let gpu = {
+                context.queue.submit(Some(encoder.finish()));
+                encoder = context
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                key_cleaner_readback(&context, &output, width, height)
+            };
+            let rgb = cpu
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(cpu, gpu)| [cpu[0] - gpu[0], cpu[1] - gpu[1], cpu[2] - gpu[2]])
+                .fold(0.0_f32, |worst, error| worst.max(error.abs()));
+            let alpha = cpu
+                .iter()
+                .zip(&gpu)
+                .map(|(cpu, gpu)| (cpu[3] - gpu[3]).abs())
+                .fold(0.0_f32, f32::max);
+            eprintln!("TRF-04 {label}: rgb={rgb:.3e} alpha={alpha:.3e}");
+            assert!(rgb <= 2.0e-4, "{label}: rgb error {rgb:.3e}");
+            assert!(alpha <= 1.0e-5, "{label}: alpha error {alpha:.3e}");
+            // Every case has to move the frame, otherwise a pass that returned
+            // its source would satisfy the comparison above.
+            assert!(
+                gpu.iter().zip(&straight_primary).any(|(actual, source)| {
+                    (0..4).any(|channel| (actual[channel] - source[channel]).abs() > 1.0e-2)
+                }),
+                "{label}: the pass must draw the window"
+            );
+        }
+
+        // A pixel the window and the shadow do not reach keeps the source bit for
+        // bit: the composer starts from the premultiplied source and the early
+        // return is the untouched frame (design §3.6).
+        {
+            let grade = PictureInPictureGrade::documented_defaults();
+            let pass = EffectGpuSpatialPass::PictureInPicture { grade };
+            let primary = key_cleaner_upload(&context, &straight_primary, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, 2);
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &primary,
+                    scratch.as_slice(),
+                    width,
+                    height,
+                )
+                .expect("the pass records the untouched check");
+            context.queue.submit(Some(encoder.finish()));
+            encoder = context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+            let corner = (height - 1) as usize * width as usize + (width - 1) as usize;
+            for channel in 0..4 {
+                assert!(
+                    (gpu[corner][channel] - straight_primary[corner][channel]).abs() <= 1.0e-6,
+                    "the untouched corner must keep the source channel {channel}"
+                );
+            }
+        }
+
+        // A transparent frame still receives the window and its shadow: the pass
+        // writes the whole frame and must not treat zero input coverage as
+        // "nothing to draw" (design §3.7).
+        {
+            let transparent = vec![[0.0_f32; 4]; (width * height) as usize];
+            let grade = PictureInPictureGrade::documented_defaults();
+            let pass = EffectGpuSpatialPass::PictureInPicture { grade };
+            let primary = key_cleaner_upload(&context, &transparent, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, 2);
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &primary,
+                    scratch.as_slice(),
+                    width,
+                    height,
+                )
+                .expect("the pass records over a transparent frame");
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+            assert!(
+                gpu.iter().any(|pixel| pixel[3] > 0.05),
+                "a transparent frame must still show the window"
+            );
+            for pixel in &gpu {
+                if pixel[3] <= 0.0 {
+                    assert_eq!(
+                        pixel.map(f32::to_bits),
+                        [0.0_f32; 4].map(f32::to_bits),
+                        "an uncovered pixel stays transparent black"
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gpu_compound_blur_matches_the_cpu_kernel() {
         use mondrian_effects::{
