@@ -351,7 +351,16 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                 } else {
                     scratch_extents.insert(output);
                     match EffectSpatialGpu::texture_pass_count(pass) {
-                        Ok(passes) => passes,
+                        Ok(passes) => {
+                            // The inner/outer key's draw count is authored (2 to
+                            // 5) while the texture-pass count only sizes the
+                            // ping-pong pool, so the diagnostic budget must
+                            // price the real draws.
+                            if let EffectGpuSpatialPass::InnerOuterKey { grade } = pass {
+                                minimum_draw_passes = grade.draw_pass_count();
+                            }
+                            passes
+                        }
                         Err(EffectSpatialGpuError::UnsupportedPass(name)) => {
                             return Err(GpuSpatialChainBlocker::UnsupportedPass {
                                 pass: name,

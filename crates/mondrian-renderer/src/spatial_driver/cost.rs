@@ -374,6 +374,10 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // The key cleaner is three separable morphology passes: one axis of
         // taps per pass, against the two reads and one write that bound it.
         "key_cleaner" => 0.9,
+        // The inner/outer key samples two authoring points in the matte pass
+        // (four bilinear loads each) and then costs one plane read per choke or
+        // feather tap, so it sits above the key cleaner's single alpha plane.
+        "inner_outer_key" => 3.0,
         // Smart blur is up to two hundred and three taps per pixel per axis, but
         // the gate usually short-circuits the sum; the average tap is cheaper
         // than a convolution tap because there is no tap table to read.
@@ -583,6 +587,10 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // Two separable minimum filters plus the softening and the composite,
         // all over a single alpha plane.
         "key_cleaner" => 2.5,
+        // Two point estimates in the matte pass, one clamped read per choke or
+        // feather tap, and the despill mix in the composite: the same tap budget
+        // as key cleaner plus the estimate sampling.
+        "inner_outer_key" => 6.0,
         // Two separable passes with a luma gate per tap: the same tap count as a
         // box blur, plus the dot product and the comparison.
         "smart_blur" => 4.0,

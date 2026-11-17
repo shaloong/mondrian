@@ -129,6 +129,12 @@ pub(crate) struct EffectSpatialGpu {
     matte_refine_composite: wgpu::RenderPipeline,
     choker_composite: wgpu::RenderPipeline,
     key_cleaner_composite: wgpu::RenderPipeline,
+    inner_outer_key_matte: wgpu::RenderPipeline,
+    inner_outer_key_choke_horizontal: wgpu::RenderPipeline,
+    inner_outer_key_choke_vertical: wgpu::RenderPipeline,
+    inner_outer_key_feather_horizontal: wgpu::RenderPipeline,
+    inner_outer_key_feather: wgpu::RenderPipeline,
+    inner_outer_key_composite: wgpu::RenderPipeline,
     smart_blur: wgpu::RenderPipeline,
     minimax: wgpu::RenderPipeline,
     channel_blur: wgpu::RenderPipeline,
@@ -1867,6 +1873,36 @@ impl EffectSpatialGpu {
         let compound_blur =
             auxiliary_pipeline("mondrian.effect-spatial.compound-blur", "fs_compound_blur");
         let texturize = auxiliary_pipeline("mondrian.effect-spatial.texturize", "fs_texturize");
+        // Inner/outer key (KEY-03) writes the matte as a scalar plane and
+        // ping-pongs it between two scratch textures; the matte draw reads the
+        // frame, the choke and feather draws read the plane, and the last draw
+        // folds the vertical feather (or the plain composite) into the
+        // destination. Every draw needs one texture per input and only the shared
+        // uniform, so they all reuse the composite layout.
+        let inner_outer_key_matte = auxiliary_pipeline(
+            "mondrian.effect-spatial.inner-outer-key-matte",
+            "fs_inner_outer_matte",
+        );
+        let inner_outer_key_choke_horizontal = auxiliary_pipeline(
+            "mondrian.effect-spatial.inner-outer-key-choke-horizontal",
+            "fs_inner_outer_choke_h",
+        );
+        let inner_outer_key_choke_vertical = auxiliary_pipeline(
+            "mondrian.effect-spatial.inner-outer-key-choke-vertical",
+            "fs_inner_outer_choke_v",
+        );
+        let inner_outer_key_feather_horizontal = auxiliary_pipeline(
+            "mondrian.effect-spatial.inner-outer-key-feather-horizontal",
+            "fs_inner_outer_feather_h",
+        );
+        let inner_outer_key_feather = auxiliary_pipeline(
+            "mondrian.effect-spatial.inner-outer-key-feather",
+            "fs_inner_outer_feather_v",
+        );
+        let inner_outer_key_composite = auxiliary_pipeline(
+            "mondrian.effect-spatial.inner-outer-key-composite",
+            "fs_inner_outer_composite",
+        );
         // Picture in picture publishes a second uniform block beside the one
         // every composite pass shares (design §5). The shared bind group layout
         // stops at binding 2, so the pass carries its own group whose fourth
@@ -2834,6 +2870,12 @@ impl EffectSpatialGpu {
             matte_refine_composite,
             choker_composite,
             key_cleaner_composite,
+            inner_outer_key_matte,
+            inner_outer_key_choke_horizontal,
+            inner_outer_key_choke_vertical,
+            inner_outer_key_feather_horizontal,
+            inner_outer_key_feather,
+            inner_outer_key_composite,
             smart_blur,
             bilateral: std::sync::OnceLock::new(),
             mask_deformation: std::sync::OnceLock::new(),
@@ -4706,6 +4748,15 @@ impl EffectSpatialGpu {
             // (4096x2160x16 bytes x 4 textures = 566,231,040 bytes) exceed the
             // 512 MiB spatial scratch budget; UHD (530,841,600 bytes) still fits.
             EffectGpuSpatialPass::KeyCleaner { .. } => Ok(3),
+            // The inner/outer key chain ping-pongs the matte between
+            // `scratch[1]` and `scratch[2]` on top of the `scratch[0]`
+            // destination, so it never indexes more than three planes whatever
+            // the authored grade asks for. The draw count is 2 to 5 and is
+            // reported separately by `spatial_effect_passes`, while the pool is
+            // sized from this value: UHD (3840x2160x16 bytes x 4 textures =
+            // 530,841,600 bytes) fits the 512 MiB spatial scratch budget; DCI 4K
+            // (4096x2160x16 bytes x 4 textures = 566,231,040 bytes) exceeds it.
+            EffectGpuSpatialPass::InnerOuterKey { .. } => Ok(3),
             // One draw per axis: the horizontal pass writes the first plane and
             // the vertical pass finishes it into the second. Two textures is the
             // smallest pool the record method accepts, so a DCI 4K frame
@@ -5593,6 +5644,11 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::KeyCleaner { grade } => {
                 return self
                     .record_key_cleaner(device, encoder, *grade, source, scratch, width, height);
+            }
+            EffectGpuSpatialPass::InnerOuterKey { grade } => {
+                return self.record_inner_outer_key(
+                    device, encoder, *grade, source, scratch, width, height,
+                );
             }
             EffectGpuSpatialPass::SmartBlur { grade } => {
                 return self
@@ -7543,6 +7599,163 @@ impl EffectSpatialGpu {
             &destination_view,
             &composite,
         );
+        Ok(scratch[0].clone())
+    }
+
+    /// Records the inner/outer key chain: matte, optional choke and feather, and
+    /// the composite.
+    ///
+    /// The chain follows the authored grade (design §6): the matte draw always
+    /// runs, the choke adds one draw per axis, the feather adds one horizontal
+    /// draw, and the final draw always folds the composite into the destination
+    /// `scratch[0]`. The matte plane ping-pongs between `scratch[1]` and
+    /// `scratch[2]`, so an intermediate draw never overwrites a plane the next
+    /// draw still samples and the destination is only ever written once.
+    ///
+    /// The count is 2, 3, 4 or 5 while [`EffectSpatialGpu::texture_pass_count`]
+    /// stays at three: the pool is sized for the planes, not the draws.
+    #[allow(clippy::too_many_arguments)]
+    fn record_inner_outer_key(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        grade: mondrian_effects::InnerOuterKeyGrade,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        // The destination plus the two ping-pong planes. Every draw below binds
+        // a plane in both texture slots because the composite layout always
+        // carries an auxiliary slot, so a smaller pool would alias an input.
+        if scratch.len() < 3 {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "inner_outer_key_scratch_geometry",
+            ));
+        }
+        let size = [width as f32, height as f32, 0.0, 0.0];
+        let no_extra = [0.0_f32; 4];
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let destination_view = scratch[0].create_view(&wgpu::TextureViewDescriptor::default());
+        let first_plane = scratch[1].create_view(&wgpu::TextureViewDescriptor::default());
+        let second_plane = scratch[2].create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Draw 1: the matte plane. Both estimates are sampled here at draw time,
+        // so the authored points can move without rebuilding the pipeline. The
+        // auxiliary slot repeats the source; the fragment entry never reads it.
+        let matte = grade.matte_gpu_controls();
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.inner_outer_key_matte,
+            &source_view,
+            &source_view,
+            &first_plane,
+            &SpatialPassUniform {
+                size,
+                params: matte.params,
+                extra: matte.extra,
+                aces: matte.aces,
+                extra1: matte.extra1,
+            },
+        );
+
+        // Draws 2 and 3: the separable choke over the scalar matte plane. A
+        // positive radius dilates, a negative one erodes, and each axis reads
+        // only `.r`; the other channels stay zero, so the plane is never
+        // premultiplied.
+        if grade.chokes() {
+            let choke = SpatialPassUniform {
+                size,
+                params: grade.choke_gpu_controls(),
+                extra: no_extra,
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            self.record_composite_pass(
+                device,
+                encoder,
+                &self.inner_outer_key_choke_horizontal,
+                &first_plane,
+                &first_plane,
+                &second_plane,
+                &choke,
+            );
+            self.record_composite_pass(
+                device,
+                encoder,
+                &self.inner_outer_key_choke_vertical,
+                &second_plane,
+                &second_plane,
+                &first_plane,
+                &choke,
+            );
+        }
+
+        // The last draw always runs the composite; `composite_gpu_controls`
+        // repeats the estimate cells so the despill target is the sampled
+        // colour, exactly like the matte draw.
+        let composite = grade.composite_gpu_controls();
+        if grade.feathers() {
+            // Draw 4: the horizontal box half, into the second plane.
+            let feather = SpatialPassUniform {
+                size,
+                params: grade.feather_gpu_controls(),
+                extra: no_extra,
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            self.record_composite_pass(
+                device,
+                encoder,
+                &self.inner_outer_key_feather_horizontal,
+                &first_plane,
+                &first_plane,
+                &second_plane,
+                &feather,
+            );
+            // Draw 5 (or the final draw of the feather-only chain): the vertical
+            // half folds the composite, so the matte never leaves the plane.
+            // `params.z` carries the radius because `.x`/`.y` are already the
+            // despill tier and the matte-source side.
+            self.record_composite_pass(
+                device,
+                encoder,
+                &self.inner_outer_key_feather,
+                &source_view,
+                &second_plane,
+                &destination_view,
+                &SpatialPassUniform {
+                    size,
+                    params: [
+                        composite.params[0],
+                        composite.params[1],
+                        grade.feather_radius() as f32,
+                        0.0,
+                    ],
+                    extra: composite.extra,
+                    aces: composite.aces,
+                    extra1: composite.extra1,
+                },
+            );
+        } else {
+            // No feather: the composite reads the matte plane directly.
+            self.record_composite_pass(
+                device,
+                encoder,
+                &self.inner_outer_key_composite,
+                &source_view,
+                &first_plane,
+                &destination_view,
+                &SpatialPassUniform {
+                    size,
+                    params: composite.params,
+                    extra: composite.extra,
+                    aces: composite.aces,
+                    extra1: composite.extra1,
+                },
+            );
+        }
         Ok(scratch[0].clone())
     }
 
@@ -11648,7 +11861,7 @@ fn spatial_composite_shader_source() -> String {
         "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
          const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
          const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
-         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         mondrian_effects::PIXEL_CENTRE,
         f32::MAX.to_bits(),
         include_str!("channel_combiner.wgsl"),
@@ -11659,6 +11872,7 @@ fn spatial_composite_shader_source() -> String {
         include_str!("compound_blur.wgsl"),
         include_str!("texturize.wgsl"),
         include_str!("picture_in_picture.wgsl"),
+        include_str!("key_inner_outer.wgsl"),
     )
 }
 

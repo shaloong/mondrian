@@ -21436,6 +21436,195 @@ mod tests {
         assert_eq!(budget_bytes, 512 * 1024 * 1024);
     }
 
+    /// A straight-alpha fixture with a green-dominant band, a colour ramp and one
+    /// fully transparent column, so the matte curve, the choke, the feather and
+    /// the despill all have something to act on.
+    fn inner_outer_key_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let u = (x as f32 + 0.5) / width as f32;
+                let v = (y as f32 + 0.5) / height as f32;
+                let green = if u < 0.35 {
+                    0.95
+                } else if u < 0.5 {
+                    0.55
+                } else {
+                    0.1 + 0.6 * u
+                };
+                let mut colour = [0.05 + 0.8 * u, green, 0.1 + 0.6 * v];
+                if x == width / 2 {
+                    colour = [0.9, 0.2, 0.4];
+                }
+                let alpha = if x + 1 == width || u < 0.18 {
+                    0.0
+                } else if u < 0.45 {
+                    0.45
+                } else {
+                    1.0
+                };
+                pixels.push([colour[0], colour[1], colour[2], alpha]);
+            }
+        }
+        pixels
+    }
+
+    #[tokio::test]
+    async fn gpu_inner_outer_key_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            inner_outer_key_frame_f32, ColourPurity, DespillStrength, EffectGpuSpatialPass,
+            EffectRenderOp, InnerOuterKeyGrade, InnerOuterKeyParameters, MatteSource,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping inner/outer key parity test: no GPU adapter available");
+            return;
+        };
+        let width = 11;
+        let height = 9;
+        let pixels = inner_outer_key_test_pixels(width, height);
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+
+        let cases: [(&str, InnerOuterKeyParameters); 8] = [
+            ("default", InnerOuterKeyParameters::default()),
+            (
+                "erode",
+                InnerOuterKeyParameters { choke: -3.0, ..Default::default() },
+            ),
+            (
+                "dilate",
+                InnerOuterKeyParameters { choke: 2.0, ..Default::default() },
+            ),
+            (
+                "feather",
+                InnerOuterKeyParameters { feather: 2.0, ..Default::default() },
+            ),
+            (
+                "choke_and_feather",
+                InnerOuterKeyParameters { choke: -2.0, feather: 1.5, ..Default::default() },
+            ),
+            (
+                "background",
+                InnerOuterKeyParameters {
+                    matte_source: MatteSource::Background,
+                    background_point: [0.2, 0.8],
+                    background_colour: [0.0, 0.1, 0.0],
+                    ..Default::default()
+                },
+            ),
+            (
+                "despill_strong",
+                InnerOuterKeyParameters {
+                    despill: DespillStrength::Strong,
+                    colour_purity: ColourPurity::Strict,
+                    ..Default::default()
+                },
+            ),
+            (
+                "point_outside_frame",
+                InnerOuterKeyParameters {
+                    foreground_point: [-0.2, 1.4],
+                    ..Default::default()
+                },
+            ),
+        ];
+        let mut draws_seen = Vec::with_capacity(cases.len());
+        for (index, (label, parameters)) in cases.iter().enumerate() {
+            let grade = InnerOuterKeyGrade::new(*parameters)
+                .unwrap_or_else(|error| panic!("{label} grade: {error}"));
+            draws_seen.push(grade.draw_pass_count());
+            let mut cpu = pixels.clone();
+            assert!(
+                inner_outer_key_frame_f32(&mut cpu, width as usize, height as usize, &grade),
+                "{label}: the CPU kernel must accept the frame"
+            );
+
+            let pass = EffectGpuSpatialPass::InnerOuterKey { grade };
+            let passes = crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                .unwrap_or_else(|error| panic!("{label} pass count: {error}"));
+            // The chain only ever indexes the destination plus two ping-pong
+            // planes, whatever the draw schedule (2 to 5 draws).
+            assert_eq!(passes, 3, "{label}: destination and the ping-pong pair");
+            let source = key_cleaner_upload(&context, &pixels, width, height);
+            let scratch = key_cleaner_scratch(&context, width, height, passes as usize);
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian.inner-outer-key.encoder"),
+                });
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap_or_else(|error| panic!("{label} record: {error}"));
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+
+            assert_eq!(gpu.len(), cpu.len(), "{label}: pixel count");
+            let mut worst = 0.0_f32;
+            for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu.iter().zip(gpu.iter()).enumerate() {
+                // Unlike the key cleaner this effect reads the colour channels for
+                // the estimate and the despill, so colour is compared numerically
+                // rather than bit for bit.
+                for channel in 0..4 {
+                    let difference = (cpu_pixel[channel] - gpu_pixel[channel]).abs();
+                    worst = worst.max(difference);
+                    assert!(
+                        difference <= 1.0e-4,
+                        "inner/outer key case {index} ({label}) pixel {pixel_index} channel \
+                         {channel}: cpu {cpu_pixel:?} gpu {gpu_pixel:?}"
+                    );
+                }
+            }
+            eprintln!("inner/outer key case {index} ({label}): max |cpu - gpu| = {worst:e}");
+        }
+        draws_seen.sort_unstable();
+        draws_seen.dedup();
+        assert_eq!(
+            draws_seen,
+            vec![2, 3, 4, 5],
+            "the cases must exercise every draw-schedule branch"
+        );
+
+        // Three planes are all the chain needs: the destination in `scratch[0]`
+        // plus the ping-pong planes in `scratch[1]` and `scratch[2]`. The planner
+        // sizes the pool as three + one, so UHD is 4 * 3840 * 2160 * 16 =
+        // 530,841,600 bytes and fits the 512 MiB budget, while DCI 4K is
+        // 4 * 4096 * 2160 * 16 = 566,231,040 bytes and does not. Declaring the
+        // texture count as the draw count (2 to 5) would have needed a six-plane
+        // pool, which exceeds the budget even at UHD.
+        let pipeline = spatial_test_pipeline(EffectRenderOp::InnerOuterKey {
+            grade: InnerOuterKeyGrade::new(InnerOuterKeyParameters::default())
+                .expect("the documented defaults are valid"),
+        });
+        let plan = crate::spatial_driver::gpu_spatial_chain_plan(&pipeline, 3840, 2160)
+            .expect("UHD fits the 512 MiB spatial scratch budget");
+        assert_eq!(
+            plan.scratch_textures, 4,
+            "three chain planes plus the pool's spare"
+        );
+        assert_eq!(
+            plan.scratch_bytes, 530_841_600,
+            "4 * 3840 * 2160 * 16 bytes"
+        );
+        let error = crate::spatial_driver::gpu_spatial_chain_plan(&pipeline, 4096, 2160)
+            .expect_err("DCI 4K exceeds the 512 MiB spatial scratch budget");
+        let crate::spatial_driver::GpuSpatialChainBlocker::ScratchBudgetExceeded {
+            required_bytes,
+            budget_bytes,
+        } = error
+        else {
+            panic!("unexpected blocker: {error:?}");
+        };
+        assert_eq!(required_bytes, 566_231_040);
+        assert_eq!(budget_bytes, 512 * 1024 * 1024);
+    }
+
     /// A straight-alpha fixture with a bright disc on a ramp, a hard step, a
     /// soft-alpha band and one fully transparent column, so the two passes, the
     /// gate and all three output modes have something to act on.
