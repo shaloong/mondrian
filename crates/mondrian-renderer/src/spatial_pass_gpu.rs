@@ -143,6 +143,7 @@ pub(crate) struct EffectSpatialGpu {
     displacement_map: wgpu::RenderPipeline,
     difference_matte_horizontal: wgpu::RenderPipeline,
     difference_matte: wgpu::RenderPipeline,
+    blend: wgpu::RenderPipeline,
     temporal_blend: wgpu::RenderPipeline,
     bindings: wgpu::BindGroupLayout,
     composite_bindings: wgpu::BindGroupLayout,
@@ -1853,6 +1854,7 @@ impl EffectSpatialGpu {
             "mondrian.effect-spatial.difference-matte",
             "fs_difference_matte",
         );
+        let blend = auxiliary_pipeline("mondrian.effect-spatial.blend", "fs_blend");
         let deband = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.deband"),
             layout: Some(&composite_layout),
@@ -2753,6 +2755,7 @@ impl EffectSpatialGpu {
             displacement_map,
             difference_matte_horizontal,
             difference_matte,
+            blend,
             temporal_blend,
             bindings,
             composite_bindings,
@@ -3881,6 +3884,95 @@ impl EffectSpatialGpu {
         Ok(destination.clone())
     }
 
+    /// Records the CHN-02 blend stage.
+    ///
+    /// One draw reads the straight primary texel and one straight reference
+    /// sample, grades the dual-layer colour mixture and writes the graded texel.
+    /// The stage preserves the raster, so the delivery always keeps the input
+    /// extent and the reference raster only feeds the sampler.
+    #[allow(clippy::too_many_arguments)]
+    fn record_blend(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        primary: &wgpu::Texture,
+        auxiliary: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        transform: [f32; 6],
+        grade: mondrian_effects::BlendGrade,
+        sampling: mondrian_effects::AuxiliarySampling,
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        if primary.width() == 0
+            || primary.height() == 0
+            || auxiliary.width() == 0
+            || auxiliary.height() == 0
+        {
+            return Err(EffectSpatialGpuError::EmptyFrame);
+        }
+        if transform.iter().any(|component| !component.is_finite()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass("blend_transform"));
+        }
+        if (destination.width(), destination.height()) != (primary.width(), primary.height()) {
+            return Err(EffectSpatialGpuError::UnsupportedPass(
+                "blend_output_extent",
+            ));
+        }
+        let (mut params, extra) = grade.gpu_controls();
+        params[3] = f32::from(u8::from(sampling.filter == AuxiliaryFilter::Linear));
+        // The kernel applies the affine itself, in the same two steps as the
+        // CPU kernel, so the sampler must not repeat it. The host delivery
+        // affine only applies when the graph declared a frame transform; a
+        // primary-grid auxiliary keeps the identity mapping.
+        let [a, b, tx, c, d, ty] = if sampling.mapping == AuxiliaryCoordinateMapping::FrameTransform
+        {
+            transform
+        } else {
+            mondrian_effects::IDENTITY_AFFINE
+        };
+        let mut crop_w = 1.0_f32;
+        let mut crop_h = 1.0_f32;
+        if grade.size_mode() == mondrian_effects::BlendSizeMode::CenterCrop {
+            let primary_aspect = primary.width() as f32 / primary.height() as f32;
+            let auxiliary_aspect = auxiliary.width() as f32 / auxiliary.height() as f32;
+            crop_w = (primary_aspect / auxiliary_aspect).min(1.0);
+            crop_h = (auxiliary_aspect / primary_aspect).min(1.0);
+            if !crop_w.is_finite() || !crop_h.is_finite() || crop_w <= 0.0 || crop_h <= 0.0 {
+                return Err(EffectSpatialGpuError::UnsupportedPass("blend_geometry"));
+            }
+        }
+        let uniforms = SpatialPassUniform {
+            size: [
+                primary.width() as f32,
+                primary.height() as f32,
+                f32::from(u8::from(
+                    sampling.out_of_bounds == AuxiliaryOutOfBounds::Transparent,
+                )),
+                // The kernel applies the affine itself, in the same two steps as
+                // the CPU kernel, so the sampler must not repeat it.
+                0.0,
+            ],
+            params,
+            // The layer is the only extra control this grade publishes; the
+            // kernel reads no stage tag.
+            extra: [extra[0], 0.0, 0.0, 0.0],
+            aces: [a, b, tx, crop_w],
+            extra1: [c, d, ty, crop_h],
+        };
+        let primary_view = primary.create_view(&wgpu::TextureViewDescriptor::default());
+        let auxiliary_view = auxiliary.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = destination.create_view(&wgpu::TextureViewDescriptor::default());
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.blend,
+            &primary_view,
+            &auxiliary_view,
+            &output_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
+
     /// Sample an independent texture while processing the primary frame.
     ///
     /// `scratch` supplies the intermediate planes that a multi-pass auxiliary
@@ -3905,6 +3997,18 @@ impl EffectSpatialGpu {
                 auxiliary,
                 destination,
                 scratch,
+                transform,
+                grade,
+                sampling,
+            );
+        }
+        if let EffectGpuSpatialPass::Blend { grade, sampling, .. } = *pass {
+            return self.record_blend(
+                device,
+                encoder,
+                primary,
+                auxiliary,
+                destination,
                 transform,
                 grade,
                 sampling,
@@ -4230,7 +4334,12 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::FillMatte { .. }
             | EffectGpuSpatialPass::ChannelCombinerLayer { .. }
             | EffectGpuSpatialPass::SetMatte { .. }
-            | EffectGpuSpatialPass::DisplacementMap { .. } => Ok(1),
+            | EffectGpuSpatialPass::DisplacementMap { .. }
+            // One draw folds the reference sample and the five grade branches
+            // into the written texel, so the pool is `pass_count + 1` = two
+            // textures. At UHD that is 2 x 132,710,400 = 265,420,800 B and at
+            // DCI 4K 2 x 141,557,760 = 283,115,520 B.
+            | EffectGpuSpatialPass::Blend { .. } => Ok(1),
         }
     }
 
@@ -4328,6 +4437,7 @@ impl EffectSpatialGpu {
             | EffectGpuSpatialPass::SetMatte { sampling: Some(_), .. }
             | EffectGpuSpatialPass::DisplacementMap { .. }
             | EffectGpuSpatialPass::DifferenceMatte { .. }
+            | EffectGpuSpatialPass::Blend { .. }
             | EffectGpuSpatialPass::Glass { auxiliary: Some(_), .. } => {
                 return Err(EffectSpatialGpuError::MissingAuxiliaryInput);
             }
@@ -10921,12 +11031,13 @@ fn spatial_composite_shader_source() -> String {
         "const AUX_PIXEL_CENTRE: f32 = {:?};\n\
          const AUX_FINITE_MAX_BITS: u32 = 0x{:08x}u;\n\
          const AUX_BILINEAR_TAPS: array<vec2<i32>, 4> = array<vec2<i32>, 4>({taps});\n\
-         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}",
+         {SPATIAL_COMPOSITE_SHADER}\n{}\n{}\n{}\n{}",
         mondrian_effects::PIXEL_CENTRE,
         f32::MAX.to_bits(),
         include_str!("channel_combiner.wgsl"),
         include_str!("displacement_map.wgsl"),
         include_str!("difference_matte.wgsl"),
+        include_str!("blend.wgsl"),
     )
 }
 

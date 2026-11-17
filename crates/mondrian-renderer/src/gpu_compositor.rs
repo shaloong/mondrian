@@ -23307,6 +23307,354 @@ mod tests {
         ));
     }
 
+    // CHN-02 「混合」/ Blend: the reference layer folds onto the premultiplied
+    // primary texel in straight scene-linear colour, the mode grades the pair,
+    // and the authored weight mixes the graded colour back with the original
+    // image (design §3 and §6). The pass table holds one draw, so the shader
+    // output must equal the CPU kernel for every mode and both size modes.
+    #[tokio::test]
+    async fn gpu_blend_matches_the_cpu_kernel() {
+        use mondrian_effects::{
+            apply_blend_f32, AuxiliaryCoordinateMapping, AuxiliaryFilter, AuxiliaryFloatFrame,
+            AuxiliaryOutOfBounds, AuxiliaryPolicy, AuxiliaryResolution, AuxiliarySampling,
+            BlendGrade, BlendMode, BlendSizeMode, EffectColorDomain, EffectFloatFrameView,
+            EffectFrameExtent, EffectGpuSpatialPass, EffectValueFormat, EffectWorkingPrecision,
+            IDENTITY_AFFINE,
+        };
+
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("GPU for blend parity");
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let (width, height) = (24, 16);
+        // A taller reference, so stretch and centre crop disagree on every pixel
+        // away from the centre of the frame.
+        let (aux_width, aux_height) = (13, 21);
+        let sampling = AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP;
+        // The effects builder declares centre crop with a transparent border,
+        // because the folded crop window addresses reference pixels the raster
+        // does not cover.
+        let cropped_sampling = AuxiliarySampling::new(
+            AuxiliaryCoordinateMapping::FrameTransform,
+            AuxiliaryFilter::Linear,
+            AuxiliaryOutOfBounds::Transparent,
+        );
+        // An off-centre affine on the cropped reading: both the delivery
+        // transform and the size-mode window move the sampled reference pixel.
+        let cropped_transform: [f32; 6] = [1.0 / 1.35, 0.0, 0.02, 0.0, 1.0 / 0.85, -0.03];
+
+        // The primary coverage ramp never reaches zero, so every mode sees a
+        // gradable colour, and the reference keeps transparent zones of its own
+        // for the fold to skip.
+        let primary_pixels: Vec<[f32; 4]> = (0..width * height)
+            .map(|i| {
+                [
+                    (i % 24) as f32 / 9.0 - 0.5,
+                    (i % 16) as f32 / 7.0 - 0.2,
+                    (i % 11) as f32 / 13.0 + 0.05,
+                    (1 + i % 7) as f32 / 8.0,
+                ]
+            })
+            .collect();
+        let auxiliary_pixels: Vec<[f32; 4]> = (0..aux_width * aux_height)
+            .map(|i| {
+                let transparent = i % 6 == 0 || (i / aux_width) % 5 == 4;
+                // The reference colour stays non-negative. The colour-only tint
+                // divides by the reference luminance, so a colour ramp that
+                // cancels below zero would turn a one-ULP sampling difference
+                // into a large absolute one and make the parity tolerance
+                // meaningless rather than strict.
+                [
+                    (i % 13) as f32 / 6.0 * 0.85 + 0.05,
+                    (i % 21) as f32 / 11.0 * 0.85 + 0.05,
+                    (i % 5) as f32 / 4.0 * 0.85 + 0.05,
+                    if transparent {
+                        0.0
+                    } else {
+                        (1 + i % 4) as f32 / 4.0
+                    },
+                ]
+            })
+            .collect();
+        // Uncovered primary pixels: a pixel without coverage has no colour to
+        // grade, so the kernel canonicalises the whole texel to `(0, 0, 0, 0)`
+        // and never looks at the reference. One entry keeps hidden colour under
+        // the zero alpha, which must not leak either.
+        let uncovered_pixels: Vec<[f32; 4]> = primary_pixels
+            .iter()
+            .enumerate()
+            .map(|(i, pixel)| {
+                if i % 11 == 3 {
+                    [0.3, -0.2, 1.4, 0.0]
+                } else if i % 5 == 0 {
+                    [0.0; 4]
+                } else {
+                    *pixel
+                }
+            })
+            .collect();
+
+        let reference = |transform: [f32; 6]| AuxiliaryFloatFrame {
+            frame: EffectFloatFrameView::new(
+                EffectFrameExtent::new(aux_width, aux_height),
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &auxiliary_pixels,
+            ),
+            transform,
+            policy: AuxiliaryPolicy::new(AuxiliaryResolution::Authored),
+        };
+        let grade = |mode: BlendMode, blend_with_original: f32, size_mode: BlendSizeMode| {
+            BlendGrade::new(0, mode, blend_with_original, size_mode)
+                .expect("the fixture grade is valid")
+        };
+
+        // Five modes at full effect, both size modes, two intermediate weights
+        // and the identity weight, and the uncovered-primary fixture.
+        type BlendCase<'a> = (
+            &'a str,
+            BlendGrade,
+            AuxiliarySampling,
+            [f32; 6],
+            &'a [[f32; 4]],
+        );
+        let cases: [BlendCase<'_>; 12] = [
+            (
+                "colour-only",
+                grade(BlendMode::ColorOnly, 0.0, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "tint-only",
+                grade(BlendMode::TintOnly, 0.0, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "darken-only",
+                grade(BlendMode::DarkenOnly, 0.0, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "lighten-only",
+                grade(BlendMode::LightenOnly, 0.0, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "crossfade",
+                grade(BlendMode::Crossfade, 0.0, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "tint-only/centre-crop",
+                grade(BlendMode::TintOnly, 0.0, BlendSizeMode::CenterCrop),
+                cropped_sampling,
+                cropped_transform,
+                &primary_pixels,
+            ),
+            (
+                "crossfade/centre-crop",
+                grade(BlendMode::Crossfade, 0.0, BlendSizeMode::CenterCrop),
+                cropped_sampling,
+                cropped_transform,
+                &primary_pixels,
+            ),
+            (
+                "colour-only/35-percent-original",
+                grade(BlendMode::ColorOnly, 0.35, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "darken-only/half-original",
+                grade(BlendMode::DarkenOnly, 0.5, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "crossfade/75-percent-original",
+                grade(BlendMode::Crossfade, 0.75, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "lighten-only/identity-original",
+                grade(BlendMode::LightenOnly, 1.0, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &primary_pixels,
+            ),
+            (
+                "colour-only/uncovered-primary",
+                grade(BlendMode::ColorOnly, 0.0, BlendSizeMode::Stretch),
+                sampling,
+                IDENTITY_AFFINE,
+                &uncovered_pixels,
+            ),
+        ];
+
+        let auxiliary = key_cleaner_upload(&context, &auxiliary_pixels, aux_width, aux_height);
+        let mut encoder = context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (label, grade_case, case_sampling, transform, case_primary) in cases {
+            let mut cpu = case_primary.to_vec();
+            assert!(
+                apply_blend_f32(
+                    &mut cpu,
+                    width,
+                    height,
+                    reference(transform),
+                    case_sampling,
+                    &grade_case,
+                ),
+                "{label}: the CPU kernel rejected the raster"
+            );
+            let pass = EffectGpuSpatialPass::Blend {
+                grade: grade_case,
+                sampling: case_sampling,
+                external_slot: None,
+            };
+            // CHN-02 spends one pass and no scratch plane, whatever the mode or
+            // the size mode: the whole grade fits in one fragment shader.
+            assert_eq!(
+                crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass)
+                    .expect("the blend has a pass count"),
+                1,
+                "{label}: recorded pass count"
+            );
+            let primary = key_cleaner_upload(&context, case_primary, width, height);
+            let destination = key_cleaner_scratch(&context, width, height, 1).remove(0);
+            let scratch = key_cleaner_scratch(&context, width, height, 2);
+            let output = executor
+                .record_auxiliary(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &primary,
+                    &auxiliary,
+                    &destination,
+                    scratch.as_slice(),
+                    transform,
+                )
+                .unwrap_or_else(|error| panic!("{label}: the blend records: {error}"));
+            assert_eq!(
+                (output.width(), output.height()),
+                (width, height),
+                "{label}: the pass returns the primary extent"
+            );
+            let gpu = {
+                context.queue.submit(Some(encoder.finish()));
+                encoder = context
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                key_cleaner_readback(&context, &output, width, height)
+            };
+            let rgb = cpu
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(cpu, gpu)| [cpu[0] - gpu[0], cpu[1] - gpu[1], cpu[2] - gpu[2]])
+                .fold(0.0_f32, |worst, error| worst.max(error.abs()));
+            let alpha = cpu
+                .iter()
+                .zip(&gpu)
+                .map(|(cpu, gpu)| (cpu[3] - gpu[3]).abs())
+                .fold(0.0_f32, f32::max);
+            eprintln!("BLEND-02 {label}: rgb={rgb:.3e} alpha={alpha:.3e}");
+            assert!(rgb <= 2.0e-4, "{label}: rgb error {rgb:.3e}");
+            assert!(alpha <= 1.0e-5, "{label}: alpha error {alpha:.3e}");
+            for ((input, actual), cpu) in case_primary.iter().zip(&gpu).zip(&cpu) {
+                if input[3] <= 0.0 {
+                    assert_eq!(
+                        actual.map(f32::to_bits),
+                        [0.0_f32; 4].map(f32::to_bits),
+                        "{label}: an uncovered pixel canonicalizes"
+                    );
+                    assert_eq!(
+                        cpu.map(f32::to_bits),
+                        [0.0_f32; 4].map(f32::to_bits),
+                        "{label}: the CPU kernel canonicalizes the fixture"
+                    );
+                }
+            }
+        }
+
+        // The delivery transform is finite by contract, and a NaN transform
+        // would poison every uv, so the pass refuses it before it draws.
+        let nan_pass = EffectGpuSpatialPass::Blend {
+            grade: grade(BlendMode::ColorOnly, 0.0, BlendSizeMode::Stretch),
+            sampling,
+            external_slot: None,
+        };
+        let nan_primary = key_cleaner_upload(&context, &primary_pixels, width, height);
+        let nan_destination = key_cleaner_scratch(&context, width, height, 1).remove(0);
+        let nan_scratch = key_cleaner_scratch(&context, width, height, 2);
+        let nan_transform = [f32::NAN, 0.0, 0.0, 0.0, 1.0, 0.0];
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &nan_pass,
+                &nan_primary,
+                &auxiliary,
+                &nan_destination,
+                nan_scratch.as_slice(),
+                nan_transform,
+            ),
+            Err(crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass("blend_transform"))
+        ));
+        // The pass writes the primary in place, so a destination of another
+        // extent is a refusal rather than a partial frame.
+        let wide_destination = key_cleaner_scratch(&context, width + 1, height, 1).remove(0);
+        assert!(matches!(
+            executor.record_auxiliary(
+                &context.device,
+                &mut encoder,
+                &nan_pass,
+                &nan_primary,
+                &auxiliary,
+                &wide_destination,
+                nan_scratch.as_slice(),
+                IDENTITY_AFFINE,
+            ),
+            Err(
+                crate::spatial_pass_gpu::EffectSpatialGpuError::UnsupportedPass(
+                    "blend_output_extent"
+                )
+            )
+        ));
+        // A blend without its second layer is a plumbing error: the scratch
+        // pool entry point never invents a transparent stand-in.
+        assert!(matches!(
+            executor.record(
+                &context.device,
+                &mut encoder,
+                &nan_pass,
+                &nan_primary,
+                &nan_scratch,
+                width,
+                height,
+            ),
+            Err(crate::spatial_pass_gpu::EffectSpatialGpuError::MissingAuxiliaryInput)
+        ));
+    }
+
     #[tokio::test]
     async fn spatial_chain_bilateral_blur_packs_directly_into_the_layer_output() {
         use mondrian_effects::{bilateral_blur_frame_f32, BilateralBlurGrade, EffectRenderOp};
