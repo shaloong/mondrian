@@ -1390,6 +1390,12 @@ pub enum EffectRenderOp {
         /// Authored layer slot, size mode, tolerance, softness and blur.
         grade: crate::DifferenceMatteGrade,
     },
+    /// Blend: composites the frame with a second layer delivered on another
+    /// layer, using one of five documented modes and a mix with the original.
+    Blend {
+        /// Authored layer slot, mode, mix with the original and size mode.
+        grade: crate::BlendGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1867,6 +1873,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::DifferenceMatte { grade } => {
                 formatter.debug_struct("DifferenceMatte").field("grade", grade).finish()
             }
+            Self::Blend { grade } => formatter.debug_struct("Blend").field("grade", grade).finish(),
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
                 .field("grade", grade)
@@ -3063,6 +3070,13 @@ impl EffectRenderOp {
                 params.map(f32::to_bits).hash(state);
                 extra.map(f32::to_bits).hash(state);
             }
+            EffectRenderOp::Blend { grade } => {
+                147u8.hash(state);
+                // The layer slot, the mode, the mix with the original and the
+                // size mode all read the authored values, so the grade hashes
+                // every one of them.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3356,6 +3370,7 @@ impl EffectRenderOp {
             EffectRenderOp::ZoomBlur { .. } => 3,
             EffectRenderOp::PageTurn { .. } => 3,
             EffectRenderOp::DifferenceMatte { .. } => 3,
+            EffectRenderOp::Blend { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -3890,7 +3905,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 146] {
+fn builtin_effect_types() -> [EffectType; 147] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4038,6 +4053,7 @@ fn builtin_effect_types() -> [EffectType; 146] {
         EffectType::ZoomBlur,
         EffectType::PageTurn,
         EffectType::DifferenceMatte,
+        EffectType::Blend,
     ]
 }
 
@@ -15872,6 +15888,69 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Blend => {
+            const GROUP: &str = "混合";
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "layer",
+                GROUP,
+                "与图层混合",
+                PropertyValue::Int(crate::blend::DEFAULT_LAYER as i64),
+                Some(crate::BLEND_MIN_LAYER as f64),
+                Some(crate::BLEND_MAX_LAYER as f64),
+                Some(1.0),
+            );
+            let modes = crate::BlendMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    ParameterEnumOption::new(
+                        mode.as_key(),
+                        mode.label(),
+                        format!("mondrian.effect.blend.mode.{}", mode.as_key()),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "mode",
+                GROUP,
+                "模式",
+                crate::BlendMode::ColorOnly.as_key(),
+                modes,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "blend_with_original",
+                GROUP,
+                "与原始图像混合",
+                PropertyValue::Float(crate::DEFAULT_BLEND_WITH_ORIGINAL),
+                Some(0.0),
+                Some(1.0),
+                Some(0.01),
+            );
+            let size_modes = crate::BlendSizeMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    ParameterEnumOption::new(
+                        mode.as_key(),
+                        mode.label(),
+                        format!("mondrian.effect.blend.size_mode.{}", mode.as_key()),
+                    )
+                })
+                .collect();
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "size_mode",
+                GROUP,
+                "如果图层大小不同",
+                crate::BlendSizeMode::Stretch.as_key(),
+                size_modes,
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -17091,6 +17170,12 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::DifferenceMatte, "layer" | "size_mode") => ParameterUnit::Unitless,
         (EffectType::DifferenceMatte, "tolerance" | "softness") => ParameterUnit::Percent,
         (EffectType::DifferenceMatte, "blur") => ParameterUnit::Pixels,
+        // The layer is a slot number, the two menus carry their own scale and
+        // the mix with the original image is already authored in `0..=1`, so
+        // nothing is a percentage here.
+        (EffectType::Blend, "layer" | "mode" | "blend_with_original" | "size_mode") => {
+            ParameterUnit::Unitless
+        }
         _ => ParameterUnit::Unitless,
     }
 }
@@ -17130,6 +17215,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::Glass
                 | EffectType::VideoCollage
                 | EffectType::DifferenceMatte
+                | EffectType::Blend
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -17401,6 +17487,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // One sample in, one sample out: the phase, palette, match and matte
             // all read the current sample only, so the ROI stays pixel-local.
+            ..cpu_linear
+        },
+        EffectType::Blend => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Both inputs are sampled at the same output coordinate, so the
+            // pixel-local ROI default stays exact.
+            topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
         EffectType::ChannelCombiner | EffectType::SetMatte => EffectExecutionContract {
@@ -23808,6 +23901,94 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Blend => {
+            let layer_id = builtin_parameter_id(effect_type, "layer");
+            let mode_id = builtin_parameter_id(effect_type, "mode");
+            let blend_with_original_id = builtin_parameter_id(effect_type, "blend_with_original");
+            let size_mode_id = builtin_parameter_id(effect_type, "size_mode");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let layer = match effect.evaluate_parameter(&layer_id, context.time) {
+                    Some(PropertyValue::Int(value))
+                        if (crate::BLEND_MIN_LAYER as i64..=crate::BLEND_MAX_LAYER as i64)
+                            .contains(&value) =>
+                    {
+                        value as u32
+                    }
+                    Some(_) => {
+                        return Err(invalid(format!(
+                            "混合的图层参数必须是 {} 到 {} 之间的整数",
+                            crate::BLEND_MIN_LAYER,
+                            crate::BLEND_MAX_LAYER
+                        )));
+                    }
+                    None => crate::blend::DEFAULT_LAYER,
+                };
+                let mode = effect
+                    .evaluate_enum_parameter(&mode_id, context.time)
+                    .and_then(|key| crate::BlendMode::from_key(&key))
+                    .unwrap_or(crate::BlendMode::ColorOnly);
+                let size_mode = effect
+                    .evaluate_enum_parameter(&size_mode_id, context.time)
+                    .and_then(|key| crate::BlendSizeMode::from_key(&key))
+                    .unwrap_or(crate::BlendSizeMode::Stretch);
+                let blend_with_original =
+                    match effect.evaluate_parameter(&blend_with_original_id, context.time) {
+                        Some(PropertyValue::Float(value)) => value,
+                        Some(_) => {
+                            return Err(invalid("混合的与原始图像混合参数必须是数值".to_string()));
+                        }
+                        None => crate::DEFAULT_BLEND_WITH_ORIGINAL,
+                    };
+                let grade = crate::BlendGrade::new(layer, mode, blend_with_original, size_mode)
+                    .map_err(|error| {
+                        invalid(format!("混合的参数 {} 超出范围", error.parameter()))
+                    })?;
+                // Layer 0 means "no second layer" and a full mix with the
+                // original is the identity, so neither needs a graph node.
+                if grade.layer() == crate::BLEND_MIN_LAYER
+                    || grade.blend_with_original() >= crate::DEFAULT_BLEND_WITH_ORIGINAL
+                {
+                    return Ok(());
+                }
+                let auxiliary = graph.append_external_input(
+                    grade.layer(),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                );
+                // The centre-crop window can address pixels the layer does not
+                // cover, and those must read as transparent instead of
+                // repeating the border texel; the plain stretch keeps the
+                // clamped border.
+                let sampling = match size_mode {
+                    crate::BlendSizeMode::Stretch => {
+                        crate::AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP
+                    }
+                    crate::BlendSizeMode::CenterCrop => crate::AuxiliarySampling::new(
+                        crate::AuxiliaryCoordinateMapping::FrameTransform,
+                        crate::AuxiliaryFilter::Linear,
+                        crate::AuxiliaryOutOfBounds::Transparent,
+                    ),
+                };
+                let output = graph.add_auxiliary_effect(
+                    graph.current_output(),
+                    auxiliary,
+                    EffectRenderOp::Blend { grade },
+                    crate::AuxiliaryRole::Layer,
+                    sampling,
+                );
+                graph.set_current_output(output);
+                Ok(())
+            }))
+        }
         EffectType::ChromaticAberrationRemoval => {
             let lateral_id = builtin_parameter_id(effect_type, "lateral");
             let longitudinal_id = builtin_parameter_id(effect_type, "longitudinal");
@@ -27187,6 +27368,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ZoomBlur => "缩放模糊",
         EffectType::PageTurn => "翻页",
         EffectType::DifferenceMatte => "差值遮罩",
+        EffectType::Blend => "混合",
         EffectType::KeyCleaner => "键控清理",
         EffectType::External(_) => "外部效果",
     }
@@ -28607,6 +28789,7 @@ mod tests {
             EffectType::ZoomBlur,
             EffectType::PageTurn,
             EffectType::DifferenceMatte,
+            EffectType::Blend,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -37903,7 +38086,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 146);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 147);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -38431,7 +38614,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 146);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 147);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -41390,7 +41573,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 146);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 147);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -42526,7 +42709,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 146);
+        assert_eq!(builtin_effect_types().len(), 147);
     }
 
     #[test]
@@ -46384,6 +46567,331 @@ mod tests {
             left.finish(),
             right.finish(),
             "the authored layer and matte controls are part of the render identity"
+        );
+    }
+
+    fn blend_node(
+        graph: &EffectRenderGraph,
+    ) -> Option<(
+        crate::BlendGrade,
+        crate::AuxiliaryRole,
+        crate::AuxiliarySampling,
+        crate::EffectGraphNodeId,
+    )> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                op: EffectRenderOp::Blend { grade },
+                auxiliary,
+                role,
+                sampling,
+                ..
+            } => Some((*grade, *role, *sampling, *auxiliary)),
+            _ => None,
+        })
+    }
+
+    fn author_blend(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Blend).expect("the blend should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Blend.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the blend parameter should be assignable");
+        }
+        effect
+    }
+
+    #[test]
+    fn blend_defaults_compile_to_identity() {
+        let effect =
+            instantiate_effect_node(EffectType::Blend).expect("registered Blend definition");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate default Blend");
+
+        assert!(
+            blend_node(&graph).is_none(),
+            "layer 0 means no second layer, so the defaults are the identity"
+        );
+
+        let effect = author_blend(&[
+            ("layer", PropertyValue::Int(6)),
+            ("blend_with_original", PropertyValue::Float(1.0)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("evaluate a full mix with the original");
+        assert!(
+            blend_node(&graph).is_none(),
+            "a full mix keeps the primary, so no node is needed"
+        );
+    }
+
+    #[test]
+    fn blend_layer_builds_one_auxiliary_node() {
+        let effect = author_blend(&[
+            ("layer", PropertyValue::Int(6)),
+            ("blend_with_original", PropertyValue::Float(0.25)),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored blend should compile");
+        let (grade, role, sampling, auxiliary) =
+            blend_node(&graph).expect("the authored layer should key a second raster");
+        assert_eq!(
+            grade,
+            crate::BlendGrade::new(
+                6,
+                crate::BlendMode::ColorOnly,
+                0.25,
+                crate::BlendSizeMode::Stretch
+            )
+            .expect("the authored controls are within range")
+        );
+        assert_eq!(
+            role,
+            crate::AuxiliaryRole::Layer,
+            "the layer is a complete picture, not a coverage matte"
+        );
+        assert_eq!(
+            sampling,
+            crate::AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP,
+            "a stretch samples the layer through the delivery transform"
+        );
+        match &graph.node(auxiliary).expect("the layer input exists").kind {
+            EffectGraphNodeKind::ExternalInput { slot, .. } => {
+                assert_eq!(*slot, 6, "the layer slot names the input");
+            }
+            other => panic!("unexpected layer input {other:?}"),
+        }
+        let op = EffectRenderOp::Blend { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the kernel reads the bound raster directly"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        assert_eq!(
+            crate::spatial_pass_for(&op),
+            None,
+            "a unary node has no bound layer to lower"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            147
+        );
+        let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
+            &op,
+            crate::AuxiliaryRole::Layer,
+            sampling,
+            Some(6),
+        )
+        .expect("the auxiliary lowering carries the blend kernel");
+        assert_eq!(pass.name(), "blend");
+        assert_eq!((pass.horizontal_halo(), pass.vertical_halo()), (0, 0));
+        assert_eq!(pass.auxiliary_slot(), Some(Some(6)));
+        assert!(matches!(pass, crate::EffectGpuSpatialPass::Blend { .. }));
+    }
+
+    #[test]
+    fn blend_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::Blend;
+        let properties = default_properties_for(effect_type.clone());
+        for parameter in ["layer", "mode", "blend_with_original", "size_mode"] {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .unwrap_or_else(|| panic!("the {parameter} value is authored"));
+            assert_eq!(
+                property.descriptor.ui_metadata.group_name.as_deref(),
+                Some("混合"),
+                "the {parameter} control sits in the blend group"
+            );
+            assert_eq!(
+                property.descriptor.schema.unit,
+                ParameterUnit::Unitless,
+                "the {parameter} control is unitless"
+            );
+        }
+        let layer = properties
+            .property(&effect_type.property_path("layer"))
+            .expect("the layer slot is defined");
+        assert_eq!(layer.evaluate(tt(0)), PropertyValue::Int(0));
+        assert_eq!(layer.descriptor.display_name, "与图层混合");
+
+        let mode = properties
+            .property(&effect_type.property_path("mode"))
+            .expect("the mode menu is defined");
+        assert_eq!(
+            mode.evaluate(tt(0)),
+            PropertyValue::Enum("color_only".to_owned())
+        );
+        assert_eq!(mode.descriptor.display_name, "模式");
+        let keys = [
+            "color_only",
+            "tint_only",
+            "darken_only",
+            "lighten_only",
+            "crossfade",
+        ];
+        let labels = ["仅颜色", "仅色调", "仅变暗", "仅变亮", "交叉淡化"];
+        let options = &mode.descriptor.schema.enum_options;
+        assert_eq!(options.len(), keys.len());
+        for ((option, key), label) in options.iter().zip(keys).zip(labels) {
+            assert_eq!(option.key, key);
+            assert_eq!(option.display_name, label);
+            assert_eq!(
+                option.message_id,
+                format!("mondrian.effect.blend.mode.{key}")
+            );
+            let mode = crate::BlendMode::from_key(key).expect("every menu key round trips");
+            assert_eq!(mode.as_key(), key);
+        }
+
+        let mix = properties
+            .property(&effect_type.property_path("blend_with_original"))
+            .expect("the mix with the original is defined");
+        assert_eq!(mix.evaluate(tt(0)), PropertyValue::Float(1.0));
+        assert_eq!(mix.descriptor.display_name, "与原始图像混合");
+
+        let size_mode = properties
+            .property(&effect_type.property_path("size_mode"))
+            .expect("the size mode menu is defined");
+        assert_eq!(
+            size_mode.evaluate(tt(0)),
+            PropertyValue::Enum("stretch".to_owned())
+        );
+        assert_eq!(size_mode.descriptor.display_name, "如果图层大小不同");
+        let keys = ["stretch", "center_crop"];
+        let labels = ["拉伸适配", "中心裁剪"];
+        let options = &size_mode.descriptor.schema.enum_options;
+        assert_eq!(options.len(), keys.len());
+        for ((option, key), label) in options.iter().zip(keys).zip(labels) {
+            assert_eq!(option.key, key);
+            assert_eq!(option.display_name, label);
+            assert_eq!(
+                option.message_id,
+                format!("mondrian.effect.blend.size_mode.{key}")
+            );
+            let size_mode = crate::BlendSizeMode::from_key(key).expect("the size key round trips");
+            assert_eq!(size_mode.as_key(), key);
+        }
+    }
+
+    #[test]
+    fn blend_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let contract = effect_definition(&EffectType::Blend)
+            .expect("registered Blend definition")
+            .execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            "the kernel has an f32 reference and a gpu pass"
+        );
+        assert_eq!(
+            contract.roi_propagation,
+            crate::EffectRoiPropagation::PixelLocal,
+            "both rasters are sampled at the same output coordinate"
+        );
+        assert_eq!(
+            contract.topology,
+            crate::EffectGraphTopology::GeneralDag,
+            "the effect reads a second input"
+        );
+    }
+
+    #[test]
+    fn blend_out_of_range_parameters_are_author_errors() {
+        let builtin_key = "builtin.blend";
+        for (parameter, value, needle) in [
+            ("layer", serde_json::json!(20), "19"),
+            (
+                "blend_with_original",
+                serde_json::json!(1.5),
+                "blend_with_original",
+            ),
+        ] {
+            let effect =
+                instantiate_effect_node(EffectType::Blend).expect("the blend should instantiate");
+            let effect_id = effect.id;
+            let mut document = serde_json::to_value(&effect).expect("serialize the node");
+            overwrite_static_value(&mut document, &format!("blend.{parameter}"), value);
+            let result: Result<EffectNode, _> = serde_json::from_value(document);
+            if let Ok(effect) = result {
+                let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                    .expect_err("an out-of-range parameter should fail");
+                match error {
+                    EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                        assert_eq!(effect_key, builtin_key);
+                        assert!(reason.contains(needle), "{reason}");
+                        assert!(reason.starts_with("混合的"), "{reason}");
+                    }
+                    other => panic!("unexpected error {other:?} for {effect_id}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blend_center_crop_selects_transparent_sampling() {
+        let effect = author_blend(&[
+            ("layer", PropertyValue::Int(6)),
+            ("blend_with_original", PropertyValue::Float(0.5)),
+            ("size_mode", PropertyValue::Enum("center_crop".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored blend should compile");
+        let (grade, role, sampling, auxiliary) =
+            blend_node(&graph).expect("the authored layer should build the node");
+        assert_eq!(grade.size_mode(), crate::BlendSizeMode::CenterCrop);
+        assert_eq!(role, crate::AuxiliaryRole::Layer);
+        assert_eq!(
+            sampling,
+            crate::AuxiliarySampling::new(
+                crate::AuxiliaryCoordinateMapping::FrameTransform,
+                crate::AuxiliaryFilter::Linear,
+                crate::AuxiliaryOutOfBounds::Transparent,
+            ),
+            "a crop window outside the layer reads transparent, not the border texel"
+        );
+        match &graph.node(auxiliary).expect("the layer input exists").kind {
+            EffectGraphNodeKind::ExternalInput { slot, .. } => assert_eq!(*slot, 6),
+            other => panic!("unexpected layer input {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blend_mode_and_mix_change_the_hash() {
+        let build = |mode: &str, blend_with_original: f32| {
+            let effect = author_blend(&[
+                ("layer", PropertyValue::Int(6)),
+                ("mode", PropertyValue::Enum(mode.to_owned())),
+                (
+                    "blend_with_original",
+                    PropertyValue::Float(blend_with_original),
+                ),
+            ]);
+            let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect("the authored blend should compile");
+            let (grade, ..) = blend_node(&graph).expect("the blend is never built as absent");
+            EffectRenderOp::Blend { grade }
+        };
+        use std::hash::Hasher;
+        let hash = |op: EffectRenderOp| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            op.hash_signature(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(
+            hash(build("color_only", 0.5)),
+            hash(build("crossfade", 0.5)),
+            "the mode is part of the render identity"
+        );
+        assert_ne!(
+            hash(build("crossfade", 0.5)),
+            hash(build("crossfade", 0.25)),
+            "the mix with the original is part of the render identity"
         );
     }
 

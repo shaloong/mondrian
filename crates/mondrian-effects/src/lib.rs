@@ -61,6 +61,13 @@ pub use bilateral_blur::{
 };
 pub mod black_white;
 pub mod blanking_fill;
+pub mod blend;
+// `DEFAULT_LAYER` is re-exported by `difference_matte`; the blend default lives
+// at the module path as `blend::DEFAULT_LAYER`.
+pub use blend::{
+    apply_blend_controlled, apply_blend_f32, BlendError, BlendGrade, BlendMode, BlendSizeMode,
+    BLEND_MAX_LAYER, BLEND_MIN_LAYER, DEFAULT_BLEND_WITH_ORIGINAL,
+};
 pub mod box_blur;
 pub mod brightness_contrast;
 pub mod bulge;

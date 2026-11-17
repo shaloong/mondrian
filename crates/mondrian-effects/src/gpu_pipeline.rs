@@ -379,6 +379,15 @@ pub enum EffectGpuSpatialPass {
         /// Host slot for a linear chain, or a graph-local input if absent.
         external_slot: Option<u32>,
     },
+    /// Composite the frame with a separately sampled layer picture.
+    Blend {
+        /// Authored layer slot, mode, mix with the original and size mode.
+        grade: crate::BlendGrade,
+        /// Reconstruction and boundary behavior of the layer picture.
+        sampling: crate::AuxiliarySampling,
+        /// Host slot for a linear chain, or a graph-local input if absent.
+        external_slot: Option<u32>,
+    },
     /// Remap a source picture inside an evaluated mask boundary.
     Smear {
         /// Geometry and controls resolved for the current graph evaluation.
@@ -445,6 +454,7 @@ impl EffectGpuSpatialPass {
             | Self::SetMatte { sampling: Some(_), external_slot, .. }
             | Self::DisplacementMap { external_slot, .. }
             | Self::DifferenceMatte { external_slot, .. }
+            | Self::Blend { external_slot, .. }
             | Self::Glass { auxiliary: Some(_), external_slot, .. } => Some(external_slot),
             _ => None,
         }
@@ -532,6 +542,7 @@ impl EffectGpuSpatialPass {
             Self::SetMatte { .. } => "set_matte",
             Self::DisplacementMap { .. } => "displacement_map",
             Self::DifferenceMatte { .. } => "difference_matte",
+            Self::Blend { .. } => "blend",
             Self::GrowBounds { .. } => "grow_bounds",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
@@ -647,7 +658,10 @@ impl EffectGpuSpatialPass {
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
-            Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
+            Self::FillMatte { .. }
+            | Self::ChannelCombinerLayer { .. }
+            | Self::SetMatte { .. }
+            | Self::Blend { .. } => 0,
             // The box average reads at most the rounded radius; the ceiling plus
             // one covers a fractional radius. Unlike the resampling passes this
             // reach is finite, so the plane can still be tiled.
@@ -749,7 +763,10 @@ impl EffectGpuSpatialPass {
             Self::BilateralBlur { grade } => grade.halo(),
             Self::ChromaticAberrationRemoval { grade } => chromatic_aberration_removal_halo(grade),
             Self::Basic3D { .. } | Self::CameraView { .. } | Self::BlankingFill { .. } => u32::MAX,
-            Self::FillMatte { .. } | Self::ChannelCombinerLayer { .. } | Self::SetMatte { .. } => 0,
+            Self::FillMatte { .. }
+            | Self::ChannelCombinerLayer { .. }
+            | Self::SetMatte { .. }
+            | Self::Blend { .. } => 0,
             // The box average reads at most the rounded radius; the ceiling plus
             // one covers a fractional radius. Unlike the resampling passes this
             // reach is finite, so the plane can still be tiled.
@@ -799,6 +816,9 @@ pub(crate) fn lower_auxiliary_spatial_pass(
                 auxiliary: Some(sampling),
                 external_slot,
             })
+        }
+        (EffectRenderOp::Blend { grade }, crate::AuxiliaryRole::Layer) => {
+            Some(EffectGpuSpatialPass::Blend { grade: *grade, sampling, external_slot })
         }
         (EffectRenderOp::Glass { grade, lighting, projection }, crate::AuxiliaryRole::Map) => {
             Some(EffectGpuSpatialPass::Glass {
@@ -1404,6 +1424,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         // A difference matte always reads a second raster, so a unary node has
         // no slot to lower; the auxiliary path supplies one.
         EffectRenderOp::DifferenceMatte { .. } => None,
+        // A blend always reads a second raster, so a unary node has no slot to
+        // lower; the auxiliary path supplies one.
+        EffectRenderOp::Blend { .. } => None,
         _ => None,
     }
 }

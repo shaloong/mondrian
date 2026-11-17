@@ -385,6 +385,7 @@ pub const fn render_op_auxiliary_scratch_frames(op: &EffectRenderOp) -> usize {
         op,
         EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::DifferenceMatte { .. }
+            | EffectRenderOp::Blend { .. }
             | EffectRenderOp::Glass { .. }
     ) {
         // These kernels own their whole working set and are charged by
@@ -404,6 +405,7 @@ pub(crate) fn supports_auxiliary_f32(op: &EffectRenderOp) -> bool {
         op,
         EffectRenderOp::Fill { .. }
             | EffectRenderOp::DifferenceMatte { .. }
+            | EffectRenderOp::Blend { .. }
             | EffectRenderOp::DisplacementMap { .. }
             | EffectRenderOp::ChannelCombiner { .. }
             | EffectRenderOp::SetMatte { .. }
@@ -433,6 +435,11 @@ pub(crate) fn apply_auxiliary_effect_f32<E>(
     }
     if let EffectRenderOp::DifferenceMatte { grade } = op {
         return crate::apply_difference_matte_controlled(
+            primary, width, height, frame, sampling, grade, checkpoint,
+        );
+    }
+    if let EffectRenderOp::Blend { grade } = op {
+        return crate::apply_blend_controlled(
             primary, width, height, frame, sampling, grade, checkpoint,
         );
     }
@@ -495,6 +502,37 @@ pub(crate) fn apply_auxiliary_effect_f32_region<E>(
             *pixel = grade.apply_pixel_from(*pixel, sample_auxiliary_f32(frame, uv, sampling));
             // HDR or negative RGB copied into alpha must stay in the coverage range.
             pixel[3] = pixel[3].clamp(0.0, 1.0);
+        }
+        checkpoint()?;
+        return Ok(true);
+    }
+    if let EffectRenderOp::Blend { grade } = op {
+        // The layer picture is sampled on the primary grid: the reference uv
+        // already carries the delivery affine and the size-mode crop, so the
+        // sampler must not apply the affine a second time.
+        let grid_sampling = AuxiliarySampling::new(
+            AuxiliaryCoordinateMapping::PrimaryGrid,
+            sampling.filter,
+            sampling.out_of_bounds,
+        );
+        checkpoint()?;
+        for (index, pixel) in primary.iter_mut().enumerate() {
+            if index % 4096 == 0 {
+                checkpoint()?;
+            }
+            let x = origin_x + index as u32 % width;
+            let y = origin_y + index as u32 / width;
+            let uv = crate::blend::blend_reference_uv(
+                x,
+                y,
+                frame_width,
+                frame_height,
+                frame.transform,
+                frame.frame.extent(),
+                sampling.mapping,
+                grade.size_mode(),
+            );
+            *pixel = grade.apply_pixel_from(*pixel, sample_auxiliary_f32(frame, uv, grid_sampling));
         }
         checkpoint()?;
         return Ok(true);

@@ -274,6 +274,9 @@ pub enum EffectType {
     /// Difference matte: key a flat plate against a reference frame delivered
     /// on another layer, with tolerance, softness, and an optional blur.
     DifferenceMatte,
+    /// Blend: composite the frame with a second layer using one of five
+    /// documented modes, a mix with the original image, and a size fit.
+    Blend,
 }
 
 impl EffectType {
@@ -334,6 +337,7 @@ impl EffectType {
             Self::ZoomBlur => "builtin.zoom_blur".to_string(),
             Self::PageTurn => "builtin.page_turn".to_string(),
             Self::DifferenceMatte => "builtin.difference_matte".to_string(),
+            Self::Blend => "builtin.blend".to_string(),
             Self::Convolution => "builtin.convolution".to_string(),
             Self::Offset => "builtin.offset".to_string(),
             Self::Twirl => "builtin.twirl".to_string(),
@@ -486,6 +490,7 @@ impl EffectType {
             "builtin.zoom_blur" => Self::ZoomBlur,
             "builtin.page_turn" => Self::PageTurn,
             "builtin.difference_matte" => Self::DifferenceMatte,
+            "builtin.blend" => Self::Blend,
             "builtin.convolution" => Self::Convolution,
             "builtin.offset" => Self::Offset,
             "builtin.twirl" => Self::Twirl,
@@ -641,6 +646,7 @@ impl EffectType {
             Self::ZoomBlur => "缩放模糊",
             Self::PageTurn => "翻页",
             Self::DifferenceMatte => "差值遮罩",
+            Self::Blend => "混合",
             Self::Convolution => "卷积核",
             Self::Offset => "偏移",
             Self::Twirl => "旋转扭曲",
@@ -798,6 +804,7 @@ impl EffectType {
             Self::ZoomBlur => vec!["颜色", "模糊与锐化"],
             Self::PageTurn => vec!["变形"],
             Self::DifferenceMatte => vec!["抠像"],
+            Self::Blend => vec!["通道"],
             Self::Convolution => vec!["颜色", "调色"],
             Self::Offset => vec!["变换与尺寸"],
             Self::Twirl => vec!["变形"],
@@ -940,6 +947,7 @@ impl EffectType {
             Self::ZoomBlur => "zoom_blur".to_string(),
             Self::PageTurn => "page_turn".to_string(),
             Self::DifferenceMatte => "difference_matte".to_string(),
+            Self::Blend => "blend".to_string(),
             Self::Convolution => "convolution".to_string(),
             Self::Offset => "offset".to_string(),
             Self::Twirl => "twirl".to_string(),
@@ -1466,6 +1474,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::ZoomBlur => Ok(()),
             Self::PageTurn => Ok(()),
             Self::DifferenceMatte => Ok(()),
+            Self::Blend => Ok(()),
             Self::Convolution => Ok(()),
             Self::Offset => Ok(()),
             Self::Twirl => Ok(()),

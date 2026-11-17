@@ -3200,12 +3200,14 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float
         },
-        EffectRenderOp::ChannelCombiner { .. } | EffectRenderOp::SetMatte { .. } => {
-            EffectImplementationRequirements {
-                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-                ..cpu_float
-            }
-        }
+        EffectRenderOp::ChannelCombiner { .. }
+        | EffectRenderOp::SetMatte { .. }
+        | EffectRenderOp::Blend { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Both inputs are sampled at the same output coordinate, so the
+            // pixel-local envelope stays exact.
+            ..cpu_float
+        },
         EffectRenderOp::Grid { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_float

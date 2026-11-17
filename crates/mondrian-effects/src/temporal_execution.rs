@@ -3735,6 +3735,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         crate::EffectRenderOp::Lut3D { .. } => "lut3d",
         crate::EffectRenderOp::DifferenceMatte { .. } => "difference_matte",
+        crate::EffectRenderOp::Blend { .. } => "blend",
         crate::EffectRenderOp::Custom { .. } => "custom",
     }
 }

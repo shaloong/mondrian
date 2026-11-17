@@ -288,6 +288,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "祛线" => Some("parameter-group-wire-removal"),
         "分形噪波" => Some("parameter-group-fractal-noise"),
         "差值遮罩" => Some("parameter-group-difference-matte"),
+        "混合" => Some("parameter-group-blend"),
         "分离" => Some("parameter-group-split"),
         "卷积核" => Some("parameter-group-convolution"),
         "反转" => Some("parameter-group-invert"),

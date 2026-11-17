@@ -3306,6 +3306,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut3d",
         EffectRenderOp::DifferenceMatte { .. } => "difference_matte",
+        EffectRenderOp::Blend { .. } => "blend",
         EffectRenderOp::Custom { .. } => "custom",
     }
 }

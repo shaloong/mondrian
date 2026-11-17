@@ -651,6 +651,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Blend { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "blend",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::FilmLook { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "film_look",
@@ -1398,6 +1404,9 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::SetMatte { .. } => 0,
         EffectRenderOp::DisplacementMap { .. } => 1,
         EffectRenderOp::DifferenceMatte { .. } => 2,
+        // The blend kernel reads at most the second sample, so no scratch
+        // frame is needed beyond the destination.
+        EffectRenderOp::Blend { .. } => 0,
         EffectRenderOp::GrowBounds { .. } => 0,
         EffectRenderOp::Smear { .. } | EffectRenderOp::Reshape { .. } => 1,
         EffectRenderOp::DetailPreservingUpscale { .. } => 1,
@@ -2021,6 +2030,9 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         // The difference matte reads a second raster, so the unary dispatch
         // cannot lower it; the auxiliary path owns the kernel.
         EffectRenderOp::DifferenceMatte { .. } => Ok(false),
+        // The blend reads a second raster, so the unary dispatch cannot lower
+        // it; the auxiliary path owns the kernel.
+        EffectRenderOp::Blend { .. } => Ok(false),
         // Glass uses the complete graph's raster and auxiliary inputs.
         EffectRenderOp::Glass { .. } | EffectRenderOp::VideoCollage { .. } => Ok(false),
         EffectRenderOp::GrowBounds { grade } => Ok(grade.output_outset() == [0, 0]),
