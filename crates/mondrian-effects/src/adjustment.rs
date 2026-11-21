@@ -609,6 +609,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::Shape { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "shape",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::Beam { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "beam",
@@ -1564,6 +1570,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::ColorSpaceTransform { .. }
         | EffectRenderOp::AcesTransform { .. }
         | EffectRenderOp::LightSweep { .. }
+        | EffectRenderOp::Shape { .. }
         | EffectRenderOp::Beam { .. }
         | EffectRenderOp::Strobe { .. }
         | EffectRenderOp::Lut3D { .. } => 0,
@@ -2845,6 +2852,16 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::LightSweep { grade } => {
             crate::light_sweep::apply_light_sweep_f32_controlled(
+                working,
+                width as usize,
+                height as usize,
+                grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::Shape { grade } => {
+            crate::shape::apply_shape_f32_controlled(
                 working,
                 width as usize,
                 height as usize,

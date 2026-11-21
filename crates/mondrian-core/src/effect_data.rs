@@ -294,6 +294,9 @@ pub enum EffectType {
     /// Inner/outer key: key the frame against a colour sampled at an authored
     /// point, keeping the pixels on one side of that screen colour.
     InnerOuterKey,
+    /// Shape: draw a rectangle, circle, ellipse, regular polygon, star or line
+    /// into the frame with fill, stroke and a boolean mode against the source.
+    Shape,
 }
 
 impl EffectType {
@@ -452,6 +455,7 @@ impl EffectType {
             Self::RadialShadow => "builtin.radial_shadow".to_string(),
             Self::FilmLook => "builtin.film_look".to_string(),
             Self::ColorDifferenceKey => "builtin.color_difference_key".to_string(),
+            Self::Shape => "builtin.shape".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -611,6 +615,7 @@ impl EffectType {
             "builtin.radial_shadow" => Self::RadialShadow,
             "builtin.film_look" => Self::FilmLook,
             "builtin.color_difference_key" => Self::ColorDifferenceKey,
+            "builtin.shape" => Self::Shape,
             other => Self::External(other.to_string()),
         }
     }
@@ -770,6 +775,7 @@ impl EffectType {
             Self::RadialShadow => "径向阴影",
             Self::FilmLook => "胶片外观",
             Self::ColorDifferenceKey => "颜色差值键",
+            Self::Shape => "形状",
             Self::External(name) => name,
         }
     }
@@ -924,6 +930,7 @@ impl EffectType {
             Self::RadialShadow => vec!["光效"],
             Self::FilmLook => vec!["风格化"],
             Self::Strobe => vec!["风格化"],
+            Self::Shape => vec!["生成器"],
             Self::External(_) => vec!["外部效果"],
         }
     }
@@ -1083,6 +1090,7 @@ impl EffectType {
             Self::RadialShadow => "radial_shadow".to_string(),
             Self::FilmLook => "film_look".to_string(),
             Self::ColorDifferenceKey => "color_difference_key".to_string(),
+            Self::Shape => "shape".to_string(),
             Self::External(key) => key.clone(),
         }
     }
@@ -1625,6 +1633,9 @@ impl crate::AuthoringFootprint for EffectType {
             // paint a region the source left empty.
             Self::FilmLook => Ok(()),
             Self::ColorDifferenceKey => Ok(()),
+            // The generator paints its own shape, so it has no authoring
+            // footprint on the source.
+            Self::Shape => Ok(()),
         }
     }
 }

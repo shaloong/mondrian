@@ -436,6 +436,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "胶片外观" => Some("parameter-group-film-look"),
         "缩放模糊" => Some("parameter-group-zoom-blur"),
         "翻页" => Some("parameter-group-page-turn"),
+        "形状" => Some("parameter-group-shape"),
         _ => None,
     }
 }

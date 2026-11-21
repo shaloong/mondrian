@@ -256,6 +256,7 @@ pub mod remove_color_matting;
 pub mod scanlines;
 pub mod scatter;
 pub mod selective_color;
+pub mod shape;
 pub mod shift_channels;
 pub mod smart_blur;
 pub mod star_burst;
@@ -809,6 +810,17 @@ pub use selective_color::{
     selective_color_frame_f32, SelectiveColorError, SelectiveColorGrade, SelectiveColorMethod,
     SelectiveColorRange, CHROMA_GATE_END, CHROMA_GATE_START, LUMA_PIVOT, MIN_MAX_CHANNEL,
     SELECTIVE_COLOR_SLIDER_MAX, SELECTIVE_COLOR_SLIDER_MIN, TENT_HALF_WIDTH_DEGREES,
+};
+pub use shape::{
+    shape_frame_f32, ShapeBooleanMode, ShapeError, ShapeGpuControls, ShapeGrade, ShapeKind,
+    ShapeParameters, ShapeStrokePosition, SHAPE_DEFAULT_CORNER_RADIUS, SHAPE_DEFAULT_FILL_COLOUR,
+    SHAPE_DEFAULT_FILL_OPACITY, SHAPE_DEFAULT_INNER_RATIO, SHAPE_DEFAULT_OPACITY,
+    SHAPE_DEFAULT_POSITION, SHAPE_DEFAULT_ROTATION, SHAPE_DEFAULT_SIZE,
+    SHAPE_DEFAULT_STROKE_COLOUR, SHAPE_DEFAULT_STROKE_WIDTH, SHAPE_DEFAULT_VERTICES,
+    SHAPE_MAX_CORNER_RADIUS, SHAPE_MAX_INNER_RATIO, SHAPE_MAX_OPACITY, SHAPE_MAX_POSITION,
+    SHAPE_MAX_ROTATION, SHAPE_MAX_SIZE, SHAPE_MAX_STROKE_WIDTH, SHAPE_MAX_VERTICES,
+    SHAPE_MIN_CORNER_RADIUS, SHAPE_MIN_INNER_RATIO, SHAPE_MIN_OPACITY, SHAPE_MIN_POSITION,
+    SHAPE_MIN_SIZE, SHAPE_MIN_STROKE_WIDTH, SHAPE_MIN_VERTICES,
 };
 pub use smart_blur::{
     smart_blur_frame_f32, SmartBlurError, SmartBlurGrade, SmartBlurMode,

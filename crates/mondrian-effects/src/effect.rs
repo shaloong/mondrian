@@ -1431,6 +1431,12 @@ pub enum EffectRenderOp {
         /// The nine authored controls.
         grade: crate::InnerOuterKeyGrade,
     },
+    /// Shape: draws a rectangle, circle, ellipse, polygon, star or line with
+    /// fill and stroke, composited against the source.
+    Shape {
+        /// The fourteen authored geometry, colour and blending controls.
+        grade: crate::ShapeGrade,
+    },
     /// Write primary coverage from a matte channel.
     SetMatte {
         grade: crate::SetMatteGrade,
@@ -1925,6 +1931,7 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::InnerOuterKey { grade } => {
                 formatter.debug_struct("InnerOuterKey").field("grade", grade).finish()
             }
+            Self::Shape { grade } => formatter.debug_struct("Shape").field("grade", grade).finish(),
             Self::ChromaticAberrationRemoval { grade } => formatter
                 .debug_struct("ChromaticAberrationRemoval")
                 .field("grade", grade)
@@ -3167,6 +3174,12 @@ impl EffectRenderOp {
                 // pixels, so the grade hashes every one of them.
                 grade.hash_state(state);
             }
+            EffectRenderOp::Shape { grade } => {
+                154u8.hash(state);
+                // Every geometry, colour and boolean control changes the pixels,
+                // so the grade hashes the whole configuration.
+                grade.hash_state(state);
+            }
             EffectRenderOp::CineonConverter { grade } => {
                 133u8.hash(state);
                 // The direction, the four points, the gamma and the highlight
@@ -3467,6 +3480,7 @@ impl EffectRenderOp {
             EffectRenderOp::Texturize { .. } => 3,
             EffectRenderOp::PictureInPicture { .. } => 5,
             EffectRenderOp::InnerOuterKey { .. } => 4,
+            EffectRenderOp::Shape { .. } => 1,
             EffectRenderOp::BilateralBlur { .. } => 12,
             EffectRenderOp::ChromaticAberrationRemoval { .. } => 3,
             EffectRenderOp::Basic3D { .. } | EffectRenderOp::CameraView { .. } => 5,
@@ -4001,7 +4015,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 153] {
+fn builtin_effect_types() -> [EffectType; 154] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4156,6 +4170,7 @@ fn builtin_effect_types() -> [EffectType; 153] {
         EffectType::PictureInPicture,
         EffectType::Beam,
         EffectType::InnerOuterKey,
+        EffectType::Shape,
     ]
 }
 
@@ -16936,6 +16951,206 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(1.0),
             );
         }
+        EffectType::Shape => {
+            const GROUP: &str = "形状";
+            // The fourteen authored values mirror the kernel: the outline and
+            // its box, the corner, vertex and star controls, the fill and the
+            // stroke, the transform, and the boolean mode against the source.
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "shape_type",
+                GROUP,
+                "形状类型",
+                crate::ShapeKind::Rectangle.as_key(),
+                crate::ShapeKind::ALL
+                    .iter()
+                    .map(|kind| {
+                        ParameterEnumOption::new(
+                            kind.as_key(),
+                            kind.label(),
+                            format!("mondrian.effect.shape.shape_type.{}", kind.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "size",
+                GROUP,
+                "大小",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::SHAPE_DEFAULT_SIZE[0],
+                    crate::SHAPE_DEFAULT_SIZE[1],
+                )),
+                Some(f64::from(crate::SHAPE_MIN_SIZE)),
+                Some(f64::from(crate::SHAPE_MAX_SIZE)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "position",
+                GROUP,
+                "位置",
+                PropertyValue::Vec2(glam::Vec2::new(
+                    crate::SHAPE_DEFAULT_POSITION[0],
+                    crate::SHAPE_DEFAULT_POSITION[1],
+                )),
+                Some(f64::from(crate::SHAPE_MIN_POSITION)),
+                Some(f64::from(crate::SHAPE_MAX_POSITION)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "corner_radius",
+                GROUP,
+                "圆角",
+                PropertyValue::Float(crate::SHAPE_DEFAULT_CORNER_RADIUS),
+                Some(f64::from(crate::SHAPE_MIN_CORNER_RADIUS)),
+                Some(f64::from(crate::SHAPE_MAX_CORNER_RADIUS)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "vertices",
+                GROUP,
+                "顶点数",
+                PropertyValue::Float(crate::SHAPE_DEFAULT_VERTICES),
+                Some(f64::from(crate::SHAPE_MIN_VERTICES)),
+                Some(f64::from(crate::SHAPE_MAX_VERTICES)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "inner_ratio",
+                GROUP,
+                "内径比",
+                PropertyValue::Float(crate::SHAPE_DEFAULT_INNER_RATIO),
+                Some(f64::from(crate::SHAPE_MIN_INNER_RATIO)),
+                Some(f64::from(crate::SHAPE_MAX_INNER_RATIO)),
+                Some(0.01),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_colour",
+                GROUP,
+                "填充颜色",
+                PropertyValue::Color(Color {
+                    r: crate::SHAPE_DEFAULT_FILL_COLOUR[0],
+                    g: crate::SHAPE_DEFAULT_FILL_COLOUR[1],
+                    b: crate::SHAPE_DEFAULT_FILL_COLOUR[2],
+                    a: crate::SHAPE_DEFAULT_FILL_COLOUR[3],
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "fill_opacity",
+                GROUP,
+                "填充不透明度",
+                PropertyValue::Float(crate::SHAPE_DEFAULT_FILL_OPACITY),
+                Some(f64::from(crate::SHAPE_MIN_OPACITY)),
+                Some(f64::from(crate::SHAPE_MAX_OPACITY)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "stroke_width",
+                GROUP,
+                "描边宽度",
+                PropertyValue::Float(crate::SHAPE_DEFAULT_STROKE_WIDTH),
+                Some(f64::from(crate::SHAPE_MIN_STROKE_WIDTH)),
+                Some(f64::from(crate::SHAPE_MAX_STROKE_WIDTH)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "stroke_colour",
+                GROUP,
+                "描边颜色",
+                PropertyValue::Color(Color {
+                    r: crate::SHAPE_DEFAULT_STROKE_COLOUR[0],
+                    g: crate::SHAPE_DEFAULT_STROKE_COLOUR[1],
+                    b: crate::SHAPE_DEFAULT_STROKE_COLOUR[2],
+                    a: crate::SHAPE_DEFAULT_STROKE_COLOUR[3],
+                }),
+                None,
+                None,
+                None,
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "stroke_position",
+                GROUP,
+                "描边位置",
+                crate::ShapeStrokePosition::Centred.as_key(),
+                crate::ShapeStrokePosition::ALL
+                    .iter()
+                    .map(|position| {
+                        ParameterEnumOption::new(
+                            position.as_key(),
+                            position.label(),
+                            format!(
+                                "mondrian.effect.shape.stroke_position.{}",
+                                position.as_key()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "rotation",
+                GROUP,
+                "旋转",
+                PropertyValue::Float(crate::SHAPE_DEFAULT_ROTATION),
+                Some(-f64::from(crate::SHAPE_MAX_ROTATION)),
+                Some(f64::from(crate::SHAPE_MAX_ROTATION)),
+                Some(1.0),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "opacity",
+                GROUP,
+                "不透明度",
+                PropertyValue::Float(crate::SHAPE_DEFAULT_OPACITY),
+                Some(f64::from(crate::SHAPE_MIN_OPACITY)),
+                Some(f64::from(crate::SHAPE_MAX_OPACITY)),
+                Some(1.0),
+            );
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "boolean_mode",
+                GROUP,
+                "布尔模式",
+                crate::ShapeBooleanMode::Add.as_key(),
+                crate::ShapeBooleanMode::ALL
+                    .iter()
+                    .map(|mode| {
+                        ParameterEnumOption::new(
+                            mode.as_key(),
+                            mode.label(),
+                            format!("mondrian.effect.shape.boolean_mode.{}", mode.as_key()),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::External(_) => {}
     }
 
@@ -18196,6 +18411,13 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             ParameterUnit::Normalized
         }
         (EffectType::InnerOuterKey, "choke" | "feather") => ParameterUnit::Pixels,
+        // Shape dimensions are pixels, its centre is normalized, rotation is
+        // degrees, inner ratio is unitless and opacity values are percentages.
+        (EffectType::Shape, "size" | "corner_radius" | "stroke_width") => ParameterUnit::Pixels,
+        (EffectType::Shape, "position") => ParameterUnit::Normalized,
+        (EffectType::Shape, "fill_opacity" | "opacity") => ParameterUnit::Percent,
+        (EffectType::Shape, "inner_ratio") => ParameterUnit::Unitless,
+        (EffectType::Shape, "rotation") => ParameterUnit::Degrees,
         _ => ParameterUnit::Unitless,
     }
 }
@@ -18559,6 +18781,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             // definition-level envelope cannot narrow the input to a tile.
             roi_propagation: EffectRoiPropagation::FullFrame,
             topology: EffectGraphTopology::LinearChain,
+            ..cpu_linear
+        },
+        EffectType::Shape => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // The generator decides each output pixel from its own coordinates,
+            // so the definition-level envelope stays pixel-local.
             ..cpu_linear
         },
         EffectType::ChannelCombiner | EffectType::SetMatte => EffectExecutionContract {
@@ -27072,6 +27300,182 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Shape => {
+            let size_id = builtin_parameter_id(effect_type, "size");
+            let position_id = builtin_parameter_id(effect_type, "position");
+            let shape_type_id = builtin_parameter_id(effect_type, "shape_type");
+            let fill_colour_id = builtin_parameter_id(effect_type, "fill_colour");
+            let stroke_colour_id = builtin_parameter_id(effect_type, "stroke_colour");
+            let stroke_position_id = builtin_parameter_id(effect_type, "stroke_position");
+            let boolean_mode_id = builtin_parameter_id(effect_type, "boolean_mode");
+            Some(Arc::new(move |effect, context, graph| {
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                fn read(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    parameter: &str,
+                    fallback: f32,
+                ) -> Result<f32, EffectGraphBuildError> {
+                    let id = builtin_parameter_id(&effect.effect_type, parameter);
+                    match effect.evaluate_parameter(&id, context.time) {
+                        Some(PropertyValue::Float(value)) => Ok(value),
+                        Some(PropertyValue::Int(value)) => Ok(value as f32),
+                        Some(_) => Err(invalid(format!("形状的参数 {parameter} 必须是数值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_vec2(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    id: &ParameterId,
+                    name: &str,
+                    fallback: [f32; 2],
+                ) -> Result<[f32; 2], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Vec2(value)) => Ok([value.x, value.y]),
+                        Some(_) => Err(invalid(format!("形状的{name}必须是二维坐标"))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_colour(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    id: &ParameterId,
+                    name: &str,
+                    fallback: [f32; 4],
+                ) -> Result<[f32; 4], EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Color(value)) => {
+                            Ok([value.r, value.g, value.b, value.a])
+                        }
+                        Some(_) => Err(invalid(format!("形状的{name}必须是颜色值"))),
+                        None => Ok(fallback),
+                    }
+                }
+                fn read_enum<T: Copy>(
+                    effect: &EffectNode,
+                    context: EffectEvalContext,
+                    invalid: &dyn Fn(String) -> EffectGraphBuildError,
+                    id: &ParameterId,
+                    name: &str,
+                    from_key: fn(&str) -> Option<T>,
+                ) -> Result<Option<T>, EffectGraphBuildError> {
+                    match effect.evaluate_parameter(id, context.time) {
+                        Some(PropertyValue::Enum(key)) => match from_key(&key) {
+                            Some(value) => Ok(Some(value)),
+                            None => Err(invalid(format!("形状的{name}没有对应的菜单项 {key}"))),
+                        },
+                        Some(_) => Err(invalid(format!("形状的{name}必须是菜单项"))),
+                        None => Ok(None),
+                    }
+                }
+                let defaults = crate::ShapeParameters::default();
+                let mut parameters = defaults;
+                parameters.size =
+                    read_vec2(effect, context, &invalid, &size_id, "大小", defaults.size)?;
+                parameters.position = read_vec2(
+                    effect,
+                    context,
+                    &invalid,
+                    &position_id,
+                    "位置",
+                    defaults.position,
+                )?;
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &shape_type_id,
+                    "形状类型",
+                    crate::ShapeKind::from_key,
+                )? {
+                    parameters.shape_type = value;
+                }
+                parameters.corner_radius = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "corner_radius",
+                    defaults.corner_radius,
+                )?;
+                parameters.vertices =
+                    read(effect, context, &invalid, "vertices", defaults.vertices)?;
+                parameters.inner_ratio = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "inner_ratio",
+                    defaults.inner_ratio,
+                )?;
+                parameters.fill_colour = read_colour(
+                    effect,
+                    context,
+                    &invalid,
+                    &fill_colour_id,
+                    "填充颜色",
+                    defaults.fill_colour,
+                )?;
+                parameters.fill_opacity = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "fill_opacity",
+                    defaults.fill_opacity,
+                )?;
+                parameters.stroke_width = read(
+                    effect,
+                    context,
+                    &invalid,
+                    "stroke_width",
+                    defaults.stroke_width,
+                )?;
+                parameters.stroke_colour = read_colour(
+                    effect,
+                    context,
+                    &invalid,
+                    &stroke_colour_id,
+                    "描边颜色",
+                    defaults.stroke_colour,
+                )?;
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &stroke_position_id,
+                    "描边位置",
+                    crate::ShapeStrokePosition::from_key,
+                )? {
+                    parameters.stroke_position = value;
+                }
+                parameters.rotation =
+                    read(effect, context, &invalid, "rotation", defaults.rotation)?;
+                parameters.opacity = read(effect, context, &invalid, "opacity", defaults.opacity)?;
+                if let Some(value) = read_enum(
+                    effect,
+                    context,
+                    &invalid,
+                    &boolean_mode_id,
+                    "布尔模式",
+                    crate::ShapeBooleanMode::from_key,
+                )? {
+                    parameters.boolean_mode = value;
+                }
+                let grade = crate::ShapeGrade::new(parameters).map_err(|error| {
+                    invalid(format!("形状的参数 {} 超出文档范围", error.parameter()))
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Shape { grade });
+                }
+                Ok(())
+            }))
+        }
         EffectType::FilmLook => {
             let stock_id = builtin_parameter_id(effect_type, "stock");
             let strength_id = builtin_parameter_id(effect_type, "strength");
@@ -29057,6 +29461,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::PictureInPicture => "画中画",
         EffectType::InnerOuterKey => "内部/外部键",
         EffectType::KeyCleaner => "键控清理",
+        EffectType::Shape => "形状",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -30483,6 +30888,7 @@ mod tests {
             EffectType::PictureInPicture,
             EffectType::Beam,
             EffectType::InnerOuterKey,
+            EffectType::Shape,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())
@@ -39779,7 +40185,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 153);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 154);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -40307,7 +40713,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 153);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 154);
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -43266,7 +43672,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 153);
+        assert_eq!(crate::effect::builtin_effect_types().len(), 154);
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -44402,7 +44808,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 153);
+        assert_eq!(builtin_effect_types().len(), 154);
     }
 
     #[test]
@@ -46881,6 +47287,320 @@ mod tests {
             }
             other => panic!("unexpected lowered point op {other:?}"),
         }
+    }
+
+    #[test]
+    fn shape_identity_builds_no_node() {
+        let switched_off = author_shape(&[("opacity", PropertyValue::Float(0.0))]);
+        let graph = build_effect_render_graph(&[switched_off], tt(0), TEST_WORKING_SPACE)
+            .expect("a switched-off shape should compile");
+        assert!(
+            shape_op(&graph).is_none(),
+            "zero opacity is the identity in Add mode"
+        );
+
+        let hollow = author_shape(&[
+            ("fill_opacity", PropertyValue::Float(0.0)),
+            ("stroke_width", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[hollow], tt(0), TEST_WORKING_SPACE)
+            .expect("an empty rectangle should compile");
+        assert!(
+            shape_op(&graph).is_none(),
+            "no fill and no stroke leave the source untouched"
+        );
+
+        for parameters in [
+            vec![("opacity", PropertyValue::Float(0.0))],
+            vec![
+                ("fill_opacity", PropertyValue::Float(0.0)),
+                ("stroke_width", PropertyValue::Float(0.0)),
+            ],
+        ] {
+            let mut parameters = parameters;
+            parameters.push(("boolean_mode", PropertyValue::Enum("intersect".to_owned())));
+            let graph =
+                build_effect_render_graph(&[author_shape(&parameters)], tt(0), TEST_WORKING_SPACE)
+                    .expect("empty intersections compile");
+            assert!(
+                shape_op(&graph).is_some(),
+                "empty intersections must clear the source, not disappear"
+            );
+        }
+
+        // The line keeps a one-pixel spine, so the same values still draw.
+        let line = author_shape(&[
+            ("shape_type", PropertyValue::Enum("line".to_owned())),
+            ("fill_opacity", PropertyValue::Float(0.0)),
+            ("stroke_width", PropertyValue::Float(0.0)),
+        ]);
+        let graph = build_effect_render_graph(&[line], tt(0), TEST_WORKING_SPACE)
+            .expect("a hairline should compile");
+        assert!(
+            shape_op(&graph).is_some(),
+            "a zero-width line still draws its spine"
+        );
+    }
+
+    #[test]
+    fn shape_defaults_build_one_point_op() {
+        let effect =
+            instantiate_effect_node(EffectType::Shape).expect("the shape should instantiate");
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the documented defaults should compile");
+        let grade = shape_op(&graph).expect("the defaults are not the identity");
+        assert_eq!(grade, crate::ShapeGrade::documented_defaults());
+        assert_eq!(graph.nodes.len(), 2, "the source plus one shape node");
+        let op = EffectRenderOp::Shape { grade };
+        assert_eq!(
+            crate::adjustment::render_op_f32_scratch_frames(&op),
+            0,
+            "the generator decides each pixel from its own coordinates"
+        );
+        assert_eq!(op.estimated_cost(), 1);
+        assert!(
+            crate::spatial_pass_for(&op).is_none(),
+            "the shape is a fused point operation, not a spatial pass"
+        );
+        assert_eq!(
+            crate::heterogeneous_execution::effect_operation_shape_tag(&op),
+            154
+        );
+
+        use std::hash::Hasher;
+        let mut default_hasher = std::collections::hash_map::DefaultHasher::new();
+        op.hash_signature(&mut default_hasher);
+        let mut authored_hasher = std::collections::hash_map::DefaultHasher::new();
+        EffectRenderOp::Shape {
+            grade: crate::ShapeGrade::new(crate::ShapeParameters::default())
+                .expect("the authored values are in range"),
+        }
+        .hash_signature(&mut authored_hasher);
+        assert_eq!(
+            default_hasher.finish(),
+            authored_hasher.finish(),
+            "the default node hashes like the authored parameters"
+        );
+    }
+
+    #[test]
+    fn shape_menu_keys_round_trip_through_the_schema() {
+        let effect_type = EffectType::Shape;
+        let properties = default_properties_for(effect_type.clone());
+        let menus: [(&str, &str, &[&str]); 3] = [
+            (
+                "shape_type",
+                "rectangle",
+                &["rectangle", "circle", "ellipse", "polygon", "star", "line"],
+            ),
+            (
+                "stroke_position",
+                "centred",
+                &["inside", "centred", "outside"],
+            ),
+            (
+                "boolean_mode",
+                "add",
+                &["add", "subtract", "intersect", "exclude"],
+            ),
+        ];
+        for (parameter, default, keys) in menus {
+            let property = properties
+                .property(&effect_type.property_path(parameter))
+                .expect("the menu is defined");
+            assert_eq!(
+                property.evaluate(tt(0)),
+                PropertyValue::Enum(default.to_owned()),
+                "{parameter}"
+            );
+            let options = &property.descriptor.schema.enum_options;
+            assert_eq!(options.len(), keys.len(), "{parameter}");
+            for (option, key) in options.iter().zip(keys) {
+                assert_eq!(option.key, *key, "{parameter}");
+                assert_eq!(
+                    option.message_id,
+                    format!("mondrian.effect.shape.{parameter}.{key}")
+                );
+            }
+        }
+
+        for shape in crate::ShapeKind::ALL {
+            assert_eq!(crate::ShapeKind::from_key(shape.as_key()), Some(shape));
+        }
+        for position in crate::ShapeStrokePosition::ALL {
+            assert_eq!(
+                crate::ShapeStrokePosition::from_key(position.as_key()),
+                Some(position)
+            );
+        }
+        for mode in crate::ShapeBooleanMode::ALL {
+            assert_eq!(crate::ShapeBooleanMode::from_key(mode.as_key()), Some(mode));
+        }
+        assert_eq!(crate::ShapeKind::Rectangle.as_u8(), 0);
+        assert_eq!(crate::ShapeKind::Line.as_u8(), 5);
+        assert_eq!(crate::ShapeBooleanMode::Exclude.as_u8(), 3);
+    }
+
+    #[test]
+    fn shape_contract_admits_both_modes() {
+        use crate::EffectExecutionModes;
+
+        let kind = EffectType::Shape;
+        let contract = effect_definition(&kind).unwrap().execution_contract();
+        assert_eq!(
+            contract.execution_modes,
+            EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32)
+        );
+        assert_eq!(contract.roi_propagation, EffectRoiPropagation::PixelLocal);
+    }
+
+    #[test]
+    fn shape_out_of_range_parameter_is_an_author_error() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Shape).expect("the shape should instantiate");
+        let error = effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Shape.property_path("corner_radius"),
+                value: PropertyValue::Float(501.0),
+            })
+            .expect_err("a corner radius above five hundred should fail");
+        let message = error.to_string();
+        assert!(message.contains("shape.corner_radius"), "{message}");
+        assert!(message.contains("parameter_value_contract"), "{message}");
+
+        let effect =
+            instantiate_effect_node(EffectType::Shape).expect("the shape should instantiate");
+        let effect_id = effect.id;
+        let mut document = serde_json::to_value(&effect).expect("serialize the node");
+        overwrite_static_value(&mut document, "shape.vertices", serde_json::json!(64.0));
+        let result: Result<EffectNode, _> = serde_json::from_value(document);
+        if let Ok(effect) = result {
+            let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+                .expect_err("too many vertices should fail");
+            match error {
+                EffectGraphBuildError::InvalidAuthorState { effect_key, reason, .. } => {
+                    assert_eq!(effect_key, "builtin.shape");
+                    assert!(reason.contains("vertices"), "{reason}");
+                }
+                other => panic!("unexpected error {other:?} for {effect_id}"),
+            }
+        }
+    }
+
+    #[test]
+    fn shape_point_lowering_exposes_the_six_control_cells() {
+        let effect = author_shape(&[
+            ("shape_type", PropertyValue::Enum("star".to_owned())),
+            ("size", PropertyValue::Vec2(glam::Vec2::new(300.0, 120.0))),
+            ("corner_radius", PropertyValue::Float(12.0)),
+            ("vertices", PropertyValue::Float(7.0)),
+            ("inner_ratio", PropertyValue::Float(0.3)),
+            ("stroke_width", PropertyValue::Float(8.0)),
+            ("stroke_position", PropertyValue::Enum("outside".to_owned())),
+            ("rotation", PropertyValue::Float(30.0)),
+            ("fill_opacity", PropertyValue::Float(90.0)),
+            ("opacity", PropertyValue::Float(80.0)),
+            ("boolean_mode", PropertyValue::Enum("subtract".to_owned())),
+        ]);
+        let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
+            .expect("the authored star should compile");
+        let grade = shape_op(&graph).expect("the authored star is not the identity");
+        let op = EffectRenderOp::Shape { grade };
+        let node_id = graph.nodes[1].id;
+        let lowered =
+            crate::gpu_plan::lower_point_op(node_id, &op).expect("the shape is point-lowerable");
+        match lowered {
+            crate::gpu_plan::EffectGpuPointOp::Shape { grade: lowered } => {
+                let cells = lowered.gpu_controls();
+                assert_eq!(
+                    cells,
+                    grade.gpu_controls(),
+                    "the lowered grade is carried whole"
+                );
+                assert_eq!(
+                    cells.0,
+                    [150.0, 60.0, 12.0, 7.0],
+                    "half extents, corner radius and vertex count"
+                );
+                assert_eq!(cells.1[0], 0.3, "the star inner ratio");
+                assert_eq!(cells.1[1], 8.0, "the stroke width");
+                assert_eq!(cells.1[2], 30.0_f32.to_radians(), "the rotation");
+                assert_eq!(cells.1[3], 0.8, "the shape opacity");
+                assert_eq!(cells.2, [0.9, 4.0, 2.0, 1.0], "fill, kind, band, boolean");
+                assert_eq!(cells.3, [1.0, 1.0, 1.0, 1.0], "the default fill colour");
+                assert_eq!(cells.4, [0.0, 0.0, 0.0, 1.0], "the default stroke colour");
+                assert_eq!(cells.5, [0.5, 0.5, 0.0, 0.0], "the normalized centre");
+                assert_eq!(
+                    (
+                        cells.0.len(),
+                        cells.1.len(),
+                        cells.2.len(),
+                        cells.3.len(),
+                        cells.4.len(),
+                        cells.5.len(),
+                    ),
+                    (4, 4, 4, 4, 4, 4),
+                    "the point pass reads six four-component cells"
+                );
+            }
+            other => panic!("unexpected lowered point op {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shape_authored_grade_renders_the_expected_default_geometry() {
+        // A two-pixel box in the middle of a four-by-four frame: the centre
+        // pixel is fully covered, the corner pixel is fully outside.
+        let effect = author_shape(&[("size", PropertyValue::Vec2(glam::Vec2::new(2.0, 2.0)))]);
+        let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
+            .expect("the small rectangle should compile");
+        let source = vec![[0.0_f32; 4]; 16];
+        let pixels = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(4, 4),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                &source,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("the graph executor must dispatch the shape kernel");
+        assert_eq!(
+            pixels[2 * 4 + 2],
+            [1.0, 1.0, 1.0, 1.0],
+            "the covered centre"
+        );
+        assert_eq!(pixels[0], [0.0, 0.0, 0.0, 0.0], "the uncovered corner");
+        assert_eq!(pixels[2 * 4], [0.0, 0.0, 0.0, 0.0], "the uncovered edge");
+    }
+
+    fn shape_op(graph: &EffectRenderGraph) -> Option<crate::ShapeGrade> {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Shape { grade }, .. }
+            | EffectGraphNodeKind::DomainEffect { op: EffectRenderOp::Shape { grade }, .. } => {
+                Some(*grade)
+            }
+            _ => None,
+        })
+    }
+
+    fn author_shape(parameters: &[(&str, PropertyValue)]) -> EffectNode {
+        let mut effect =
+            instantiate_effect_node(EffectType::Shape).expect("the shape should instantiate");
+        for (parameter, value) in parameters {
+            effect
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: EffectType::Shape.property_path(parameter),
+                    value: value.clone(),
+                })
+                .expect("the shape parameter should be assignable");
+        }
+        effect
     }
 
     fn beam_op(graph: &EffectRenderGraph) -> Option<crate::BeamGrade> {

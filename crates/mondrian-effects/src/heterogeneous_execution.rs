@@ -2952,6 +2952,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::PictureInPicture { .. } => 152,
         EffectRenderOp::Beam { .. } => 151,
         EffectRenderOp::InnerOuterKey { .. } => 153,
+        EffectRenderOp::Shape { .. } => 154,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
         EffectRenderOp::Reshape { .. } => 123,
@@ -5404,6 +5405,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Texturize { .. }
             | crate::EffectRenderOp::PictureInPicture { .. }
             | crate::EffectRenderOp::InnerOuterKey { .. }
+            | crate::EffectRenderOp::Shape { .. }
             | crate::EffectRenderOp::ChannelCombiner { .. }
             | crate::EffectRenderOp::SetMatte { .. }
             | crate::EffectRenderOp::Grid { .. }
