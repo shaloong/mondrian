@@ -1755,8 +1755,10 @@ fn temporal_preview_cache_identity_is_generation_and_source_complete() {
 }
 
 #[test]
-fn preview_effect_only_mask_without_consumer_keeps_the_same_solid_route_and_pixels() {
-    use mondrian_core::mask_data::{MaskComponent, MaskEvaluation, MaskParticipation};
+fn preview_clip_masks_keep_effect_only_inert_and_limit_local_grade() {
+    use mondrian_core::automation::PropertyValue;
+    use mondrian_core::mask_data::{MaskComponent, MaskEvaluation, MaskParticipation, MaskShape};
+    use mondrian_effects::{EffectNode, EffectNodeExt, EffectType};
 
     ensure_mondrian_default_ocio_loaded().unwrap();
     let target = Resolution { width: 7, height: 5 };
@@ -1775,10 +1777,8 @@ fn preview_effect_only_mask_without_consumer_keeps_the_same_solid_route_and_pixe
         ) else {
             panic!("solid must resolve");
         };
-        assert!(matches!(
-            resolved.plan.elements.as_slice(),
-            [ResolvedPreviewElement::SolidColor(_)]
-        ));
+        // The plain solid can bypass rasterization; an active local grade cannot.
+        assert_eq!(resolved.plan.elements.len(), 1);
         composite_resolved_preview_working(
             target.width,
             target.height,
@@ -1800,6 +1800,39 @@ fn preview_effect_only_mask_without_consumer_keeps_the_same_solid_route_and_pixe
     assert_eq!(candidate.rgba_f32().sampling, baseline.rgba_f32().sampling);
     assert_eq!(candidate.rgba_f32().data, baseline.rgba_f32().data);
     assert!(candidate.rgba_f32().data.iter().all(|pixel| pixel[2] > 0.0 && pixel[3] == 1.0));
+
+    let kind = EffectType::BasicCorrection;
+    let mut grade = EffectNode::with_defaults(kind.clone());
+    grade
+        .set_static_value_by_parameter(
+            &kind.parameter_id("exposure").unwrap(),
+            PropertyValue::Float(1.0),
+        )
+        .unwrap();
+    sequence.video_tracks[0].clips[0].add_effect_node(grade);
+    let unmasked = render(&sequence);
+    sequence.video_tracks[0].clips[0].add_mask_component(MaskComponent::new(
+        "Left half".into(),
+        MaskEvaluation {
+            shape: MaskShape::Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 1.0,
+                corner_radius: 0.0,
+            },
+            ..MaskEvaluation::default()
+        },
+    ));
+    let local = render(&sequence);
+    let outside = (target.width - 1) as usize;
+    assert!(unmasked.rgba_f32().data[0][0] > baseline.rgba_f32().data[0][0] + 0.05);
+    assert_eq!(local.rgba_f32().data[0], unmasked.rgba_f32().data[0]);
+    assert_eq!(
+        local.rgba_f32().data[outside],
+        baseline.rgba_f32().data[outside]
+    );
+    assert!(local.rgba_f32().data.iter().all(|pixel| pixel[3] == 1.0));
 }
 
 #[test]

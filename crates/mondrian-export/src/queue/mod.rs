@@ -17408,8 +17408,12 @@ mod tests {
     }
 
     #[test]
-    fn export_effect_only_mask_without_consumer_keeps_the_same_route_and_pixels() {
-        use mondrian_core::mask_data::{MaskComponent, MaskEvaluation, MaskParticipation};
+    fn export_clip_masks_keep_effect_only_inert_and_limit_local_grade() {
+        use mondrian_core::automation::PropertyValue;
+        use mondrian_core::mask_data::{
+            MaskComponent, MaskEvaluation, MaskParticipation, MaskShape,
+        };
+        use mondrian_effects::{EffectNode, EffectNodeExt, EffectType};
 
         let target = Resolution { width: 7, height: 5 };
         let mut sequence = Sequence::new("Export geometry only");
@@ -17472,12 +17476,46 @@ mod tests {
         let mut mask = MaskComponent::new("Geometry".into(), MaskEvaluation::default());
         mask.participation = MaskParticipation::EffectOnly;
         sequence.video_tracks[0].clips[0].add_mask_component(mask);
-        let (candidate, candidate_diagnostics) = render(sequence);
+        let (candidate, candidate_diagnostics) = render(sequence.clone());
         assert_eq!(candidate_diagnostics, baseline_diagnostics);
         assert_eq!(candidate_diagnostics.float_linear_composites, 1);
         assert_eq!(candidate.descriptor(), baseline.descriptor());
         assert_eq!(candidate.rgba_f32().sampling, baseline.rgba_f32().sampling);
         assert_eq!(candidate.rgba_f32().data, baseline.rgba_f32().data);
+
+        let kind = EffectType::BasicCorrection;
+        let mut grade = EffectNode::with_defaults(kind.clone());
+        grade
+            .set_static_value_by_parameter(
+                &kind.parameter_id("exposure").unwrap(),
+                PropertyValue::Float(1.0),
+            )
+            .unwrap();
+        sequence.video_tracks[0].clips[0].add_effect_node(grade);
+        let (unmasked, _) = render(sequence.clone());
+        sequence.video_tracks[0].clips[0].add_mask_component(MaskComponent::new(
+            "Left half".into(),
+            MaskEvaluation {
+                shape: MaskShape::Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.5,
+                    height: 1.0,
+                    corner_radius: 0.0,
+                },
+                ..MaskEvaluation::default()
+            },
+        ));
+        let (local, diagnostics) = render(sequence);
+        let outside = (target.width - 1) as usize;
+        assert_eq!(diagnostics.float_linear_composites, 1);
+        assert!(unmasked.rgba_f32().data[0][0] > baseline.rgba_f32().data[0][0] + 0.05);
+        assert_eq!(local.rgba_f32().data[0], unmasked.rgba_f32().data[0]);
+        assert_eq!(
+            local.rgba_f32().data[outside],
+            baseline.rgba_f32().data[outside]
+        );
+        assert!(local.rgba_f32().data.iter().all(|pixel| pixel[3] == 1.0));
     }
 
     #[test]
