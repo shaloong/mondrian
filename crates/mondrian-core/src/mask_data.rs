@@ -788,7 +788,13 @@ impl MaskComponent {
             for pair in self.shape_keyframes.windows(2) {
                 let t0 = pair[0].time;
                 let t1 = pair[1].time;
-                if time >= t0 && time <= t1 {
+                // An authored key owns its exact time, including a topology
+                // change after Hold. Only the outgoing segment owns the key.
+                if time == t0 {
+                    result = pair[0].shape.clone();
+                    break;
+                }
+                if time > t0 && time < t1 {
                     result = match pair[0].interpolation {
                         MaskShapeInterpolation::Hold => pair[0].shape.clone(),
                         MaskShapeInterpolation::Linear => {
@@ -1317,6 +1323,30 @@ mod tests {
         } else {
             panic!("expected Rectangle");
         }
+    }
+
+    #[test]
+    fn mask_shape_hold_yields_to_the_authored_key_at_its_exact_time() {
+        let rectangle = MaskShape::default();
+        let ellipse = |x| MaskShape::Ellipse {
+            center: Vec2::new(x, 0.5),
+            radii: Vec2::splat(0.25),
+        };
+        let mut mask = MaskComponent::new(
+            "M1".into(),
+            MaskEvaluation { shape: rectangle.clone(), ..Default::default() },
+        );
+        mask.set_shape_animation_enabled(true, TimelineTime::ZERO).unwrap();
+        let time = |ticks, rate| TimelineTime::new(ticks, rate).unwrap();
+        mask.write_shape(time(1, 3), ellipse(0.25), MaskShapeInterpolation::Linear)
+            .unwrap();
+        mask.write_shape(time(2, 3), ellipse(0.75), MaskShapeInterpolation::Hold)
+            .unwrap();
+
+        assert_eq!(mask.evaluate_at(time(999, 3000)).shape, rectangle);
+        assert_eq!(mask.evaluate_at(time(1000, 3000)).shape, ellipse(0.25));
+        assert_eq!(mask.evaluate_at(time(1, 2)).shape, ellipse(0.5));
+        assert_eq!(mask.evaluate_at(time(2, 3)).shape, ellipse(0.75));
     }
 
     #[test]
