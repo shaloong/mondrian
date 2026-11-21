@@ -11365,6 +11365,7 @@ fn inspector_panel_locked_target_controls_do_not_dispatch() {
         effects: Vec::new(),
         grade: InspectorGradeHierarchyModel::default(),
         masks: Vec::new(),
+        mask_editor: None,
     };
     let mut panel = inspector_panel(&model, &chinese_localizer());
     panel.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
@@ -11808,6 +11809,7 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         }],
         grade: InspectorGradeHierarchyModel::default(),
         masks: Vec::new(),
+        mask_editor: None,
     };
     let mut panel = inspector_panel(&model, &chinese_localizer());
     panel.layout(Rect::new(0.0, 0.0, 340.0, 720.0));

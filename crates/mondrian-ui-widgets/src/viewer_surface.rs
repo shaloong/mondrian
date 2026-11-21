@@ -6,14 +6,18 @@
 //! domain-light boundary.
 
 mod clip_transform;
+mod mask_selection;
 mod model;
 mod paint;
 mod power_window;
 
 use clip_transform::ClipTransformEditor;
 pub use clip_transform::{ViewerClipTransform, ViewerClipTransformEdit};
+pub use mask_selection::ViewerMaskSelectionMode;
 use power_window::PowerWindowEditor;
-pub use power_window::{ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape};
+pub use power_window::{
+    ViewerMaskOverlayStyle, ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
+};
 
 use mondrian_core::{Color, SampleAspectRatio};
 use mondrian_editor_state::Action;
@@ -381,6 +385,7 @@ pub struct ViewerSurface {
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
     power_window_editor: Option<PowerWindowEditor>,
     on_power_window_edit: Option<Box<ViewerPowerWindowAction>>,
+    release_replaced_power_window_capture: bool,
     clip_transform_editor: Option<ClipTransformEditor>,
     on_clip_transform_edit: Option<Box<ViewerClipTransformAction>>,
     overlay_viewport: Cell<Option<Rect>>,
@@ -433,6 +438,7 @@ impl ViewerSurface {
             on_preview_quality: None,
             power_window_editor: None,
             on_power_window_edit: None,
+            release_replaced_power_window_capture: false,
             clip_transform_editor: None,
             on_clip_transform_edit: None,
             overlay_viewport: Cell::new(None),
@@ -622,6 +628,52 @@ impl ViewerSurface {
     pub fn with_power_window(mut self, window: ViewerPowerWindow) -> Self {
         self.power_window_editor = Some(PowerWindowEditor::new(window));
         self
+    }
+
+    /// Replace the mask projection and commit mapper together. Call when the
+    /// selected mask, author time, evaluated shape or editability changes.
+    pub fn replace_power_window_projection(
+        &mut self,
+        window: Option<(ViewerPowerWindow, Box<ViewerPowerWindowAction>)>,
+    ) {
+        self.release_replaced_power_window_capture |=
+            self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging);
+        (self.power_window_editor, self.on_power_window_edit) = window
+            .map_or((None, None), |(overlay, action)| {
+                (Some(PowerWindowEditor::new(overlay)), Some(action))
+            });
+    }
+
+    /// Completed anchor selection. Active gestures are deliberately not exported.
+    pub fn selected_power_window_anchors(&self) -> Option<&[usize]> {
+        self.power_window_editor.as_ref().map(PowerWindowEditor::selected_anchors)
+    }
+
+    /// Restore a completed selection after rebuilding an identical mask projection.
+    pub fn restore_power_window_anchors(&mut self, selection: Vec<usize>) {
+        if let Some(editor) = &mut self.power_window_editor {
+            editor.restore_selected_anchors(selection);
+        }
+    }
+
+    /// Choose the Viewer-only gesture for selecting mask anchors.
+    pub fn with_mask_selection_mode(mut self, mode: ViewerMaskSelectionMode) -> Self {
+        if let Some(editor) = &mut self.power_window_editor {
+            editor.set_selection_mode(mode);
+        }
+        self
+    }
+
+    /// Apply Viewer-only mask controls without changing geometry or selection.
+    pub fn set_mask_editor_presentation(
+        &mut self,
+        mode: ViewerMaskSelectionMode,
+        style: ViewerMaskOverlayStyle,
+    ) {
+        if let Some(editor) = &mut self.power_window_editor {
+            editor.set_selection_mode(mode);
+            editor.set_style(style);
+        }
     }
 
     /// Set the one-action commit mapper for completed Power Window gestures.
@@ -900,9 +952,12 @@ impl ViewerSurface {
             || self.hovered_dropdown_index.is_some()
             || self.pressed_dropdown_index.is_some()
             || self.focused
-            || self.focus_visible
-            || self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel)
-            || self.clip_transform_editor.as_mut().is_some_and(ClipTransformEditor::cancel);
+            || self.focus_visible;
+        // Both editors must be cancelled even when another interaction changed.
+        let power_window_changed =
+            self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel);
+        let transform_changed =
+            self.clip_transform_editor.as_mut().is_some_and(ClipTransformEditor::cancel);
         self.hovered_control = None;
         self.pressed_control = None;
         self.hovered_zoom = false;
@@ -915,7 +970,21 @@ impl ViewerSurface {
         self.pressed_dropdown_index = None;
         self.focused = false;
         self.focus_visible = false;
-        changed
+        changed || power_window_changed || transform_changed
+    }
+
+    fn cancel_pointer_interaction(&mut self, ctx: &mut EventContext) {
+        if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging)
+            || self
+                .clip_transform_editor
+                .as_ref()
+                .is_some_and(ClipTransformEditor::is_dragging)
+        {
+            ctx.release_pointer_capture(self.id);
+        }
+        if self.clear_interaction_state() {
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -934,10 +1003,11 @@ impl Widget for ViewerSurface {
     }
 
     fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if std::mem::take(&mut self.release_replaced_power_window_capture) {
+            ctx.release_pointer_capture(self.id);
+        }
         if !self.enabled {
-            if self.clear_interaction_state() {
-                ctx.request_repaint();
-            }
+            self.cancel_pointer_interaction(ctx);
             return EventResult::Ignored;
         }
 
@@ -1038,6 +1108,17 @@ impl Widget for ViewerSurface {
                         (ctx.dispatch)(mapper(shape));
                     }
                     ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if *modifiers == (Modifiers { shift: true, ..Modifiers::default() })
+                    && canvas.contains(*position)
+                    && self.canvas_viewport_rect().contains(*position)
+                    && let Some(editor) = self.power_window_editor.as_mut()
+                {
+                    if editor.start_anchor_selection(canvas, *position) {
+                        ctx.request_pointer_capture(self.id);
+                        ctx.request_repaint();
+                    }
                     return EventResult::Handled;
                 }
                 if let Some(editor) = self.power_window_editor.as_mut()
@@ -1190,17 +1271,7 @@ impl Widget for ViewerSurface {
                 EventResult::Ignored
             }
             UiEvent::FocusLost => {
-                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging)
-                    || self
-                        .clip_transform_editor
-                        .as_ref()
-                        .is_some_and(ClipTransformEditor::is_dragging)
-                {
-                    ctx.release_pointer_capture(self.id);
-                }
-                if self.clear_interaction_state() {
-                    ctx.request_repaint();
-                }
+                self.cancel_pointer_interaction(ctx);
                 EventResult::Handled
             }
             UiEvent::MouseWheel { delta, position, .. }
@@ -2376,6 +2447,115 @@ mod tests {
             Some(PointerCaptureRequest::Release(viewer.id()))
         );
         assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
+    }
+
+    #[test]
+    fn power_window_selection_moves_only_selected_anchors_and_drops_stale_capture() {
+        use std::rc::Rc;
+
+        let anchor = |position| ViewerPowerWindowBezierPoint {
+            position,
+            control_in: [0.0, 0.0],
+            control_out: [0.01, 0.01],
+        };
+        let initial = vec![anchor([0.2, 0.2]), anchor([0.5, 0.3]), anchor([0.8, 0.8])];
+        let window = ViewerPowerWindow {
+            shape: ViewerPowerWindowShape::Bezier { points: initial.clone(), closed: true },
+            editable: true,
+        };
+        for mode in [
+            ViewerMaskSelectionMode::Rectangle,
+            ViewerMaskSelectionMode::Lasso,
+        ] {
+            let commits = Rc::new(RefCell::new(Vec::new()));
+            let committed_shapes = Rc::clone(&commits);
+            let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+                .with_power_window(window.clone())
+                .with_mask_selection_mode(mode)
+                .on_power_window_edit(move |shape| {
+                    committed_shapes.borrow_mut().push(shape);
+                    Action::DeselectAll
+                });
+            viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+            let canvas = viewer.canvas_rect();
+            let at = |x, y| Point::new(canvas.x + canvas.width * x, canvas.y + canvas.height * y);
+            let actions = RefCell::new(Vec::new());
+            let dispatch = |action| actions.borrow_mut().push(action);
+            let mut focus = DummyFocus;
+            let mut shortcut = DummyShortcut;
+            let mut tooltip = DummyTooltip;
+            let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+            let shift = Modifiers { shift: true, ..Modifiers::none() };
+            let down = |position, modifiers| UiEvent::MouseDown {
+                position,
+                modifiers,
+                button: MouseButton::Left,
+            };
+            let movement = |position, modifiers| UiEvent::MouseMove { position, modifiers };
+            let up = |position, modifiers| UiEvent::MouseUp {
+                position,
+                modifiers,
+                button: MouseButton::Left,
+            };
+            let none = Modifiers::none();
+
+            viewer.event(&down(at(0.12, 0.12), shift), &mut ctx);
+            assert_eq!(
+                ctx.requests.pointer_capture,
+                Some(PointerCaptureRequest::Capture(viewer.id()))
+            );
+            if mode == ViewerMaskSelectionMode::Lasso {
+                for position in [at(0.65, 0.12), at(0.65, 0.42), at(0.12, 0.42)] {
+                    viewer.event(&movement(position, shift), &mut ctx);
+                }
+                viewer.event(&up(at(0.12, 0.12), shift), &mut ctx);
+            } else {
+                viewer.event(&up(at(0.65, 0.42), shift), &mut ctx);
+            }
+            assert_eq!(
+                ctx.requests.pointer_capture,
+                Some(PointerCaptureRequest::Release(viewer.id()))
+            );
+            assert_eq!(viewer.selected_power_window_anchors(), Some(&[0, 1][..]));
+            assert!(actions.borrow().is_empty());
+
+            viewer.event(&down(at(0.2, 0.2), none), &mut ctx);
+            viewer.event(&movement(at(0.25, 0.26), none), &mut ctx);
+            assert!(actions.borrow().is_empty());
+            viewer.event(&up(at(0.3, 0.28), none), &mut ctx);
+            assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
+            let shapes = commits.borrow();
+            let [ViewerPowerWindowShape::Bezier { points, closed: true }] = shapes.as_slice()
+            else {
+                panic!("expected a single closed path edit");
+            };
+            for (point, original) in points[..2].iter().zip(&initial) {
+                assert!((point.position[0] - original.position[0] - 0.1).abs() < 1.0e-6);
+                assert!((point.position[1] - original.position[1] - 0.08).abs() < 1.0e-6);
+                assert_eq!(point.control_in, original.control_in);
+                assert_eq!(point.control_out, original.control_out);
+            }
+            assert_eq!(points[2], initial[2]);
+            drop(shapes);
+
+            viewer.event(&down(at(0.3, 0.28), none), &mut ctx);
+            assert_eq!(
+                ctx.requests.pointer_capture,
+                Some(PointerCaptureRequest::Capture(viewer.id()))
+            );
+            viewer.replace_power_window_projection(Some((
+                ViewerPowerWindow { editable: false, ..window.clone() },
+                Box::new(|_| Action::DeselectAll),
+            )));
+            ctx.requests.pointer_capture = None;
+            viewer.event(&up(at(0.4, 0.4), none), &mut ctx);
+            assert_eq!(
+                ctx.requests.pointer_capture,
+                Some(PointerCaptureRequest::Release(viewer.id()))
+            );
+            assert_eq!(viewer.selected_power_window_anchors(), Some(&[][..]));
+            assert_eq!(actions.borrow().len(), 1);
+        }
     }
 
     #[test]

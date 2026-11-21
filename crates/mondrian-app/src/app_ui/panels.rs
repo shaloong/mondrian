@@ -96,6 +96,7 @@ use mondrian_ui_widgets::{
     WaveformDisplay,
 };
 
+use super::mask_editor::{MaskEditorAction, MaskEditorEdit, MaskEditorSettings, MaskEditorTarget};
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::preview_unavailability::{PreviewUnavailability, PreviewUnavailabilityDisposition};
 use crate::app::product_action::{
@@ -1040,11 +1041,20 @@ pub struct ViewerPanelModel {
 }
 
 /// App-owned identity plus domain-light Viewer geometry for one Power Window.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ViewerPowerWindowModel {
-    pub clip_id: ClipId,
-    pub mask_id: MaskId,
+    pub(super) target: MaskEditorTarget,
+    pub author_time: TimelineTime,
     pub overlay: ViewerPowerWindow,
+    pub(super) presentation: MaskEditorSettings,
+}
+
+impl ViewerPowerWindowModel {
+    pub(super) fn same_projection(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.author_time == other.author_time
+            && self.overlay == other.overlay
+    }
 }
 
 /// App-owned stable parameter addresses and domain-light Viewer transform geometry.
@@ -1589,26 +1599,21 @@ fn viewer_clip_frame_extent(
         .then_some(resolution)
 }
 
-fn viewer_power_window_model(
+pub(super) fn viewer_power_window_model(
     state: &AppState,
     sequence: &Sequence,
 ) -> Option<ViewerPowerWindowModel> {
+    let target = MaskEditorTarget::selected(state)?;
     let selection = state.primary_selected_clip()?;
-    if !selection.is_video_track {
-        return None;
-    }
-    let (mask_id, mask_clip_id, _) = state.primary_selected_mask()?;
-    if mask_clip_id != selection.clip_id {
-        return None;
-    }
     let (resolved_selection, clip) = clip_for_selection(sequence, &selection)?;
-    let mask = clip.mask(mask_id)?;
-    let timeline_time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
-    let author_time = clip.clamped_visual_author_time(timeline_time).unwrap_or(clip.clip_time_in);
+    let mask = clip.mask(target.mask_id)?;
+    let timeline_time = state.current_timeline_time().ok()?.unwrap_or(sequence.playhead);
+    let author_time = clip.clamped_visual_author_time(timeline_time).ok()?;
     let shape = viewer_power_window_shape(&mask.evaluate_at(author_time).shape);
     Some(ViewerPowerWindowModel {
-        clip_id: clip.id,
-        mask_id,
+        target,
+        author_time,
+        presentation: MaskEditorSettings::default(),
         overlay: ViewerPowerWindow {
             shape,
             editable: !state.is_playing()
@@ -1646,7 +1651,7 @@ fn viewer_power_window_shape(shape: &MaskShape) -> ViewerPowerWindowShape {
     }
 }
 
-fn mask_shape_from_viewer(shape: ViewerPowerWindowShape) -> MaskShape {
+pub(super) fn mask_shape_from_viewer(shape: ViewerPowerWindowShape) -> MaskShape {
     match shape {
         ViewerPowerWindowShape::Rectangle { x, y, width, height, corner_radius } => {
             MaskShape::Rectangle { x, y, width, height, corner_radius }
@@ -2383,6 +2388,7 @@ pub struct InspectorPanelModel {
     pub selected_effect_id: Option<EffectId>,
     /// Selected Mask nested inside the selected video Clip.
     pub selected_mask_id: Option<MaskId>,
+    pub(super) mask_editor: Option<(MaskEditorTarget, MaskEditorSettings)>,
     /// Whether inspector controls may dispatch mutations for the selected clip.
     pub is_editable: bool,
     /// Human-readable reason shown when a selected clip cannot be edited.
@@ -2888,6 +2894,8 @@ impl InspectorPanelModel {
             selected_mask_id: state.primary_selected_mask().and_then(|(mask_id, clip_id, _)| {
                 (clip_id == resolved_selection.clip_id).then_some(mask_id)
             }),
+            mask_editor: MaskEditorTarget::selected(state)
+                .map(|target| (target, MaskEditorSettings::default())),
             is_editable,
             edit_disabled_reason: (!is_editable).then(|| localizer.text("inspector-track-locked")),
             enabled: !clip.is_disabled,
@@ -3106,6 +3114,7 @@ impl InspectorPanelModel {
             empty_message: Some(AppMessage::new("inspector-empty-selection")),
             selected_effect_id: None,
             selected_mask_id: None,
+            mask_editor: None,
             is_editable: false,
             edit_disabled_reason: None,
             enabled: false,
@@ -3144,6 +3153,7 @@ impl InspectorPanelModel {
             empty_message: None,
             selected_effect_id: None,
             selected_mask_id: None,
+            mask_editor: None,
             is_editable: false,
             edit_disabled_reason: None,
             enabled: true,
@@ -3965,6 +3975,34 @@ fn scopes_panel(model: &ScopesPanelModel) -> VideoScopesSurface {
     }
 }
 
+pub(super) fn configure_viewer_power_window(
+    surface: &mut ViewerSurface,
+    window: Option<&ViewerPowerWindowModel>,
+) {
+    surface.replace_power_window_projection(window.map(|window| {
+        let target = window.target;
+        let author_time = window.author_time;
+        let original = mask_shape_from_viewer(window.overlay.shape.clone());
+        let action: Box<mondrian_ui_widgets::ViewerPowerWindowAction> = Box::new(move |shape| {
+            MaskEditorAction::action(
+                target,
+                MaskEditorEdit::WriteShape {
+                    author_time,
+                    original: original.clone(),
+                    shape: mask_shape_from_viewer(shape),
+                },
+            )
+        });
+        (window.overlay.clone(), action)
+    }));
+    if let Some(window) = window {
+        surface.set_mask_editor_presentation(
+            window.presentation.selection.viewer_mode(),
+            window.presentation.viewer_style(),
+        );
+    }
+}
+
 fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
     let mut surface = ViewerSurface::new(model.title.clone(), model.width, model.height)
         .with_status(model.status.clone())
@@ -4002,20 +4040,8 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         Some(reference) => surface.with_comparison_reference(reference),
         None => surface,
     };
-    let surface = if let Some(window) = model.power_window.clone() {
-        let clip_id = window.clip_id;
-        let mask_id = window.mask_id;
-        surface.with_power_window(window.overlay).on_power_window_edit(move |shape| {
-            visual_mask_write_shape_action(VisualMaskWriteShapePayload {
-                clip_id,
-                mask_id,
-                shape: mask_shape_from_viewer(shape),
-                interpolation: MaskShapeInterpolation::Hold,
-            })
-        })
-    } else {
-        surface
-    };
+    let mut surface = surface;
+    configure_viewer_power_window(&mut surface, model.power_window.as_ref());
     if let Some(transform) = model.clip_transform.clone() {
         surface
             .with_clip_transform(transform.overlay)

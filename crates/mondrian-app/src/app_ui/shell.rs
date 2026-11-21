@@ -67,13 +67,17 @@ use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
 #[cfg(test)]
 use crate::app_ui::localization::AppUiLocale;
 use crate::app_ui::localization::{export_progress_phase_message_id, Localizer};
+use crate::app_ui::mask_editor::{
+    MaskEditorAction, MaskEditorEdit, MaskEditorSession, MaskEditorTarget,
+};
 use crate::app_ui::menu_bar::MenuBar;
 use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
 use crate::app_ui::notifications::NotificationOverlay;
 use crate::app_ui::panels::{
-    build_dock_tree_for_preset, build_dock_tree_from_layout, AppUiPanelModels,
-    AssetThumbnailSource, ScopesPanelModel, ViewerPanelModel, ViewerPreviewSource,
+    build_dock_tree_for_preset, build_dock_tree_from_layout, configure_viewer_power_window,
+    AppUiPanelModels, AssetThumbnailSource, ScopesPanelModel, ViewerPanelModel,
+    ViewerPreviewSource,
 };
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::preferences_dialog::{AppUiPreferencesModel, PreferencesDialogTab};
@@ -1141,6 +1145,7 @@ pub struct AppUiAppRoot {
     dock: DockSplitter,
     status_bar: StatusBar,
     notification_session_id: Option<AuthoringSessionId>,
+    mask_editor: MaskEditorSession,
     models: AppUiPanelModels,
     asset_folder_id: Option<String>,
     preferences_model: AppUiPreferencesModel,
@@ -1667,6 +1672,7 @@ impl AppUiAppRoot {
                 ),
             },
             notification_session_id: None,
+            mask_editor: MaskEditorSession::default(),
             models,
             asset_folder_id: None,
             preferences_model,
@@ -1895,9 +1901,65 @@ impl AppUiAppRoot {
         Ok(())
     }
 
+    /// Intercept Viewer-only actions before any authoring or preview refresh.
+    /// The nested option separates an unrelated action from a consumed local action.
+    pub(super) fn try_handle_mask_editor_action(
+        &mut self,
+        action: &Action,
+        state: &AppState,
+    ) -> Option<Option<Action>> {
+        let Some(MaskEditorAction { target, edit }) = MaskEditorAction::decode(action)? else {
+            return Some(None);
+        };
+        if MaskEditorTarget::selected(state) != Some(target) {
+            return Some(None);
+        }
+        match edit {
+            MaskEditorEdit::Presentation(setting) => {
+                if self.mask_editor.update(target, setting) {
+                    self.set_models(self.models.clone());
+                }
+                Some(None)
+            }
+            MaskEditorEdit::WriteShape { author_time, original, shape } => {
+                use crate::app::ui_actions::{
+                    visual_mask_write_shape_action, VisualMaskWriteShapePayload,
+                };
+                use crate::app_ui::panels::{mask_shape_from_viewer, viewer_power_window_model};
+                use mondrian_core::mask_data::MaskShapeInterpolation;
+                let replacement = state
+                    .active_sequence()
+                    .and_then(|sequence| viewer_power_window_model(state, sequence))
+                    .filter(|window| {
+                        window.target == target
+                            && window.overlay.editable
+                            && window.author_time == author_time
+                            && mask_shape_from_viewer(window.overlay.shape.clone()) == original
+                    })
+                    .map(|_| {
+                        visual_mask_write_shape_action(VisualMaskWriteShapePayload {
+                            clip_id: target.clip_id,
+                            mask_id: target.mask_id,
+                            interpolation: MaskShapeInterpolation::Hold,
+                            shape,
+                        })
+                    });
+                Some(replacement)
+            }
+        }
+    }
+
     /// Replace panel contents from a fresh model snapshot while preserving the
     /// root widget id and menu state.
     pub fn set_models(&mut self, mut models: AppUiPanelModels) {
+        self.mask_editor.sync(models.author_control_scope.map(|scope| scope.0));
+        if let Some((target, settings)) = &mut models.inspector.mask_editor {
+            *settings = self.mask_editor.settings(target.clip_id, target.mask_id);
+        }
+        if let Some(window) = &mut models.viewer.power_window {
+            window.presentation =
+                self.mask_editor.settings(window.target.clip_id, window.target.mask_id);
+        }
         bind_native_visual_gui_models(&mut models, &self.native_visual_gui);
         if self
             .modal
@@ -1928,6 +1990,25 @@ impl AppUiAppRoot {
         let panel_list_state = collect_panel_list_state(&self.dock);
         let timeline_state = collect_timeline_view_state(&self.dock);
         let panel_scroll_state = collect_panel_scroll_state(&self.dock);
+        let mask_selection = if models.viewer.enabled
+            && models
+                .viewer
+                .power_window
+                .as_ref()
+                .is_some_and(|window| window.overlay.editable)
+            && self.models.author_control_scope == models.author_control_scope
+            && self
+                .models
+                .viewer
+                .power_window
+                .as_ref()
+                .zip(models.viewer.power_window.as_ref())
+                .is_some_and(|(previous, next)| previous.same_projection(next))
+        {
+            viewer_mask_selection(&self.dock).map(<[usize]>::to_vec)
+        } else {
+            None
+        };
         self.models = models;
         apply_viewer_zoom_mode(&mut self.models, self.viewer_zoom_mode);
         self.dock = build_dock_tree_for_workspace(
@@ -1943,6 +2024,9 @@ impl AppUiAppRoot {
         restore_panel_list_state(&mut self.dock, &panel_list_state);
         restore_timeline_view_state(&mut self.dock, &timeline_state);
         restore_panel_scroll_state(&mut self.dock, &panel_scroll_state);
+        if let Some(selection) = mask_selection {
+            restore_viewer_mask_selection(&mut self.dock, selection);
+        }
         if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
             self.layout(self.bounds);
             restore_dock_panel_state(&mut self.dock, &dock_panel_state);
@@ -1993,6 +2077,11 @@ impl AppUiAppRoot {
         if preview.is_none() && viewer.enabled && self.models.viewer.enabled {
             viewer.retain_presentation_from(&self.models.viewer, state, Some(&self.localizer));
         }
+        self.mask_editor.sync(state.authoring_session_id());
+        if let Some(window) = &mut viewer.power_window {
+            window.presentation =
+                self.mask_editor.settings(window.target.clip_id, window.target.mask_id);
+        }
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
         let preview_waiting = viewer.preview_waiting;
         self.models.scopes = ScopesPanelModel::from_viewer_with_settings(
@@ -2000,9 +2089,10 @@ impl AppUiAppRoot {
             self.models.scopes.settings,
             self.models.scopes.signal_color_space,
         );
+        let mask_projection_changed = self.models.viewer.power_window != viewer.power_window;
         self.models.viewer = viewer;
         self.models.timeline.playhead_frame = frame;
-        update_viewer_widgets(&mut self.dock, &self.models.viewer);
+        update_viewer_widgets(&mut self.dock, &self.models.viewer, mask_projection_changed);
         update_scopes_widgets(&mut self.dock, &self.models.scopes);
         update_timeline_playhead_widgets(&mut self.dock, frame);
         preview_waiting
@@ -2014,7 +2104,7 @@ impl AppUiAppRoot {
         self.models
             .viewer
             .mark_presentation_pending_after_transport_intent(state, Some(&self.localizer));
-        update_viewer_widgets(&mut self.dock, &self.models.viewer);
+        update_viewer_widgets(&mut self.dock, &self.models.viewer, false);
     }
 
     /// Return the payload-free Viewer lifecycle meaning used by playback.
@@ -2897,8 +2987,15 @@ fn update_timeline_playhead_widgets(widget: &mut dyn Widget, frame: i64) -> bool
     updated
 }
 
-fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> bool {
+fn update_viewer_widgets(
+    widget: &mut dyn Widget,
+    model: &ViewerPanelModel,
+    mask_projection_changed: bool,
+) -> bool {
     if let Some(viewer) = widget.as_any_mut().and_then(|any| any.downcast_mut::<ViewerSurface>()) {
+        if mask_projection_changed {
+            configure_viewer_power_window(viewer, model.power_window.as_ref());
+        }
         viewer.set_playback_frame_content_state(
             model.status.clone(),
             model.status_tone,
@@ -2915,10 +3012,31 @@ fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> b
     let mut updated = false;
     for index in 0..widget.child_count() {
         if let Some(child) = widget.child_mut(index) {
-            updated |= update_viewer_widgets(child, model);
+            updated |= update_viewer_widgets(child, model, mask_projection_changed);
         }
     }
     updated
+}
+
+fn viewer_mask_selection(widget: &dyn Widget) -> Option<&[usize]> {
+    if let Some(viewer) = widget.as_any().and_then(|any| any.downcast_ref::<ViewerSurface>()) {
+        return viewer.selected_power_window_anchors();
+    }
+    (0..widget.child_count()).find_map(|index| widget.child(index).and_then(viewer_mask_selection))
+}
+
+fn restore_viewer_mask_selection(widget: &mut dyn Widget, selection: Vec<usize>) -> bool {
+    fn visit(widget: &mut dyn Widget, selection: &mut Option<Vec<usize>>) -> bool {
+        if let Some(viewer) =
+            widget.as_any_mut().and_then(|any| any.downcast_mut::<ViewerSurface>())
+        {
+            viewer.restore_power_window_anchors(selection.take().unwrap_or_default());
+            return true;
+        }
+        (0..widget.child_count())
+            .any(|index| widget.child_mut(index).is_some_and(|child| visit(child, selection)))
+    }
+    visit(widget, &mut Some(selection))
 }
 
 fn update_scopes_widgets(widget: &mut dyn Widget, model: &ScopesPanelModel) -> bool {
@@ -5112,6 +5230,145 @@ mod tests {
         );
         assert_eq!(payload.settings.preview.resolution_scale, 0.25);
         assert!(!payload.settings.preview.cache_enabled);
+    }
+
+    fn mask_editor_test_state() -> (AppState, MaskEditorTarget) {
+        use crate::app::ui_actions::{visual_mask_add_to_clip_action, VisualMaskAddToClipPayload};
+        use mondrian_core::{mask_data::MaskShape, TimelineTime};
+        use mondrian_timeline::clip::Clip;
+
+        let mut sequence = Sequence::new("Viewer mask editing");
+        sequence.settings.frame_rate = Rational::new(25, 1);
+        sequence.add_video_track();
+        let tt = |frame| TimelineTime::new(frame, 25).unwrap();
+        let clip = Clip::new(AssetId::new(), tt(10), tt(20)).unwrap();
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.seek(15).unwrap();
+        state
+            .dispatch_action(visual_mask_add_to_clip_action(VisualMaskAddToClipPayload {
+                clip_id,
+                shape: MaskShape::default(),
+            }))
+            .unwrap();
+        let target = MaskEditorTarget::selected(&state).expect("newly added mask selected");
+        (state, target)
+    }
+
+    #[test]
+    fn mask_editor_presentation_is_local_and_resets_with_authoring_session() {
+        use crate::app_ui::mask_editor::{
+            AnchorSelection, MaskEditorSetting, MaskEditorSettings, OverlayColor,
+        };
+
+        let (state, target) = mask_editor_test_state();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let generation = state.project_author_generation();
+        let before = serde_json::to_value(state.active_sequence().unwrap()).unwrap();
+        for setting in [
+            MaskEditorSetting::Selection(AnchorSelection::Lasso),
+            MaskEditorSetting::Color(OverlayColor::Seafoam),
+            MaskEditorSetting::FillOpacity(40),
+            MaskEditorSetting::FillOpacity(101),
+            MaskEditorSetting::Outline(false),
+        ] {
+            let action = MaskEditorAction::action(target, MaskEditorEdit::Presentation(setting));
+            assert_eq!(
+                root.try_handle_mask_editor_action(&action, &state),
+                Some(None)
+            );
+        }
+        let expected = MaskEditorSettings {
+            selection: AnchorSelection::Lasso,
+            color: OverlayColor::Seafoam,
+            fill_opacity: 40,
+            outline: false,
+        };
+        assert_eq!(root.models.inspector.mask_editor, Some((target, expected)));
+        assert_eq!(
+            root.models.viewer.power_window.as_ref().unwrap().presentation,
+            expected
+        );
+        assert_eq!(state.project_author_generation(), generation);
+        assert_eq!(
+            serde_json::to_value(state.active_sequence().unwrap()).unwrap(),
+            before
+        );
+
+        let (other, other_target) = mask_editor_test_state();
+        assert_ne!(target.session, other_target.session);
+        root.set_models(AppUiPanelModels::from_app_state(&other));
+        let stale = MaskEditorAction::action(
+            target,
+            MaskEditorEdit::Presentation(MaskEditorSetting::Outline(false)),
+        );
+        assert_eq!(
+            root.try_handle_mask_editor_action(&stale, &other),
+            Some(None)
+        );
+        assert_eq!(
+            root.mask_editor.settings(target.clip_id, target.mask_id),
+            MaskEditorSettings::default()
+        );
+        assert_eq!(
+            root.models.inspector.mask_editor,
+            Some((other_target, MaskEditorSettings::default()))
+        );
+    }
+
+    #[test]
+    fn mask_editor_only_forwards_a_live_unlocked_shape_write() {
+        use crate::app::ui_actions::{visual_mask_set_locked_action, VisualMaskSetLockedPayload};
+        use crate::app_ui::panels::{mask_shape_from_viewer, viewer_power_window_model};
+        use mondrian_core::{mask_data::MaskShape, TimelineTime};
+
+        let (mut state, target) = mask_editor_test_state();
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let current = |state: &AppState| {
+            viewer_power_window_model(state, state.active_sequence().unwrap()).unwrap()
+        };
+        let window = current(&state);
+        let original = mask_shape_from_viewer(window.overlay.shape);
+        let shape = MaskShape::Ellipse { center: Vec2::splat(0.5), radii: Vec2::splat(0.3) };
+        let write = |author_time, original| {
+            MaskEditorAction::action(
+                target,
+                MaskEditorEdit::WriteShape { author_time, original, shape: shape.clone() },
+            )
+        };
+        let live = write(window.author_time, original.clone());
+        let wrong_time = write(TimelineTime::new(1, 25).unwrap(), original.clone());
+        let wrong_shape = write(window.author_time, shape.clone());
+        for stale in [&wrong_time, &wrong_shape] {
+            assert_eq!(
+                root.try_handle_mask_editor_action(stale, &state),
+                Some(None)
+            );
+        }
+        let lock = |locked| {
+            visual_mask_set_locked_action(VisualMaskSetLockedPayload {
+                clip_id: target.clip_id,
+                mask_id: target.mask_id,
+                locked,
+            })
+        };
+        state.dispatch_action(lock(true)).unwrap();
+        assert_eq!(
+            root.try_handle_mask_editor_action(&live, &state),
+            Some(None)
+        );
+        state.dispatch_action(lock(false)).unwrap();
+        let generation = state.project_author_generation();
+        let forwarded = root.try_handle_mask_editor_action(&live, &state).flatten().unwrap();
+        state.dispatch_action(forwarded).unwrap();
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(mask_shape_from_viewer(current(&state).overlay.shape), shape);
+        assert_eq!(
+            root.try_handle_mask_editor_action(&live, &state),
+            Some(None)
+        );
     }
 
     #[test]

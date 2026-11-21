@@ -4,11 +4,19 @@
 //! only an in-gesture preview; a completed drag emits one complete shape value
 //! and the App authoring transaction remains the sole authority.
 
+use std::cell::OnceCell;
+
+use lyon::math::point;
+use lyon::path::Path;
+use lyon::tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use mondrian_core::mask_data::MAX_MASK_PATH_POINTS;
+use mondrian_core::Color;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::widget::PaintContext;
 
 use crate::paint::color_with_alpha;
+
+use super::mask_selection::{AnchorSelectionDrag, ViewerMaskSelectionMode};
 
 const HANDLE_RADIUS: f32 = 4.5;
 const HIT_RADIUS: f32 = 9.0;
@@ -54,6 +62,27 @@ pub struct ViewerPowerWindow {
     pub editable: bool,
 }
 
+/// Viewer-only colors and visibility; independent of the authored mask matte.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewerMaskOverlayStyle {
+    /// `None` uses the current UI theme accent.
+    pub color: Option<Color>,
+    /// Opacity of the closed-shape fill, in percent. Zero skips fill entirely.
+    pub fill_opacity_percent: u8,
+    /// Whether to paint the shape's outline; editing handles remain visible.
+    pub show_outline: bool,
+}
+
+impl Default for ViewerMaskOverlayStyle {
+    fn default() -> Self {
+        Self {
+            color: None,
+            fill_opacity_percent: 0,
+            show_outline: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Handle {
     Body,
@@ -66,11 +95,16 @@ enum Handle {
     BezierControlOut(usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DragState {
     handle: Handle,
     origin_pointer: [f32; 2],
     origin_shape: ViewerPowerWindowShape,
+}
+
+enum Gesture {
+    Geometry(DragState),
+    AnchorSelection(AnchorSelectionDrag),
 }
 
 /// Stateful gesture preview for one immutable author projection.
@@ -78,7 +112,11 @@ pub(crate) struct PowerWindowEditor {
     authored: ViewerPowerWindow,
     preview: ViewerPowerWindowShape,
     hovered: Option<Handle>,
-    drag: Option<DragState>,
+    gesture: Option<Gesture>,
+    selection_mode: ViewerMaskSelectionMode,
+    selected: Vec<usize>,
+    style: ViewerMaskOverlayStyle,
+    fill_triangles: OnceCell<Vec<[f32; 2]>>,
 }
 
 impl PowerWindowEditor {
@@ -87,12 +125,63 @@ impl PowerWindowEditor {
             preview: authored.shape.clone(),
             authored,
             hovered: None,
-            drag: None,
+            gesture: None,
+            selection_mode: ViewerMaskSelectionMode::default(),
+            selected: Vec::new(),
+            style: ViewerMaskOverlayStyle::default(),
+            fill_triangles: OnceCell::new(),
         }
     }
 
     pub(crate) fn is_dragging(&self) -> bool {
-        self.drag.is_some()
+        self.gesture.is_some()
+    }
+
+    pub(super) fn set_selection_mode(&mut self, mode: ViewerMaskSelectionMode) {
+        self.selection_mode = mode;
+    }
+
+    pub(super) fn set_style(&mut self, style: ViewerMaskOverlayStyle) {
+        self.style = style;
+    }
+
+    fn set_preview(&mut self, shape: ViewerPowerWindowShape) {
+        if self.preview != shape {
+            self.preview = shape;
+            self.fill_triangles.take();
+        }
+    }
+
+    pub(super) fn selected_anchors(&self) -> &[usize] {
+        &self.selected
+    }
+
+    pub(super) fn restore_selected_anchors(&mut self, mut selection: Vec<usize>) {
+        if !self.authored.editable || self.is_dragging() {
+            return;
+        }
+        if let ViewerPowerWindowShape::Bezier { points, .. } = &self.authored.shape {
+            selection.retain(|&index| index < points.len());
+            selection.sort_unstable();
+            selection.dedup();
+            self.selected = selection;
+        }
+    }
+
+    pub(super) fn start_anchor_selection(&mut self, canvas: Rect, point: Point) -> bool {
+        if !self.authored.editable
+            || self.is_dragging()
+            || !canvas.contains(point)
+            || !matches!(self.preview, ViewerPowerWindowShape::Bezier { .. })
+        {
+            return false;
+        }
+        let Some(selection) = AnchorSelectionDrag::start(self.selection_mode, point) else {
+            return false;
+        };
+        self.hovered = None;
+        self.gesture = Some(Gesture::AnchorSelection(selection));
+        true
     }
 
     /// Split the nearest visible cubic without changing the rendered outline.
@@ -103,7 +192,7 @@ impl PowerWindowEditor {
         point: Point,
     ) -> Option<ViewerPowerWindowShape> {
         if !self.authored.editable
-            || self.drag.is_some()
+            || self.is_dragging()
             || !canvas.contains(point)
             || canvas.width <= 0.0
             || canvas.height <= 0.0
@@ -128,32 +217,48 @@ impl PowerWindowEditor {
             return None;
         };
         split_bezier_segment(points, segment, t);
-        self.preview = shape.clone();
+        self.selected.clear();
+        self.set_preview(shape.clone());
         Some(shape)
     }
 
     pub(crate) fn pointer_down(&mut self, canvas: Rect, point: Point) -> bool {
-        if !self.authored.editable || !canvas.contains(point) {
+        if !self.authored.editable || self.is_dragging() || !canvas.contains(point) {
             return false;
         }
         let Some(handle) = self.hit_test(canvas, point) else {
             return false;
         };
-        let origin_pointer = normalized_point(canvas, point);
-        self.drag = Some(DragState {
+        if let Handle::BezierAnchor(index) = handle
+            && self.selected.binary_search(&index).is_err()
+        {
+            self.selected.clear();
+            self.selected.push(index);
+        }
+        self.gesture = Some(Gesture::Geometry(DragState {
             handle,
-            origin_pointer,
+            origin_pointer: normalized_point(canvas, point),
             origin_shape: self.preview.clone(),
-        });
+        }));
         self.hovered = Some(handle);
         true
     }
 
     pub(crate) fn pointer_move(&mut self, canvas: Rect, point: Point) -> bool {
-        if let Some(drag) = self.drag.clone() {
-            let pointer = normalized_point(canvas, point);
-            self.preview = dragged_shape(&drag, pointer);
-            return true;
+        match &mut self.gesture {
+            Some(Gesture::Geometry(drag)) => {
+                if point.x.is_finite() && point.y.is_finite() {
+                    let shape =
+                        dragged_shape(drag, normalized_point(canvas, point), &self.selected);
+                    self.set_preview(shape);
+                }
+                return true;
+            }
+            Some(Gesture::AnchorSelection(selection)) => {
+                selection.track(point);
+                return true;
+            }
+            None => {}
         }
         let hovered = self.hit_test(canvas, point);
         if hovered == self.hovered {
@@ -168,25 +273,69 @@ impl PowerWindowEditor {
         canvas: Rect,
         point: Point,
     ) -> Option<ViewerPowerWindowShape> {
-        let drag = self.drag.take()?;
-        self.preview = dragged_shape(&drag, normalized_point(canvas, point));
-        self.hovered = self.hit_test(canvas, point);
-        (self.preview != self.authored.shape).then(|| self.preview.clone())
+        match self.gesture.take()? {
+            Gesture::Geometry(drag) => {
+                if !point.x.is_finite() || !point.y.is_finite() {
+                    self.set_preview(self.authored.shape.clone());
+                    return None;
+                }
+                self.set_preview(dragged_shape(
+                    &drag,
+                    normalized_point(canvas, point),
+                    &self.selected,
+                ));
+                self.hovered = self.hit_test(canvas, point);
+                (self.preview != self.authored.shape).then(|| self.preview.clone())
+            }
+            Gesture::AnchorSelection(selection) => {
+                if let ViewerPowerWindowShape::Bezier { points, .. } = &self.preview
+                    && let Some(indices) = selection.finish(
+                        point,
+                        points.iter().map(|p| canvas_point(canvas, p.position)),
+                    )
+                {
+                    self.selected = indices;
+                }
+                self.hovered = self.hit_test(canvas, point);
+                None
+            }
+        }
     }
 
     pub(crate) fn cancel(&mut self) -> bool {
-        let changed = self.drag.take().is_some() || self.hovered.take().is_some();
-        self.preview = self.authored.shape.clone();
+        let was_dragging = self.gesture.take().is_some();
+        let was_hovering = self.hovered.take().is_some();
+        let changed = was_dragging || was_hovering || self.preview != self.authored.shape;
+        self.set_preview(self.authored.shape.clone());
         changed
     }
 
     pub(crate) fn paint(&self, ctx: &mut PaintContext, canvas: Rect) {
-        let accent = ctx.theme.colors.accent;
+        let accent = self.style.color.unwrap_or(ctx.theme.colors.accent);
+        let fill_opacity = f32::from(self.style.fill_opacity_percent.min(100)) / 100.0;
+        if fill_opacity > 0.0 {
+            let triangles = self.fill_triangles.get_or_init(|| overlay_triangles(&self.preview));
+            if !triangles.is_empty() {
+                let vertices: Vec<_> = triangles.iter().map(|&p| canvas_point(canvas, p)).collect();
+                ctx.encoder.draw_triangles(&vertices, color_with_alpha(accent, fill_opacity));
+            }
+        }
         let muted = color_with_alpha(ctx.theme.colors.foreground, 0.72);
+        if let Some(Gesture::AnchorSelection(selection)) = &self.gesture {
+            selection.for_each_edge(|a, b| ctx.encoder.draw_line(a, b, 1.0, accent));
+        }
         match &self.preview {
-            ViewerPowerWindowShape::Rectangle { x, y, width, height, .. } => {
+            ViewerPowerWindowShape::Rectangle { x, y, width, height, corner_radius } => {
                 let corners = rectangle_corners(*x, *y, *width, *height);
-                paint_polyline(ctx, canvas, &corners, true, accent);
+                if self.style.show_outline {
+                    paint_polyline(
+                        ctx,
+                        canvas,
+                        &rectangle_outline(*x, *y, *width, *height, *corner_radius),
+                        true,
+                        accent,
+                    );
+                }
                 for (index, point) in corners.into_iter().enumerate() {
                     paint_handle(
                         ctx,
@@ -197,8 +346,15 @@ impl PowerWindowEditor {
                 }
             }
             ViewerPowerWindowShape::Ellipse { center, radii } => {
-                let points = ellipse_polyline(*center, *radii);
-                paint_polyline(ctx, canvas, &points, true, accent);
+                if self.style.show_outline {
+                    paint_polyline(
+                        ctx,
+                        canvas,
+                        &ellipse_polyline(*center, *radii),
+                        true,
+                        accent,
+                    );
+                }
                 for (handle, point) in [
                     (Handle::EllipseCenter, *center),
                     (Handle::EllipseRadiusX, [center[0] + radii[0], center[1]]),
@@ -221,8 +377,15 @@ impl PowerWindowEditor {
                 }
             }
             ViewerPowerWindowShape::Bezier { points, closed } => {
-                let curve = bezier_polyline(points, *closed);
-                paint_polyline(ctx, canvas, &curve, false, accent);
+                if self.style.show_outline {
+                    paint_polyline(
+                        ctx,
+                        canvas,
+                        &bezier_polyline(points, *closed),
+                        false,
+                        accent,
+                    );
+                }
                 for (index, point) in points.iter().enumerate() {
                     let anchor = point.position;
                     let control_in = add(anchor, point.control_in);
@@ -247,7 +410,8 @@ impl PowerWindowEditor {
                     paint_handle(
                         ctx,
                         canvas_point(canvas, anchor),
-                        self.hovered == Some(Handle::BezierAnchor(index)),
+                        self.hovered == Some(Handle::BezierAnchor(index))
+                            || self.selected.binary_search(&index).is_ok(),
                         accent,
                     );
                 }
@@ -272,7 +436,11 @@ impl PowerWindowEditor {
     }
 }
 
-fn dragged_shape(drag: &DragState, pointer: [f32; 2]) -> ViewerPowerWindowShape {
+fn dragged_shape(
+    drag: &DragState,
+    pointer: [f32; 2],
+    selected: &[usize],
+) -> ViewerPowerWindowShape {
     let delta = sub(pointer, drag.origin_pointer);
     let mut shape = drag.origin_shape.clone();
     match (&mut shape, drag.handle) {
@@ -307,8 +475,15 @@ fn dragged_shape(drag: &DragState, pointer: [f32; 2]) -> ViewerPowerWindowShape 
             }
         }
         (ViewerPowerWindowShape::Bezier { points, .. }, Handle::BezierAnchor(index)) => {
-            if let Some(point) = points.get_mut(index) {
-                point.position = add(point.position, delta);
+            let indices = if selected.contains(&index) {
+                selected
+            } else {
+                std::slice::from_ref(&index)
+            };
+            for &i in indices {
+                if let Some(point) = points.get_mut(i) {
+                    point.position = add(point.position, delta);
+                }
             }
         }
         (ViewerPowerWindowShape::Bezier { points, .. }, Handle::BezierControlIn(index)) => {
@@ -390,6 +565,75 @@ fn rectangle_corners(x: f32, y: f32, width: f32, height: f32) -> [[f32; 2]; 4] {
     ]
 }
 
+fn rectangle_outline(x: f32, y: f32, width: f32, height: f32, radius: f32) -> Vec<[f32; 2]> {
+    let radius = radius.min(width.min(height) * 0.5).max(0.0);
+    if radius == 0.0 {
+        return rectangle_corners(x, y, width, height).to_vec();
+    }
+    let centers = [
+        [x + width - radius, y + radius],
+        [x + width - radius, y + height - radius],
+        [x + radius, y + height - radius],
+        [x + radius, y + radius],
+    ];
+    centers
+        .into_iter()
+        .enumerate()
+        .flat_map(|(corner, center)| {
+            (0..=8).map(move |step| {
+                let angle = (corner as f32 - 1.0 + step as f32 / 8.0) * std::f32::consts::FRAC_PI_2;
+                [
+                    center[0] + radius * angle.cos(),
+                    center[1] + radius * angle.sin(),
+                ]
+            })
+        })
+        .collect()
+}
+
+fn overlay_triangles(shape: &ViewerPowerWindowShape) -> Vec<[f32; 2]> {
+    let polygon = match shape {
+        ViewerPowerWindowShape::Rectangle { x, y, width, height, corner_radius } => {
+            rectangle_outline(*x, *y, *width, *height, *corner_radius)
+        }
+        ViewerPowerWindowShape::Ellipse { center, radii } => ellipse_polyline(*center, *radii),
+        ViewerPowerWindowShape::Bezier { points, closed: true } if points.len() >= 2 => {
+            // Cap display-only tessellation input while retaining every anchor.
+            let steps = (8192 / points.len()).clamp(1, CURVE_STEPS);
+            let mut polygon = bezier_polyline_with_steps(points, true, steps);
+            polygon.pop(); // The closed tessellation path supplies this edge.
+            polygon
+        }
+        _ => return Vec::new(),
+    };
+    if polygon.len() < 3 || polygon.iter().flatten().any(|v| !v.is_finite() || v.abs() > 16384.0) {
+        return Vec::new();
+    }
+    let mut builder = Path::builder();
+    builder.begin(point(polygon[0][0], polygon[0][1]));
+    for &[x, y] in &polygon[1..] {
+        builder.line_to(point(x, y));
+    }
+    builder.end(true);
+    // Use a bounded vertex index type; pathological self-intersections may fall
+    // back to the outline rather than growing the display cache without bound.
+    let mut mesh = VertexBuffers::<[f32; 2], u16>::new();
+    if FillTessellator::new()
+        .tessellate_path(
+            &builder.build(),
+            &FillOptions::default().with_tolerance(0.0001),
+            &mut BuffersBuilder::new(&mut mesh, |vertex: FillVertex| {
+                let p = vertex.position();
+                [p.x, p.y]
+            }),
+        )
+        .is_err()
+    {
+        return Vec::new();
+    }
+    mesh.indices.into_iter().map(|i| mesh.vertices[usize::from(i)]).collect()
+}
+
 fn ellipse_polyline(center: [f32; 2], radii: [f32; 2]) -> Vec<[f32; 2]> {
     (0..48)
         .map(|index| {
@@ -403,6 +647,14 @@ fn ellipse_polyline(center: [f32; 2], radii: [f32; 2]) -> Vec<[f32; 2]> {
 }
 
 fn bezier_polyline(points: &[ViewerPowerWindowBezierPoint], closed: bool) -> Vec<[f32; 2]> {
+    bezier_polyline_with_steps(points, closed, CURVE_STEPS)
+}
+
+fn bezier_polyline_with_steps(
+    points: &[ViewerPowerWindowBezierPoint],
+    closed: bool,
+    steps: usize,
+) -> Vec<[f32; 2]> {
     if points.len() < 2 {
         return points.iter().map(|point| point.position).collect();
     }
@@ -411,15 +663,15 @@ fn bezier_polyline(points: &[ViewerPowerWindowBezierPoint], closed: bool) -> Vec
     } else {
         points.len() - 1
     };
-    let mut output = Vec::with_capacity(pair_count * CURVE_STEPS + 1);
+    let mut output = Vec::with_capacity(pair_count * steps + 1);
     output.push(points[0].position);
     for index in 0..pair_count {
         let next = (index + 1) % points.len();
-        for step in 1..=CURVE_STEPS {
+        for step in 1..=steps {
             output.push(cubic(
                 points[index],
                 points[next],
-                step as f32 / CURVE_STEPS as f32,
+                step as f32 / steps as f32,
             ));
         }
     }
@@ -767,7 +1019,7 @@ mod tests {
             },
         };
         let ViewerPowerWindowShape::Rectangle { x, y, width, height, .. } =
-            dragged_shape(&drag, [0.8, 0.9])
+            dragged_shape(&drag, [0.8, 0.9], &[])
         else {
             panic!("rectangle expected");
         };
@@ -787,7 +1039,8 @@ mod tests {
             origin_pointer: point.position,
             origin_shape: ViewerPowerWindowShape::Bezier { points: vec![point], closed: true },
         };
-        let ViewerPowerWindowShape::Bezier { points, .. } = dragged_shape(&drag, [0.4, 0.5]) else {
+        let ViewerPowerWindowShape::Bezier { points, .. } = dragged_shape(&drag, [0.4, 0.5], &[])
+        else {
             panic!("Bezier expected");
         };
         assert_eq!(points[0].position, [0.4, 0.5]);
@@ -808,7 +1061,8 @@ mod tests {
                 origin_pointer: [0.0, 0.0],
                 origin_shape: origin_shape.clone(),
             };
-            let ViewerPowerWindowShape::Ellipse { center, radii } = dragged_shape(&drag, pointer)
+            let ViewerPowerWindowShape::Ellipse { center, radii } =
+                dragged_shape(&drag, pointer, &[])
             else {
                 panic!("ellipse expected");
             };
@@ -829,7 +1083,7 @@ mod tests {
             origin_pointer: [0.5, 0.5],
             origin_shape: ViewerPowerWindowShape::Bezier { points: vec![point], closed: false },
         };
-        let ViewerPowerWindowShape::Bezier { points, .. } = dragged_shape(&drag, [0.65, 0.7])
+        let ViewerPowerWindowShape::Bezier { points, .. } = dragged_shape(&drag, [0.65, 0.7], &[])
         else {
             panic!("Bezier expected");
         };

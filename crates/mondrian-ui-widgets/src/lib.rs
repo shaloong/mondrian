@@ -109,7 +109,7 @@ pub use viewer_surface::{
     ViewerCanvasBackground, ViewerClipTransform, ViewerClipTransformAction,
     ViewerClipTransformEdit, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
     ViewerControlAction, ViewerExternalTextureFrame, ViewerExternalTexturePresentation,
-    ViewerFrameContent, ViewerFrameImage, ViewerPowerWindow, ViewerPowerWindowAction,
-    ViewerPowerWindowBezierPoint, ViewerPowerWindowShape, ViewerPresentationGeometry,
-    ViewerStatusTone, ViewerSurface,
+    ViewerFrameContent, ViewerFrameImage, ViewerMaskOverlayStyle, ViewerMaskSelectionMode,
+    ViewerPowerWindow, ViewerPowerWindowAction, ViewerPowerWindowBezierPoint,
+    ViewerPowerWindowShape, ViewerPresentationGeometry, ViewerStatusTone, ViewerSurface,
 };

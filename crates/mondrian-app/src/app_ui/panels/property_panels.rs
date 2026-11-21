@@ -10,6 +10,7 @@ use crate::app::parameter_gesture::{
 use crate::app::product_action::VisualMaskSetParticipationPayload;
 use crate::app::ui_actions::visual_mask_set_participation_action;
 use crate::app_ui::localization::keyframe_interpolation_message_id;
+use crate::app_ui::mask_editor::{AnchorSelection, MaskEditorSetting, OverlayColor};
 use mondrian_core::automation::AnimationChannelValue;
 use mondrian_ui_widgets::CurveGestureEvent;
 use mondrian_ui_widgets::{CurvePointTarget, CurvePreview, CurveTangent};
@@ -1171,13 +1172,11 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     }),
                 ),
             ));
-        if mask.shape_kind == InspectorMaskShapeKind::Path
-            && model.selected_mask_id == Some(mask_id)
+        if let Some((target, settings)) =
+            model.mask_editor.filter(|(target, _)| target.mask_id == mask_id)
         {
-            section = section.with_row(PropertyRow::new(
-                "Viewer",
-                Box::new(Label::new(localizer.text("mask-insert-point-hint")).muted()),
-            ));
+            section =
+                with_mask_editor_controls(section, mask.shape_kind, target, settings, localizer);
         }
         let tracking_active = mask.tracking_status.as_ref().is_some_and(|status| {
             matches!(
@@ -3085,6 +3084,81 @@ pub(super) fn inspector_mask_enabled_action(
             enabled,
         })
     })
+}
+
+fn with_mask_editor_controls(
+    mut section: PropertySection,
+    shape: InspectorMaskShapeKind,
+    target: MaskEditorTarget,
+    settings: MaskEditorSettings,
+    localizer: &Localizer,
+) -> PropertySection {
+    let action =
+        move |setting| MaskEditorAction::action(target, MaskEditorEdit::Presentation(setting));
+    if shape == InspectorMaskShapeKind::Path {
+        let modes = AnchorSelection::ALL
+            .into_iter()
+            .map(|mode| {
+                let selected = settings.selection == mode;
+                MenuItem::new(
+                    localizer.text(mode.message_id()),
+                    (!selected).then(|| action(MaskEditorSetting::Selection(mode))),
+                )
+                .checked(selected)
+            })
+            .collect();
+        section = section
+            .with_row(PropertyRow::new(
+                localizer.text("mask-editor-anchor-selection"),
+                Box::new(Dropdown::new(
+                    localizer.text(settings.selection.message_id()),
+                    modes,
+                )),
+            ))
+            .with_row(PropertyRow::new(
+                localizer.text("mask-editor-viewer"),
+                Box::new(Label::new(localizer.text("mask-editor-shift-drag-hint")).muted()),
+            ))
+            .with_row(PropertyRow::new(
+                "",
+                Box::new(Label::new(localizer.text("mask-insert-point-hint")).muted()),
+            ));
+    }
+
+    let colors = OverlayColor::ALL
+        .into_iter()
+        .map(|color| {
+            let selected = settings.color == color;
+            MenuItem::new(
+                localizer.text(color.message_id()),
+                (!selected).then(|| action(MaskEditorSetting::Color(color))),
+            )
+            .checked(selected)
+        })
+        .collect();
+    section
+        .with_row(PropertyRow::new(
+            localizer.text("mask-editor-overlay-color"),
+            Box::new(Dropdown::new(
+                localizer.text(settings.color.message_id()),
+                colors,
+            )),
+        ))
+        .with_row(PropertyRow::new(
+            localizer.text("mask-editor-fill-opacity"),
+            Box::new(
+                NumberInput::new(i64::from(settings.fill_opacity), 0, 100)
+                    .with_step(1)
+                    .on_change(move |value| action(MaskEditorSetting::FillOpacity(value as u8))),
+            ),
+        ))
+        .with_row(PropertyRow::new(
+            localizer.text("mask-editor-overlay-outline"),
+            Box::new(
+                Checkbox::new(localizer.text("mask-editor-show-outline"), settings.outline)
+                    .on_change(move |outline| action(MaskEditorSetting::Outline(outline))),
+            ),
+        ))
 }
 
 pub(super) fn mask_participation_control(

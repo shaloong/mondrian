@@ -1788,6 +1788,15 @@ impl AppUiHost {
                 continue;
             }
 
+            let action =
+                match self.root.try_handle_mask_editor_action(&action, &self.app_state.borrow()) {
+                    None => action,
+                    Some(Some(author_action)) => author_action,
+                    Some(None) => {
+                        needs_layout = true;
+                        continue;
+                    }
+                };
             let action = match self.root.try_handle_resource_action(
                 &action,
                 &self.app_state.borrow(),

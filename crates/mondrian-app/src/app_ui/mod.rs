@@ -30,6 +30,7 @@ pub mod icons;
 mod inspector_source_timing;
 pub mod interpret_asset_dialog;
 pub mod localization;
+mod mask_editor;
 pub mod menu_bar;
 pub mod modal;
 pub(crate) mod musical_time_dialog;

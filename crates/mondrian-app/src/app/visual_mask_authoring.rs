@@ -287,8 +287,7 @@ impl AppState {
                 format!("Mask {mask_id} does not belong to Clip {clip_id}"),
             ));
         }
-        let end = clip.end_position()?;
-        let clip_time = clip.timeline_to_clip_time(sequence_time.clamp(clip.position, end))?;
+        let clip_time = clip.clamped_visual_author_time(sequence_time)?;
         Ok(VisualMaskContext {
             sequence_id: sequence.id,
             track_id,
