@@ -2350,6 +2350,9 @@ fn effects_author_coverage() -> bool {
         // The cell pattern is a generator as well: it always writes opaque
         // coverage, so a transparent source pixel must not skip it.
         if (effect.header.x == 41u) { return true; }
+        // Shape Add and Exclude can create coverage from an empty source. Run
+        // the entire chain, including preceding colour operations, in that case.
+        if (effect.header.x == 59u) { return true; }
         // The fractal is a generator too: it authors coverage from the escape
         // field, so a transparent source pixel must not skip it.
         if (effect.header.x == 42u) { return true; }
@@ -3398,6 +3401,233 @@ fn beam_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> v
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     return vec4<f32>(mix(added, covered, blend), alpha);
+}
+
+// TTL-02 形状 (Shape): one actor-authored signed-distance shape stamped onto the
+// frame with a fill, a stroke and one of four boolean modes. Every expression
+// mirrors `mondrian-effects/src/shape.rs` operation for operation, because the
+// shared AA band is only `d <= -0.5 ... d >= 0.5` wide and any reassociation
+// would move the parity fixture's straddling pixels.
+fn shape_cross(left: vec2<f32>, right: vec2<f32>) -> f32 {
+    return left.x * right.y - left.y * right.x;
+}
+
+// Point-to-segment distance. The CPU kernel guards the zero-length segment by
+// falling back to the endpoint distance; the guard is spelled the same way here
+// so a line with a zero extent still returns the exact endpoint distance.
+fn shape_segment_distance(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let ab = b - a;
+    let denominator = dot(ab, ab);
+    if (denominator <= 1e-12) {
+        return length(point - a);
+    }
+    let t = clamp(dot(point - a, ab) / denominator, 0.0, 1.0);
+    return length((point - a) - ab * t);
+}
+
+// Signed distance in pixels, negative inside. The largest finite f32 stands in
+// for the CPU kernel's `+INFINITY` empty set: `clamp(0.5 - d, 0.0, 1.0)`
+// saturates to zero for either value, and the finite sentinel cannot leak an
+// infinity into the stroke band arithmetic where it would meet a NaN.
+fn shape_distance(
+    q: vec2<f32>,
+    half_size: vec2<f32>,
+    corner_radius: f32,
+    vertices: f32,
+    inner_ratio: f32,
+    kind: u32,
+) -> f32 {
+    let hx = half_size.x;
+    let hy = half_size.y;
+    // The line keeps its 1 px ridge even at size zero, so it is the only shape
+    // that survives the degenerate test below.
+    if (kind == 5u) {
+        // Unsigned spine distance: the centred band applies half the stroke
+        // width exactly once, producing a solid capsule rather than two rails.
+        return shape_segment_distance(
+            q,
+            vec2<f32>(-hx, 0.0),
+            vec2<f32>(hx, 0.0),
+        );
+    }
+    // Every other shape is the empty set when either half extent is zero.
+    if (min(hx, hy) == 0.0) {
+        return 3.4028235e38;
+    }
+    if (kind == 0u) {
+        // Rectangle: the corner radius is clamped to the shorter half extent,
+        // and the distance is exact, including the rounded corners.
+        let radius = clamp(corner_radius, 0.0, min(hx, hy));
+        let offset = abs(q) - vec2<f32>(hx - radius, hy - radius);
+        return length(max(offset, vec2<f32>(0.0))) +
+            min(max(offset.x, offset.y), 0.0) - radius;
+    }
+    if (kind == 1u) {
+        return length(q) - min(hx, hy);
+    }
+    if (kind == 2u) {
+        // Ellipse: the normalised-radius distance scaled by the shorter axis.
+        // This is the documented first-order approximation, not an exact
+        // Euclidean distance.
+        let a = max(hx, 1.1754944e-38);
+        let b = max(hy, 1.1754944e-38);
+        let k = length(vec2<f32>(q.x / a, q.y / b));
+        return (k - 1.0) * min(a, b);
+    }
+    let n = clamp(round(vertices), 3.0, 20.0);
+    if (kind == 3u) {
+        // Polygon half-plane field (not exact Euclidean distance outside the
+        // corners), matching the CPU's AA approximation. The first vertex points
+        // along +X, so edge normals sit at (2i+1)pi/n.
+        let radius = min(hx, hy);
+        let apothem = radius * cos(3.141592653589793 / n);
+        var distance = -3.4028235e38;
+        for (var index = 0.0; index < n; index = index + 1.0) {
+            let angle = (2.0 * index + 1.0) * 3.141592653589793 / n;
+            let normal = vec2<f32>(cos(angle), sin(angle));
+            distance = max(distance, dot(q, normal) - apothem);
+        }
+        return distance;
+    }
+    // Star: fold the local point into one sector and measure to the two nearest
+    // spokes. Inside a sector the closest edge is always one of those spokes, so
+    // the distance stays exact, at the cost of two segment tests.
+    let radius = min(hx, hy);
+    let inner = radius * clamp(inner_ratio, 0.001, 1.0);
+    let rho = length(q);
+    // The CPU kernel's atan2(0, 0) is 0; spelling that out keeps a pixel exactly
+    // on the centre from handing a NaN to the sector fold.
+    let phase = select(atan2(q.y, q.x), 0.0, rho == 0.0);
+    // `sector` and `period` are spelled as the CPU kernel spells them: one
+    // rounding for the half sector and an exact doubling for the period.
+    let sector = 3.141592653589793 / n;
+    let period = sector + sector;
+    // Euclidean remainder, identical to the CPU kernel's `rem_euclid`: `%` is
+    // the exact IEEE remainder and the negative branch folds it back into
+    // [0, period).
+    var wrapped = phase % period;
+    if (wrapped < 0.0) {
+        wrapped = wrapped + period;
+    }
+    let folded = select(wrapped, period - wrapped, wrapped > sector);
+    let local = vec2<f32>(rho * cos(folded), rho * sin(folded));
+    let tip = vec2<f32>(radius, 0.0);
+    let side = vec2<f32>(inner * cos(sector), inner * sin(sector));
+    let mirror = vec2<f32>(inner * cos(sector), -inner * sin(sector));
+    let distance = min(
+        shape_segment_distance(local, tip, side),
+        shape_segment_distance(local, tip, mirror),
+    );
+    let inside = shape_cross(side - tip, local - tip) *
+        shape_cross(side - tip, -tip) > 0.0;
+    return select(distance, -distance, inside);
+}
+
+fn shape_apply(
+    pixel: vec4<f32>,
+    position: vec2<f32>,
+    effect: EffectUniform,
+) -> vec4<f32> {
+    // `position` is the fragment centre offset by -0.5, so adding 0.5 back
+    // yields the same pixel coordinates the CPU kernel uses (`column + 0.5`)
+    // without a second scale.
+    let point = position + vec2<f32>(0.5);
+    let frame_size = uniforms.geometry.zw;
+    // The six packed cells are params, color, extra0, extra1, extra2, extra3 in
+    // the order `ShapeGrade::gpu_controls` returns them.
+    let half_size = effect.params.xy;
+    let corner_radius = effect.params.z;
+    let vertices = effect.params.w;
+    let inner_ratio = effect.color.x;
+    let stroke_width = effect.color.y;
+    let rotation = effect.color.z;
+    let opacity = effect.color.w;
+    let fill_opacity = effect.extra0.x;
+    let kind = u32(effect.extra0.y + 0.5);
+    let stroke_position = u32(effect.extra0.z + 0.5);
+    let boolean_mode = u32(effect.extra0.w + 0.5);
+    let fill_colour = effect.extra1;
+    let stroke_colour = effect.extra2;
+    // The shape centre is the normalised position scaled by the frame extent.
+    let centre = effect.extra3.xy * frame_size;
+    // Local coordinates are the frame-space offset rotated by -theta, written
+    // exactly like the CPU kernel's (cos, sin) pair.
+    let cos_theta = cos(rotation);
+    let sin_theta = sin(rotation);
+    let dx = point.x - centre.x;
+    let dy = point.y - centre.y;
+    let q = vec2<f32>(
+        dx * cos_theta + dy * sin_theta,
+        dy * cos_theta - dx * sin_theta,
+    );
+    let distance = shape_distance(
+        q,
+        half_size,
+        corner_radius,
+        vertices,
+        inner_ratio,
+        kind,
+    );
+    // Fill coverage is the 1 px AA band; the line has no fill surface.
+    var fill_coverage = clamp(0.5 - distance, 0.0, 1.0);
+    if (kind == 5u) {
+        fill_coverage = 0.0;
+    }
+    // The stroke band is centred on the distance field and shifted by the
+    // authored position. The line is always centred and never thinner than 1 px.
+    let band_width = select(stroke_width, max(stroke_width, 1.0), kind == 5u);
+    var band_distance = 0.0;
+    if (kind == 5u || stroke_position == 1u) {
+        band_distance = max(
+            -band_width * 0.5 - distance,
+            distance - band_width * 0.5,
+        );
+    } else if (stroke_position == 0u) {
+        band_distance = max(-band_width - distance, distance);
+    } else {
+        band_distance = max(-distance, distance - band_width);
+    }
+    var stroke_coverage = 0.0;
+    if (band_width > 0.0) {
+        stroke_coverage = clamp(0.5 - band_distance, 0.0, 1.0);
+    }
+    // The shape's own composite: the stroke covers the fill, so the stroke
+    // weight gates the fill contribution.
+    let fill_weight = fill_coverage * fill_opacity * opacity * fill_colour.a;
+    let stroke_weight = stroke_coverage * opacity * stroke_colour.a;
+    let weight = clamp(
+        stroke_weight + fill_weight * (1.0 - stroke_weight),
+        0.0,
+        1.0,
+    );
+    let shape_premultiplied = stroke_colour.rgb * stroke_weight +
+        fill_colour.rgb * fill_weight * (1.0 - stroke_weight);
+    // Intersect clears the source outside the shape, including zero-opacity
+    // shapes. Only the other three modes reduce to identity at zero coverage.
+    if (weight <= 0.0 && boolean_mode != 2u) {
+        if (pixel.a == 0.0) { return vec4<f32>(0.0); }
+        return pixel;
+    }
+    // The fused chain carries straight RGB. Associate only for Shape's boolean
+    // algebra, then unassociate before the next point operation/compositor.
+    // Transparent inputs still receive Add and Exclude coverage.
+    let source_alpha = clamp(pixel.a, 0.0, 1.0);
+    var source_weight = 1.0 - weight;
+    var shape_weight = 0.0;
+    if (boolean_mode == 0u) {
+        shape_weight = 1.0;
+    } else if (boolean_mode == 2u) {
+        source_weight = weight;
+    } else if (boolean_mode == 3u) {
+        shape_weight = 1.0 - source_alpha;
+    }
+    let weighted_source_alpha = source_alpha * source_weight;
+    let alpha = weighted_source_alpha + weight * shape_weight;
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let result = pixel.rgb * weighted_source_alpha + shape_premultiplied * shape_weight;
+    return vec4<f32>(result / alpha, alpha);
 }
 
 fn scanlines_apply(pixel: vec4<f32>, position: vec2<f32>, effect: EffectUniform) -> vec4<f32> {
@@ -4485,6 +4715,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             pixel = strobe_apply(pixel, effect);
         } else if (effect.header.x == 58u) {
             pixel = beam_apply(pixel, position, effect);
+        } else if (effect.header.x == 59u) {
+            pixel = shape_apply(pixel, position, effect);
         }
     }
     return pixel;
@@ -9186,6 +9418,23 @@ fn effect_uniforms_for_ops(
                     extra3,
                 }
             }
+            EffectGpuPointOp::Shape { grade } => {
+                // The shape geometry, composite, boolean tag and normalised
+                // centre fill the point uniform; the shader never re-derives
+                // them. Cell six carries `position`, the one cell the design
+                // marked reserved, because the centre cannot be reconstructed
+                // from the half extents alone.
+                let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
+                GpuEffectUniform {
+                    header: [59, 0, 0, 0],
+                    params,
+                    color,
+                    extra0,
+                    extra1,
+                    extra2,
+                    extra3,
+                }
+            }
             EffectGpuPointOp::Scanlines { grade } => {
                 let (params, color, extra0, extra1, extra2, extra3) = grade.gpu_controls();
                 GpuEffectUniform {
@@ -9516,9 +9765,16 @@ fn composite_output_alpha(
 
 fn effect_plan_preserves_full_coverage(plan: Option<&CompiledEffectGpuPlan>) -> bool {
     plan.is_none_or(|plan| {
-        plan.operations()
-            .iter()
-            .all(|operation| !matches!(operation, EffectGpuPointOp::Crop { .. }))
+        plan.operations().iter().all(|operation| match operation {
+            EffectGpuPointOp::Crop { .. } => false,
+            // Add over an opaque source stays opaque; the other boolean modes
+            // may cut holes and must not establish an opaque canvas/fast path.
+            EffectGpuPointOp::Shape { grade } => matches!(
+                grade.parameters().boolean_mode,
+                mondrian_effects::ShapeBooleanMode::Add
+            ),
+            _ => true,
+        })
     })
 }
 
@@ -14922,6 +15178,532 @@ mod tests {
                 "GPU beam accuracy budget exceeded for {label}: {report:?}"
             );
         }
+    }
+
+    #[test]
+    fn shape_uniforms_pack_kind_59_and_all_six_authored_cells() {
+        use mondrian_effects::{
+            ShapeBooleanMode, ShapeGrade, ShapeKind, ShapeParameters, ShapeStrokePosition,
+        };
+        let grade = ShapeGrade::new(ShapeParameters {
+            shape_type: ShapeKind::Star,
+            size: [150.0, 90.0],
+            position: [0.23, 0.71],
+            corner_radius: 50.0,
+            vertices: 6.6,
+            inner_ratio: 0.37,
+            stroke_width: 8.5,
+            rotation: -31.0,
+            opacity: 83.0,
+            fill_opacity: 71.0,
+            fill_colour: [0.9, 0.15, 0.35, 0.43],
+            stroke_colour: [0.1, 0.8, 0.25, 0.61],
+            stroke_position: ShapeStrokePosition::Outside,
+            boolean_mode: ShapeBooleanMode::Exclude,
+        })
+        .expect("valid shape grade");
+        let packed = effect_uniforms_for_ops(&[EffectGpuPointOp::Shape { grade }], None)
+            .expect("shape uniforms");
+        let uniform = &packed[0];
+        // Independent expected cells: this catches swapping a slot in the
+        // renderer even if the grade's own gpu_controls test still passes.
+        assert_eq!(uniform.header, [59, 0, 0, 0]);
+        assert_eq!(uniform.params, [75.0, 45.0, 45.0, 7.0]);
+        assert_eq!(uniform.color, [0.37, 8.5, -31.0_f32.to_radians(), 0.83]);
+        assert_eq!(uniform.extra0, [0.71, 4.0, 2.0, 3.0]);
+        assert_eq!(uniform.extra1, [0.9, 0.15, 0.35, 0.43]);
+        assert_eq!(uniform.extra2, [0.1, 0.8, 0.25, 0.61]);
+        assert_eq!(uniform.extra3, [0.23, 0.71, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn shape_boolean_modes_revoke_opaque_canvas_except_add() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp, ShapeBooleanMode, ShapeGrade, ShapeParameters,
+        };
+        for boolean_mode in ShapeBooleanMode::ALL {
+            let grade = ShapeGrade::new(ShapeParameters {
+                boolean_mode,
+                size: [2.0, 2.0],
+                ..ShapeParameters::default()
+            })
+            .expect("valid shape grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Shape { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("shape graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("shape GPU plan");
+            let preserves_opaque = boolean_mode == ShapeBooleanMode::Add;
+            assert_eq!(
+                effect_plan_preserves_full_coverage(Some(&plan)),
+                preserves_opaque
+            );
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::SolidColor(Color {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.6,
+                    a: 1.0,
+                }),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            assert_eq!(
+                layer_establishes_opaque_canvas(4, 4, &layer, false),
+                preserves_opaque
+            );
+        }
+    }
+
+    fn shape_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
+        let mut data = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            for column in 0..width {
+                let u = column as f32 / (width - 1) as f32;
+                let v = row as f32 / (height - 1) as f32;
+                // Every region contains opaque, partial and zero coverage. The
+                // zero-alpha pixels deliberately carry hidden colour: Add/Xor
+                // must paint them, but must not reveal that hidden source RGB.
+                let alpha = match (column * 5 + row * 3) % 7 {
+                    0 => 0.0,
+                    1 => 1.0,
+                    2 => 1.0 / 65_535.0,
+                    _ => 0.2 + 0.65 * ((column + row) % 17) as f32 / 17.0,
+                };
+                // Include negative and HDR straight colour to expose accidental
+                // display clamps as well as association/weighting mistakes.
+                data.push([-0.15 + 1.5 * u, 0.1 + 0.7 * v, 1.2 - 0.5 * u, alpha]);
+            }
+        }
+        data
+    }
+
+    #[tokio::test]
+    async fn gpu_shape_associated_output_parity_when_adapter_available() {
+        use crate::color_accuracy::{
+            compare_linear_rgba, LinearAccuracyBudget, LinearRgbaAccuracyBudget,
+        };
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, shape::shape_frame_f32,
+            EffectGraphBuilderState, EffectRenderOp, ShapeBooleanMode, ShapeGrade, ShapeKind,
+            ShapeParameters, ShapeStrokePosition,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU shape parity test: no GPU adapter available");
+            return;
+        };
+        // The default rectangle is 200 x 200, so the frame has to be wider than
+        // that for the fixture to hold inside, outside and straddling pixels.
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 240;
+        let defaults = ShapeParameters::default();
+        let cases = [
+            ("documented defaults rectangle", defaults),
+            (
+                "circle",
+                ShapeParameters {
+                    shape_type: ShapeKind::Circle,
+                    size: [170.0, 170.0],
+                    ..defaults
+                },
+            ),
+            (
+                "ellipse",
+                ShapeParameters {
+                    shape_type: ShapeKind::Ellipse,
+                    size: [260.0, 110.0],
+                    ..defaults
+                },
+            ),
+            (
+                "polygon with seven vertices",
+                ShapeParameters {
+                    shape_type: ShapeKind::Polygon,
+                    vertices: 7.0,
+                    size: [200.0, 200.0],
+                    ..defaults
+                },
+            ),
+            (
+                "star with five vertices and inner ratio 0.4",
+                ShapeParameters {
+                    shape_type: ShapeKind::Star,
+                    vertices: 5.0,
+                    inner_ratio: 0.4,
+                    size: [220.0, 220.0],
+                    ..defaults
+                },
+            ),
+            (
+                "line with stroke width 60",
+                ShapeParameters {
+                    shape_type: ShapeKind::Line,
+                    size: [240.0, 0.0],
+                    stroke_width: 60.0,
+                    ..defaults
+                },
+            ),
+            (
+                "outside stroke of 12 px rotated 30 degrees",
+                ShapeParameters {
+                    size: [170.0, 130.0],
+                    stroke_width: 12.0,
+                    stroke_position: ShapeStrokePosition::Outside,
+                    rotation: 30.0,
+                    ..defaults
+                },
+            ),
+            (
+                "subtract at 60 percent opacity",
+                ShapeParameters {
+                    size: [200.0, 160.0],
+                    fill_colour: [0.9, 0.35, 0.1, 1.0],
+                    fill_opacity: 80.0,
+                    boolean_mode: ShapeBooleanMode::Subtract,
+                    opacity: 60.0,
+                    ..defaults
+                },
+            ),
+        ];
+        let mut cases: Vec<_> = cases
+            .into_iter()
+            .map(|(label, parameters)| (label.to_owned(), parameters, false))
+            .collect();
+        // Full 6 x 4 x 3 mode matrix, not merely one example of each enum. A
+        // non-central, subpixel centre and rotation exercise all coordinate
+        // lanes; partial colour alpha and gains distinguish stroke from fill.
+        for shape_type in ShapeKind::ALL {
+            for boolean_mode in ShapeBooleanMode::ALL {
+                for stroke_position in ShapeStrokePosition::ALL {
+                    cases.push((
+                        format!("{shape_type:?}/{boolean_mode:?}/{stroke_position:?}"),
+                        ShapeParameters {
+                            shape_type,
+                            boolean_mode,
+                            stroke_position,
+                            size: [173.5, 119.25],
+                            position: [0.371, 0.637],
+                            corner_radius: 19.0,
+                            vertices: 6.6,
+                            inner_ratio: 0.37,
+                            fill_colour: [0.9, 0.15, 0.35, 0.25],
+                            fill_opacity: 71.0,
+                            stroke_width: 7.5,
+                            stroke_colour: [0.1, 0.8, 0.25, 0.5],
+                            rotation: -31.0,
+                            opacity: 83.0,
+                        },
+                        false,
+                    ));
+                }
+            }
+            // Each extent can vanish independently. Intersect must clear the
+            // whole source for empty non-lines, while a line retains its spine.
+            for size in [[0.0, 0.0], [0.0, 80.0], [100.0, 0.0]] {
+                cases.push((
+                    format!("{shape_type:?}/Intersect/size={size:?}"),
+                    ShapeParameters {
+                        shape_type,
+                        size,
+                        boolean_mode: ShapeBooleanMode::Intersect,
+                        stroke_width: 4.0,
+                        ..defaults
+                    },
+                    false,
+                ));
+            }
+        }
+        for boolean_mode in ShapeBooleanMode::ALL {
+            // A completely transparent source catches a missing kind-59 entry
+            // in effects_author_coverage, not just straight/premult arithmetic.
+            cases.push((
+                format!("transparent source/{boolean_mode:?}"),
+                ShapeParameters {
+                    size: [150.0, 100.0],
+                    boolean_mode,
+                    fill_colour: [0.8, 0.2, 0.6, 0.5],
+                    stroke_colour: [0.15, 0.9, 0.4, 0.75],
+                    stroke_width: 9.0,
+                    ..defaults
+                },
+                true,
+            ));
+        }
+        for (label, changed) in [
+            (
+                "exclude zero opacity identity",
+                ShapeParameters {
+                    boolean_mode: ShapeBooleanMode::Exclude,
+                    opacity: 0.0,
+                    ..defaults
+                },
+            ),
+            (
+                "intersect zero opacity",
+                ShapeParameters {
+                    boolean_mode: ShapeBooleanMode::Intersect,
+                    opacity: 0.0,
+                    ..defaults
+                },
+            ),
+            (
+                "intersect no fill or stroke",
+                ShapeParameters {
+                    boolean_mode: ShapeBooleanMode::Intersect,
+                    fill_opacity: 0.0,
+                    stroke_width: 0.0,
+                    ..defaults
+                },
+            ),
+            (
+                "intersect transparent fill and stroke",
+                ShapeParameters {
+                    boolean_mode: ShapeBooleanMode::Intersect,
+                    fill_colour: [0.8, 0.3, 0.1, 0.0],
+                    stroke_colour: [0.1, 0.6, 0.9, 0.0],
+                    stroke_width: 10.0,
+                    ..defaults
+                },
+            ),
+            (
+                "corner centre and oversized rounded corners",
+                ShapeParameters {
+                    position: [0.0, 1.0],
+                    size: [91.0, 47.0],
+                    corner_radius: 500.0,
+                    rotation: 90.0,
+                    ..defaults
+                },
+            ),
+            (
+                "triangle",
+                ShapeParameters {
+                    shape_type: ShapeKind::Polygon,
+                    vertices: 3.0,
+                    size: [179.0, 131.0],
+                    ..defaults
+                },
+            ),
+            (
+                "twenty-gon",
+                ShapeParameters {
+                    shape_type: ShapeKind::Polygon,
+                    vertices: 20.0,
+                    size: [179.0, 131.0],
+                    ..defaults
+                },
+            ),
+            (
+                "star collapsed inner ratio",
+                ShapeParameters {
+                    shape_type: ShapeKind::Star,
+                    inner_ratio: 0.0,
+                    size: [179.0, 131.0],
+                    rotation: 17.0,
+                    ..defaults
+                },
+            ),
+            (
+                "star unit inner ratio",
+                ShapeParameters {
+                    shape_type: ShapeKind::Star,
+                    inner_ratio: 1.0,
+                    size: [179.0, 131.0],
+                    rotation: -17.0,
+                    ..defaults
+                },
+            ),
+            (
+                "line zero stroke one pixel spine",
+                ShapeParameters {
+                    shape_type: ShapeKind::Line,
+                    size: [120.0, 0.0],
+                    stroke_width: 0.0,
+                    rotation: 90.0,
+                    ..defaults
+                },
+            ),
+            (
+                "line rotated solid capsule",
+                ShapeParameters {
+                    shape_type: ShapeKind::Line,
+                    size: [120.0, 0.0],
+                    stroke_width: 13.0,
+                    rotation: 37.0,
+                    ..defaults
+                },
+            ),
+        ] {
+            cases.push((label.to_owned(), changed, false));
+        }
+        assert_eq!(cases.len(), 113);
+        let input = shape_test_pixels(WIDTH, HEIGHT);
+        let transparent_input = vec![[0.7, -0.2, 1.4, 0.0]; (WIDTH * HEIGHT) as usize];
+        let frame_from_data = |data| {
+            CpuColorFrame::working(WorkingRgbaF32Frame {
+                sampling: mondrian_core::ImageSampling::UNIT_SQUARE,
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                width: WIDTH,
+                height: HEIGHT,
+                color_space: WorkingColorSpace::LinearRec709,
+                data,
+            })
+        };
+        let frame = frame_from_data(input.clone());
+        let transparent_frame = frame_from_data(transparent_input.clone());
+        // Reuse pipelines across the matrix rather than compiling the large
+        // compositor shader once per case through the generic readback helper.
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut worst_rgb = 0.0_f64;
+        let mut worst_alpha = 0.0_f64;
+        let mut tiny_coverage_checks = 0;
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame ids");
+        for (label, parameters, transparent_source) in cases {
+            let grade = ShapeGrade::new(parameters).expect("valid shape grade");
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::Shape { grade });
+            let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+            let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effect");
+            assert_eq!(plan.operations().len(), 1);
+            let mut expected = if transparent_source {
+                transparent_input.clone()
+            } else {
+                input.clone()
+            };
+            assert!(shape_frame_f32(
+                &mut expected,
+                WIDTH as usize,
+                HEIGHT as usize,
+                &grade,
+            ));
+            // Normal Over onto an empty target canonicalises hidden RGB at
+            // alpha zero, including identity pixels outside the shape.
+            for pixel in &mut expected {
+                if pixel[3] == 0.0 {
+                    *pixel = [0.0; 4];
+                }
+            }
+            let layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(if transparent_source {
+                    &transparent_frame
+                } else {
+                    &frame
+                }),
+                opacity: 1.0,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 0,
+            };
+            let mut table = GpuColorFrameResourceTable::new();
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("shape-parity"),
+                });
+            let record = compositor
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    GpuCompositeRequest {
+                        width: WIDTH,
+                        height: HEIGHT,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: &[layer],
+                    },
+                )
+                .expect("record shape parity");
+            assert_eq!(record.diagnostics.execution.fused_point_operations, 1);
+            let actual = readback_composite_output(
+                &context,
+                encoder,
+                &mut table,
+                &record.output,
+                WIDTH,
+                HEIGHT,
+            );
+            if transparent_source
+                && matches!(
+                    parameters.boolean_mode,
+                    ShapeBooleanMode::Add | ShapeBooleanMode::Exclude
+                )
+            {
+                assert!(
+                    actual.iter().any(|pixel| pixel[3] > 0.0),
+                    "{label}: shape must author coverage on a transparent source"
+                );
+            }
+            for (index, (reference, gpu)) in expected.iter().zip(&actual).enumerate() {
+                // Straight colour is discontinuous when AA changes exact zero
+                // into tiny positive coverage. Check it independently where
+                // division is well-conditioned, rather than silently widening
+                // the colour budget for invisible pixels.
+                if reference[3] >= 0.1 {
+                    for channel in 0..3 {
+                        assert!(
+                            (reference[channel] - gpu[channel]).abs() <= 2.0e-4,
+                            "{label} pixel {index}: straight RGB {reference:?} != {gpu:?}"
+                        );
+                    }
+                }
+                // The associated-frame alpha budget is larger than one 16-bit
+                // code. Explicitly pin untouched tiny-coverage samples so an
+                // epsilon cutoff cannot hide inside that geometry budget.
+                if !transparent_source
+                    && *reference == input[index]
+                    && reference[3] == 1.0 / 65_535.0
+                {
+                    tiny_coverage_checks += 1;
+                    assert!(
+                        (gpu[3] - reference[3]).abs() <= 1.0e-10,
+                        "{label} pixel {index}: lost positive 16-bit coverage"
+                    );
+                    for channel in 0..3 {
+                        assert!(
+                            (reference[channel] - gpu[channel]).abs() <= 2.0e-4,
+                            "{label} pixel {index}: lost tiny-coverage straight colour"
+                        );
+                    }
+                }
+            }
+            let associate = |pixels: &[[f32; 4]]| -> Vec<[f32; 4]> {
+                pixels.iter().map(|p| [p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]]).collect()
+            };
+            let report = compare_linear_rgba(
+                &associate(&expected),
+                &associate(&actual),
+                LinearRgbaAccuracyBudget {
+                    rgb: LinearAccuracyBudget::finite(2.0e-4, 2.0e-4, 2.0e-4),
+                    // Trig/SDF error is measured as alpha too, not hidden behind
+                    // the straight RGB divide. This is <= 1/20000 coverage.
+                    alpha: LinearAccuracyBudget::finite(5.0e-5, 5.0e-5, 5.0e-5),
+                },
+            )
+            .expect("comparable frames");
+            eprintln!(
+                "shape parity {label}: rgb={:.3e} alpha={:.3e}",
+                report.rgb.statistics.max_absolute_error,
+                report.alpha.statistics.max_absolute_error,
+            );
+            assert!(
+                report.within_budget,
+                "GPU shape accuracy budget exceeded for {label}: {report:?}"
+            );
+            worst_rgb = worst_rgb.max(report.rgb.statistics.max_absolute_error);
+            worst_alpha = worst_alpha.max(report.alpha.statistics.max_absolute_error);
+        }
+        assert!(
+            tiny_coverage_checks > 0,
+            "fixture must exercise untouched tiny coverage"
+        );
+        eprintln!("shape parity worst: rgb={worst_rgb:.3e} alpha={worst_alpha:.3e}");
     }
 
     fn star_burst_test_pixels(width: u32, height: u32) -> Vec<[f32; 4]> {
@@ -27208,8 +27990,7 @@ mod tests {
             AuxiliaryFloatFrame, AuxiliaryOutOfBounds, AuxiliaryPolicy, AuxiliaryResolution,
             AuxiliarySampling, CompoundArithmeticGrade, CompoundChannels, CompoundOperator,
             CompoundOverflow, CompoundStretch, EffectColorDomain, EffectFloatFrameView,
-            EffectFrameExtent, EffectRenderOp, EffectValueFormat, EffectWorkingPrecision,
-            IDENTITY_AFFINE,
+            EffectFrameExtent, EffectValueFormat, EffectWorkingPrecision, IDENTITY_AFFINE,
         };
 
         let width = 9;
