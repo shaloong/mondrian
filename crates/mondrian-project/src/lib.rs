@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 35;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 36;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -353,6 +353,11 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
             to: 35,
             migrate: migrate_document_v34_to_v35,
         },
+        JsonMigrationStep {
+            from: 35,
+            to: 36,
+            migrate: migrate_document_v35_to_v36,
+        },
     ],
 );
 
@@ -455,6 +460,62 @@ fn migrate_document_v34_to_v35(mut value: serde_json::Value) -> anyhow::Result<s
         }
     }
     value["schema_version"] = serde_json::json!(35);
+    Ok(value)
+}
+
+// The document's SequenceCollection also holds nested sequences by ID.
+// Only the canonical clip-content path owns a Basic Title property bag.
+fn migrate_document_v35_to_v36(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    use serde_json::Value;
+
+    let sequences = value
+        .get_mut("sequences")
+        .and_then(|collection| collection.get_mut("sequences"))
+        .and_then(Value::as_array_mut)
+        .context("schema-35 document has no Sequence collection")?;
+    for sequence in sequences {
+        for track_list in ["video_tracks", "audio_tracks"] {
+            let tracks = sequence
+                .get_mut(track_list)
+                .and_then(Value::as_array_mut)
+                .with_context(|| format!("schema-35 Sequence has no {track_list} array"))?;
+            for track in tracks {
+                let clips = track
+                    .get_mut("clips")
+                    .and_then(Value::as_array_mut)
+                    .context("schema-35 Track has no Clip array")?;
+                for clip in clips {
+                    let Some(content) = clip.get_mut("content") else {
+                        continue;
+                    };
+                    if content.get("type").and_then(Value::as_str) != Some("basic_title") {
+                        continue;
+                    }
+                    let properties = content
+                        .pointer_mut("/title/properties/properties")
+                        .and_then(Value::as_object_mut)
+                        .context("schema-35 Basic Title has no property map")?;
+                    // Build once per title: do not share generated animation track IDs.
+                    let mut defaults =
+                        serde_json::to_value(mondrian_core::BasicTitle::decoration_defaults())?;
+                    let defaults =
+                        defaults.get_mut("properties").and_then(Value::as_object_mut).context(
+                            "Basic Title decoration defaults did not serialize to a property map",
+                        )?;
+                    for path in defaults.keys() {
+                        // Presence is invalid even when null or exactly a default.
+                        anyhow::ensure!(
+                            !properties.contains_key(path),
+                            "schema-35 Basic Title cannot contain decoration property `{path}`"
+                        );
+                    }
+                    // Do not reserialize any old value, descriptor, ID or keyframe.
+                    properties.append(defaults);
+                }
+            }
+        }
+    }
+    value["schema_version"] = serde_json::json!(36);
     Ok(value)
 }
 
@@ -3185,6 +3246,228 @@ mod tests {
             .expect("reopened Qualifier author state");
     }
 
+    const TTL01_MAIN_TITLE_FIELDS: &str =
+        "/sequences/sequences/0/video_tracks/0/clips/0/content/title/properties/properties";
+    const TTL01_CHILD_TITLE_FIELDS: &str =
+        "/sequences/sequences/1/video_tracks/0/clips/0/content/title/properties/properties";
+
+    fn ttl01_expected_defaults() -> [(&'static str, PropertyValue); 8] {
+        let black = mondrian_core::Color::BLACK;
+        [
+            ("title.stroke_width", PropertyValue::Float(0.0)),
+            ("title.stroke_color", PropertyValue::Color(black)),
+            ("title.shadow_distance", PropertyValue::Float(0.0)),
+            ("title.shadow_softness", PropertyValue::Float(10.0)),
+            ("title.shadow_color", PropertyValue::Color(black)),
+            ("title.background_color", PropertyValue::Color(black)),
+            ("title.background_opacity", PropertyValue::Float(0.0)),
+            ("title.opacity", PropertyValue::Float(1.0)),
+        ]
+    }
+
+    fn ttl01_title_fields_mut<'a>(
+        document: &'a mut serde_json::Value,
+        pointer: &str,
+    ) -> &'a mut serde_json::Map<String, serde_json::Value> {
+        document.pointer_mut(pointer).unwrap().as_object_mut().unwrap()
+    }
+
+    fn ttl01_schema35_title_fixture() -> serde_json::Value {
+        let time = |seconds| TimelineTime::new(seconds, 1).unwrap();
+        let mut document = test_document();
+        let mut child = Sequence::new("Child");
+        for sequence in [document.sequences.active_mut().unwrap(), &mut child] {
+            let mut title = Clip::new_basic_title(
+                "Mondrian 标题",
+                mondrian_core::default_basic_title_font_family(),
+                TimelineTime::ZERO,
+                time(5),
+            )
+            .unwrap();
+            title.clip_time_in = time(10);
+            for (key_time, size) in [(10, 72.0), (14, 144.0)] {
+                title
+                    .apply_property_mutation(PropertyMutation::SetKeyframe {
+                        path: mondrian_core::BasicTitle::FONT_SIZE_PATH.to_owned(),
+                        keyframe: Keyframe::linear(time(key_time), PropertyValue::Float(size)),
+                    })
+                    .unwrap();
+            }
+            sequence.video_tracks[0].add_clip(title).unwrap();
+        }
+        let child_id = document.sequences.add_sequence(child).unwrap();
+        let root_track = &mut document.sequences.active_mut().unwrap().video_tracks[0];
+        let mut media = Clip::new(AssetId::new(), time(5), time(5)).unwrap();
+        let parameter_id = ParameterId::new_static("mondrian.effect.builtin.gaussian_blur.radius");
+        let mut effect = EffectNode::new(EffectType::GaussianBlur);
+        effect.define_property(
+            PropertyDescriptor::new(
+                "effect.gaussian_blur.radius",
+                "Radius",
+                PropertyValue::Float(12.0),
+            )
+            .with_parameter_id(parameter_id),
+        );
+        media.add_effect_node(effect);
+        root_track.add_clip(media).unwrap();
+        root_track
+            .add_clip(Clip::new_nested_sequence(child_id, time(10), time(5), None).unwrap())
+            .unwrap();
+
+        let mut legacy = serde_json::to_value(document).unwrap();
+        legacy["schema_version"] = serde_json::json!(35);
+        for pointer in [TTL01_MAIN_TITLE_FIELDS, TTL01_CHILD_TITLE_FIELDS] {
+            let fields = ttl01_title_fields_mut(&mut legacy, pointer);
+            for (path, _) in ttl01_expected_defaults() {
+                fields.remove(path).expect("strip each v36 property");
+            }
+        }
+        legacy
+    }
+
+    fn ttl01_write_title_archive(path: &Path, value: &serde_json::Value) {
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).unwrap();
+        let document = serde_json::to_vec(value).unwrap();
+        write_raw_stored_archive(
+            path,
+            &[
+                (MANIFEST_ENTRY, &manifest),
+                (PROJECT_ENTRY, &document),
+                (LIBRARY_ENTRY, b"sqlite fixture"),
+            ],
+        );
+    }
+
+    #[test]
+    fn ttl01_schema35_nested_basic_titles_migrate_exactly_and_resave_as_current() {
+        let root = unique_temp_dir("ttl01-title-schema35");
+        let legacy = ttl01_schema35_title_fixture();
+        let migrated = DOCUMENT_MIGRATIONS.migrate(legacy.clone()).unwrap();
+        let main = migrated.pointer(TTL01_MAIN_TITLE_FIELDS).unwrap();
+        let child = migrated.pointer(TTL01_CHILD_TITLE_FIELDS).unwrap();
+        let mut stripped = migrated.clone();
+        stripped["schema_version"] = serde_json::json!(35);
+        for (path, expected) in ttl01_expected_defaults() {
+            let expected = serde_json::to_value(expected).unwrap();
+            for fields in [main, child] {
+                assert_eq!(fields[path]["static_value"], expected, "{path}");
+                assert_eq!(fields[path]["animation_enabled"], serde_json::json!(false));
+            }
+            assert_ne!(main[path]["track_id"], child[path]["track_id"], "{path}");
+            for pointer in [TTL01_MAIN_TITLE_FIELDS, TTL01_CHILD_TITLE_FIELDS] {
+                ttl01_title_fields_mut(&mut stripped, pointer).remove(path).unwrap();
+            }
+        }
+        // Includes every old descriptor, ID, value, curve, normal clip,
+        // Effect, and nested Sequence reference.
+        assert_eq!(stripped, legacy);
+
+        let archive = root.join("legacy.mdp");
+        ttl01_write_title_archive(&archive, &legacy);
+        let runtime = root.join("runtime");
+        let opened = load_project_archive(&archive, &runtime).unwrap();
+        assert_eq!(opened.source_document_schema_version, 35);
+        assert_eq!(
+            opened.document.schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
+        for sequence in &opened.document.sequences.sequences {
+            let clip = &sequence.video_tracks[0].clips[0];
+            assert_eq!(clip.clip_time_in, TimelineTime::new(10, 1).unwrap());
+            let author_time = clip.timeline_to_clip_time(TimelineTime::new(2, 1).unwrap()).unwrap();
+            assert_eq!(author_time, TimelineTime::new(12, 1).unwrap());
+            let title = clip.content.basic_title().unwrap();
+            let midpoint = title.evaluate(author_time).unwrap();
+            assert_eq!(midpoint.text, "Mondrian 标题");
+            assert!((midpoint.font_size - 108.0).abs() < 1.0e-5);
+        }
+
+        // Keep the migrated IDs and preserve a nondefault v36 authored value.
+        let mut authored = serde_json::to_value(&opened.document).unwrap();
+        ttl01_title_fields_mut(&mut authored, TTL01_CHILD_TITLE_FIELDS)
+            .get_mut("title.background_opacity")
+            .unwrap()["static_value"] = serde_json::to_value(PropertyValue::Float(0.5)).unwrap();
+        let document: ProjectDocument = serde_json::from_value(authored).unwrap();
+        let current_archive = root.join("current.mdp");
+        save_project_archive(&document, &runtime.join("index.db"), &current_archive).unwrap();
+        assert_eq!(
+            read_project_document_from_archive(&current_archive).unwrap(),
+            document
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ttl01_schema35_title_migration_ignores_lookalikes_outside_clip_content() {
+        let mut legacy = ttl01_schema35_title_fixture();
+        let current = DOCUMENT_MIGRATIONS.migrate(legacy.clone()).unwrap();
+        let v36_title =
+            &current["sequences"]["sequences"][0]["video_tracks"][0]["clips"][0]["content"];
+        let clip = &mut legacy["sequences"]["sequences"][0]["video_tracks"][0]["clips"][1];
+        // Deliberately invalid as a typed document: the raw migration must not
+        // recursively interpret unrelated data or use the wrong variant tag.
+        clip["effects"][0]["content"] = v36_title.clone();
+        clip["content"]["kind"] = serde_json::json!("basic_title");
+        clip["content"]["payload"] = v36_title["title"].clone();
+        let untouched = clip.clone();
+        let migrated = DOCUMENT_MIGRATIONS.migrate(legacy).unwrap();
+        assert_eq!(
+            migrated["sequences"]["sequences"][0]["video_tracks"][0]["clips"][1],
+            untouched
+        );
+    }
+
+    #[test]
+    fn ttl01_schema35_basic_title_rejects_each_prepopulated_field_including_null() {
+        let legacy = ttl01_schema35_title_fixture();
+        let current = DOCUMENT_MIGRATIONS.migrate(legacy.clone()).unwrap();
+        let current_fields = current.pointer(TTL01_CHILD_TITLE_FIELDS).unwrap();
+        for (path, _) in ttl01_expected_defaults() {
+            for entry in [serde_json::Value::Null, current_fields[path].clone()] {
+                let mut mislabeled = legacy.clone();
+                ttl01_title_fields_mut(&mut mislabeled, TTL01_CHILD_TITLE_FIELDS)
+                    .insert(path.to_owned(), entry);
+                let error = DOCUMENT_MIGRATIONS.migrate(mislabeled).unwrap_err();
+                assert!(format!("{error:#}").contains(&format!(
+                    "schema-35 Basic Title cannot contain decoration property `{path}`"
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn ttl01_current_archive_does_not_repair_missing_or_malformed_basic_title_fields() {
+        let root = unique_temp_dir("ttl01-title-malformed-current");
+        let current = DOCUMENT_MIGRATIONS.migrate(ttl01_schema35_title_fixture()).unwrap();
+        for (case, static_value) in [
+            ("missing", None),
+            ("animated", None),
+            (
+                "wrong-type",
+                Some(PropertyValue::Text("not opacity".to_owned())),
+            ),
+            ("out-of-range", Some(PropertyValue::Float(1.01))),
+        ] {
+            let mut invalid = current.clone();
+            let fields = ttl01_title_fields_mut(&mut invalid, TTL01_CHILD_TITLE_FIELDS);
+            if let Some(value) = static_value {
+                fields.get_mut("title.opacity").unwrap()["static_value"] =
+                    serde_json::to_value(value).unwrap();
+            } else if case == "animated" {
+                fields.get_mut("title.opacity").unwrap()["animation_enabled"] =
+                    serde_json::json!(true);
+            } else {
+                fields.remove("title.opacity").unwrap();
+            }
+            let archive = root.join(format!("{case}.mdp"));
+            ttl01_write_title_archive(&archive, &invalid);
+            assert!(
+                read_project_document_from_archive(&archive).is_err(),
+                "{case}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn basic_title_closed_author_state_round_trips_with_exact_animation() {
         let root = unique_temp_dir("basic-title-round-trip");
@@ -4002,7 +4285,9 @@ mod tests {
                 ProjectArchiveReadBudget::default(),
             )
             .expect_err("old reader must refuse the new authored value schema");
-            assert!(error.to_string().contains("unsupported project document version: 35"));
+            assert!(error.to_string().contains(&format!(
+                "unsupported project document version: {PROJECT_DOCUMENT_SCHEMA_VERSION}"
+            )));
         }
         fs::remove_dir_all(root).unwrap();
     }

@@ -52,6 +52,42 @@ pub enum BasicTitleFontStyle {
     Oblique,
 }
 
+/// Static decoration controls in full-resolution Sequence pixels and working-linear color.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BasicTitleAppearance {
+    /// Extent of the outline under the fill.
+    pub stroke_width: f32,
+    /// Straight-alpha outline color.
+    pub stroke_color: Color,
+    /// Shadow offset along the down-right diagonal.
+    pub shadow_distance: f32,
+    /// Radius of the finite-support shadow blur.
+    pub shadow_softness: f32,
+    /// Straight-alpha shadow color.
+    pub shadow_color: Color,
+    /// Straight-alpha background color.
+    pub background_color: Color,
+    /// Additional opacity of the background, in [0, 1].
+    pub background_opacity: f32,
+    /// Overall generated title opacity, in [0, 1], before Clip opacity.
+    pub opacity: f32,
+}
+
+impl Default for BasicTitleAppearance {
+    fn default() -> Self {
+        Self {
+            stroke_width: 0.0,
+            stroke_color: Color::BLACK,
+            shadow_distance: 0.0,
+            shadow_softness: 10.0,
+            shadow_color: Color::BLACK,
+            background_color: Color::BLACK,
+            background_opacity: 0.0,
+            opacity: 1.0,
+        }
+    }
+}
+
 /// Fully evaluated Basic Title semantics at one title-local author time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvaluatedBasicTitle {
@@ -75,6 +111,8 @@ pub struct EvaluatedBasicTitle {
     pub horizontal_align: BasicTitleHorizontalAlign,
     /// Vertical canvas alignment.
     pub vertical_align: BasicTitleVerticalAlign,
+    /// Static title decorations, independent of the Clip transform and opacity.
+    pub appearance: BasicTitleAppearance,
 }
 
 /// Sequence-local Basic Title author state.
@@ -109,8 +147,24 @@ impl BasicTitle {
     pub const HORIZONTAL_ALIGN_PATH: &'static str = "title.horizontal_align";
     /// Current property address for vertical alignment.
     pub const VERTICAL_ALIGN_PATH: &'static str = "title.vertical_align";
+    /// Current property address for outline extent.
+    pub const STROKE_WIDTH_PATH: &'static str = "title.stroke_width";
+    /// Current property address for working-linear outline color.
+    pub const STROKE_COLOR_PATH: &'static str = "title.stroke_color";
+    /// Current property address for shadow offset.
+    pub const SHADOW_DISTANCE_PATH: &'static str = "title.shadow_distance";
+    /// Current property address for shadow blur radius.
+    pub const SHADOW_SOFTNESS_PATH: &'static str = "title.shadow_softness";
+    /// Current property address for working-linear shadow color.
+    pub const SHADOW_COLOR_PATH: &'static str = "title.shadow_color";
+    /// Current property address for working-linear backdrop color.
+    pub const BACKGROUND_COLOR_PATH: &'static str = "title.background_color";
+    /// Current property address for backdrop opacity.
+    pub const BACKGROUND_OPACITY_PATH: &'static str = "title.background_opacity";
+    /// Current property address for generated title opacity.
+    pub const OPACITY_PATH: &'static str = "title.opacity";
     /// Canonical Basic Title property order used by authoring Adapters.
-    pub const PROPERTY_PATHS: [&'static str; 10] = [
+    pub const PROPERTY_PATHS: [&'static str; 18] = [
         Self::TEXT_PATH,
         Self::FONT_FAMILY_PATH,
         Self::FONT_WEIGHT_PATH,
@@ -121,6 +175,14 @@ impl BasicTitle {
         Self::LINE_HEIGHT_PATH,
         Self::HORIZONTAL_ALIGN_PATH,
         Self::VERTICAL_ALIGN_PATH,
+        Self::STROKE_WIDTH_PATH,
+        Self::STROKE_COLOR_PATH,
+        Self::SHADOW_DISTANCE_PATH,
+        Self::SHADOW_SOFTNESS_PATH,
+        Self::SHADOW_COLOR_PATH,
+        Self::BACKGROUND_COLOR_PATH,
+        Self::BACKGROUND_OPACITY_PATH,
+        Self::OPACITY_PATH,
     ];
 
     /// Build a validated Basic Title with a concrete named font dependency.
@@ -138,6 +200,16 @@ impl BasicTitle {
         Ok(title)
     }
 
+    /// Create fresh canonical decoration properties for versioned legacy project migration.
+    /// A caller must refuse to overwrite any decoration already present in an older payload.
+    pub fn decoration_defaults() -> PropertyBag {
+        let mut properties = PropertyBag::default();
+        for descriptor in decoration_descriptors() {
+            properties.define(descriptor);
+        }
+        properties
+    }
+
     /// Return the closed property set for Inspector and command routing.
     pub fn property_bag(&self) -> PropertyBag {
         self.properties.clone()
@@ -150,8 +222,11 @@ impl BasicTitle {
                 "built-in Basic Title properties cannot be removed",
             ));
         }
-        self.properties.apply_mutation(mutation)?;
-        self.validate_author_state()
+        let mut candidate = self.clone();
+        candidate.properties.apply_mutation(mutation)?;
+        candidate.validate_author_state()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Fork placement-local animation and keyframe identities.
@@ -250,12 +325,38 @@ impl BasicTitle {
             line_height: required_float(&self.properties, Self::LINE_HEIGHT_PATH, time)?,
             horizontal_align,
             vertical_align,
+            appearance: BasicTitleAppearance {
+                stroke_width: required_float(&self.properties, Self::STROKE_WIDTH_PATH, time)?,
+                stroke_color: required_color(&self.properties, Self::STROKE_COLOR_PATH, time)?,
+                shadow_distance: required_float(
+                    &self.properties,
+                    Self::SHADOW_DISTANCE_PATH,
+                    time,
+                )?,
+                shadow_softness: required_float(
+                    &self.properties,
+                    Self::SHADOW_SOFTNESS_PATH,
+                    time,
+                )?,
+                shadow_color: required_color(&self.properties, Self::SHADOW_COLOR_PATH, time)?,
+                background_color: required_color(
+                    &self.properties,
+                    Self::BACKGROUND_COLOR_PATH,
+                    time,
+                )?,
+                background_opacity: required_float(
+                    &self.properties,
+                    Self::BACKGROUND_OPACITY_PATH,
+                    time,
+                )?,
+                opacity: required_float(&self.properties, Self::OPACITY_PATH, time)?,
+            },
         })
     }
 }
 
 fn canonical_descriptors() -> Vec<PropertyDescriptor> {
-    vec![
+    let mut descriptors = vec![
         PropertyDescriptor::new(
             BasicTitle::TEXT_PATH,
             "文字",
@@ -374,6 +475,99 @@ fn canonical_descriptors() -> Vec<PropertyDescriptor> {
             ("bottom", "Bottom"),
         ]))
         .with_animatable(false),
+    ];
+    descriptors.extend(decoration_descriptors());
+    descriptors
+}
+
+fn decoration_descriptors() -> [PropertyDescriptor; 8] {
+    let defaults = BasicTitleAppearance::default();
+    let pixels = |value, max| {
+        (
+            PropertyValue::Float(value),
+            ParameterUnit::Pixels,
+            ParameterNumericContract::closed(
+                0.0,
+                max,
+                Some(1.0),
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("Basic Title pixels constants form a valid numeric contract"),
+        )
+    };
+    let opacity = |value| {
+        (
+            PropertyValue::Float(value),
+            ParameterUnit::Normalized,
+            ParameterNumericContract::closed(
+                0.0,
+                1.0,
+                Some(0.01),
+                ParameterInvalidValuePolicy::Reject,
+            )
+            .expect("Basic Title opacity constants form a valid numeric contract"),
+        )
+    };
+    let numeric = |path, id, label, (value, unit, contract)| {
+        PropertyDescriptor::new(path, label, value)
+            .with_parameter_id(ParameterId::new_static(id))
+            .with_numeric_contract(unit, contract)
+            .with_animatable(false)
+    };
+    let color = |path, id, label, value| {
+        PropertyDescriptor::new(path, label, PropertyValue::Color(value))
+            .with_parameter_id(ParameterId::new_static(id))
+            .with_animatable(false)
+    };
+    [
+        numeric(
+            BasicTitle::STROKE_WIDTH_PATH,
+            "mondrian.title.stroke_width",
+            "描边宽度",
+            pixels(defaults.stroke_width, 50.0),
+        ),
+        color(
+            BasicTitle::STROKE_COLOR_PATH,
+            "mondrian.title.stroke_color",
+            "描边颜色",
+            defaults.stroke_color,
+        ),
+        numeric(
+            BasicTitle::SHADOW_DISTANCE_PATH,
+            "mondrian.title.shadow_distance",
+            "阴影距离",
+            pixels(defaults.shadow_distance, 100.0),
+        ),
+        numeric(
+            BasicTitle::SHADOW_SOFTNESS_PATH,
+            "mondrian.title.shadow_softness",
+            "阴影柔化",
+            pixels(defaults.shadow_softness, 100.0),
+        ),
+        color(
+            BasicTitle::SHADOW_COLOR_PATH,
+            "mondrian.title.shadow_color",
+            "阴影颜色",
+            defaults.shadow_color,
+        ),
+        color(
+            BasicTitle::BACKGROUND_COLOR_PATH,
+            "mondrian.title.background_color",
+            "背景颜色",
+            defaults.background_color,
+        ),
+        numeric(
+            BasicTitle::BACKGROUND_OPACITY_PATH,
+            "mondrian.title.background_opacity",
+            "背景不透明度",
+            opacity(defaults.background_opacity),
+        ),
+        numeric(
+            BasicTitle::OPACITY_PATH,
+            "mondrian.title.opacity",
+            "标题不透明度",
+            opacity(defaults.opacity),
+        ),
     ]
 }
 
@@ -491,7 +685,75 @@ mod tests {
             evaluated.horizontal_align,
             BasicTitleHorizontalAlign::Center
         );
-        assert_eq!(title.property_bag().iter().count(), 10);
+        assert_eq!(
+            title.property_bag().iter().count(),
+            BasicTitle::PROPERTY_PATHS.len()
+        );
+        assert_eq!(evaluated.appearance, BasicTitleAppearance::default());
+    }
+
+    #[test]
+    fn title_decoration_values_are_static_typed_and_transactional() {
+        let mut title = BasicTitle::new("Decorated", default_basic_title_font_family()).unwrap();
+        let color = Color { r: 2.0, g: 0.5, b: 0.25, a: 0.25 };
+        for (path, value) in [
+            (BasicTitle::STROKE_WIDTH_PATH, PropertyValue::Float(50.0)),
+            (BasicTitle::STROKE_COLOR_PATH, PropertyValue::Color(color)),
+            (BasicTitle::OPACITY_PATH, PropertyValue::Float(0.25)),
+        ] {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.into(),
+                    value,
+                })
+                .unwrap();
+        }
+        let appearance = title.evaluate(tt(23)).unwrap().appearance;
+        assert_eq!(
+            (
+                appearance.stroke_width,
+                appearance.stroke_color,
+                appearance.opacity
+            ),
+            (50.0, color, 0.25)
+        );
+        let before = title.clone();
+        for (path, value) in [
+            (BasicTitle::STROKE_WIDTH_PATH, PropertyValue::Float(50.01)),
+            (
+                BasicTitle::SHADOW_SOFTNESS_PATH,
+                PropertyValue::Float(f32::NAN),
+            ),
+            (BasicTitle::BACKGROUND_COLOR_PATH, PropertyValue::Float(1.0)),
+            (BasicTitle::OPACITY_PATH, PropertyValue::Float(-0.1)),
+            (BasicTitle::FONT_FAMILY_PATH, PropertyValue::Text("".into())),
+        ] {
+            assert!(title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.into(),
+                    value
+                })
+                .is_err());
+            assert_eq!(title, before);
+        }
+        assert!(title
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: BasicTitle::OPACITY_PATH.into(),
+                keyframe: Keyframe::linear(tt(0), PropertyValue::Float(0.5)),
+            })
+            .is_err());
+        assert_eq!(title, before);
+    }
+
+    #[test]
+    fn title_requires_decorations_in_current_schema() {
+        let title = BasicTitle::new("Decorated", default_basic_title_font_family()).unwrap();
+        for (path, _) in BasicTitle::decoration_defaults().iter() {
+            let mut raw = serde_json::to_value(&title).unwrap();
+            raw["properties"]["properties"].as_object_mut().unwrap().remove(path).unwrap();
+            let truncated: BasicTitle = serde_json::from_value(raw).unwrap();
+            assert!(truncated.validate_author_state().is_err(), "missing {path}");
+        }
     }
 
     #[test]
