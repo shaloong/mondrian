@@ -139,6 +139,7 @@ impl Localizer {
             || address.starts_with("mondrian.effect.builtin.")
             || address.starts_with("mondrian.effect.curves.")
             || address.starts_with("mondrian.effect.qualifier.")
+            || address.starts_with("mondrian.effect.stroke.paint_style.")
             || address.starts_with("builtin.lut_3d.")
         {
             let message_id = format!("parameter-{}", address.replace(['.', '_'], "-"));
@@ -395,6 +396,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "棋盘" => Some("parameter-group-checkerboard"),
         "网格" => Some("parameter-group-grid"),
         "圆形与椭圆" => Some("parameter-group-circle-ellipse"),
+        "蒙版路径描边" => Some("parameter-group-mask-path-stroke"),
         "描边" => Some("parameter-group-stroke"),
         "填充" => Some("parameter-group-fill"),
         "单元格图案" => Some("parameter-group-cell-pattern"),

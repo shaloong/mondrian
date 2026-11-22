@@ -58,6 +58,7 @@ pub(crate) enum EffectSpatialGpuError {
 pub(crate) struct EffectSpatialGpu {
     bilateral: std::sync::OnceLock<crate::bilateral_gpu::BilateralGpu>,
     mask_deformation: std::sync::OnceLock<crate::mask_deformation_gpu::MaskDeformationGpu>,
+    mask_path_stroke: std::sync::OnceLock<crate::mask_path_stroke_gpu::MaskPathStrokeGpu>,
     detail_preserving_upscale:
         std::sync::OnceLock<crate::detail_preserving_upscale_gpu::DetailPreservingUpscaleGpu>,
     glass: std::sync::OnceLock<crate::glass_gpu::GlassGpu>,
@@ -2879,6 +2880,7 @@ impl EffectSpatialGpu {
             smart_blur,
             bilateral: std::sync::OnceLock::new(),
             mask_deformation: std::sync::OnceLock::new(),
+            mask_path_stroke: std::sync::OnceLock::new(),
             detail_preserving_upscale: std::sync::OnceLock::new(),
             glass: std::sync::OnceLock::new(),
             video_collage: std::sync::OnceLock::new(),
@@ -4838,6 +4840,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
             EffectGpuSpatialPass::Smear { .. } | EffectGpuSpatialPass::Reshape { .. } => Ok(1),
+            EffectGpuSpatialPass::MaskPathStroke { .. } => Ok(0),
             EffectGpuSpatialPass::DetailPreservingUpscale { .. } => Ok(1),
             EffectGpuSpatialPass::Glass { .. } => Ok(1),
             EffectGpuSpatialPass::VideoCollage { .. } => Ok(0),
@@ -4982,6 +4985,12 @@ impl EffectSpatialGpu {
                     mondrian_effects::EffectFrameExtent::new(source.width(), source.height());
                 self.record_glass(device, encoder, pass, source, output, None, primary)?;
                 return Ok(output.clone());
+            }
+            EffectGpuSpatialPass::MaskPathStroke { .. } => {
+                // The driver prepares and validates the extent-bound layout before recording.
+                return Err(EffectSpatialGpuError::UnsupportedPass(
+                    "mask_path_stroke_direct_output",
+                ));
             }
             EffectGpuSpatialPass::VideoCollage { .. } => {
                 return Err(EffectSpatialGpuError::UnsupportedPass(
@@ -6242,6 +6251,22 @@ impl EffectSpatialGpu {
         )
     }
 
+    pub(crate) fn record_mask_path_stroke(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        layout: &mondrian_effects::mask_path_stroke::MaskPathStrokeLayout,
+        roi: mondrian_effects::EffectPixelRoi,
+    ) -> Result<(), EffectSpatialGpuError> {
+        crate::mask_path_stroke_gpu::check_limits(layout, &device.limits())?;
+        self.mask_path_stroke
+            .get_or_init(|| crate::mask_path_stroke_gpu::MaskPathStrokeGpu::new(device))
+            .record(device, encoder, source, destination, layout, roi)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_mask_deformation_pass(
         &self,
         device: &wgpu::Device,

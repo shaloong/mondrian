@@ -6095,7 +6095,7 @@ impl GpuFrameCompositor {
             layers: &layers,
         };
         validate_request(&plain)?;
-        let chains = prepare_spatial_chains(&request, auxiliary_rasters, table)?;
+        let chains = prepare_spatial_chains(&device.limits(), &request, auxiliary_rasters, table)?;
         self.record_layers(
             device,
             queue,
@@ -6151,7 +6151,7 @@ impl GpuFrameCompositor {
             working_color_space,
             layers: &[layer],
         })?;
-        let chains = prepare_spatial_chains(&request, &[auxiliary], table)?;
+        let chains = prepare_spatial_chains(&device.limits(), &request, &[auxiliary], table)?;
         let chain = chains[0].as_ref().ok_or_else(|| GpuCompositeError::SpatialChainFailed {
             pass: "effect_input",
             detail: "historical Effect input has no prepared spatial chain".into(),
@@ -6159,20 +6159,22 @@ impl GpuFrameCompositor {
         let resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?.resource();
         let texture = resource.texture.clone();
         let view = resource.texture_view.clone();
-        let output = self.record_spatial_chain(
-            device,
-            queue,
-            encoder,
-            ids,
-            table,
-            resource_pool,
-            &texture,
-            &view,
-            descriptor,
-            chain,
-            frame_seed,
-            auxiliary,
-        )?;
+        let output = self
+            .record_spatial_chain(
+                device,
+                queue,
+                encoder,
+                ids,
+                table,
+                resource_pool,
+                &texture,
+                &view,
+                descriptor,
+                chain,
+                frame_seed,
+                auxiliary,
+            )?
+            .unwrap_or_else(|| input.clone());
         Ok(GpuCompositeRecord {
             output,
             diagnostics: GpuCompositingDiagnostics {
@@ -6329,8 +6331,7 @@ impl GpuFrameCompositor {
                     &target_a,
                 )
             };
-            let (mut layer_binding, source_kind, solid_color, mut source_size) = match layer.source
-            {
+            let (layer_binding, source_kind, solid_color, mut source_size) = match layer.source {
                 GpuCompositeLayerSource::CpuFrame(frame) => {
                     uploaded_cpu_layers = true;
                     let descriptor = frame.descriptor();
@@ -6404,16 +6405,14 @@ impl GpuFrameCompositor {
             };
             let mut transform = layer.transform;
             let mut sample_spatial_output_bilinear = false;
-            if let Some(chain) = spatial_chain_at(index) {
+            let layer_binding = if let Some(chain) = spatial_chain_at(index) {
                 let source_descriptor = layer_source_descriptor(layer.source).ok_or(
                     GpuCompositeError::SpatialPlanOnUnsupportedSource {
                         source_kind: composite_layer_source_name(layer.source),
                     },
                 )?;
-                // Clone the sampled texture, its view, and the resource table's
-                // own handle out of the binding before the chain inserts its
-                // intermediates, so no immutable and mutable table borrow
-                // overlap.
+                // Release the source binding before the chain mutates the table.
+                // A no-op chain will rebind the original resource below.
                 let (source_texture, source_view) = match layer_binding {
                     GpuCompositeTextureBinding::Resource(resource) => {
                         (resource.texture.clone(), resource.texture_view.clone())
@@ -6439,9 +6438,6 @@ impl GpuFrameCompositor {
                     layer.frame_seed,
                     auxiliary_rasters.get(index).copied().unwrap_or_default(),
                 )?;
-                layer_binding = GpuCompositeTextureBinding::Resource(
-                    table.get(&chain_output).map_err(GpuCompositeError::ResourceTable)?.resource(),
-                );
                 let extent = chain.output_bounds.extent();
                 source_size = [extent.width() as f32, extent.height() as f32];
                 transform = chain.output_bounds.project_affine(transform);
@@ -6465,7 +6461,20 @@ impl GpuFrameCompositor {
                 spatial_scratch_textures_peak =
                     spatial_scratch_textures_peak.max(chain.scratch_texture_request());
                 spatial_scratch_bytes_peak = spatial_scratch_bytes_peak.max(chain.scratch_bytes);
-            }
+
+                let resource_handle = chain_output.as_ref().or(match layer.source {
+                    GpuCompositeLayerSource::GpuFrame(handle) => Some(handle),
+                    _ => None,
+                });
+                let resource = if let Some(handle) = resource_handle {
+                    table.get(handle).map_err(GpuCompositeError::ResourceTable)?.resource()
+                } else {
+                    transient_uploads.last().expect("CPU layer just uploaded").resource()
+                };
+                GpuCompositeTextureBinding::Resource(resource)
+            } else {
+                layer_binding
+            };
             let inv_transform = invert_affine(transform)
                 .filter(|values| values.iter().all(|value| value.is_finite()))
                 .ok_or(GpuCompositeError::Blocked {
@@ -6641,7 +6650,7 @@ impl GpuFrameCompositor {
         chain: &GpuSpatialChainPlan,
         frame_seed: i64,
         auxiliary_rasters: &[GpuSpatialAuxiliaryRaster<'_>],
-    ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
+    ) -> Result<Option<GpuColorFrameHandle>, GpuCompositeError> {
         // The chain writes working rasters, while the source descriptor may
         // still describe a CPU-resident upload; only the extent and colour
         // space carry over.
@@ -6657,7 +6666,7 @@ impl GpuFrameCompositor {
         let mut current_handle = None;
         let primary_extent =
             mondrian_effects::EffectFrameExtent::new(descriptor.width, descriptor.height);
-        for stage in &chain.stages {
+        for (stage_index, stage) in chain.stages.iter().enumerate() {
             let width = working_descriptor.width;
             let height = working_descriptor.height;
             match stage {
@@ -6712,6 +6721,10 @@ impl GpuFrameCompositor {
                             ),
                         });
                     }
+                    let mask_path_stroke = chain.mask_path_strokes.get(&stage_index);
+                    if mask_path_stroke.is_some_and(|layout| layout.is_empty()) {
+                        continue;
+                    }
                     let (width, height) = (output_extent.width(), output_extent.height());
                     working_descriptor.width = width;
                     working_descriptor.height = height;
@@ -6722,7 +6735,21 @@ impl GpuFrameCompositor {
                         "gpu-spatial-pass",
                         resource_pool,
                     )?;
-                    if let EffectGpuSpatialPass::DetailPreservingUpscale { grade } = pass {
+                    if let Some(layout) = mask_path_stroke {
+                        self.spatial
+                            .record_mask_path_stroke(
+                                device,
+                                encoder,
+                                &current_texture,
+                                &output.resource().texture,
+                                layout,
+                                mondrian_effects::EffectPixelRoi::new(0, 0, width, height),
+                            )
+                            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                                pass: spatial_failure_pass(&error),
+                                detail: error.to_string(),
+                            })?;
+                    } else if let EffectGpuSpatialPass::DetailPreservingUpscale { grade } = pass {
                         self.spatial
                             .record_detail_preserving_upscale(
                                 device,
@@ -6917,10 +6944,7 @@ impl GpuFrameCompositor {
                 }
             }
         }
-        current_handle.ok_or(GpuCompositeError::SpatialChainFailed {
-            pass: "spatial_chain",
-            detail: "the spatial chain produced no raster".to_string(),
-        })
+        Ok(current_handle)
     }
 
     /// Record a standalone full-raster point-op pass over a chain intermediate.
@@ -9603,6 +9627,7 @@ fn validate_spatial_request(
 }
 
 fn prepare_spatial_chains(
+    limits: &wgpu::Limits,
     request: &GpuCompositeSpatialRequest<'_>,
     auxiliary_rasters: &[&[GpuSpatialAuxiliaryRaster<'_>]],
     table: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
@@ -9638,6 +9663,14 @@ fn prepare_spatial_chains(
                     pass: spatial_chain_blocker_pass(&blocker),
                     detail: blocker.to_string(),
                 })?;
+        for layout in chain.mask_path_strokes.values() {
+            crate::mask_path_stroke_gpu::check_limits(layout, limits).map_err(|error| {
+                GpuCompositeError::SpatialChainFailed {
+                    pass: spatial_failure_pass(&error),
+                    detail: error.to_string(),
+                }
+            })?;
+        }
         for (binding_index, binding) in bindings.iter().enumerate() {
             let declared = pipeline.stages().iter().any(|stage| {
                 matches!(
@@ -27322,6 +27355,154 @@ mod tests {
             "DST-17 after Grow Bounds {bounds:?}, Float32 maximum absolute error {error:.9e}"
         );
         assert!(error <= 1.0e-4);
+    }
+
+    #[tokio::test]
+    async fn authored_clip_mask_path_stroke_matches_gpu_with_actual_sampling() {
+        use mondrian_core::{
+            automation::PropertyMutation,
+            mask_data::{MaskParticipation, MaskShapeInterpolation},
+            AssetId, ImageSampling, PropertyHost, PropertyValue, Rational, SampleAspectRatio,
+            TimelineTime,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, instantiate_effect_node,
+            lower_effect_graph_to_gpu_pipeline, EffectFloatFrameView, EffectFrameExtent,
+            EffectType, EffectValueFormat, EffectWorkingPrecision, MaskComponent, MaskEvaluation,
+            MaskShape, PreparedEffectProgram, StrokePaintStyle,
+        };
+        use mondrian_timeline::Clip;
+
+        let context = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for authored mask-path Stroke parity");
+        let (width, height) = (57, 39);
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let pixels = (0..width * height)
+            .map(|i| {
+                if i % 11 == 0 {
+                    [0.0; 4]
+                } else {
+                    [(i % 23) as f32 / 5.0, -0.25, 2.0, (1 + i % 7) as f32 / 7.0]
+                }
+            })
+            .collect::<Vec<_>>();
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width,
+            height,
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: space,
+            data: pixels.clone(),
+        });
+        let time = TimelineTime::new(1, 2).unwrap();
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let rect = |x| MaskShape::Rectangle {
+            x,
+            y: 0.25,
+            width: 0.37,
+            height: 0.53,
+            corner_radius: 0.06,
+        };
+        let mut first = MaskComponent::new(
+            "Animated path".to_owned(),
+            MaskEvaluation { shape: rect(0.18), ..MaskEvaluation::default() },
+        );
+        first.participation = MaskParticipation::EffectOnly;
+        first.set_shape_animation_enabled(true, TimelineTime::ZERO).unwrap();
+        first.write_shape(time, rect(0.30), MaskShapeInterpolation::Hold).unwrap();
+        let mut second = MaskComponent::new(
+            "Intersecting path".to_owned(),
+            MaskEvaluation {
+                shape: MaskShape::Ellipse {
+                    center: glam::Vec2::new(0.60, 0.39),
+                    radii: glam::Vec2::new(0.24, 0.27),
+                },
+                ..MaskEvaluation::default()
+            },
+        );
+        second.participation = MaskParticipation::EffectOnly;
+
+        for (style, all_masks, spacing, end) in [
+            (StrokePaintStyle::OnOriginal, false, 0.0, 96.0),
+            (StrokePaintStyle::OnTransparent, true, 67.0, 89.0),
+            (StrokePaintStyle::RevealOriginal, true, 0.0, 73.0),
+        ] {
+            let mut clip =
+                Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).unwrap();
+            clip.masks.push(first.clone());
+            clip.masks.push(second.clone());
+            let kind = EffectType::MaskPathStroke;
+            let mut stroke = instantiate_effect_node(kind.clone()).unwrap();
+            for (name, value) in [
+                ("path", PropertyValue::MaskReference(Some(first.id))),
+                ("all_masks", PropertyValue::Bool(all_masks)),
+                ("sequential_stroke", PropertyValue::Bool(true)),
+                ("brush_size", PropertyValue::Float(9.5)),
+                ("brush_hardness", PropertyValue::Float(0.62)),
+                ("opacity", PropertyValue::Float(0.71)),
+                ("start", PropertyValue::Float(8.0)),
+                ("end", PropertyValue::Float(end)),
+                ("spacing", PropertyValue::Float(spacing)),
+                ("paint_style", PropertyValue::Enum(style.key().to_owned())),
+            ] {
+                stroke
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: kind.property_path(name),
+                        value,
+                    })
+                    .unwrap();
+            }
+            clip.add_effect_node(stroke);
+            let graph = PreparedEffectProgram::prepare(&clip.effects, &clip.masks, space)
+                .unwrap()
+                .evaluate(time)
+                .unwrap();
+            let lowering = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            assert!(lowering.requires_image_sampling());
+            assert!(
+                crate::spatial_driver::gpu_spatial_chain_plan(&lowering, width, height).is_err()
+            );
+            let pipeline = lowering.with_image_sampling(sampling);
+            let layers = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &context, &layers, width, height, space,
+            );
+            let cpu = |sampling| {
+                apply_compiled_effect_graph_rgba_f32(
+                    EffectFloatFrameView::new(extent, format, sampling, &pixels),
+                    &graph,
+                    0,
+                )
+                .unwrap()
+            };
+            let expected = cpu(sampling);
+            assert_eq!(expected.extent(), extent);
+            assert_eq!(diagnostics.spatial_effect_passes, 1);
+            assert_eq!(diagnostics.spatial_scratch_textures_peak, 0);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+            assert!(diagnostics.spatial_scratch_bytes_peak > 0);
+            assert!(max_spatial_float_error(&pixels, expected.pixels()) > 0.01);
+            assert!(
+                max_spatial_float_error(cpu(ImageSampling::UNIT_SQUARE).pixels(), &actual) > 0.01
+            );
+            let error = max_spatial_float_error(expected.pixels(), &actual);
+            eprintln!("authored mask-path Stroke {style:?}, Float32 absolute error {error:.9e}");
+            assert!(error <= 1.0e-4);
+        }
     }
 
     #[tokio::test]

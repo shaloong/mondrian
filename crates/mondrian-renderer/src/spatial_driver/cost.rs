@@ -320,7 +320,7 @@ fn estimate_ns(
     let mut pixels = source_pixels;
     let mut gpu = GPU_CHAIN_SETUP_NS;
     let mut cpu = CPU_CHAIN_SETUP_NS;
-    for stage in &plan.stages {
+    for (stage_index, stage) in plan.stages.iter().enumerate() {
         match stage {
             GpuSpatialStagePlan::Spatial {
                 pass,
@@ -331,6 +331,13 @@ fn estimate_ns(
                 ..
             } => {
                 pixels = f64::from(output_extent.width()) * f64::from(output_extent.height());
+                if let Some(layout) = plan.mask_path_strokes.get(&stage_index) {
+                    if layout.is_empty() {
+                        continue;
+                    }
+                    let uploaded = crate::mask_path_stroke_gpu::payload_bytes(layout) as f64;
+                    gpu += uploaded / GPU_EFFECTIVE_BANDWIDTH_BYTES_PER_NS;
+                }
                 let passes = f64::from(*draw_passes);
                 gpu += *draw_pixels as f64 * gpu_ns_per_px(pass) + passes * GPU_PASS_OVERHEAD_NS;
                 if *scratch_textures > 0 {
@@ -425,7 +432,7 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "selective_color" => 0.6,
         // Stroke scans up to a hundred and twelve taps per pixel before the
         // band composite, so it sits far above one-pass arithmetic.
-        "stroke" => 3.0,
+        "stroke" | "mask_path_stroke" => 3.0,
         // The median gathers the whole window eight times over, so it costs more
         // than a separable blur pass despite the small GPU radius cap.
         "median" => 4.0,
@@ -540,7 +547,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         "selective_color" => 2.0,
         // Fifty-six to a hundred and twelve nearest-neighbour taps with a
         // bracket decision per tap: the most expensive CPU kernel in the family.
-        "stroke" => 6.0,
+        "stroke" | "mask_path_stroke" => 6.0,
         "fill_matte" => 2.5,
         "channel_combiner_layer" => 3.0,
         "set_matte" => 3.0,
@@ -676,6 +683,7 @@ mod tests {
         }
         GpuSpatialChainPlan {
             stages,
+            mask_path_strokes: Default::default(),
             spatial_passes,
             point_stages,
             scratch_textures: usize::try_from(largest).unwrap_or(usize::MAX).saturating_add(1),

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use mondrian_core::types::{BlendMode, ColorSpace};
 use mondrian_core::{OcioColorSpaceIdentity, OutputTransformIntentResolutionError};
 use mondrian_effects::{
-    CompiledEffectGraph, EffectExecutionError, EffectFloatExecutionError,
-    EffectFloatUnsupportedReason,
+    mask_path_stroke::MaskPathStrokeError, CompiledEffectGraph, EffectExecutionError,
+    EffectFloatExecutionError, EffectFloatUnsupportedReason,
 };
 use mondrian_renderer::{
     color::{
@@ -107,22 +107,25 @@ impl PreviewCpuExecutionError {
             Self::WorkingFrame(MediaPreviewWorkingFrameError::InputColorTransform { .. }) => {
                 PreviewUnavailability::failed(PreviewOutputStage::InputAdaptation, self.to_string())
             }
-            Self::TimelineComposite(TimelineCompositeError::FloatEffect {
-                reason: EffectFloatExecutionError::Stopped { .. },
-            }) => PreviewUnavailability::stopped(
-                PreviewOutputStage::TimelineComposite,
-                self.to_string(),
-            ),
-            Self::TimelineComposite(error) if timeline_composite_is_blocked(error) => {
-                PreviewUnavailability::blocked(
-                    PreviewOutputStage::TimelineComposite,
-                    self.to_string(),
-                )
+            Self::TimelineComposite(error) => {
+                let stage = PreviewOutputStage::TimelineComposite;
+                let (detail, stopped) = match error {
+                    TimelineCompositeError::FloatEffect {
+                        reason: EffectFloatExecutionError::MaskPathStroke(reason),
+                    } => (reason.to_string(), *reason == MaskPathStrokeError::Canceled),
+                    TimelineCompositeError::FloatEffect {
+                        reason: EffectFloatExecutionError::Stopped { .. },
+                    } => (self.to_string(), true),
+                    _ => (self.to_string(), false),
+                };
+                if stopped {
+                    PreviewUnavailability::stopped(stage, detail)
+                } else if timeline_composite_is_blocked(error) {
+                    PreviewUnavailability::blocked(stage, detail)
+                } else {
+                    PreviewUnavailability::failed(stage, detail)
+                }
             }
-            Self::TimelineComposite(_) => PreviewUnavailability::failed(
-                PreviewOutputStage::TimelineComposite,
-                self.to_string(),
-            ),
             Self::ProgramOutputIdentity { .. } | Self::ProgramOutputTransform(_) => {
                 PreviewUnavailability::blocked(PreviewOutputStage::ProgramOutput, self.to_string())
             }
@@ -182,6 +185,18 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
                 | EffectFloatExecutionError::GlassFailed { .. }
                 | EffectFloatExecutionError::VideoCollage(_),
         } => true,
+        TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::MaskPathStroke(error),
+        } => match error {
+            MaskPathStrokeError::InvalidControl { .. }
+            | MaskPathStrokeError::InvalidGeometry { .. }
+            | MaskPathStrokeError::BudgetExceeded { .. }
+            | MaskPathStrokeError::DabPhaseLimitExceeded => true,
+            MaskPathStrokeError::Canceled
+            | MaskPathStrokeError::AllocationFailed { .. }
+            | MaskPathStrokeError::RegionOutsideExtent
+            | MaskPathStrokeError::InvalidPixelBuffer => false,
+        },
         TimelineCompositeError::FloatEffect {
             reason:
                 EffectFloatExecutionError::FrameContract(
@@ -884,6 +899,40 @@ mod tests {
         );
         assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
         assert!(unavailable.detail().contains("worker exited"));
+    }
+
+    #[test]
+    fn mask_path_stroke_projects_admission_failure_and_cancellation() {
+        use PreviewUnavailabilityDisposition::{Blocked, Failed, Stopped};
+
+        for (reason, disposition, detail) in [
+            (
+                MaskPathStrokeError::InvalidGeometry { reason: "invalid curve" },
+                Blocked,
+                "invalid curve",
+            ),
+            (
+                MaskPathStrokeError::BudgetExceeded { resource: "dabs", limit: 12 },
+                Blocked,
+                "dabs budget exceeded (limit 12)",
+            ),
+            (
+                MaskPathStrokeError::InvalidPixelBuffer,
+                Failed,
+                "RGBA buffer",
+            ),
+            (MaskPathStrokeError::Canceled, Stopped, "was canceled"),
+        ] {
+            let error =
+                PreviewCpuExecutionError::TimelineComposite(TimelineCompositeError::FloatEffect {
+                    reason: EffectFloatExecutionError::MaskPathStroke(reason),
+                });
+            let unavailable = error.unavailability();
+            assert_eq!(unavailable.disposition(), disposition);
+            assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+            assert!(unavailable.detail().contains(detail));
+            assert!(error.processor_blocked().is_none());
+        }
     }
 
     #[test]

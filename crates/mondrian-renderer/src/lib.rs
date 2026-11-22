@@ -27,6 +27,7 @@ pub mod display_calibration;
 mod display_matte;
 mod glass_gpu;
 mod mask_deformation_gpu;
+mod mask_path_stroke_gpu;
 pub mod spatial_driver;
 mod spatial_pass_gpu;
 mod video_collage_gpu;

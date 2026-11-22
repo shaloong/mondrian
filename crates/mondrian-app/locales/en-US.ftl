@@ -3148,8 +3148,8 @@ parameter-mondrian-effect-circle-ellipse-blend-mode-saturation = Saturation
 parameter-mondrian-effect-circle-ellipse-blend-mode-color = Color
 parameter-mondrian-effect-circle-ellipse-blend-mode-luminosity = Luminosity
 
-effect-stroke = Stroke
-parameter-group-stroke = Stroke
+effect-stroke = Contour Stroke
+parameter-group-stroke = Contour Stroke
 parameter-mondrian-effect-builtin-stroke-path-label = Path
 parameter-mondrian-effect-builtin-stroke-all-masks-label = All Masks
 parameter-mondrian-effect-builtin-stroke-sequential-stroke-label = Sequential Stroke
@@ -3164,6 +3164,20 @@ parameter-mondrian-effect-builtin-stroke-paint-style-label = Paint Style
 parameter-mondrian-effect-stroke-paint-style-on-original = On Original Image
 parameter-mondrian-effect-stroke-paint-style-on-transparent = On Transparent
 parameter-mondrian-effect-stroke-paint-style-reveal-original = Reveal Original Image
+
+effect-mask-path-stroke = Mask Path Stroke
+parameter-group-mask-path-stroke = Mask Path Stroke
+parameter-mondrian-effect-builtin-mask-path-stroke-path-label = Mask Path
+parameter-mondrian-effect-builtin-mask-path-stroke-all-masks-label = All Masks
+parameter-mondrian-effect-builtin-mask-path-stroke-sequential-stroke-label = Sequential Stroke
+parameter-mondrian-effect-builtin-mask-path-stroke-color-label = Color
+parameter-mondrian-effect-builtin-mask-path-stroke-brush-size-label = Brush Size
+parameter-mondrian-effect-builtin-mask-path-stroke-brush-hardness-label = Brush Hardness
+parameter-mondrian-effect-builtin-mask-path-stroke-opacity-label = Opacity
+parameter-mondrian-effect-builtin-mask-path-stroke-start-label = Start
+parameter-mondrian-effect-builtin-mask-path-stroke-end-label = End
+parameter-mondrian-effect-builtin-mask-path-stroke-spacing-label = Spacing
+parameter-mondrian-effect-builtin-mask-path-stroke-paint-style-label = Paint Style
 
 effect-fill = Fill
 parameter-group-fill = Fill

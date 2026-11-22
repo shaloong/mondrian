@@ -107,6 +107,9 @@ pub struct GpuSpatialChainPlan {
     pub scratch_bytes: u64,
     /// Distinct raster extents recorded by spatial stages.
     pub(crate) scratch_extents: usize,
+    // Retained immutable payloads are keyed by lowered stage index.
+    pub(crate) mask_path_strokes:
+        HashMap<usize, std::sync::Arc<mondrian_effects::mask_path_stroke::MaskPathStrokeLayout>>,
     /// Final raster dimensions and pixel origin relative to the input layer.
     pub output_bounds: EffectRasterBounds,
 }
@@ -212,6 +215,7 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
     }
 
     let mut stages = Vec::with_capacity(pipeline.stages().len());
+    let mut mask_path_strokes = HashMap::new();
     let mut spatial_passes = 0_u32;
     let mut point_stages = 0_u32;
     let mut largest_pass_count = 0_u32;
@@ -335,6 +339,45 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                     direct_working_bytes = direct_working_bytes.saturating_add(plan.working_bytes);
                     direct_scratch_bytes = direct_scratch_bytes.saturating_add(plan.scratch_bytes);
                     0
+                } else if let EffectGpuSpatialPass::MaskPathStroke { geometry, sampling } = pass {
+                    let reject = |detail| GpuSpatialChainBlocker::UnsupportedPass {
+                        pass: pass.name(),
+                        detail,
+                    };
+                    let sampling = sampling.ok_or_else(|| {
+                        reject("actual source image sampling was not bound".into())
+                    })?;
+                    let layout = geometry
+                        .prepare(
+                            input_extent,
+                            sampling,
+                            &mondrian_core::ExecutionCancellationToken::new(),
+                        )
+                        .map_err(|error| reject(error.to_string()))?;
+                    crate::mask_path_stroke_gpu::check_limits(&layout, &wgpu::Limits::default())
+                        .map_err(|error| reject(error.to_string()))?;
+                    if layout.is_empty() {
+                        minimum_draw_passes = 0;
+                    } else {
+                        let payload = crate::mask_path_stroke_gpu::payload_bytes(&layout);
+                        let output_bytes = u64::from(output.width())
+                            * u64::from(output.height())
+                            * GPU_SPATIAL_BYTES_PER_PIXEL;
+                        direct_working_bytes = direct_working_bytes
+                            .saturating_add(payload)
+                            .saturating_add(output_bytes);
+                        direct_scratch_bytes = direct_scratch_bytes.saturating_add(payload);
+                        // Do not retain an unbounded number of layouts until the
+                        // final aggregate scratch check below.
+                        if direct_working_bytes > GPU_SPATIAL_SCRATCH_BUDGET_BYTES {
+                            return Err(GpuSpatialChainBlocker::ScratchBudgetExceeded {
+                                required_bytes: direct_working_bytes,
+                                budget_bytes: GPU_SPATIAL_SCRATCH_BUDGET_BYTES,
+                            });
+                        }
+                    }
+                    mask_path_strokes.insert(stages.len(), std::sync::Arc::new(layout));
+                    0
                 } else if let EffectGpuSpatialPass::Smear { grade, sampling }
                 | EffectGpuSpatialPass::Reshape { grade, sampling } = pass
                 {
@@ -400,11 +443,12 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
 
     // The pool always holds one more texture than the largest pass count needs,
     // so no stage's destination can alias the source it samples.
-    let scratch_textures = if direct_working_bytes > 0 && largest_pass_count == 0 {
-        0
-    } else {
-        usize::try_from(largest_pass_count).unwrap_or(usize::MAX).saturating_add(1)
-    };
+    let scratch_textures =
+        if largest_pass_count == 0 && (direct_working_bytes > 0 || !mask_path_strokes.is_empty()) {
+            0
+        } else {
+            usize::try_from(largest_pass_count).unwrap_or(usize::MAX).saturating_add(1)
+        };
     if scratch_extents.is_empty() && scratch_textures != 0 {
         scratch_extents.insert(output_bounds.extent());
     }
@@ -430,6 +474,7 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
         scratch_textures,
         scratch_bytes: scratch_bytes.saturating_add(direct_scratch_bytes),
         scratch_extents: scratch_extents.len(),
+        mask_path_strokes,
         output_bounds,
     })
 }
