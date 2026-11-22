@@ -297,6 +297,8 @@ pub enum EffectType {
     /// Shape: draw a rectangle, circle, ellipse, regular polygon, star or line
     /// into the frame with fill, stroke and a boolean mode against the source.
     Shape,
+    /// Paints a brush stroke along one or more authored clip mask paths.
+    MaskPathStroke,
 }
 
 impl EffectType {
@@ -414,6 +416,7 @@ impl EffectType {
             Self::Colorama => "builtin.colorama".to_string(),
             Self::Grid => "builtin.grid".to_string(),
             Self::CircleEllipse => "builtin.circle_ellipse".to_string(),
+            Self::MaskPathStroke => "builtin.mask_path_stroke".to_string(),
             Self::Stroke => "builtin.stroke".to_string(),
             Self::Fill => "builtin.fill".to_string(),
             Self::Magnify => "builtin.magnify".to_string(),
@@ -574,6 +577,7 @@ impl EffectType {
             "builtin.colorama" => Self::Colorama,
             "builtin.grid" => Self::Grid,
             "builtin.circle_ellipse" => Self::CircleEllipse,
+            "builtin.mask_path_stroke" => Self::MaskPathStroke,
             "builtin.stroke" => Self::Stroke,
             "builtin.fill" => Self::Fill,
             "builtin.magnify" => Self::Magnify,
@@ -734,7 +738,8 @@ impl EffectType {
             Self::Colorama => "色光",
             Self::Grid => "网格",
             Self::CircleEllipse => "圆形与椭圆",
-            Self::Stroke => "描边",
+            Self::Stroke => "轮廓描边",
+            Self::MaskPathStroke => "蒙版路径描边",
             Self::Fill => "填充",
             Self::Magnify => "放大",
             Self::DustScratches => "蒙尘与划痕",
@@ -898,7 +903,7 @@ impl EffectType {
             Self::Colorama => vec!["颜色", "调色"],
             Self::Grid => vec!["生成器"],
             Self::CircleEllipse => vec!["生成器"],
-            Self::Stroke => vec!["生成器"],
+            Self::Stroke | Self::MaskPathStroke => vec!["生成器"],
             Self::Fill => vec!["生成器"],
             Self::Magnify => vec!["变形"],
             Self::DustScratches => vec!["修复"],
@@ -1049,6 +1054,7 @@ impl EffectType {
             Self::Colorama => "colorama".to_string(),
             Self::Grid => "grid".to_string(),
             Self::CircleEllipse => "circle_ellipse".to_string(),
+            Self::MaskPathStroke => "mask_path_stroke".to_string(),
             Self::Stroke => "stroke".to_string(),
             Self::Fill => "fill".to_string(),
             Self::Magnify => "magnify".to_string(),
@@ -1582,7 +1588,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Colorama => Ok(()),
             Self::Grid => Ok(()),
             Self::CircleEllipse => Ok(()),
-            Self::Stroke => Ok(()),
+            Self::Stroke | Self::MaskPathStroke => Ok(()),
             Self::Fill => Ok(()),
             Self::Magnify => Ok(()),
             Self::DustScratches => Ok(()),

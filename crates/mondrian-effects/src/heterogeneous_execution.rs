@@ -2507,6 +2507,9 @@ pub enum PreparedHeterogeneousEffectWorkError {
     /// A bound custom Float32 processor failed without publishing staged pixels.
     #[error(transparent)]
     CustomProcessor(#[from] crate::EffectExecutionError),
+    /// Mask Path Stroke layout preparation or application failed.
+    #[error(transparent)]
+    MaskPathStroke(crate::mask_path_stroke::MaskPathStrokeError),
     /// A Glass node failed while producing its complete CPU materialization.
     #[error("heterogeneous Glass execution failed: {0:?}")]
     Glass(crate::EffectFloatExecutionError),
@@ -2952,6 +2955,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::PictureInPicture { .. } => 152,
         EffectRenderOp::Beam { .. } => 151,
         EffectRenderOp::InnerOuterKey { .. } => 153,
+        EffectRenderOp::MaskPathStroke { .. } => 155,
         EffectRenderOp::Shape { .. } => 154,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
@@ -3882,7 +3886,12 @@ fn execute_cpu_dag_prefix(
                         &op,
                         frame_seed,
                         &mut || heterogeneous_processor_checkpoint(control, generation),
-                    )?
+                    )
+                    .map_err(|error| {
+                        error.into_execution_error(
+                            PreparedHeterogeneousEffectWorkError::MaskPathStroke,
+                        )
+                    })?
                 };
                 if !supported {
                     return Err(
@@ -5410,6 +5419,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::SetMatte { .. }
             | crate::EffectRenderOp::Grid { .. }
             | crate::EffectRenderOp::CircleEllipse { .. }
+            | crate::EffectRenderOp::MaskPathStroke { .. }
             | crate::EffectRenderOp::Stroke { .. }
             | crate::EffectRenderOp::Fill { .. }
             | crate::EffectRenderOp::ColorBalance { .. }

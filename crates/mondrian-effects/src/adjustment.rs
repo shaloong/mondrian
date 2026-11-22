@@ -517,6 +517,7 @@ pub(crate) fn apply_render_op(
         }
         EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }
+        | EffectRenderOp::MaskPathStroke { .. }
         | EffectRenderOp::DetailPreservingUpscale { .. }
         | EffectRenderOp::VideoCollage { .. }
         | EffectRenderOp::Glass { .. } => {
@@ -1356,7 +1357,7 @@ pub(crate) fn apply_render_op_f32(
         &mut || Ok::<(), Infallible>(()),
     ) {
         Ok(supported) => supported,
-        Err(never) => match never {},
+        Err(error) => panic!("Float32 kernel failed: {error:?}"),
     }
 }
 
@@ -1366,6 +1367,12 @@ pub(crate) fn render_op_tile_scratch_bytes(op: &EffectRenderOp, width: u32, heig
         EffectRenderOp::BilateralBlur { grade } => grade.tile_scratch_bytes(width, height),
         EffectRenderOp::Glass { .. } => {
             crate::GlassHeightPlan::scratch_bytes(crate::EffectFrameExtent::new(width, height))
+        }
+        EffectRenderOp::MaskPathStroke { .. } => {
+            use crate::mask_path_stroke::{
+                MASK_PATH_STROKE_MAX_PREPARE_SCRATCH_BYTES, MASK_PATH_STROKE_MAX_RETAINED_BYTES,
+            };
+            MASK_PATH_STROKE_MAX_PREPARE_SCRATCH_BYTES + MASK_PATH_STROKE_MAX_RETAINED_BYTES
         }
         EffectRenderOp::Smear { grade } | EffectRenderOp::Reshape { grade } => {
             grade.preparation_scratch_bytes(crate::EffectFrameExtent::new(width, height))
@@ -1570,6 +1577,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         | EffectRenderOp::ColorSpaceTransform { .. }
         | EffectRenderOp::AcesTransform { .. }
         | EffectRenderOp::LightSweep { .. }
+        | EffectRenderOp::MaskPathStroke { .. }
         | EffectRenderOp::Shape { .. }
         | EffectRenderOp::Beam { .. }
         | EffectRenderOp::Strobe { .. }
@@ -1692,7 +1700,7 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
     op: &EffectRenderOp,
     frame_seed: i64,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
-) -> Result<bool, E> {
+) -> Result<bool, crate::mask_path_stroke::ControlledMaskPathStrokeError<E>> {
     apply_render_op_f32_region_controlled(
         working,
         EffectRasterRegion::full_frame(width, height),
@@ -1711,6 +1719,29 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
 /// whose implementation requires the complete frame fail closed when supplied
 /// a partial region.
 pub(crate) fn apply_render_op_f32_region_controlled<E>(
+    working: &mut Vec<[f32; 4]>,
+    region: EffectRasterRegion,
+    sampling: mondrian_core::ImageSampling,
+    op: &EffectRenderOp,
+    frame_seed: i64,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, crate::mask_path_stroke::ControlledMaskPathStrokeError<E>> {
+    use crate::mask_path_stroke::ControlledMaskPathStrokeError;
+    if let EffectRenderOp::MaskPathStroke { geometry } = op {
+        if !region.is_valid_for(working.len()) {
+            return Err(crate::mask_path_stroke::MaskPathStrokeError::InvalidPixelBuffer.into());
+        }
+        let extent = crate::EffectFrameExtent::new(region.frame_width, region.frame_height);
+        let roi = crate::EffectPixelRoi::new(region.x, region.y, region.width, region.height);
+        let layout = geometry.prepare_controlled(extent, sampling, checkpoint)?;
+        layout.apply_region_f32_controlled(working, roi, checkpoint)?;
+        return Ok(true);
+    }
+    apply_render_op_f32_region_impl(working, region, sampling, op, frame_seed, checkpoint)
+        .map_err(ControlledMaskPathStrokeError::Checkpoint)
+}
+
+fn apply_render_op_f32_region_impl<E>(
     working: &mut Vec<[f32; 4]>,
     region: EffectRasterRegion,
     sampling: mondrian_core::ImageSampling,
@@ -2947,7 +2978,9 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             lut.apply_rgba_f32_in_place_controlled(working, *intensity, checkpoint)?;
             Ok(true)
         }
-        EffectRenderOp::Custom { .. } => Ok(false),
+        // Mask path geometry is prepared by the region dispatcher so it can
+        // distinguish a geometry error from an execution checkpoint.
+        EffectRenderOp::MaskPathStroke { .. } | EffectRenderOp::Custom { .. } => Ok(false),
     }
 }
 

@@ -254,6 +254,8 @@ pub enum EffectFloatExecutionError {
         node_id: EffectGraphNodeId,
         source: crate::GlassError,
     },
+    /// Mask Path Stroke layout preparation or application failed.
+    MaskPathStroke(crate::mask_path_stroke::MaskPathStrokeError),
     /// A Video Collage source or cell geometry violates the compiled plan.
     VideoCollage(crate::VideoCollageError),
     /// The graph contains a node shape or render op that cannot execute in float.
@@ -1911,7 +1913,10 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         op,
                         frame_seed,
                         &mut || scalar_checkpoint(control),
-                    )?;
+                    )
+                    .map_err(|error| {
+                        error.into_execution_error(EffectFloatExecutionError::MaskPathStroke)
+                    })?;
                     if !supported {
                         return Err(unsupported_float_graph_node(
                             node.id,
@@ -2029,7 +2034,10 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         op,
                         frame_seed,
                         &mut || scalar_checkpoint(control),
-                    )?
+                    )
+                    .map_err(|error| {
+                        error.into_execution_error(EffectFloatExecutionError::MaskPathStroke)
+                    })?
                 };
                 if !supported {
                     return Err(EffectFloatExecutionError::UnsupportedNode {
@@ -3304,6 +3312,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::SelectiveColor { .. } => "selective_color",
+        EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         EffectRenderOp::Stroke { .. } => "stroke",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut3d",

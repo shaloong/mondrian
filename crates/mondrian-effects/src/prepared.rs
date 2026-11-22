@@ -44,6 +44,10 @@ mod input_tests;
 mod fill_tests;
 
 #[cfg(test)]
+#[path = "prepared_mask_path_stroke_tests.rs"]
+mod mask_path_stroke_tests;
+
+#[cfg(test)]
 #[path = "prepared_auxiliary_tests.rs"]
 mod auxiliary_tests;
 
@@ -265,6 +269,7 @@ impl PreparedEffectStack {
         let masks = if !masks.is_empty()
             && instances.iter().any(|instance| {
                 fill_may_use_masks(&instance.effect)
+                    || mask_path_stroke_may_use_all_masks(&instance.effect)
                     || instance.effect.properties.iter().any(|(_, property)| {
                         matches!(
                             property.static_value(),
@@ -524,6 +529,19 @@ pub(crate) fn validate_effect_schema_in_project(
         }
     }
     Ok(())
+}
+
+fn mask_path_stroke_may_use_all_masks(effect: &EffectNode) -> bool {
+    if effect.effect_type != crate::EffectType::MaskPathStroke {
+        return false;
+    }
+    let all_masks = effect.effect_type.parameter_id("all_masks").expect("builtin All Masks");
+    // A later Hold key can enable All Masks even if its zero-time and static values are false.
+    effect.properties.iter().any(|(_, property)| {
+        property.descriptor.parameter_id() == &all_masks
+            && (matches!(property.static_value(), PropertyValue::Bool(true))
+                || (property.is_enabled() && property.is_animated()))
+    })
 }
 
 fn fill_may_use_masks(effect: &EffectNode) -> bool {

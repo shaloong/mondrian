@@ -2123,6 +2123,40 @@ mod tests {
     }
 
     #[test]
+    fn mask_path_stroke_round_trips_and_follows_the_copied_clip_mask() {
+        let mut original = Clip::new(AssetId::new(), tt(0), tt(10)).unwrap();
+        let mut mask = MaskComponent::new("Stroke path".to_owned(), MaskEvaluation::default());
+        mask.participation = MaskParticipation::EffectOnly;
+        let selected = mask.id;
+        original.masks.push(mask);
+        let mut stroke: EffectNode =
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::MaskPathStroke);
+        let path = EffectType::MaskPathStroke.parameter_id("path").unwrap();
+        stroke
+            .set_static_value_by_parameter(&path, PropertyValue::MaskReference(Some(selected)))
+            .unwrap();
+        original.add_effect_node(stroke);
+
+        let encoded = serde_json::to_vec(&original).unwrap();
+        let mut restored: Clip = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.effects[0].effect_type, EffectType::MaskPathStroke);
+        assert_eq!(restored.masks[0].id, selected);
+        assert_eq!(
+            restored.effects[0].evaluate_mask_reference_parameter(&path),
+            Some(Some(selected)),
+        );
+
+        restored.fork_visual_placement_identities();
+        assert_ne!(restored.id, original.id);
+        assert_ne!(restored.effects[0].id, original.effects[0].id);
+        assert_ne!(restored.masks[0].id, selected);
+        assert_eq!(
+            restored.effects[0].evaluate_mask_reference_parameter(&path),
+            Some(Some(restored.masks[0].id)),
+        );
+    }
+
+    #[test]
     fn adjustment_layer_instances_from_same_asset_do_not_share_state() {
         let shared_asset_id = AssetId::new();
         let mut first =

@@ -2277,6 +2277,31 @@ impl EffectGraphBuilderState {
         self.auxiliary_masks.iter().filter_map(|mask| mask.evaluation.as_ref())
     }
 
+    /// Resolve all enabled clip-local masks in author order with strict ID checks.
+    /// A disabled entry can make an enabled ID ambiguous but is never returned.
+    pub(crate) fn resolve_all_enabled_effect_masks(
+        &self,
+    ) -> Result<Vec<&crate::MaskEvaluation>, EffectMaskReferenceError> {
+        let mut duplicates = HashMap::with_capacity(self.auxiliary_masks.len());
+        for mask in &*self.auxiliary_masks {
+            duplicates
+                .entry(mask.id)
+                .and_modify(|duplicate| *duplicate = true)
+                .or_insert(false);
+        }
+        self.auxiliary_masks
+            .iter()
+            .filter_map(|mask| mask.evaluation.as_ref().map(|evaluation| (mask.id, evaluation)))
+            .map(|(id, evaluation)| {
+                if duplicates[&id] {
+                    Err(EffectMaskReferenceError::Ambiguous(id))
+                } else {
+                    Ok(evaluation)
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn auxiliary_mask_at(&self, index: usize) -> Option<&crate::MaskEvaluation> {
         self.auxiliary_masks.get(index)?.evaluation.as_ref()
     }
@@ -3328,6 +3353,11 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             // The kernel reads the whole sample to resolve its ink, so the
             // definition-level envelope cannot narrow the input tile.
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
+        EffectRenderOp::MaskPathStroke { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_from_effect_input: EffectRoiPropagation::PixelLocal,
             ..cpu_float
         },
         EffectRenderOp::Stroke { .. } => EffectImplementationRequirements {
@@ -4821,7 +4851,10 @@ fn hash_render_op(op: &EffectRenderOp, state: &mut impl std::hash::Hasher) {
     op.hash_signature(state);
 }
 
-fn shape_variant_hash(shape: &crate::mask::MaskShape, state: &mut impl std::hash::Hasher) {
+pub(crate) fn shape_variant_hash(
+    shape: &crate::mask::MaskShape,
+    state: &mut impl std::hash::Hasher,
+) {
     match shape {
         crate::mask::MaskShape::Rectangle { x, y, width, height, corner_radius } => {
             state.write_u8(0);

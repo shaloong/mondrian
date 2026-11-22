@@ -1179,6 +1179,9 @@ pub enum EffectTemporalExecutionError {
     /// A bound custom Float32 processor failed without publishing staged pixels.
     #[error(transparent)]
     CustomProcessor(#[from] crate::EffectExecutionError),
+    /// Mask Path Stroke layout preparation or application failed.
+    #[error(transparent)]
+    MaskPathStroke(crate::mask_path_stroke::MaskPathStrokeError),
     /// One definition stage does not admit CPU Float32.
     #[error("effect stage {stage_index} does not admit CPU Float32 temporal execution")]
     ExecutionModeNotAdmitted {
@@ -2834,6 +2837,11 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                         frame_seed,
                                         &mut || processor_input_checkpoint(self.request, control),
                                     )
+                                    .map_err(|error| {
+                                        error.into_execution_error(
+                                            EffectTemporalExecutionError::MaskPathStroke,
+                                        )
+                                    })
                                 };
                                 match execution {
                                     Ok(true) => {}
@@ -3733,6 +3741,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         crate::EffectRenderOp::Crop { .. } => "crop",
         crate::EffectRenderOp::SelectiveColor { .. } => "selective_color",
+        crate::EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         crate::EffectRenderOp::Stroke { .. } => "stroke",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         crate::EffectRenderOp::Lut3D { .. } => "lut3d",

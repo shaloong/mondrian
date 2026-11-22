@@ -431,6 +431,13 @@ pub enum EffectGpuSpatialPass {
         /// The nine authored controls.
         grade: crate::InnerOuterKeyGrade,
     },
+    /// Draw the sampled native Clip mask paths with a pixel-local analytic brush.
+    MaskPathStroke {
+        /// Immutable, ordered author-time paths and paint controls.
+        geometry: Arc<crate::MaskPathStrokeGeometry>,
+        /// Proven sampling of the actual input grid.
+        sampling: Option<mondrian_core::ImageSampling>,
+    },
     /// Remap a source picture inside an evaluated mask boundary.
     Smear {
         /// Geometry and controls resolved for the current graph evaluation.
@@ -595,6 +602,7 @@ impl EffectGpuSpatialPass {
             Self::PictureInPicture { .. } => "picture_in_picture",
             Self::InnerOuterKey { .. } => "inner_outer_key",
             Self::GrowBounds { .. } => "grow_bounds",
+            Self::MaskPathStroke { .. } => "mask_path_stroke",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
             Self::DetailPreservingUpscale { .. } => "detail_preserving_upscale",
@@ -732,6 +740,7 @@ impl EffectGpuSpatialPass {
             // read a bounded window, so the halo is the sum of their reaches plus
             // the sample tap of the estimate.
             Self::InnerOuterKey { grade } => grade.halo(),
+            Self::MaskPathStroke { .. } => 0,
             Self::GrowBounds { grade } => grade.output_outset()[0],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -844,6 +853,7 @@ impl EffectGpuSpatialPass {
             // complete frame raster vertically as well.
             Self::PictureInPicture { .. } => u32::MAX,
             Self::InnerOuterKey { grade } => grade.halo(),
+            Self::MaskPathStroke { .. } => 0,
             Self::GrowBounds { grade } => grade.output_outset()[1],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -1017,7 +1027,8 @@ impl CompiledEffectGpuPipeline {
                     pass: EffectGpuSpatialPass::Smear { .. }
                         | EffectGpuSpatialPass::Reshape { .. }
                         | EffectGpuSpatialPass::Glass { .. }
-                        | EffectGpuSpatialPass::VideoCollage { .. },
+                        | EffectGpuSpatialPass::VideoCollage { .. }
+                        | EffectGpuSpatialPass::MaskPathStroke { .. },
                     ..
                 }
             )
@@ -1034,7 +1045,8 @@ impl CompiledEffectGpuPipeline {
                     EffectGpuSpatialPass::Smear { sampling: value, .. }
                     | EffectGpuSpatialPass::Reshape { sampling: value, .. }
                     | EffectGpuSpatialPass::Glass { sampling: value, .. }
-                    | EffectGpuSpatialPass::VideoCollage { sampling: value, .. },
+                    | EffectGpuSpatialPass::VideoCollage { sampling: value, .. }
+                    | EffectGpuSpatialPass::MaskPathStroke { sampling: value, .. },
                 ..
             } = stage
             {
@@ -1435,6 +1447,10 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::SelectiveColor { grade } => {
             Some(EffectGpuSpatialPass::SelectiveColor { grade: *grade })
         }
+        EffectRenderOp::MaskPathStroke { geometry } => Some(EffectGpuSpatialPass::MaskPathStroke {
+            geometry: Arc::clone(geometry),
+            sampling: None,
+        }),
         EffectRenderOp::Stroke { grade } => Some(EffectGpuSpatialPass::Stroke { grade: *grade }),
         // Admission is deliberately radius-agnostic: the renderer rejects radii
         // above the GPU cap while the chain is still being planned.

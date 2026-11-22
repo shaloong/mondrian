@@ -1221,6 +1221,11 @@ pub enum EffectRenderOp {
         /// Authored ink, band width, profile, opacity and paint style.
         grade: crate::StrokeGrade,
     },
+    /// Mask path stroke: paints a brush stroke along time-resolved clip paths.
+    MaskPathStroke {
+        /// Ordered immutable geometry and brush controls, independent of clip IDs.
+        geometry: Arc<crate::MaskPathStrokeGeometry>,
+    },
     /// Fill: paints the whole layer with one colour behind an inset feather ramp.
     Fill {
         /// Authored feather, colour, invert and opacity.
@@ -1733,6 +1738,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Stroke { grade } => {
                 formatter.debug_struct("Stroke").field("grade", grade).finish()
+            }
+            Self::MaskPathStroke { geometry } => {
+                formatter.debug_struct("MaskPathStroke").field("geometry", geometry).finish()
             }
             Self::Fill { grade } => formatter.debug_struct("Fill").field("grade", grade).finish(),
             Self::DustScratches { grade } => {
@@ -2760,6 +2768,10 @@ impl EffectRenderOp {
                     cell.map(f32::to_bits).hash(state);
                 }
             }
+            EffectRenderOp::MaskPathStroke { geometry } => {
+                155u8.hash(state);
+                geometry.hash_signature(state);
+            }
             EffectRenderOp::Fill { grade } => {
                 96u8.hash(state);
                 let (params, color) = grade.gpu_controls();
@@ -3419,6 +3431,7 @@ impl EffectRenderOp {
             }
             EffectRenderOp::Grid { .. } => 1,
             EffectRenderOp::CircleEllipse { .. } => 1,
+            EffectRenderOp::MaskPathStroke { .. } => 8,
             EffectRenderOp::Stroke { .. } => 5,
             EffectRenderOp::Fill { .. } => 1,
             EffectRenderOp::SetMatte { .. } => 2,
@@ -4015,7 +4028,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 154] {
+fn builtin_effect_types() -> [EffectType; 155] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4112,6 +4125,7 @@ fn builtin_effect_types() -> [EffectType; 154] {
         EffectType::Grid,
         EffectType::CircleEllipse,
         EffectType::Stroke,
+        EffectType::MaskPathStroke,
         EffectType::Fill,
         EffectType::Magnify,
         EffectType::DustScratches,
@@ -11281,6 +11295,99 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::MaskPathStroke => {
+            let group = "蒙版路径描边";
+            let controls = crate::mask_path_stroke::MaskPathStrokeControls::default();
+            let [r, g, b] = crate::STROKE_DEFAULT_COLOR;
+            for (key, label, value, range) in [
+                ("path", "蒙版路径", PropertyValue::MaskReference(None), None),
+                ("all_masks", "所有蒙版", PropertyValue::Bool(false), None),
+                (
+                    "sequential_stroke",
+                    "按顺序描边",
+                    PropertyValue::Bool(controls.sequential()),
+                    None,
+                ),
+                (
+                    "color",
+                    "颜色",
+                    PropertyValue::Color(Color { r, g, b, a: 1.0 }),
+                    None,
+                ),
+                (
+                    "brush_size",
+                    "画笔大小",
+                    PropertyValue::Float(crate::STROKE_DEFAULT_BRUSH_SIZE),
+                    Some((0.0, f64::from(crate::STROKE_MAX_BRUSH_SIZE), 1.0)),
+                ),
+                (
+                    "brush_hardness",
+                    "画笔硬度",
+                    PropertyValue::Float(crate::STROKE_DEFAULT_BRUSH_HARDNESS),
+                    Some((0.0, f64::from(crate::STROKE_MAX_BRUSH_HARDNESS), 0.01)),
+                ),
+                (
+                    "opacity",
+                    "不透明度",
+                    PropertyValue::Float(crate::STROKE_DEFAULT_OPACITY),
+                    Some((0.0, 1.0, 0.01)),
+                ),
+                (
+                    "start",
+                    "起点",
+                    PropertyValue::Float(controls.start_percent()),
+                    Some((0.0, 100.0, 1.0)),
+                ),
+                (
+                    "end",
+                    "终点",
+                    PropertyValue::Float(controls.end_percent()),
+                    Some((0.0, 100.0, 1.0)),
+                ),
+                (
+                    "spacing",
+                    "间距",
+                    PropertyValue::Float(controls.spacing_percent()),
+                    Some((0.0, 100.0, 1.0)),
+                ),
+            ] {
+                let (min, max, step) = range.map_or((None, None, None), |(min, max, step)| {
+                    (Some(min), Some(max), Some(step))
+                });
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    key,
+                    group,
+                    label,
+                    value,
+                    min,
+                    max,
+                    step,
+                );
+            }
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "paint_style",
+                group,
+                "描边样式",
+                crate::StrokePaintStyle::OnOriginal.key(),
+                crate::StrokePaintStyle::ALL
+                    .iter()
+                    .map(|style| {
+                        ParameterEnumOption::new(
+                            style.key(),
+                            style.display_label(),
+                            format!(
+                                "mondrian.effect.stroke.paint_style.{}",
+                                style.label_suffix()
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         EffectType::Fill => {
             // One-based index into the clip's original authored mask list;
             // zero keeps the existing unmasked fill path.
@@ -18214,9 +18321,13 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
             EffectType::MatteRefine,
             "edge_detail" | "view_edge_region" | "view_map" | "more_motion_blur",
         ) => ParameterUnit::Normalized,
-        (EffectType::Stroke, "brush_size") => ParameterUnit::Pixels,
-        (EffectType::Stroke, "brush_hardness" | "opacity") => ParameterUnit::Normalized,
-        (EffectType::Stroke, "start" | "end" | "spacing") => ParameterUnit::Percent,
+        (EffectType::Stroke | EffectType::MaskPathStroke, "brush_size") => ParameterUnit::Pixels,
+        (EffectType::Stroke | EffectType::MaskPathStroke, "brush_hardness" | "opacity") => {
+            ParameterUnit::Normalized
+        }
+        (EffectType::Stroke | EffectType::MaskPathStroke, "start" | "end" | "spacing") => {
+            ParameterUnit::Percent
+        }
         (EffectType::Fill, "feather_x" | "feather_y") => ParameterUnit::Pixels,
         (EffectType::Fill, "all_masks" | "opacity") => ParameterUnit::Normalized,
         (EffectType::DustScratches, "radius") => ParameterUnit::Pixels,
@@ -18837,6 +18948,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         },
         EffectType::CircleEllipse => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
+        EffectType::MaskPathStroke => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            // Brush coverage depends on authored geometry, not neighboring source pixels.
             ..cpu_linear
         },
         EffectType::Stroke => EffectExecutionContract {
@@ -24218,6 +24334,94 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::MaskPathStroke => {
+            let [path, all_masks, sequential, color, size, hardness, opacity, start, end, spacing, paint_style] =
+                [
+                    "path",
+                    "all_masks",
+                    "sequential_stroke",
+                    "color",
+                    "brush_size",
+                    "brush_hardness",
+                    "opacity",
+                    "start",
+                    "end",
+                    "spacing",
+                    "paint_style",
+                ]
+                .map(|key| builtin_parameter_id(effect_type, key));
+            Some(Arc::new(move |effect, context, graph| {
+                use crate::mask_path_stroke::MaskPathStrokeControls;
+
+                let invalid = |reason: String| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason,
+                };
+                let boolean = |id: &ParameterId| match effect.evaluate_parameter(id, context.time) {
+                    Some(PropertyValue::Bool(value)) => Ok(value),
+                    _ => Err(invalid(format!("{id} must be a boolean"))),
+                };
+                // All Masks overrides Path, including a missing or disabled selection.
+                let shapes = if boolean(&all_masks)? {
+                    let masks = graph
+                        .resolve_all_enabled_effect_masks()
+                        .map_err(|error| invalid(error.to_string()))?;
+                    if masks.is_empty() {
+                        return Err(invalid(
+                            "All Masks requires at least one enabled clip mask".into(),
+                        ));
+                    }
+                    masks.into_iter().map(|mask| mask.shape.clone()).collect()
+                } else {
+                    let path =
+                        effect.evaluate_mask_reference_parameter(&path).ok_or_else(|| {
+                            invalid("Path must be a static clip mask reference".into())
+                        })?;
+                    let Some(path) = path else {
+                        return Ok(());
+                    };
+                    let mask = graph
+                        .resolve_effect_mask(path)
+                        .map_err(|error| invalid(error.to_string()))?;
+                    vec![mask.shape.clone()]
+                };
+                let float = |id: &ParameterId, fallback| {
+                    effect.evaluate_f32_parameter(id, context.time, fallback)
+                };
+                let color = match effect.evaluate_parameter(&color, context.time) {
+                    Some(PropertyValue::Color(color)) => [color.r, color.g, color.b],
+                    _ => return Err(invalid("stroke color must be a color".into())),
+                };
+                let paint_style = effect
+                    .evaluate_enum_parameter(&paint_style, context.time)
+                    .and_then(|key| crate::StrokePaintStyle::from_key(&key))
+                    .ok_or_else(|| invalid("stroke paint style is not a declared option".into()))?;
+                let grade = crate::StrokeGrade::new(
+                    paint_style,
+                    color,
+                    float(&size, crate::STROKE_DEFAULT_BRUSH_SIZE),
+                    float(&hardness, crate::STROKE_DEFAULT_BRUSH_HARDNESS),
+                    float(&opacity, crate::STROKE_DEFAULT_OPACITY),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                let defaults = MaskPathStrokeControls::default();
+                let controls = MaskPathStrokeControls::new(
+                    boolean(&sequential)?,
+                    float(&start, defaults.start_percent()),
+                    float(&end, defaults.end_percent()),
+                    float(&spacing, defaults.spacing_percent()),
+                )
+                .map_err(|error| invalid(error.to_string()))?;
+                let geometry = crate::MaskPathStrokeGeometry::new(shapes, grade, controls);
+                if !geometry.is_identity() {
+                    graph.append_unary(EffectRenderOp::MaskPathStroke {
+                        geometry: Arc::new(geometry),
+                    });
+                }
+                Ok(())
+            }))
+        }
         EffectType::Fill => {
             let fill_mask_id = builtin_parameter_id(effect_type, "fill_mask");
             let all_masks_id = builtin_parameter_id(effect_type, "all_masks");
@@ -29410,7 +29614,8 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Fractal => "分形",
         EffectType::Grid => "网格",
         EffectType::CircleEllipse => "圆形与椭圆",
-        EffectType::Stroke => "描边",
+        EffectType::Stroke => "轮廓描边",
+        EffectType::MaskPathStroke => "蒙版路径描边",
         EffectType::Fill => "填充",
         EffectType::DustScratches => "蒙尘与划痕",
         EffectType::ChangeToColor => "定向改色",
@@ -30830,6 +31035,7 @@ mod tests {
             EffectType::Grid,
             EffectType::CircleEllipse,
             EffectType::Stroke,
+            EffectType::MaskPathStroke,
             EffectType::Fill,
             EffectType::Magnify,
             EffectType::DustScratches,
@@ -40185,7 +40391,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             106
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 154);
+        assert!(builtin_effect_types().contains(&EffectType::Fractal));
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -40713,7 +40919,7 @@ mod tests {
             crate::heterogeneous_execution::effect_operation_shape_tag(&op),
             105
         );
-        assert_eq!(crate::effect::builtin_effect_types().len(), 154);
+        assert!(builtin_effect_types().contains(&EffectType::CellPattern));
         let mut actual = std::collections::hash_map::DefaultHasher::new();
         op.hash_signature(&mut actual);
         let mut expected = std::collections::hash_map::DefaultHasher::new();
@@ -43672,7 +43878,7 @@ mod tests {
         // matte removal takes hash 106, shape 107 and the 106th slot. The photo
         // filter that landed later took 107/108 and the JPEG damage 108/109,
         // bringing the library to 108.
-        assert_eq!(crate::effect::builtin_effect_types().len(), 154);
+        assert!(builtin_effect_types().contains(&EffectType::RemoveColorMatting));
         let default = crate::RemoveColorMattingGrade::new([0.0, 0.0, 0.0, 1.0], true)
             .expect("the documented default validates");
         assert!(default.is_identity());
@@ -44808,7 +45014,7 @@ mod tests {
             grade.gpu_controls(),
             ([47, 0xFF33, 0, 0], [0.0, 0.2126, 0.7152, 0.0722])
         );
-        assert_eq!(builtin_effect_types().len(), 154);
+        assert!(builtin_effect_types().contains(&EffectType::ChannelCombiner));
     }
 
     #[test]
