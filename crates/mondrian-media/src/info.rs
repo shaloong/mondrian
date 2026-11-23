@@ -23,9 +23,10 @@ pub use mondrian_core::{
     VideoStreamInfo,
 };
 use mondrian_core::{
-    AudioChannelLayout, AudioChannelPosition, VideoContentLightMetadata, VideoHdrChromaticity,
-    VideoHdrMetadataPayload, VideoHdrRational, VideoIccProfileMetadata,
-    VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
+    AudioChannelLayout, AudioChannelPosition, SmpteCountingMode, SmpteTimecodeReference,
+    VideoContentLightMetadata, VideoHdrChromaticity, VideoHdrMetadataPayload, VideoHdrRational,
+    VideoIccProfileMetadata, VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata,
+    VideoMasteringDisplayPrimaries,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -693,6 +694,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         picture,
                         frame_rate,
                         frame_rate_proven,
+                        source_timecode: None,
                         pixel_format,
                         pixel_format_proven,
                         color_range,
@@ -735,6 +737,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     picture,
                     frame_rate,
                     frame_rate_proven,
+                    source_timecode: None,
                     pixel_format,
                     pixel_format_proven,
                     color_range: DecodedVideoRange::Unknown,
@@ -848,6 +851,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
         }
     }
 
+    capture_video_source_timecodes(&input, &mut video_streams);
     let info = MediaProbeSnapshot {
         duration,
         file_size,
@@ -874,6 +878,37 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
     }
 
     Ok(info)
+}
+
+fn capture_video_source_timecodes(
+    input: &ffmpeg::format::context::Input,
+    videos: &mut [VideoStreamInfo],
+) {
+    let container = input.metadata();
+    let container_label = if videos.len() == 1 {
+        metadata_value(&container, "timecode")
+    } else {
+        None
+    };
+    for video in videos.iter_mut().filter(|video| video.frame_rate_proven) {
+        let Some(stream) = input.stream(video.index as usize) else {
+            continue;
+        };
+        let metadata = stream.metadata();
+        let label = metadata_value(&metadata, "timecode").or(container_label);
+        video.source_timecode =
+            label.and_then(|label| parse_source_timecode(video.frame_rate, label));
+    }
+}
+
+fn parse_source_timecode(rate: Rational, label: &str) -> Option<SmpteTimecodeReference> {
+    let label = label.trim();
+    let mode = if label.contains(';') {
+        SmpteCountingMode::DropFrame
+    } else {
+        SmpteCountingMode::NonDropFrame
+    };
+    SmpteTimecodeReference::parse_start(rate, mode, label).ok()
 }
 
 #[cfg(test)]
@@ -3160,6 +3195,75 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(root).expect("remove closed range fixtures");
+    }
+
+    #[test]
+    fn probe_preserves_independent_source_timecodes_on_video_streams() {
+        let root = tempfile::tempdir().expect("timecode fixture directory");
+        let path = root.path().join("independent.mov");
+        let output = crate::ffmpeg_command()
+            .expect("admit timecode fixture command")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=64x64:r=25",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=64x64:r=24",
+                "-map",
+                "0:v",
+                "-map",
+                "1:v",
+                "-t",
+                "0.2",
+                "-c:v",
+                "mpeg4",
+                "-metadata:s:v:0",
+                "timecode=02:11:22:23",
+                "-metadata:s:v:1",
+                "timecode=03:22:11:12",
+            ])
+            .arg(&path)
+            .output()
+            .expect("create two-stream MOV");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let probe = probe_media_info(&path).expect("probe MOV");
+        assert_eq!(probe.video_streams.len(), 2);
+        for (index, rate, label) in [
+            (0, Rational::FPS_25, "02:11:22:23"),
+            (1, Rational::FPS_24, "03:22:11:12"),
+        ] {
+            let video = &probe.video_streams[index];
+            assert_eq!(video.index, index as u32);
+            assert_eq!(video.source_timecode, parse_source_timecode(rate, label));
+            let origin = video.source_timecode.expect("stream-owned timecode");
+            assert_eq!(origin.timecode_at_media_frame(0).unwrap().label(), label);
+        }
+    }
+
+    #[test]
+    fn source_timecode_rejects_invalid_or_unmatched_drop_frame_labels() {
+        let parsed = parse_source_timecode(Rational::FPS_2997, "01:00:59;29").unwrap();
+        assert_eq!(
+            parsed.timecode_at_media_frame(1).unwrap().label(),
+            "01:01:00;02"
+        );
+        assert_eq!(
+            parse_source_timecode(Rational::FPS_2997, "01:01:00;00"),
+            None
+        );
+        assert_eq!(parse_source_timecode(Rational::FPS_25, "01:00:00;00"), None);
+        assert_eq!(parse_source_timecode(Rational::FPS_25, "01:00:00:25"), None);
     }
 
     #[test]

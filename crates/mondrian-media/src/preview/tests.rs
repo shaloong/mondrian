@@ -6037,6 +6037,7 @@ fn reduced_test_stream() -> crate::info::VideoStreamInfo {
         picture: mondrian_core::PictureStreamMetadata::default(),
         frame_rate: Rational::new(25, 1),
         frame_rate_proven: true,
+        source_timecode: None,
         pixel_format: PixelFormat::Yuv420p,
         pixel_format_proven: true,
         color_range: DecodedVideoRange::Limited,

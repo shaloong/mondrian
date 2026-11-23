@@ -1479,6 +1479,9 @@ pub struct VideoStreamInfo {
     /// Whether the frame rate came from positive decoder evidence.
     #[serde(default)]
     pub frame_rate_proven: bool,
+    /// Proven SMPTE label at source time zero for this video stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_timecode: Option<crate::SmpteTimecodeReference>,
     /// Encoded pixel format or a non-authoritative storage fallback.
     ///
     /// This field is executable evidence only through
@@ -1711,6 +1714,7 @@ mod tests {
             picture: PictureStreamMetadata::default(),
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
+            source_timecode: None,
             pixel_format: PixelFormat::P010,
             pixel_format_proven,
             color_range: DecodedVideoRange::Limited,
