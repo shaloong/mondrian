@@ -11,6 +11,11 @@ use crate::automation::{
 use crate::{Color, MondrianError, ParameterId, Result, TimelineTime};
 use serde::{Deserialize, Serialize};
 
+mod timecode;
+pub use timecode::{
+    TitleMediaTimecodeSample, TitleTimecode, TitleTimecodeFormat, TitleTimecodeSource,
+};
+
 /// Maximum persisted UTF-8 bytes admitted for one Basic Title.
 pub const BASIC_TITLE_MAX_TEXT_BYTES: usize = 64 * 1024;
 /// Maximum persisted UTF-8 bytes admitted for one requested font family.
@@ -91,6 +96,8 @@ impl Default for BasicTitleAppearance {
 /// Fully evaluated Basic Title semantics at one title-local author time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvaluatedBasicTitle {
+    /// Explicit author-pixel layout anchor for generated captions.
+    pub layout_anchor: Option<[f32; 2]>,
     /// UTF-8 text, including explicit line breaks.
     pub text: String,
     /// Exact requested system font family. Missing families fail closed.
@@ -124,6 +131,8 @@ pub struct EvaluatedBasicTitle {
 #[serde(deny_unknown_fields)]
 pub struct BasicTitle {
     properties: PropertyBag,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    timecode: bool,
 }
 
 impl BasicTitle {
@@ -187,24 +196,87 @@ impl BasicTitle {
 
     /// Build a validated Basic Title with a concrete named font dependency.
     pub fn new(text: impl Into<String>, font_family: impl Into<String>) -> Result<Self> {
-        let text = text.into();
-        let font_family = font_family.into();
+        let title = Self::with_properties(text.into(), font_family.into(), false)?;
+        title.validate_author_state()?;
+        Ok(title)
+    }
+
+    fn with_properties(text: String, font_family: String, timecode: bool) -> Result<Self> {
         let mut properties = PropertyBag::default();
-        for descriptor in canonical_descriptors() {
+        for descriptor in canonical_descriptors(timecode) {
             properties.define(descriptor);
         }
         properties.set_static_value(Self::TEXT_PATH, PropertyValue::Text(text))?;
         properties.set_static_value(Self::FONT_FAMILY_PATH, PropertyValue::Text(font_family))?;
-        let title = Self { properties };
+        Ok(Self { properties, timecode })
+    }
+
+    /// Create a native overlay with authored clock settings and independent styling.
+    pub fn new_timecode(timecode: TitleTimecode, font_family: impl Into<String>) -> Result<Self> {
+        let mut title = Self::with_properties(String::new(), font_family.into(), true)?;
+        timecode.write_to(&mut title.properties)?;
         title.validate_author_state()?;
         Ok(title)
+    }
+
+    /// Whether this title renders a generated timecode label.
+    pub const fn is_timecode(&self) -> bool {
+        self.timecode
+    }
+
+    /// Author settings for a generated Timecode Title, when applicable.
+    pub fn timecode(&self) -> Result<Option<TitleTimecode>> {
+        self.timecode.then(|| TitleTimecode::read_from(&self.properties)).transpose()
+    }
+
+    /// Media placement whose original picture is excluded by this timecode overlay.
+    pub fn timecode_original_media_to_hide(&self) -> Result<Option<crate::ClipId>> {
+        if !self.timecode
+            || timecode::flag(&self.properties, Self::TIMECODE_COMPOSITE_ORIGINAL_PATH)?
+        {
+            return Ok(None);
+        }
+        match timecode::media_reference(&self.properties)? {
+            crate::VisualSourceReference::Clip { clip_id, .. } => Ok(Some(clip_id)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Evaluate style on the Clip clock and generate a label on the selected clock.
+    pub fn evaluate_for_render(
+        &self,
+        clip_time: TimelineTime,
+        sequence_time: TimelineTime,
+        sequence_rate: crate::Rational,
+        sequence_display: crate::TimelineDisplaySettings,
+        media_sample: Option<TitleMediaTimecodeSample>,
+    ) -> Result<EvaluatedBasicTitle> {
+        let mut evaluated = self.evaluate(clip_time)?;
+        if let Some(timecode) = self.timecode()? {
+            evaluated.text = timecode
+                .label_with_media_sample(
+                    sequence_time,
+                    clip_time,
+                    sequence_rate,
+                    sequence_display,
+                    media_sample,
+                )
+                .map_err(|error| title_error(error.to_string()))?;
+            evaluated.layout_anchor = Some(timecode.position);
+            evaluated.horizontal_align = BasicTitleHorizontalAlign::Left;
+            evaluated.vertical_align = BasicTitleVerticalAlign::Top;
+            if !timecode::show_box(&self.properties)? {
+                evaluated.appearance.background_opacity = 0.0;
+            }
+        }
+        Ok(evaluated)
     }
 
     /// Create fresh canonical decoration properties for versioned legacy project migration.
     /// A caller must refuse to overwrite any decoration already present in an older payload.
     pub fn decoration_defaults() -> PropertyBag {
         let mut properties = PropertyBag::default();
-        for descriptor in decoration_descriptors() {
+        for descriptor in decoration_descriptors(false) {
             properties.define(descriptor);
         }
         properties
@@ -234,10 +306,31 @@ impl BasicTitle {
         self.properties.fork_author_identities();
     }
 
+    /// Retarget a stored media binding when its placement is copied with the title.
+    pub fn remap_timecode_media_clip(
+        &mut self,
+        resolve: impl FnOnce(crate::ClipId) -> Option<crate::ClipId>,
+    ) -> Result<()> {
+        let Some(PropertyValue::VisualSource(crate::VisualSourceReference::Clip {
+            clip_id,
+            retime,
+        })) = self.properties.evaluate(Self::TIMECODE_MEDIA_CLIP_PATH, TimelineTime::ZERO)
+        else {
+            return Ok(());
+        };
+        if let Some(clip_id) = resolve(clip_id) {
+            self.properties.set_static_value(
+                Self::TIMECODE_MEDIA_CLIP_PATH,
+                PropertyValue::VisualSource(crate::VisualSourceReference::Clip { clip_id, retime }),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Validate the complete persisted author contract.
     pub fn validate_author_state(&self) -> Result<()> {
         self.properties.validate()?;
-        let canonical = canonical_descriptors();
+        let canonical = canonical_descriptors(self.timecode);
         if self.properties.iter().count() != canonical.len() {
             return Err(title_error(
                 "Basic Title property set must contain exactly the canonical definitions",
@@ -260,6 +353,9 @@ impl BasicTitle {
             }
         }
 
+        if let Some(timecode) = self.timecode()? {
+            timecode.validate()?;
+        }
         let evaluated = self.evaluate(TimelineTime::ZERO)?;
         if evaluated.text.len() > BASIC_TITLE_MAX_TEXT_BYTES {
             return Err(title_error(format!(
@@ -315,6 +411,7 @@ impl BasicTitle {
             };
 
         Ok(EvaluatedBasicTitle {
+            layout_anchor: None,
             text,
             font_family,
             font_weight,
@@ -355,7 +452,7 @@ impl BasicTitle {
     }
 }
 
-fn canonical_descriptors() -> Vec<PropertyDescriptor> {
+fn canonical_descriptors(timecode: bool) -> Vec<PropertyDescriptor> {
     let mut descriptors = vec![
         PropertyDescriptor::new(
             BasicTitle::TEXT_PATH,
@@ -404,14 +501,14 @@ fn canonical_descriptors() -> Vec<PropertyDescriptor> {
         PropertyDescriptor::new(
             BasicTitle::FONT_SIZE_PATH,
             "字号",
-            PropertyValue::Float(96.0),
+            PropertyValue::Float(if timecode { 36.0 } else { 96.0 }),
         )
         .with_parameter_id(ParameterId::new_static("mondrian.title.font_size"))
         .with_numeric_contract(
             ParameterUnit::Pixels,
             ParameterNumericContract::closed(
-                1.0,
-                4096.0,
+                if timecode { 8.0 } else { 1.0 },
+                if timecode { 128.0 } else { 4096.0 },
                 Some(1.0),
                 ParameterInvalidValuePolicy::Reject,
             )
@@ -476,11 +573,14 @@ fn canonical_descriptors() -> Vec<PropertyDescriptor> {
         ]))
         .with_animatable(false),
     ];
-    descriptors.extend(decoration_descriptors());
+    descriptors.extend(decoration_descriptors(timecode));
+    if timecode {
+        descriptors.extend(timecode::descriptors());
+    }
     descriptors
 }
 
-fn decoration_descriptors() -> [PropertyDescriptor; 8] {
+fn decoration_descriptors(timecode: bool) -> [PropertyDescriptor; 8] {
     let defaults = BasicTitleAppearance::default();
     let pixels = |value, max| {
         (
@@ -560,7 +660,11 @@ fn decoration_descriptors() -> [PropertyDescriptor; 8] {
             BasicTitle::BACKGROUND_OPACITY_PATH,
             "mondrian.title.background_opacity",
             "背景不透明度",
-            opacity(defaults.background_opacity),
+            opacity(if timecode {
+                1.0
+            } else {
+                defaults.background_opacity
+            }),
         ),
         numeric(
             BasicTitle::OPACITY_PATH,
@@ -656,7 +760,7 @@ impl crate::AuthoringFootprint for BasicTitle {
         &self,
         collector: &mut crate::AuthoringFootprintCollector,
     ) -> std::result::Result<(), crate::AuthoringFootprintError> {
-        let Self { properties } = self;
+        let Self { properties, timecode: _ } = self;
         collector.collect(properties)
     }
 }

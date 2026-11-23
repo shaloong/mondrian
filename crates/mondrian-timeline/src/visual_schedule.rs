@@ -126,6 +126,7 @@ impl PreparedVisualScheduleQueryDiagnostics {
 pub struct PreparedVisualSchedule {
     key: PreparedVisualScheduleKey,
     time_base: Rational,
+    timeline_display: mondrian_core::TimelineDisplaySettings,
     working_color_space: WorkingColorSpace,
     auto_tone_map_media: bool,
     tracks: Vec<PreparedVisualTrack>,
@@ -194,6 +195,7 @@ impl PreparedVisualSchedule {
         Ok(Self {
             key: PreparedVisualScheduleKey::for_sequence(sequence),
             time_base: sequence.time_base(),
+            timeline_display: sequence.settings.timeline_display,
             working_color_space: sequence.settings.color.working_color_space,
             auto_tone_map_media: sequence.settings.color.input.auto_tone_map_media,
             active_tracks,
@@ -756,15 +758,27 @@ impl PreparedAuxiliaryClipPlacement {
         target: SourceSampleTarget,
         frame_rate: Rational,
     ) -> std::result::Result<TimelineTime, VisualSourceTimeError> {
-        Ok(match target.boundary() {
-            SourceSamplingBoundary::Covering => target.time(),
-            SourceSamplingBoundary::StrictPredecessor => {
-                let position = target.to_frame_position(frame_rate)?;
-                // A Clip can be shorter than a grid cell and retain its in-edge.
-                TimelineTime::from_frame_position(position)?.max(self.available.start)
-            }
-        })
+        Ok(project_clip_sample_time(
+            target,
+            frame_rate,
+            self.available.start,
+        )?)
     }
+}
+
+pub(crate) fn project_clip_sample_time(
+    target: SourceSampleTarget,
+    frame_rate: Rational,
+    in_edge: TimelineTime,
+) -> Result<TimelineTime, mondrian_core::TimelineTimeError> {
+    Ok(match target.boundary() {
+        SourceSamplingBoundary::Covering => target.time(),
+        SourceSamplingBoundary::StrictPredecessor => {
+            let position = target.to_frame_position(frame_rate)?;
+            // A Clip can be shorter than a grid cell and retain its in-edge.
+            TimelineTime::from_frame_position(position)?.max(in_edge)
+        }
+    })
 }
 
 /// Reason a Clip reference cannot be resolved against this visual schedule.
@@ -810,6 +824,26 @@ pub enum AuxiliaryClipAdmissionError {
 }
 
 impl RenderPlanSource for PreparedVisualSchedule {
+    fn source_timeline_display(&self) -> mondrian_core::TimelineDisplaySettings {
+        self.timeline_display
+    }
+
+    fn sample_title_media_timecode(
+        &self,
+        clip_id: ClipId,
+        sequence_time: TimelineTime,
+        retime: VisualSourceRetime,
+    ) -> Result<Option<mondrian_core::TitleMediaTimecodeSample>> {
+        let &(track_index, clip_index) = self.clip_locations.get(&clip_id).ok_or_else(|| {
+            crate::clip::title_media_source_error(clip_id, "Clip is not in this Sequence")
+        })?;
+        self.tracks[track_index].track.clips[clip_index].sample_title_media_timecode(
+            sequence_time,
+            Rational::new(self.time_base.den, self.time_base.num),
+            retime,
+        )
+    }
+
     fn flat_visual_items_at(&self, time: TimelineTime) -> Result<Vec<FlatVisualItem>> {
         self.flat_visual_items_at_with_diagnostics(time).map(|(items, _)| items)
     }

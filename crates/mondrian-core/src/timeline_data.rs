@@ -221,6 +221,20 @@ pub struct MediaInterpretation {
 }
 
 impl MediaInterpretation {
+    /// Apply the placement's author frame-rate override to a source request.
+    pub fn resolve_source_sample(
+        &self,
+        sample: SourceSampleTarget,
+    ) -> Result<SourceSampleTarget, crate::TimelineTimeError> {
+        if let Some(rate) = self.frame_rate_override {
+            let position = sample.to_frame_position(rate)?;
+            return Ok(SourceSampleTarget::covering(
+                TimelineTime::from_frame_position(position)?,
+            ));
+        }
+        Ok(sample)
+    }
+
     /// Closed picture-geometry override projection for execution Adapters.
     pub const fn picture_overrides(&self) -> crate::PictureInterpretationOverrides {
         crate::PictureInterpretationOverrides {
@@ -722,6 +736,17 @@ pub trait RenderPlanSource {
 
     /// Time base of the sequence.
     fn source_time_base(&self) -> Rational;
+
+    /// Timecode origin and counting convention of the owner Sequence.
+    fn source_timeline_display(&self) -> crate::TimelineDisplaySettings;
+
+    /// Sample a media Clip's editorial timecode without materializing its pixels.
+    fn sample_title_media_timecode(
+        &self,
+        clip_id: ClipId,
+        sequence_time: TimelineTime,
+        retime: crate::VisualSourceRetime,
+    ) -> Result<Option<crate::TitleMediaTimecodeSample>>;
 
     /// Linear-light working color space in which clip effects execute.
     fn source_working_color_space(&self) -> WorkingColorSpace;

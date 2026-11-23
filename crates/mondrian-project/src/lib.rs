@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 36;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 37;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -358,6 +358,11 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
             to: 36,
             migrate: migrate_document_v35_to_v36,
         },
+        JsonMigrationStep {
+            from: 36,
+            to: 37,
+            migrate: migrate_document_v36_to_v37,
+        },
     ],
 );
 
@@ -466,24 +471,65 @@ fn migrate_document_v34_to_v35(mut value: serde_json::Value) -> anyhow::Result<s
 // The document's SequenceCollection also holds nested sequences by ID.
 // Only the canonical clip-content path owns a Basic Title property bag.
 fn migrate_document_v35_to_v36(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    visit_document_titles(&mut value, 35, |title| {
+        let properties = title
+            .pointer_mut("/properties/properties")
+            .and_then(serde_json::Value::as_object_mut)
+            .context("schema-35 Basic Title has no property map")?;
+        // Generate fresh IDs for each title and leave the previous tracks intact.
+        let mut defaults = serde_json::to_value(mondrian_core::BasicTitle::decoration_defaults())?;
+        let defaults = defaults
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+            .context("Basic Title decoration defaults did not serialize to a property map")?;
+        for path in defaults.keys() {
+            anyhow::ensure!(
+                !properties.contains_key(path),
+                "schema-35 Basic Title cannot contain decoration property `{path}`"
+            );
+        }
+        properties.append(defaults);
+        Ok(())
+    })?;
+    value["schema_version"] = serde_json::json!(36);
+    Ok(value)
+}
+
+fn migrate_document_v36_to_v37(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    visit_document_titles(&mut value, 36, |title| {
+        anyhow::ensure!(
+            title.get("timecode").is_none(),
+            "schema-36 Basic Title cannot contain Timecode Title settings"
+        );
+        Ok(())
+    })?;
+    value["schema_version"] = serde_json::json!(37);
+    Ok(value)
+}
+
+fn visit_document_titles(
+    value: &mut serde_json::Value,
+    schema: u32,
+    mut visit: impl FnMut(&mut serde_json::Value) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     use serde_json::Value;
 
     let sequences = value
         .get_mut("sequences")
         .and_then(|collection| collection.get_mut("sequences"))
         .and_then(Value::as_array_mut)
-        .context("schema-35 document has no Sequence collection")?;
+        .with_context(|| format!("schema-{schema} document has no Sequence collection"))?;
     for sequence in sequences {
         for track_list in ["video_tracks", "audio_tracks"] {
             let tracks = sequence
                 .get_mut(track_list)
                 .and_then(Value::as_array_mut)
-                .with_context(|| format!("schema-35 Sequence has no {track_list} array"))?;
+                .with_context(|| format!("schema-{schema} Sequence has no {track_list} array"))?;
             for track in tracks {
                 let clips = track
                     .get_mut("clips")
                     .and_then(Value::as_array_mut)
-                    .context("schema-35 Track has no Clip array")?;
+                    .with_context(|| format!("schema-{schema} Track has no Clip array"))?;
                 for clip in clips {
                     let Some(content) = clip.get_mut("content") else {
                         continue;
@@ -491,32 +537,15 @@ fn migrate_document_v35_to_v36(mut value: serde_json::Value) -> anyhow::Result<s
                     if content.get("type").and_then(Value::as_str) != Some("basic_title") {
                         continue;
                     }
-                    let properties = content
-                        .pointer_mut("/title/properties/properties")
-                        .and_then(Value::as_object_mut)
-                        .context("schema-35 Basic Title has no property map")?;
-                    // Build once per title: do not share generated animation track IDs.
-                    let mut defaults =
-                        serde_json::to_value(mondrian_core::BasicTitle::decoration_defaults())?;
-                    let defaults =
-                        defaults.get_mut("properties").and_then(Value::as_object_mut).context(
-                            "Basic Title decoration defaults did not serialize to a property map",
-                        )?;
-                    for path in defaults.keys() {
-                        // Presence is invalid even when null or exactly a default.
-                        anyhow::ensure!(
-                            !properties.contains_key(path),
-                            "schema-35 Basic Title cannot contain decoration property `{path}`"
-                        );
-                    }
-                    // Do not reserialize any old value, descriptor, ID or keyframe.
-                    properties.append(defaults);
+                    let title = content.get_mut("title").with_context(|| {
+                        format!("schema-{schema} Basic Title is missing its author state")
+                    })?;
+                    visit(title)?;
                 }
             }
         }
     }
-    value["schema_version"] = serde_json::json!(36);
-    Ok(value)
+    Ok(())
 }
 
 const REQUIRED_ARCHIVE_ENTRIES: [&str; 3] = [MANIFEST_ENTRY, PROJECT_ENTRY, LIBRARY_ENTRY];
@@ -3468,6 +3497,122 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn timecode_title_migration_preserves_plain_titles_and_rejects_legacy_clock_settings() {
+        let current = DOCUMENT_MIGRATIONS.migrate(ttl01_schema35_title_fixture()).unwrap();
+        let mut legacy = current.clone();
+        legacy["schema_version"] = serde_json::json!(36);
+        assert_eq!(
+            DOCUMENT_MIGRATIONS.migrate(legacy.clone()).unwrap(),
+            current
+        );
+
+        let child = legacy
+            .pointer_mut("/sequences/sequences/1/video_tracks/0/clips/0/content/title")
+            .unwrap();
+        child["timecode"] = serde_json::json!(true);
+        let error = DOCUMENT_MIGRATIONS.migrate(legacy).unwrap_err();
+        assert!(format!("{error:#}")
+            .contains("schema-36 Basic Title cannot contain Timecode Title settings"));
+    }
+
+    #[test]
+    fn timecode_title_archive_preserves_control_identities_and_dormant_values() {
+        use mondrian_core::{
+            BasicTitle, TitleTimecode, TitleTimecodeFormat, TitleTimecodeSource,
+            VisualSourceBoundary, VisualSourceReference, VisualSourceRetime,
+        };
+
+        let root = unique_temp_dir("timecode-title-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").unwrap();
+        let path = root.join("timecode.mdp");
+        let mut document = test_document();
+        let media = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(3, 1).unwrap(),
+        )
+        .unwrap();
+        let media_id = media.id;
+        let reference = VisualSourceReference::Clip {
+            clip_id: media_id,
+            retime: VisualSourceRetime {
+                time_offset: TimelineTime::new(1, 24).unwrap(),
+                mode: VisualSourceBoundary::Transparent,
+            },
+        };
+        document.sequences.active_mut().unwrap().video_tracks[1]
+            .add_clip(media)
+            .unwrap();
+        let clock = TitleTimecode {
+            format: TitleTimecodeFormat::FeetAndFrames35mm,
+            source: TitleTimecodeSource::Custom {
+                frames_per_second: 24,
+                drop_frame: false,
+                start_frame: -68,
+            },
+            position: [123.4, -18.0],
+        };
+        let mut clip = Clip::new_timecode_title(
+            clock,
+            "Arial",
+            TimelineTime::ZERO,
+            TimelineTime::new(3, 1).unwrap(),
+        )
+        .unwrap();
+        for (path, value) in [
+            (
+                BasicTitle::TIMECODE_SOURCE_PATH,
+                PropertyValue::Enum("sequence".into()),
+            ),
+            (BasicTitle::TIMECODE_BOX_PATH, PropertyValue::Bool(false)),
+            (
+                BasicTitle::TIMECODE_COMPOSITE_ORIGINAL_PATH,
+                PropertyValue::Bool(false),
+            ),
+            (
+                BasicTitle::TIMECODE_MEDIA_CLIP_PATH,
+                PropertyValue::VisualSource(reference),
+            ),
+            (
+                BasicTitle::BACKGROUND_OPACITY_PATH,
+                PropertyValue::Float(0.6),
+            ),
+        ] {
+            clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: path.to_owned(),
+                value,
+            })
+            .unwrap();
+        }
+        let expected = clip.content.basic_title().unwrap().clone();
+        document.sequences.active_mut().unwrap().video_tracks[0].add_clip(clip).unwrap();
+        save_project_archive(&document, &db_path, &path).unwrap();
+        let reopened = read_project_document_from_archive(&path).unwrap();
+        let mut title = reopened.sequences.active().unwrap().video_tracks[0].clips[0]
+            .content
+            .basic_title()
+            .unwrap()
+            .clone();
+        assert_eq!(title, expected);
+        assert_eq!(
+            title.timecode_original_media_to_hide().unwrap(),
+            Some(media_id)
+        );
+        title
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: BasicTitle::TIMECODE_SOURCE_PATH.to_owned(),
+                value: PropertyValue::Enum("custom".into()),
+            })
+            .unwrap();
+        assert_eq!(title.timecode().unwrap(), Some(clock));
+        assert_eq!(
+            title.evaluate(TimelineTime::ZERO).unwrap().appearance.background_opacity,
+            0.6
+        );
+    }
+
     #[test]
     fn basic_title_closed_author_state_round_trips_with_exact_animation() {
         let root = unique_temp_dir("basic-title-round-trip");

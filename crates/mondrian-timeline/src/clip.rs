@@ -12,10 +12,21 @@ use mondrian_core::{
     mask_data::{MaskComponent, MaskParticipation, MaskShape, MaskShapeInterpolation},
     types::*,
     AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
-    MondrianError, ParameterId, Result, TimeScale, TimelineTime,
+    MondrianError, ParameterId, Result, TimeScale, TimelineTime, TimelineTimeRange,
+    TitleMediaTimecodeSample, VisualSourceRetime,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+pub(crate) fn title_media_source_error(
+    clip_id: ClipId,
+    reason: impl std::fmt::Display,
+) -> MondrianError {
+    MondrianError::WorkflowStepFailed {
+        step_id: "timecode_title_media_source".to_owned(),
+        reason: format!("Clip {clip_id}: {reason}"),
+    }
+}
 
 /// 裁剪边缘
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -648,6 +659,19 @@ impl Clip {
         Ok(clip)
     }
 
+    /// Create a Timecode Title on the ordinary generated-picture path.
+    pub fn new_timecode_title(
+        clock: mondrian_core::TitleTimecode,
+        font_family: impl Into<String>,
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
+        let title = mondrian_core::BasicTitle::new_timecode(clock, font_family)?;
+        let mut clip = Self::with_content(ClipContent::BasicTitle { title }, position, duration)?;
+        clip.label = Some("时间码".to_owned());
+        Ok(clip)
+    }
+
     pub fn new_adjustment_layer(
         asset_id: AssetId,
         position: TimelineTime,
@@ -885,6 +909,39 @@ impl Clip {
     ) -> Result<mondrian_core::SourceSampleTarget> {
         let local = timeline_time.checked_sub(self.position)?;
         self.source_time_map.sample(local)
+    }
+
+    pub(crate) fn sample_title_media_timecode(
+        &self,
+        sequence_time: TimelineTime,
+        sequence_rate: Rational,
+        retime: VisualSourceRetime,
+    ) -> Result<Option<TitleMediaTimecodeSample>> {
+        let ClipContent::Media { interpretation, .. } = &self.content else {
+            return Err(title_media_source_error(self.id, "expected a media Clip"));
+        };
+        let reference = interpretation
+            .editorial_source
+            .as_ref()
+            .and_then(|identity| identity.source_timecode())
+            .ok_or_else(|| title_media_source_error(self.id, "Clip has no editorial timecode"))?;
+        reference.validate().map_err(|error| title_media_source_error(self.id, error))?;
+
+        let available = TimelineTimeRange { start: self.position, duration: self.duration };
+        let sample = retime
+            .sample(sequence_time, available)
+            .map_err(|error| title_media_source_error(self.id, error))?;
+        let Some(target) = sample.source_sample else {
+            return Ok(None);
+        };
+        let sample_time =
+            crate::visual_schedule::project_clip_sample_time(target, sequence_rate, self.position)?;
+        let source =
+            interpretation.resolve_source_sample(self.timeline_to_source_sample(sample_time)?)?;
+        Ok(Some(TitleMediaTimecodeSample {
+            reference,
+            frame: source.to_frame_position(reference.frame_rate())?.frame,
+        }))
     }
 
     /// Map one source-domain time back into this Clip's Sequence placement.

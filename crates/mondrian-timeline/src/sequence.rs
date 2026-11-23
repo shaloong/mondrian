@@ -2337,6 +2337,17 @@ impl Sequence {
             clip_ids.insert(old_id, clip.id);
         }
 
+        for title in self
+            .video_tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+            .filter_map(|clip| clip.content.basic_title_mut())
+        {
+            title
+                .remap_timecode_media_clip(|id| clip_ids.get(&id).copied())
+                .expect("a validated title can retarget a media Clip without changing its schema");
+        }
+
         let old_channels = std::mem::take(&mut self.audio_program.track_channels);
         self.audio_program.track_channels = old_channels
             .into_iter()
@@ -3042,6 +3053,26 @@ fn rekey_exact_curve(curve: &mut mondrian_core::ExactAutomationCurve) {
 }
 
 impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
+    fn source_timeline_display(&self) -> TimelineDisplaySettings {
+        self.settings.timeline_display
+    }
+
+    fn sample_title_media_timecode(
+        &self,
+        clip_id: ClipId,
+        sequence_time: TimelineTime,
+        retime: mondrian_core::VisualSourceRetime,
+    ) -> mondrian_core::Result<Option<mondrian_core::TitleMediaTimecodeSample>> {
+        let clip = self
+            .video_tracks
+            .iter()
+            .find_map(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+            .ok_or_else(|| {
+                crate::clip::title_media_source_error(clip_id, "Clip is not in this Sequence")
+            })?;
+        clip.sample_title_media_timecode(sequence_time, self.settings.frame_rate, retime)
+    }
+
     fn flat_visual_items_at(
         &self,
         time: TimelineTime,

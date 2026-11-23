@@ -510,6 +510,9 @@ fn parse_two_digits(bytes: &[u8]) -> Result<u64, DisplayTimecodeError> {
 /// Invalid or unsupported SMPTE display request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DisplayTimecodeError {
+    /// The owning visual plan did not resolve a required media clock.
+    #[error("missing media timecode sample")]
+    MissingMediaTimecodeSample,
     /// Frame rate and time base must be positive.
     #[error("display timecode frame rate must be positive")]
     InvalidFrameRate,
