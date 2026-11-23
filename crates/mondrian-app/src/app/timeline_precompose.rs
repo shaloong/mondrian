@@ -111,6 +111,7 @@ impl AppState {
                     nested_clip.position = clip.position.checked_sub(plan.min_time)?;
                     if let Some(title) = nested_clip.content.basic_title_mut() {
                         title.remap_clip_info_track(|id| nested_video_tracks.get(&id).copied())?;
+                        title.remap_metadata_tracks(|id| nested_video_tracks.get(&id).copied())?;
                     }
                     nested_sequence.video_tracks[track_index].add_clip(nested_clip)?;
                 }

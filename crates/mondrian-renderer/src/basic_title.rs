@@ -248,6 +248,8 @@ pub struct BasicTitleRasterDiagnostics {
 pub struct BasicTitleRasterFrame {
     /// Straight-alpha working-linear pixels.
     frame: CpuColorFrame,
+    /// Exact crop origin on the sampled canvas.
+    crop: [i64; 2],
     /// Affine mapping from sampled raster pixels to full-resolution title
     /// author coordinates.
     sampled_source_to_author: [f32; 6],
@@ -291,6 +293,42 @@ impl std::fmt::Display for BasicTitleRasterIdentity {
 }
 
 impl BasicTitleRasterFrame {
+    fn from_output(
+        output: title_decoration::Output,
+        sampling: mondrian_core::ImageSampling,
+        scale: f32,
+        working: WorkingColorSpace,
+        interpolate: bool,
+        identity: BasicTitleRasterIdentity,
+        diagnostics: BasicTitleRasterDiagnostics,
+    ) -> Self {
+        let title_decoration::Output { crop_x, crop_y, width, height, pixels } = output;
+        Self {
+            frame: CpuColorFrame::working_with_composite_projection(
+                WorkingRgbaF32Frame {
+                    sampling,
+                    alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    width,
+                    height,
+                    data: pixels,
+                    color_space: working,
+                },
+                interpolate,
+            ),
+            crop: [crop_x, crop_y],
+            sampled_source_to_author: [
+                1.0 / scale,
+                0.0,
+                crop_x as f32 / scale,
+                0.0,
+                1.0 / scale,
+                crop_y as f32 / scale,
+            ],
+            identity,
+            diagnostics,
+        }
+    }
+
     /// Borrow the generated working-linear frame.
     pub fn frame(&self) -> &CpuColorFrame {
         &self.frame
@@ -583,6 +621,34 @@ impl BasicTitleRasterizer {
             owner_sample_aspect_ratio,
             uniform_scale,
         )?;
+        if !title.positioned_lines.is_empty() {
+            let (output, glyphs) = self.rasterize_positioned_lines(
+                title,
+                author_resolution,
+                title_safe_margin,
+                sampled_resolution,
+                working_color_space,
+                owner_sample_aspect_ratio,
+            )?;
+            let frame = BasicTitleRasterFrame::from_output(
+                output,
+                sampling,
+                uniform_scale,
+                working_color_space,
+                true,
+                identity,
+                BasicTitleRasterDiagnostics {
+                    requested_family: title.font_family.clone(),
+                    resolved_postscript_name,
+                    resolved_weight,
+                    face_fingerprint,
+                    glyphs,
+                    cache_hit: false,
+                },
+            );
+            self.insert_cache(identity, frame.clone());
+            return Ok(frame);
+        }
         let sampled_font_size = title.font_size * uniform_scale;
         let sampled_line_height = sampled_font_size * title.line_height;
         let safe_margin_per_side = title_safe_margin * 0.5;
@@ -766,48 +832,33 @@ impl BasicTitleRasterizer {
             });
         }
 
-        let title_decoration::Output { crop_x, crop_y, width, height, pixels } =
-            if let Some(decoration) = decoration {
-                decoration.finish()
-            } else {
-                if appearance.opacity != 1.0 {
-                    for pixel in &mut pixels {
-                        pixel[3] *= appearance.opacity;
-                        if pixel[3] == 0.0 {
-                            *pixel = [0.0; 4];
-                        }
+        let output = if let Some(decoration) = decoration {
+            decoration.finish()
+        } else {
+            if appearance.opacity != 1.0 {
+                for pixel in &mut pixels {
+                    pixel[3] *= appearance.opacity;
+                    if pixel[3] == 0.0 {
+                        *pixel = [0.0; 4];
                     }
                 }
-                title_decoration::Output {
-                    crop_x: i64::from(crop_x),
-                    crop_y: i64::from(crop_y),
-                    width,
-                    height,
-                    pixels,
-                }
-            };
-        let frame = BasicTitleRasterFrame {
-            frame: CpuColorFrame::working_with_composite_projection(
-                WorkingRgbaF32Frame {
-                    sampling,
-                    alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
-                    width,
-                    height,
-                    data: pixels,
-                    color_space: working_color_space,
-                },
-                geometry_active || title.layout_anchor.is_some(),
-            ),
-            sampled_source_to_author: [
-                1.0 / uniform_scale,
-                0.0,
-                crop_x as f32 / uniform_scale,
-                0.0,
-                1.0 / uniform_scale,
-                crop_y as f32 / uniform_scale,
-            ],
+            }
+            title_decoration::Output {
+                crop_x: i64::from(crop_x),
+                crop_y: i64::from(crop_y),
+                width,
+                height,
+                pixels,
+            }
+        };
+        let frame = BasicTitleRasterFrame::from_output(
+            output,
+            sampling,
+            uniform_scale,
+            working_color_space,
+            geometry_active || title.layout_anchor.is_some(),
             identity,
-            diagnostics: BasicTitleRasterDiagnostics {
+            BasicTitleRasterDiagnostics {
                 requested_family: title.font_family.clone(),
                 resolved_postscript_name,
                 resolved_weight,
@@ -815,9 +866,100 @@ impl BasicTitleRasterizer {
                 glyphs,
                 cache_hit: false,
             },
-        };
+        );
         self.insert_cache(identity, frame.clone());
         Ok(frame)
+    }
+
+    fn rasterize_positioned_lines(
+        &mut self,
+        title: &EvaluatedBasicTitle,
+        author_resolution: Resolution,
+        title_safe_margin: f32,
+        sampled_resolution: Resolution,
+        working: WorkingColorSpace,
+        sample_aspect_ratio: mondrian_core::SampleAspectRatio,
+    ) -> Result<(title_decoration::Output, u32), BasicTitleRasterError> {
+        let mut styled_line = title.clone();
+        styled_line.positioned_lines.clear();
+        styled_line.appearance.opacity = 1.0;
+        let mut lines = Vec::with_capacity(title.positioned_lines.len());
+        let mut glyphs = 0u32;
+        let mut bounds: Option<title_decoration::Rect> = None;
+        let mut scratch_pixels = 0u64;
+        for line in &title.positioned_lines {
+            styled_line.text.clone_from(&line.text);
+            styled_line.layout_anchor = Some(line.anchor);
+            styled_line.font_size = line.font_size;
+            let raster = self.rasterize(
+                &styled_line,
+                author_resolution,
+                title_safe_margin,
+                sampled_resolution,
+                working,
+                sample_aspect_ratio,
+            )?;
+            let frame = raster.frame.rgba_f32();
+            let [x0, y0] = raster.crop;
+            let rect = title_decoration::Rect {
+                x0,
+                y0,
+                x1: x0 + i64::from(frame.width),
+                y1: y0 + i64::from(frame.height),
+            };
+            bounds = Some(bounds.map_or(rect, |bounds| bounds.union(rect)));
+            scratch_pixels += u64::from(frame.width) * u64::from(frame.height);
+            glyphs = glyphs.saturating_add(raster.diagnostics.glyphs);
+            if scratch_pixels > MAX_RASTER_PIXELS {
+                return Err(BasicTitleRasterError::RasterBudgetExceeded {
+                    width: frame.width,
+                    height: frame.height,
+                    max_pixels: MAX_RASTER_PIXELS,
+                });
+            }
+            lines.push(raster);
+        }
+        let bounds = bounds.expect("positioned-title callers provide at least one line");
+        let (width, height) = bounds.dimensions()?;
+        admit_raster(width, height)?;
+        let union_pixels = u64::from(width) * u64::from(height);
+        if scratch_pixels.saturating_add(union_pixels) > MAX_RASTER_PIXELS {
+            return Err(BasicTitleRasterError::RasterBudgetExceeded {
+                width,
+                height,
+                max_pixels: MAX_RASTER_PIXELS,
+            });
+        }
+        let mut pixels = vec![[0.0; 4]; union_pixels as usize];
+        for raster in lines {
+            let frame = raster.frame.rgba_f32();
+            let dst_x = (raster.crop[0] - bounds.x0) as usize;
+            let dst_y = (raster.crop[1] - bounds.y0) as usize;
+            for (row, src) in frame.data.chunks_exact(frame.width as usize).enumerate() {
+                let start = (dst_y + row) * width as usize + dst_x;
+                for (dst, &src) in pixels[start..start + src.len()].iter_mut().zip(src) {
+                    title_decoration::over(dst, src, 1.0);
+                }
+            }
+        }
+        for pixel in &mut pixels {
+            let [r, g, b, a] = *pixel;
+            if a > 0.0 && title.appearance.opacity > 0.0 {
+                *pixel = [r / a, g / a, b / a, a * title.appearance.opacity];
+            } else {
+                *pixel = [0.0; 4];
+            }
+        }
+        Ok((
+            title_decoration::Output {
+                crop_x: bounds.x0,
+                crop_y: bounds.y0,
+                width,
+                height,
+                pixels,
+            },
+            glyphs,
+        ))
     }
 
     fn insert_cache(&mut self, key: BasicTitleRasterIdentity, frame: BasicTitleRasterFrame) {
@@ -1199,6 +1341,14 @@ fn hash_title_raster_request(
     title.horizontal_align.hash(hasher);
     title.vertical_align.hash(hasher);
     title.layout_anchor.map(|anchor| anchor.map(f32::to_bits)).hash(hasher);
+    if !title.positioned_lines.is_empty() {
+        title.positioned_lines.len().hash(hasher);
+        for line in &title.positioned_lines {
+            line.text.hash(hasher);
+            line.anchor.map(f32::to_bits).hash(hasher);
+            line.font_size.to_bits().hash(hasher);
+        }
+    }
     author.width.hash(hasher);
     author.height.hash(hasher);
     title_safe_margin.to_bits().hash(hasher);
@@ -1426,6 +1576,43 @@ mod tests {
         let mut transparent = at_origin;
         transparent.appearance.background_opacity = 0.0;
         assert!(render(&transparent).frame().uses_bilinear_composite_projection());
+    }
+
+    #[test]
+    fn metadata_burn_in_applies_global_opacity_once_after_line_overlap() {
+        let mut title = evaluated("");
+        let line = mondrian_core::PositionedTitleLine {
+            text: "Overlap".into(),
+            anchor: [320.0, 160.0],
+            font_size: 36.0,
+        };
+        title.appearance.opacity = 0.4;
+        title.positioned_lines = vec![line.clone(), line];
+        let mut rasterizer = BasicTitleRasterizer::new();
+        let mut render = |title: &EvaluatedBasicTitle| {
+            rasterizer
+                .rasterize(
+                    title,
+                    Resolution::FHD,
+                    0.15,
+                    Resolution::FHD,
+                    WorkingColorSpace::LinearRec709,
+                    mondrian_core::SampleAspectRatio::SQUARE,
+                )
+                .unwrap()
+        };
+        let combined = render(&title);
+        let max_alpha = combined
+            .frame()
+            .rgba_f32()
+            .data
+            .iter()
+            .map(|pixel| pixel[3])
+            .fold(0.0, f32::max);
+        assert!((max_alpha - 0.4).abs() < 1e-6);
+        assert!(render(&title).diagnostics().cache_hit);
+        title.positioned_lines[1].anchor[1] += 20.0;
+        assert_ne!(combined.identity(), render(&title).identity());
     }
 
     #[test]

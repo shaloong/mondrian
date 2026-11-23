@@ -2875,13 +2875,14 @@ impl InspectorPanelModel {
             .basic_title()
             .map(|title| {
                 use mondrian_core::{
-                    BasicTitle, BasicTitleContentKind, TitleTimecode, TitleTimecodeSource,
+                    BasicTitle, BasicTitleContentKind, TitleMetadataField, TitleTimecode,
+                    TitleTimecodeSource, TITLE_METADATA_LINE_PATHS,
                 };
 
                 let properties = title.property_bag();
                 let content_kind = title.content_kind();
                 let generated_paths = match content_kind {
-                    BasicTitleContentKind::Text => &[][..],
+                    BasicTitleContentKind::Text | BasicTitleContentKind::MetadataBurnIn => &[][..],
                     BasicTitleContentKind::Timecode => {
                         BasicTitle::TIMECODE_PROPERTY_PATHS.as_slice()
                     }
@@ -2890,6 +2891,31 @@ impl InspectorPanelModel {
                         BasicTitle::CLIP_INFO_PROPERTY_PATHS.as_slice()
                     }
                 };
+                let metadata_paths = title
+                    .metadata_lines()
+                    .ok()
+                    .flatten()
+                    .into_iter()
+                    .flatten()
+                    .zip(TITLE_METADATA_LINE_PATHS)
+                    .flat_map(|(line, paths)| {
+                        let timecode = line.enabled && line.field.is_timecode();
+                        [
+                            Some(paths.enabled),
+                            line.enabled.then_some(paths.field),
+                            line.enabled.then_some(paths.position),
+                            line.enabled.then_some(paths.scale),
+                            (line.enabled && line.field != TitleMetadataField::SequenceTimecode)
+                                .then_some(paths.track),
+                            timecode.then_some(paths.format),
+                            timecode.then_some(paths.time_origin),
+                            timecode.then_some(paths.offset),
+                            (timecode && line.custom_start_frame.is_some())
+                                .then_some(paths.start_frame),
+                        ]
+                        .into_iter()
+                        .flatten()
+                    });
                 let decimal_controls = title
                     .numbers_format()
                     .ok()
@@ -2905,8 +2931,9 @@ impl InspectorPanelModel {
                 ) == Some(PropertyValue::Bool(true));
                 generated_paths
                     .iter()
-                    .chain(&BasicTitle::PROPERTY_PATHS)
                     .copied()
+                    .chain(metadata_paths)
+                    .chain(BasicTitle::PROPERTY_PATHS)
                     .filter(|path| match *path {
                         BasicTitle::TEXT_PATH => content_kind == BasicTitleContentKind::Text,
                         BasicTitle::HORIZONTAL_ALIGN_PATH => !title.is_timecode(),
@@ -2933,7 +2960,9 @@ impl InspectorPanelModel {
                                 clip_author_time,
                                 localizer,
                             );
-                            if path == BasicTitle::CLIP_INFO_TRACK_PATH {
+                            if path == BasicTitle::CLIP_INFO_TRACK_PATH
+                                || TITLE_METADATA_LINE_PATHS.iter().any(|line| path == line.track)
+                            {
                                 model.enum_labels.extend(
                                     sequence.video_tracks.iter().enumerate().map(
                                         |(index, track)| {

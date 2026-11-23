@@ -75,7 +75,7 @@ impl Rect {
         })
     }
 
-    fn dimensions(self) -> Result<(u32, u32), Error> {
+    pub(super) fn dimensions(self) -> Result<(u32, u32), Error> {
         fn dimension(lo: i64, hi: i64) -> Result<u32, Error> {
             hi.checked_sub(lo)
                 .and_then(|n| u32::try_from(n).ok())
@@ -402,7 +402,7 @@ fn zeroed<T: Copy>(len: usize, value: T) -> Result<Vec<T>, Error> {
     Ok(result)
 }
 
-fn over(dst: &mut Pixel, straight: Pixel, coverage: f32) {
+pub(super) fn over(dst: &mut Pixel, straight: Pixel, coverage: f32) {
     let alpha = straight[3] * coverage;
     if alpha > 0.0 {
         let retain = 1.0 - alpha;

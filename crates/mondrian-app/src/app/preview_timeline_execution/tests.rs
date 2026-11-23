@@ -2609,6 +2609,12 @@ fn clip_info_title_matches_cpu_through_production_preview() {
     assert_title_matches_cpu_through_production_preview(BasicTitleContentKind::ClipInfo);
 }
 
+#[test]
+#[ignore = "real GPU Preview metadata burn-in parity; run independently"]
+fn metadata_burn_in_matches_cpu_through_production_preview() {
+    assert_title_matches_cpu_through_production_preview(BasicTitleContentKind::MetadataBurnIn);
+}
+
 fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleContentKind) {
     use crate::app::preview_cpu_execution::output_boundary_from_color_context;
     use crate::app::preview_viewer_plan::{
@@ -2694,10 +2700,32 @@ fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleCon
         Clip::new_numbers_title(font, TimelineTime::ZERO, duration)
     } else if title_kind == BasicTitleContentKind::ClipInfo {
         Clip::new_clip_info_title(font, TimelineTime::ZERO, duration)
+    } else if title_kind == BasicTitleContentKind::MetadataBurnIn {
+        Clip::new_metadata_burn_in_title(font, TimelineTime::ZERO, duration)
     } else {
         Clip::new_basic_title("Mondrian\nTitle", font, TimelineTime::ZERO, duration)
     }
     .unwrap();
+    if title_kind == BasicTitleContentKind::MetadataBurnIn {
+        let [first, second, ..] = mondrian_core::TITLE_METADATA_LINE_PATHS;
+        for (path, value) in [
+            (first.position, PropertyValue::Vec2([0.42, 0.20].into())),
+            (second.enabled, PropertyValue::Bool(true)),
+            (
+                second.field,
+                PropertyValue::Enum("sequence_timecode".into()),
+            ),
+            (second.format, PropertyValue::Enum("frames".into())),
+            (second.position, PropertyValue::Vec2([0.52, 0.35].into())),
+        ] {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.to_owned(),
+                    value,
+                })
+                .unwrap();
+        }
+    }
     if title_kind == BasicTitleContentKind::ClipInfo {
         title
             .apply_property_mutation(PropertyMutation::SetStaticValue {
@@ -2773,6 +2801,12 @@ fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleCon
                 BasicTitleContentKind::Timecode => assert_eq!(request.title.text, "00:01:00;03"),
                 BasicTitleContentKind::Numbers => assert_eq!(request.title.text, "1"),
                 BasicTitleContentKind::ClipInfo => assert_eq!(request.title.text, "B"),
+                BasicTitleContentKind::MetadataBurnIn => {
+                    let lines = &request.title.positioned_lines;
+                    assert_eq!(lines.len(), 2);
+                    assert_eq!(lines[0].text, "00:00:00:01");
+                    assert_eq!(lines[1].text, "1");
+                }
             }
             PreviewTimelineTitleFrame::Ready(
                 rasterizer

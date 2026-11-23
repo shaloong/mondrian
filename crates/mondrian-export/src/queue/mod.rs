@@ -17715,6 +17715,14 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "real GPU Export metadata burn-in parity; run independently"]
+    fn metadata_burn_in_matches_cpu_through_production_export() {
+        assert_title_matches_cpu_through_production_export(
+            mondrian_core::BasicTitleContentKind::MetadataBurnIn,
+        );
+    }
+
     fn assert_title_matches_cpu_through_production_export(
         title_kind: mondrian_core::BasicTitleContentKind,
     ) {
@@ -17790,10 +17798,32 @@ mod tests {
             Clip::new_numbers_title(font, start, duration)
         } else if title_kind == BasicTitleContentKind::ClipInfo {
             Clip::new_clip_info_title(font, start, duration)
+        } else if title_kind == BasicTitleContentKind::MetadataBurnIn {
+            Clip::new_metadata_burn_in_title(font, start, duration)
         } else {
             Clip::new_basic_title("Mondrian\nTitle", font, start, duration)
         }
         .unwrap();
+        if title_kind == BasicTitleContentKind::MetadataBurnIn {
+            let [first, second, ..] = mondrian_core::TITLE_METADATA_LINE_PATHS;
+            for (path, value) in [
+                (first.position, PropertyValue::Vec2([0.42, 0.20].into())),
+                (second.enabled, PropertyValue::Bool(true)),
+                (
+                    second.field,
+                    PropertyValue::Enum("sequence_timecode".into()),
+                ),
+                (second.format, PropertyValue::Enum("frames".into())),
+                (second.position, PropertyValue::Vec2([0.52, 0.35].into())),
+            ] {
+                title
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: path.to_owned(),
+                        value,
+                    })
+                    .unwrap();
+            }
+        }
         if title_kind == BasicTitleContentKind::ClipInfo {
             title
                 .apply_property_mutation(PropertyMutation::SetStaticValue {

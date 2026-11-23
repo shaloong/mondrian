@@ -34,6 +34,11 @@ impl PreviewTitleAssets {
                         .ok()
                         .flatten()
                         .is_some_and(|info| info.field.uses_asset_names())
+                        || title.metadata_lines().ok().flatten().is_some_and(|lines| {
+                            lines
+                                .into_iter()
+                                .any(|line| line.enabled && line.field.uses_asset_names())
+                        })
                 });
         }
         let (revision, names) = if self.needs_names {

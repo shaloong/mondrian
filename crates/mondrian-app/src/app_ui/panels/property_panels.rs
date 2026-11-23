@@ -490,7 +490,7 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         let mut name = None;
         let mut section = None;
         for property in &model.clip_properties {
-            use mondrian_core::BasicTitle;
+            use mondrian_core::{BasicTitle, TITLE_METADATA_LINE_PATHS};
             let heading = match property.path.as_str() {
                 path if BasicTitle::TIMECODE_PROPERTY_PATHS.contains(&path) => {
                     "inspector-title-timecode"
@@ -500,6 +500,19 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 }
                 path if BasicTitle::CLIP_INFO_PROPERTY_PATHS.contains(&path) => {
                     "inspector-title-clip-info"
+                }
+                path if path.starts_with("title.metadata.") => {
+                    const LINE_HEADINGS: [&str; 5] = [
+                        "inspector-title-metadata-line-1",
+                        "inspector-title-metadata-line-2",
+                        "inspector-title-metadata-line-3",
+                        "inspector-title-metadata-line-4",
+                        "inspector-title-metadata-line-5",
+                    ];
+                    TITLE_METADATA_LINE_PATHS
+                        .into_iter()
+                        .position(|paths| paths.contains(path))
+                        .map_or("inspector-basic-title", |index| LINE_HEADINGS[index])
                 }
                 BasicTitle::STROKE_WIDTH_PATH | BasicTitle::STROKE_COLOR_PATH => {
                     "inspector-title-outline"
@@ -4246,7 +4259,10 @@ pub(super) fn inspector_property_value_widget(
             }))
         }
         PropertyValue::Text(value)
-            if property.path == mondrian_core::BasicTitle::CLIP_INFO_TRACK_PATH =>
+            if property.path == mondrian_core::BasicTitle::CLIP_INFO_TRACK_PATH
+                || mondrian_core::TITLE_METADATA_LINE_PATHS
+                    .iter()
+                    .any(|line| property.path == line.track) =>
         {
             let automatic = localizer.text("clip-info-track-automatic");
             let select = |id: String| {

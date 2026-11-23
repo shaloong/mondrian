@@ -1409,6 +1409,9 @@ impl AppState {
             TimelineProductAction::CreateClipInfoTitle => {
                 self.create_clip_info_title_at_playhead().map(|_| ())
             }
+            TimelineProductAction::CreateMetadataBurnIn => {
+                self.create_metadata_burn_in_at_playhead().map(|_| ())
+            }
             TimelineProductAction::PlaceAsset(payload) => self.place_asset_on_timeline(payload),
             TimelineProductAction::PlaceFile(payload) => self.queue_file_on_timeline(payload),
             TimelineProductAction::InsertAsset(payload) => {

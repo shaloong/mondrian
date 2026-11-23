@@ -308,6 +308,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             crate::app::ui_actions::timeline_create_clip_info_title_action,
         ),
         command(
+            "timeline.create_metadata_burn_in",
+            "元数据刻录",
+            "元数据刻录",
+            AppUiCommandCategory::Timeline,
+            None,
+            crate::app::ui_actions::timeline_create_metadata_burn_in_action,
+        ),
+        command(
             "timeline.mark_in",
             "标记入点",
             "标记入点",

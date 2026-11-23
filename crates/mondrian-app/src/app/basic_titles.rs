@@ -32,6 +32,11 @@ impl AppState {
         self.create_title_at_playhead(BasicTitleContentKind::ClipInfo)
     }
 
+    /// Place a five-line metadata overlay as one undoable edit.
+    pub fn create_metadata_burn_in_at_playhead(&mut self) -> mondrian_core::Result<ClipId> {
+        self.create_title_at_playhead(BasicTitleContentKind::MetadataBurnIn)
+    }
+
     fn create_title_at_playhead(
         &mut self,
         kind: BasicTitleContentKind,
@@ -71,6 +76,9 @@ impl AppState {
             BasicTitleContentKind::Numbers => ("创建编号标题", "status-numbers-title-created"),
             BasicTitleContentKind::ClipInfo => {
                 ("创建片段信息标题", "status-clip-info-title-created")
+            }
+            BasicTitleContentKind::MetadataBurnIn => {
+                ("创建元数据刻录", "status-metadata-burn-in-created")
             }
         };
         let (_sequence_id, clip_id) =
@@ -124,6 +132,9 @@ impl AppState {
                     BasicTitleContentKind::ClipInfo => {
                         Clip::new_clip_info_title(font_family, position, duration)?
                     }
+                    BasicTitleContentKind::MetadataBurnIn => {
+                        Clip::new_metadata_burn_in_title(font_family, position, duration)?
+                    }
                 };
                 let clip_id = clip.id;
                 sequence
@@ -175,6 +186,38 @@ mod tests {
             clip.content.basic_title().unwrap().timecode().unwrap(),
             Some(mondrian_core::TitleTimecode::default())
         );
+        assert!(state.undo_timeline().unwrap());
+        assert!(state
+            .active_sequence()
+            .unwrap()
+            .video_tracks
+            .iter()
+            .all(|track| track.clips.is_empty()));
+    }
+
+    #[test]
+    fn metadata_burn_in_action_creates_visible_defaults_and_undoes_as_one_edit() {
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Metadata")));
+        state
+            .dispatch_action(crate::app::ui_actions::timeline_create_metadata_burn_in_action())
+            .unwrap();
+        let clip = state
+            .active_sequence()
+            .unwrap()
+            .video_tracks
+            .iter()
+            .find_map(|track| track.clips.first())
+            .unwrap();
+        let title = clip.content.basic_title().unwrap();
+        assert_eq!(title.content_kind(), BasicTitleContentKind::MetadataBurnIn);
+        let lines = title.metadata_lines().unwrap().unwrap();
+        assert!(lines[0].enabled);
+        assert_eq!(
+            lines[0].field,
+            mondrian_core::TitleMetadataField::SequenceTimecode
+        );
+        assert!(lines[1..].iter().all(|line| !line.enabled));
         assert!(state.undo_timeline().unwrap());
         assert!(state
             .active_sequence()

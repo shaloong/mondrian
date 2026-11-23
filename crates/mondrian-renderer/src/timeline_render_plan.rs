@@ -6,8 +6,9 @@ use mondrian_core::{
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
     ClipId, ColorEncodingSpec, EvaluatedBasicTitle, FrameRounding, MondrianError, Result,
-    TimelineTime, TitleTimecode, TitleTimecodeSource, VisualSourceReference, VisualSourceRetime,
-    VisualSourceTimeSample, WorkingColorSpace,
+    SmpteCountingMode, TimelineDisplayFormat, TimelineTime, TitleClipInfo, TitleMetadataField,
+    TitleMetadataLine, TitleTimecode, TitleTimecodeSource, VisualSourceReference,
+    VisualSourceRetime, VisualSourceTimeSample, WorkingColorSpace,
 };
 use mondrian_effects::{CompiledEffectGraph, EffectExecutionSession};
 use mondrian_timeline::visual_schedule::{
@@ -1291,6 +1292,22 @@ fn compile_flat_clip(
                     label,
                     source.source_resolution(),
                 )?
+            } else if let Some(lines) = title.metadata_lines()? {
+                let mut resolved = Vec::with_capacity(lines.len());
+                for line in lines.into_iter().filter(|line| line.enabled) {
+                    if let Some(label) = metadata_line_label(source, &frame, line)? {
+                        resolved.push((line, label));
+                    }
+                }
+                if resolved.is_empty() {
+                    diagnostics.skipped_unrenderable += 1;
+                    return Ok(None);
+                }
+                title.evaluate_metadata_for_render(
+                    ac.clip_time,
+                    resolved,
+                    source.source_resolution(),
+                )?
             } else {
                 title.evaluate_for_render(
                     ac.clip_time,
@@ -1331,6 +1348,55 @@ fn compile_flat_clip(
             })
         }
     }))
+}
+
+fn metadata_line_label(
+    source: &dyn RenderPlanSource,
+    frame: &VisualEvaluationFrame<'_>,
+    line: TitleMetadataLine,
+) -> Result<Option<String>> {
+    let label = match line.field {
+        TitleMetadataField::Clip(field) => {
+            return Ok(source
+                .title_clip_info_at(
+                    frame.time,
+                    TitleClipInfo {
+                        field,
+                        track_id: line.track_id,
+                        position: line.position,
+                    },
+                    frame.title_assets,
+                )?
+                .map(str::to_owned));
+        }
+        TitleMetadataField::SequenceTimecode => {
+            let grid = source.source_time_base();
+            let rate = Rational::new(grid.den, grid.num);
+            let display = source.source_timeline_display();
+            let mode = match display.format {
+                TimelineDisplayFormat::Timecode(mode) => mode,
+                TimelineDisplayFormat::Frames => SmpteCountingMode::NonDropFrame,
+            };
+            let count = frame.time.to_frame_position(rate, FrameRounding::Floor)?.frame;
+            line.format_timecode(rate, mode, display.timecode_start_frame, count)
+        }
+        TitleMetadataField::SourceTimecode => {
+            let Some(sample) = source.metadata_source_timecode_at(frame.time, line.track_id)?
+            else {
+                return Ok(None);
+            };
+            line.format_timecode(
+                sample.reference.frame_rate(),
+                sample.reference.mode(),
+                sample.reference.start_frame(),
+                sample.frame,
+            )
+        }
+    };
+    label.map(Some).map_err(|error| MondrianError::WorkflowStepFailed {
+        step_id: "metadata_burn_in".to_owned(),
+        reason: error.to_string(),
+    })
 }
 
 pub fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
@@ -1672,6 +1738,77 @@ mod tests {
 
         assert!((title.opacity - 0.5).abs() < 1.0e-6);
         assert!((title.title.font_size - 60.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn metadata_burn_in_resolves_each_line_on_its_own_track_and_clock() {
+        use mondrian_core::timeline_data::EditorialSourceIdentity;
+        use mondrian_core::{SmpteTimecodeReference, TITLE_METADATA_LINE_PATHS};
+
+        let mut sequence = Sequence::new("Metadata line sources");
+        sequence.settings.frame_rate = Rational::FPS_24;
+        let grid = sequence.time_base();
+        let mut media = Clip::new(AssetId::new(), tt(0, grid), tt(10, grid)).unwrap();
+        media.label = Some("Camera edit".into());
+        media.media_interpretation_mut().unwrap().editorial_source = Some(
+            EditorialSourceIdentity::new(
+                None,
+                Some(
+                    SmpteTimecodeReference::new(
+                        Rational::FPS_25,
+                        SmpteCountingMode::NonDropFrame,
+                        24,
+                    )
+                    .unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        sequence.video_tracks[0].add_clip(media).unwrap();
+        let track_id = sequence.video_tracks[0].id;
+        let mut title =
+            Clip::new_metadata_burn_in_title("Segoe UI", tt(0, grid), tt(10, grid)).unwrap();
+        let [first, second, third, fourth, ..] = TITLE_METADATA_LINE_PATHS;
+        for (path, value) in [
+            (first.offset, PropertyValue::Int(5)),
+            (second.enabled, PropertyValue::Bool(true)),
+            (second.field, PropertyValue::Enum("source_timecode".into())),
+            (second.track, PropertyValue::Text(track_id.to_string())),
+            (third.enabled, PropertyValue::Bool(true)),
+            (third.field, PropertyValue::Enum("clip_name".into())),
+            (third.track, PropertyValue::Text(track_id.to_string())),
+            (third.scale, PropertyValue::Float(200.0)),
+            (fourth.enabled, PropertyValue::Bool(true)),
+            (fourth.field, PropertyValue::Enum("file_name".into())),
+        ] {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.into(),
+                    value,
+                })
+                .unwrap();
+        }
+        sequence.video_tracks[1].add_clip(title).unwrap();
+        let prepared = PreparedVisualProgram::prepare(&sequence).unwrap();
+        let plan = evaluate_prepared_visual_program(
+            &prepared,
+            TimelineEvaluationRequest::export(fp(1, grid)),
+        )
+        .unwrap();
+        let Some(TimelineRenderPlanElement::BasicTitle(title)) = plan.elements.last() else {
+            panic!("expected populated metadata lines");
+        };
+        let lines = &title.title.positioned_lines;
+        assert_eq!(
+            lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+            ["00:00:00:06", "00:00:01:00", "Camera edit"]
+        );
+        assert_eq!(
+            lines.iter().map(|line| line.font_size).collect::<Vec<_>>(),
+            [15.0, 15.0, 30.0]
+        );
+        assert_ne!(lines[1].anchor, lines[2].anchor);
     }
 
     #[test]
