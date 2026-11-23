@@ -1,5 +1,7 @@
 use mondrian_core::types::Rational;
-use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, TimelineTime};
+use mondrian_core::{
+    ensure_mondrian_default_ocio_loaded, BasicTitleContentKind, Color, TimelineTime,
+};
 use mondrian_timeline::clip::Clip;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -2586,16 +2588,22 @@ fn basic_title_enters_the_shared_working_linear_preview_path() {
 #[test]
 #[ignore = "real GPU Preview decorated Basic Title parity; run independently"]
 fn decorated_basic_title_matches_cpu_through_production_preview() {
-    assert_title_matches_cpu_through_production_preview(false);
+    assert_title_matches_cpu_through_production_preview(BasicTitleContentKind::Text);
 }
 
 #[test]
 #[ignore = "real GPU Preview Timecode Title parity; run independently"]
 fn timecode_title_matches_cpu_through_production_preview() {
-    assert_title_matches_cpu_through_production_preview(true);
+    assert_title_matches_cpu_through_production_preview(BasicTitleContentKind::Timecode);
 }
 
-fn assert_title_matches_cpu_through_production_preview(timecode: bool) {
+#[test]
+#[ignore = "real GPU Preview Numbers Title parity; run independently"]
+fn numbers_title_matches_cpu_through_production_preview() {
+    assert_title_matches_cpu_through_production_preview(BasicTitleContentKind::Numbers);
+}
+
+fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleContentKind) {
     use crate::app::preview_cpu_execution::output_boundary_from_color_context;
     use crate::app::preview_viewer_plan::{
         prepare_gpu_composite_layers_with_heterogeneous_effects, PreparedPreviewViewerGpuLayers,
@@ -2616,6 +2624,7 @@ fn assert_title_matches_cpu_through_production_preview(timecode: bool) {
     use mondrian_timeline::clip::Transform2D;
 
     ensure_mondrian_default_ocio_loaded().unwrap();
+    let timecode = title_kind == BasicTitleContentKind::Timecode;
     let raster = Resolution { width: 192, height: 108 };
     let mut sequence = solid_sequence("Decorated title Preview", Color::BLACK);
     sequence.settings.resolution = raster;
@@ -2662,6 +2671,8 @@ fn assert_title_matches_cpu_through_production_preview(timecode: bool) {
             TimelineTime::ZERO,
             duration,
         )
+    } else if title_kind == BasicTitleContentKind::Numbers {
+        Clip::new_numbers_title(font, TimelineTime::ZERO, duration)
     } else {
         Clip::new_basic_title("Mondrian\nTitle", font, TimelineTime::ZERO, duration)
     }
@@ -2722,14 +2733,16 @@ fn assert_title_matches_cpu_through_production_preview(timecode: bool) {
     let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline(
         &sequence,
         &[],
-        i64::from(timecode),
+        i64::from(title_kind != BasicTitleContentKind::Text),
         raster,
         PreviewResolutionScale::Full,
         color_context(&sequence),
         &mut |_| panic!("generated sources need no media decode"),
         &mut |request: PreviewTimelineTitleRequest| {
-            if timecode {
-                assert_eq!(request.title.text, "00:01:00;03");
+            match title_kind {
+                BasicTitleContentKind::Text => {}
+                BasicTitleContentKind::Timecode => assert_eq!(request.title.text, "00:01:00;03"),
+                BasicTitleContentKind::Numbers => assert_eq!(request.title.text, "1"),
             }
             PreviewTimelineTitleFrame::Ready(
                 rasterizer
@@ -2863,7 +2876,7 @@ fn assert_title_matches_cpu_through_production_preview(timecode: bool) {
         .map(|(cpu, gpu)| cpu.abs_diff(*gpu))
         .max()
         .unwrap();
-    eprintln!("Title Preview (timecode={timecode}) maximum error: {max_error} RGBA8 steps");
+    eprintln!("Title Preview ({title_kind:?}) maximum error: {max_error} RGBA8 steps");
     assert!(max_error <= 1);
 }
 

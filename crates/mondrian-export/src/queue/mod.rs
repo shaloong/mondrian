@@ -17590,35 +17590,57 @@ mod tests {
     #[test]
     #[ignore = "real GPU Export decorated Basic Title parity; run independently"]
     fn decorated_basic_title_matches_cpu_through_production_export() {
-        assert_title_matches_cpu_through_production_export(false);
+        assert_title_matches_cpu_through_production_export(
+            mondrian_core::BasicTitleContentKind::Text,
+        );
     }
 
     #[test]
     #[ignore = "real GPU Export Timecode Title parity; run independently"]
     fn timecode_title_matches_cpu_through_production_export() {
-        assert_title_matches_cpu_through_production_export(true);
+        assert_title_matches_cpu_through_production_export(
+            mondrian_core::BasicTitleContentKind::Timecode,
+        );
     }
 
-    fn assert_title_matches_cpu_through_production_export(timecode: bool) {
+    #[test]
+    #[ignore = "real GPU Export Numbers Title parity; run independently"]
+    fn numbers_title_matches_cpu_through_production_export() {
+        assert_title_matches_cpu_through_production_export(
+            mondrian_core::BasicTitleContentKind::Numbers,
+        );
+    }
+
+    fn assert_title_matches_cpu_through_production_export(
+        title_kind: mondrian_core::BasicTitleContentKind,
+    ) {
         use mondrian_core::timeline_data::EditorialSourceIdentity;
         use mondrian_core::{
-            BasicTitle, Color, SmpteCountingMode, SmpteTimecodeReference, TitleTimecode,
-            TitleTimecodeSource, VisualSourceReference,
+            BasicTitle, BasicTitleContentKind, Color, SmpteCountingMode, SmpteTimecodeReference,
+            TitleTimecode, TitleTimecodeSource, VisualSourceReference,
         };
         use mondrian_effects::{instantiate_effect_node, EffectType};
         use mondrian_timeline::clip::Transform2D;
 
         let _gpu_visual = GpuVisualExecutionGuard::activate();
+        let timecode = title_kind == BasicTitleContentKind::Timecode;
         let raster = Resolution { width: 192, height: 108 };
         let mut child = Sequence::new("Decorated title child");
         child.settings.resolution = raster;
         if timecode {
             child.settings.frame_rate = mondrian_core::Rational::FPS_2997;
+        } else if title_kind == BasicTitleContentKind::Numbers {
+            child.settings.frame_rate = mondrian_core::Rational::new(48, 1);
         }
         let time_base = child.time_base();
         let font = mondrian_core::default_basic_title_font_family();
         let start = tt(0, time_base);
-        let duration = tt(2, time_base);
+        let child_frames = if title_kind == BasicTitleContentKind::Numbers {
+            4
+        } else {
+            2
+        };
+        let duration = tt(child_frames, time_base);
         let mut title = if timecode {
             let mut media = Clip::new(AssetId::new(), start, duration).unwrap();
             let media_id = media.id;
@@ -17646,6 +17668,8 @@ mod tests {
                 start,
                 duration,
             )
+        } else if title_kind == BasicTitleContentKind::Numbers {
+            Clip::new_numbers_title(font, start, duration)
         } else {
             Clip::new_basic_title("Mondrian\nTitle", font, start, duration)
         }
@@ -17704,7 +17728,11 @@ mod tests {
 
         let mut sequence = Sequence::new("Decorated title export root");
         sequence.settings.resolution = raster;
-        sequence.settings.frame_rate = child.settings.frame_rate;
+        sequence.settings.frame_rate = if title_kind == BasicTitleContentKind::Numbers {
+            mondrian_core::Rational::FPS_24
+        } else {
+            child.settings.frame_rate
+        };
         let time_base = sequence.time_base();
         let start = tt(0, time_base);
         let duration = tt(2, time_base);
@@ -17768,9 +17796,9 @@ mod tests {
             .unwrap();
             output
         };
-        let frame = i64::from(timecode);
+        let frame = i64::from(title_kind != BasicTitleContentKind::Text);
         let cpu = render(&mut session, false, frame);
-        if timecode {
+        if title_kind != BasicTitleContentKind::Text {
             assert_ne!(
                 cpu,
                 render(&mut session, false, 0),
@@ -17788,7 +17816,7 @@ mod tests {
         assert_eq!(gpu.len(), cpu.len());
         assert!(cpu.chunks_exact(4).any(|pixel| pixel[0].abs_diff(pixel[1]) > 8));
         let max_error = cpu.iter().zip(&gpu).map(|(cpu, gpu)| cpu.abs_diff(*gpu)).max().unwrap();
-        eprintln!("Title Export (timecode={timecode}) maximum error: {max_error} RGBA8 steps");
+        eprintln!("Title Export ({title_kind:?}) maximum error: {max_error} RGBA8 steps");
         assert!(max_error <= 1);
     }
 

@@ -109,6 +109,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             vec![
                 command_menu_item("timeline.create_basic_title"),
                 command_menu_item("timeline.create_timecode_title"),
+                command_menu_item("timeline.create_numbers_title"),
                 MenuItem::separator(),
                 MenuItem::new(
                     "安装 OpenFX Filter…",

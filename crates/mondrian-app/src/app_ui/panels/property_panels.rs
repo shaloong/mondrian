@@ -495,6 +495,9 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 path if BasicTitle::TIMECODE_PROPERTY_PATHS.contains(&path) => {
                     "inspector-title-timecode"
                 }
+                path if BasicTitle::NUMBERS_PROPERTY_PATHS.contains(&path) => {
+                    "inspector-title-numbers"
+                }
                 BasicTitle::STROKE_WIDTH_PATH | BasicTitle::STROKE_COLOR_PATH => {
                     "inspector-title-outline"
                 }
@@ -4183,6 +4186,11 @@ pub(super) fn inspector_property_value_widget(
         PropertyValue::Double(value) => {
             let ((min, max), (hard_min, hard_max)) = parameter_double_ranges(property);
             let selected_clip = selection;
+            let decimals = match property.path.as_str() {
+                mondrian_core::BasicTitle::NUMBERS_START_PATH
+                | mondrian_core::BasicTitle::NUMBERS_STEP_PATH => 8,
+                _ => property.step.map_or(2, decimal_places_for_step),
+            };
             numeric_slider_input_control_with_hard_range(
                 *value,
                 min,
@@ -4190,7 +4198,7 @@ pub(super) fn inspector_property_value_widget(
                 hard_min,
                 hard_max,
                 property.step.filter(|step| step.is_finite() && *step > 0.0),
-                property.step.map_or(2, decimal_places_for_step),
+                decimals,
                 can_edit,
                 move |v: f64| {
                     inspector_property_action(

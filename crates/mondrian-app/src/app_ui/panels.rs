@@ -2874,14 +2874,24 @@ impl InspectorPanelModel {
             .content
             .basic_title()
             .map(|title| {
-                use mondrian_core::{BasicTitle, TitleTimecode, TitleTimecodeSource};
+                use mondrian_core::{
+                    BasicTitle, BasicTitleContentKind, TitleTimecode, TitleTimecodeSource,
+                };
 
                 let properties = title.property_bag();
-                let clock_paths = if title.is_timecode() {
-                    BasicTitle::TIMECODE_PROPERTY_PATHS.as_slice()
-                } else {
-                    &[]
+                let content_kind = title.content_kind();
+                let generated_paths = match content_kind {
+                    BasicTitleContentKind::Text => &[][..],
+                    BasicTitleContentKind::Timecode => {
+                        BasicTitle::TIMECODE_PROPERTY_PATHS.as_slice()
+                    }
+                    BasicTitleContentKind::Numbers => BasicTitle::NUMBERS_PROPERTY_PATHS.as_slice(),
                 };
+                let decimal_controls = title
+                    .numbers_format()
+                    .ok()
+                    .flatten()
+                    .is_some_and(mondrian_core::TitleNumbersFormat::uses_decimal_controls);
                 let clock =
                     title.timecode().ok().flatten().map(|TitleTimecode { source, .. }| source);
                 let is_custom = matches!(clock, Some(TitleTimecodeSource::Custom { .. }));
@@ -2890,18 +2900,22 @@ impl InspectorPanelModel {
                     BasicTitle::TIMECODE_COMPOSITE_ORIGINAL_PATH,
                     clip_author_time,
                 ) == Some(PropertyValue::Bool(true));
-                clock_paths
+                generated_paths
                     .iter()
                     .chain(&BasicTitle::PROPERTY_PATHS)
                     .copied()
                     .filter(|path| match *path {
-                        BasicTitle::TEXT_PATH
-                        | BasicTitle::HORIZONTAL_ALIGN_PATH
-                        | BasicTitle::VERTICAL_ALIGN_PATH => !title.is_timecode(),
+                        BasicTitle::TEXT_PATH => content_kind == BasicTitleContentKind::Text,
+                        BasicTitle::HORIZONTAL_ALIGN_PATH | BasicTitle::VERTICAL_ALIGN_PATH => {
+                            !title.is_timecode()
+                        }
                         BasicTitle::TIMECODE_RATE_PATH
                         | BasicTitle::TIMECODE_DROP_PATH
                         | BasicTitle::TIMECODE_START_PATH => is_custom,
                         BasicTitle::TIMECODE_MEDIA_CLIP_PATH => is_media || !shows_original,
+                        BasicTitle::NUMBERS_DECIMALS_PATH
+                        | BasicTitle::NUMBERS_GROUP_PATH
+                        | BasicTitle::NUMBERS_ZERO_PAD_PATH => decimal_controls,
                         _ => true,
                     })
                     .filter_map(|path| {

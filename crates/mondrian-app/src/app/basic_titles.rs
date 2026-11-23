@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::app::AppMessage;
-use mondrian_core::default_basic_title_font_family;
+use mondrian_core::{default_basic_title_font_family, BasicTitleContentKind};
 
 const DEFAULT_BASIC_TITLE_DURATION_SECS: f64 = 5.0;
 
@@ -14,17 +14,22 @@ impl AppState {
     /// existing Track is occupied, the new Track and Clip are committed
     /// together so one Undo removes both.
     pub fn create_basic_title_at_playhead(&mut self) -> mondrian_core::Result<ClipId> {
-        self.create_title_at_playhead(None)
+        self.create_title_at_playhead(BasicTitleContentKind::Text)
     }
 
     /// Place a generated Timecode Title using the same undoable placement rules.
     pub fn create_timecode_title_at_playhead(&mut self) -> mondrian_core::Result<ClipId> {
-        self.create_title_at_playhead(Some(mondrian_core::TitleTimecode::default()))
+        self.create_title_at_playhead(BasicTitleContentKind::Timecode)
+    }
+
+    /// Place a generated Numbers Title using the same undoable placement rules.
+    pub fn create_numbers_title_at_playhead(&mut self) -> mondrian_core::Result<ClipId> {
+        self.create_title_at_playhead(BasicTitleContentKind::Numbers)
     }
 
     fn create_title_at_playhead(
         &mut self,
-        timecode: Option<mondrian_core::TitleTimecode>,
+        kind: BasicTitleContentKind,
     ) -> mondrian_core::Result<ClipId> {
         let sequence = self.active_sequence().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
@@ -55,10 +60,10 @@ impl AppState {
             .max(1);
         let font_family = default_basic_title_font_family().to_owned();
 
-        let (description, status) = if timecode.is_some() {
-            ("创建时间码标题", "status-timecode-title-created")
-        } else {
-            ("创建基础标题", "status-title-created")
+        let (description, status) = match kind {
+            BasicTitleContentKind::Text => ("创建基础标题", "status-title-created"),
+            BasicTitleContentKind::Timecode => ("创建时间码标题", "status-timecode-title-created"),
+            BasicTitleContentKind::Numbers => ("创建编号标题", "status-numbers-title-created"),
         };
         let (_sequence_id, clip_id) =
             self.commit_active_sequence_edit(description, move |sequence| {
@@ -95,11 +100,19 @@ impl AppState {
                     })
                     .unwrap_or_else(|| sequence.add_video_track());
 
-                let clip = match timecode {
-                    Some(clock) => {
-                        Clip::new_timecode_title(clock, font_family, position, duration)?
+                let clip = match kind {
+                    BasicTitleContentKind::Text => {
+                        Clip::new_basic_title("标题", font_family, position, duration)?
                     }
-                    None => Clip::new_basic_title("标题", font_family, position, duration)?,
+                    BasicTitleContentKind::Timecode => Clip::new_timecode_title(
+                        mondrian_core::TitleTimecode::default(),
+                        font_family,
+                        position,
+                        duration,
+                    )?,
+                    BasicTitleContentKind::Numbers => {
+                        Clip::new_numbers_title(font_family, position, duration)?
+                    }
                 };
                 let clip_id = clip.id;
                 sequence

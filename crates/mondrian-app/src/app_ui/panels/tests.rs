@@ -1475,6 +1475,49 @@ fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
 }
 
 #[test]
+fn numbers_title_inspector_keeps_alignment_and_hides_dormant_decimal_controls() {
+    use mondrian_core::{BasicTitle, PropertyHost, PropertyMutation};
+
+    for (format, shows_digits) in [("currency", true), ("date", false), ("timecode", false)] {
+        let mut sequence = Sequence::new("Numbers");
+        let track_id = sequence.video_tracks[0].id;
+        let mut clip = Clip::new_numbers_title(
+            mondrian_core::default_basic_title_font_family(),
+            TimelineTime::ZERO,
+            tt(25, sequence.time_base()),
+        )
+        .unwrap();
+        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: BasicTitle::NUMBERS_FORMAT_PATH.to_owned(),
+            value: PropertyValue::Enum(format.to_owned()),
+        })
+        .unwrap();
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+        let property = |path| model.clip_properties.iter().find(|item| item.path == path);
+        assert!(property(BasicTitle::TEXT_PATH).is_none());
+        assert!(property(BasicTitle::HORIZONTAL_ALIGN_PATH).is_some());
+        assert_eq!(
+            property(BasicTitle::NUMBERS_STEP_PATH).unwrap().label,
+            "步长"
+        );
+        assert_eq!(
+            property(BasicTitle::NUMBERS_DECIMALS_PATH).is_some(),
+            shows_digits
+        );
+        assert_eq!(
+            property(BasicTitle::NUMBERS_FORMAT_PATH).unwrap().enum_labels["number"],
+            "数字"
+        );
+    }
+}
+
+#[test]
 fn timecode_title_inspector_exposes_only_relevant_localized_clock_controls() {
     use mondrian_core::{BasicTitle, TitleTimecode, TitleTimecodeSource};
 

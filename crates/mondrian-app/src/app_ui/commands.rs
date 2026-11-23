@@ -292,6 +292,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             crate::app::ui_actions::timeline_create_timecode_title_action,
         ),
         command(
+            "timeline.create_numbers_title",
+            "编号标题",
+            "编号标题",
+            AppUiCommandCategory::Timeline,
+            None,
+            crate::app::ui_actions::timeline_create_numbers_title_action,
+        ),
+        command(
             "timeline.mark_in",
             "标记入点",
             "标记入点",

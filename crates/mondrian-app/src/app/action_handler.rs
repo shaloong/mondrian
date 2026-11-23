@@ -1403,6 +1403,9 @@ impl AppState {
             TimelineProductAction::CreateTimecodeTitle => {
                 self.create_timecode_title_at_playhead().map(|_| ())
             }
+            TimelineProductAction::CreateNumbersTitle => {
+                self.create_numbers_title_at_playhead().map(|_| ())
+            }
             TimelineProductAction::PlaceAsset(payload) => self.place_asset_on_timeline(payload),
             TimelineProductAction::PlaceFile(payload) => self.queue_file_on_timeline(payload),
             TimelineProductAction::InsertAsset(payload) => {
@@ -8378,6 +8381,50 @@ mod tests {
         assert_eq!(opacity(&state), 0.0);
         assert!(state.undo_timeline().unwrap());
         assert_eq!(opacity(&state), 0.45);
+    }
+
+    #[test]
+    fn numbers_title_command_and_parameter_edit_are_undoable() {
+        use mondrian_core::{BasicTitle, TimelineDisplaySettings};
+
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Numbers authoring")));
+        state
+            .dispatch_action(crate::app::ui_actions::timeline_create_numbers_title_action())
+            .unwrap();
+        let id = state.primary_selected_clip().unwrap().clip_id;
+        let evaluate = |state: &AppState| {
+            let sequence = state.active_sequence().unwrap();
+            sequence
+                .find_clip(id)
+                .unwrap()
+                .content
+                .basic_title()
+                .unwrap()
+                .evaluate_for_render(
+                    TimelineTime::ZERO,
+                    TimelineTime::ZERO,
+                    sequence.settings.frame_rate,
+                    TimelineDisplaySettings::frames(0),
+                    None,
+                )
+                .unwrap()
+                .text
+        };
+        assert_eq!(evaluate(&state), "0");
+        let parameter = clip_parameter_address(&state, id, BasicTitle::NUMBERS_START_PATH);
+        state
+            .dispatch_action(clip_parameter_action(
+                id,
+                parameter,
+                PropertyValue::Double(12.0),
+            ))
+            .unwrap();
+        assert_eq!(evaluate(&state), "12");
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(evaluate(&state), "0");
+        assert!(state.redo_timeline().unwrap());
+        assert_eq!(evaluate(&state), "12");
     }
 
     #[test]

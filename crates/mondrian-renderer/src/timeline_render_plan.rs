@@ -1638,6 +1638,78 @@ mod tests {
     }
 
     #[test]
+    fn numbers_title_uses_the_same_authored_frame_before_and_after_split() {
+        use mondrian_core::{BasicTitle, TimelineDisplaySettings};
+        use mondrian_timeline::{apply_split_edit, SplitEditRequest};
+
+        let mut sequence = Sequence::new("Numbers author time");
+        sequence.settings.frame_rate = Rational::FPS_24;
+        sequence.settings.timeline_display = TimelineDisplaySettings::frames(5000);
+        let grid = sequence.time_base();
+        let mut title = Clip::new_numbers_title("Segoe UI", tt(24, grid), tt(8, grid)).unwrap();
+        title
+            .set_constant_source_time_map(tt(10, grid), TimeScale::NEGATIVE_ONE)
+            .unwrap();
+        for (path, value) in [
+            (
+                BasicTitle::NUMBERS_START_PATH,
+                PropertyValue::Double(10.125),
+            ),
+            (BasicTitle::NUMBERS_STEP_PATH, PropertyValue::Double(0.125)),
+            (BasicTitle::NUMBERS_DECIMALS_PATH, PropertyValue::Int(3)),
+            (
+                BasicTitle::HORIZONTAL_ALIGN_PATH,
+                PropertyValue::Enum("right".to_owned()),
+            ),
+        ] {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.to_owned(),
+                    value,
+                })
+                .unwrap();
+        }
+        let id = title.id;
+        sequence.video_tracks[0].add_clip(title).unwrap();
+        let before = PreparedVisualProgram::prepare(&sequence).unwrap();
+        let split = apply_split_edit(
+            &mut sequence,
+            &SplitEditRequest { clip_id: id, at: tt(28, grid) },
+        )
+        .unwrap();
+        let after = PreparedVisualProgram::prepare(&sequence).unwrap();
+
+        for (frame, expected) in [
+            (24, "10.125"),
+            (27, "10.500"),
+            (28, "10.625"),
+            (31, "11.000"),
+        ] {
+            for (program, expected_id) in [
+                (&before, id),
+                (&after, if frame < 28 { id } else { split.right_clip_id }),
+            ] {
+                let plan = evaluate_prepared_visual_program(
+                    program,
+                    TimelineEvaluationRequest::export(fp(frame, grid)),
+                )
+                .unwrap();
+                let [TimelineRenderPlanElement::BasicTitle(title)] = plan.elements.as_slice()
+                else {
+                    panic!("expected one Numbers Title");
+                };
+                assert_eq!(title.placement.clip_id, expected_id);
+                assert_eq!(title.title.text, expected);
+                assert_eq!(title.title.font_size, 72.0);
+                assert_eq!(
+                    title.title.horizontal_align,
+                    mondrian_core::BasicTitleHorizontalAlign::Right
+                );
+            }
+        }
+    }
+
+    #[test]
     fn timecode_title_plan_uses_frozen_sequence_and_clip_clocks() {
         use mondrian_core::{
             TimelineDisplaySettings, TitleTimecode, TitleTimecodeFormat, TitleTimecodeSource,
