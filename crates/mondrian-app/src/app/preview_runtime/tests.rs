@@ -2414,6 +2414,58 @@ fn clip_info_title_asset_rename_retires_the_same_frame_preview_generation() {
     assert_eq!(current[&asset].file_name.as_deref(), Some("source.mp4"));
 }
 
+#[test]
+fn metadata_burn_in_enabling_frame_rate_refreshes_an_unchanged_library_revision() {
+    use mondrian_core::{
+        PropertyHost, PropertyMutation, PropertyValue, TimelineTime, TITLE_METADATA_LINE_PATHS,
+    };
+
+    let (mut state, asset, _) = state_with_invalid_video_asset_for_cpu_rgb(false);
+    let mut sequence = state.active_sequence().unwrap().clone();
+    let mut title = Clip::new_metadata_burn_in_title(
+        mondrian_core::default_basic_title_font_family(),
+        TimelineTime::ZERO,
+        tt(50, sequence.time_base()),
+    )
+    .unwrap();
+    let path = TITLE_METADATA_LINE_PATHS[0].field;
+    title
+        .apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: path.to_owned(),
+            value: PropertyValue::Enum("asset_name".into()),
+        })
+        .unwrap();
+    sequence.video_tracks[1].add_clip(title).unwrap();
+    state.test_set_sequence(Some(sequence));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let revision = {
+        let snapshot = state.preview_execution_snapshot(Instant::now());
+        runtime.synchronize_visual_program_authoring_session(&snapshot);
+        let frozen = runtime.title_assets.borrow().names().unwrap();
+        assert_eq!(frozen[&asset].media_frame_rate, None);
+        snapshot.authoring().unwrap().asset_library().database_revision().unwrap()
+    };
+    state
+        .commit_active_sequence_edit("Select media frame rate", |sequence| {
+            sequence.video_tracks[1].clips[0].apply_property_mutation(
+                PropertyMutation::SetStaticValue {
+                    path: path.to_owned(),
+                    value: PropertyValue::Enum("media_frame_rate".into()),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    assert_eq!(
+        snapshot.authoring().unwrap().asset_library().database_revision().unwrap(),
+        revision
+    );
+    runtime.synchronize_visual_program_authoring_session(&snapshot);
+    let frozen = runtime.title_assets.borrow().names().unwrap();
+    assert_eq!(frozen[&asset].media_frame_rate.as_deref(), Some("25 fps"));
+}
+
 fn state_with_sequential_invalid_video_assets() -> (AppState, PathBuf) {
     ensure_test_ocio_loaded();
     let root = unique_preview_test_root("mondrian-preview-sequential-invalid-videos");

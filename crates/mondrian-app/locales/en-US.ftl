@@ -845,6 +845,7 @@ parameter-mondrian-title-metadata-offset-label = Frame offset
 parameter-mondrian-title-metadata-start-frame-label = Start frame
 parameter-mondrian-title-option-sequence-timecode = Sequence timecode
 parameter-mondrian-title-option-source-timecode = Source timecode
+parameter-mondrian-title-option-media-frame-rate = Media frame rate
 parameter-mondrian-title-option-original = Original origin
 parameter-mondrian-title-option-custom-origin = Custom origin
 parameter-mondrian-title-option-file-name = File name

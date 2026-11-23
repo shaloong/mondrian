@@ -8264,10 +8264,16 @@ fn prepare_export_visual_frame_closure(
                 .media
                 .iter()
                 .map(|(&id, source)| {
-                    let names = mondrian_core::TitleAssetNames::from_source(
+                    let mut names = mondrian_core::TitleAssetNames::from_source(
                         source.source_asset_name.as_deref(),
                         &source.path,
                     );
+                    if source.picture_source_extent
+                        != Some(mondrian_timeline::PictureSourceExtent::Still)
+                        && let Some(video) = &source.source_video_stream
+                    {
+                        names.set_media_frame_rate(video);
+                    }
                     (id, names)
                 })
                 .collect(),
@@ -17609,12 +17615,20 @@ mod tests {
     }
 
     #[test]
-    fn clip_info_title_export_reads_names_from_the_serialized_job_snapshot() {
-        use mondrian_core::BasicTitle;
+    fn metadata_burn_in_export_reads_names_and_frame_rate_from_the_serialized_job_snapshot() {
+        use mondrian_core::{BasicTitle, TITLE_METADATA_LINE_PATHS};
 
         let folder = tempfile::tempdir().unwrap();
-        let path = folder.path().join("camera.ppm");
-        std::fs::write(&path, b"P6\n1 1\n255\n\xff\0\0").unwrap();
+        let path = folder.path().join("camera.mp4");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/small/h264-bframes.mp4"),
+            &path,
+        )
+        .unwrap();
+        let probe = mondrian_media::probe_media_info(&path).unwrap();
+        let video = probe.primary_video().unwrap();
+        assert!(video.frame_rate_proven);
         let asset = AssetId::new();
         let mut sequence = Sequence::new("Queued title names");
         let time_base = sequence.time_base();
@@ -17638,8 +17652,31 @@ mod tests {
                 .unwrap();
             sequence.video_tracks[track].add_clip(title).unwrap();
         }
+        sequence.add_video_track();
+        let mut metadata = Clip::new_metadata_burn_in_title(
+            mondrian_core::default_basic_title_font_family(),
+            start,
+            duration,
+        )
+        .unwrap();
+        metadata
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: TITLE_METADATA_LINE_PATHS[0].field.into(),
+                value: PropertyValue::Enum("media_frame_rate".into()),
+            })
+            .unwrap();
+        sequence.video_tracks.last_mut().unwrap().add_clip(metadata).unwrap();
+
         let mut source = test_media_dependency(path, None, Default::default(), None);
         source.source_asset_name = Some("Library name at submission".to_owned());
+        source.source_video_stream = Some(video.clone());
+        source.source_container = probe.container.clone();
+        source.source_resolution = Some(Resolution { width: video.width, height: video.height });
+        source.video_stream_index = Some(video.index);
+        source.picture = Some(video.picture);
+        source.picture_source_extent = Some(mondrian_timeline::PictureSourceExtent::TimelineRange(
+            TimelineTimeRange::new(start, duration).unwrap(),
+        ));
         let source_map = HashMap::from([(asset, source)]);
         let submitted = TimelineExportSnapshot::unprepared(
             mondrian_core::ProjectColorEnvironment::default(),
@@ -17672,15 +17709,20 @@ mod tests {
             .plan()
             .elements
             .iter()
-            .filter_map(|element| {
+            .flat_map(|element| {
                 if let TimelineRenderPlanElement::BasicTitle(title) = element {
-                    Some(title.title.text.as_str())
+                    if title.title.positioned_lines.is_empty() {
+                        vec![title.title.text.as_str()]
+                    } else {
+                        title.title.positioned_lines.iter().map(|line| line.text.as_str()).collect()
+                    }
                 } else {
-                    None
+                    Vec::new()
                 }
             })
             .collect::<Vec<_>>();
-        assert_eq!(labels, ["Library name at submission", "camera.ppm"]);
+        let rate = format!("{} fps", video.frame_rate.reduce());
+        assert_eq!(labels, ["Library name at submission", "camera.mp4", &rate]);
     }
 
     #[test]

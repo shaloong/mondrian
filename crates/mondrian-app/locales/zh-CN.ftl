@@ -1288,6 +1288,7 @@ parameter-mondrian-title-metadata-offset-label = 帧偏移
 parameter-mondrian-title-metadata-start-frame-label = 开始帧
 parameter-mondrian-title-option-sequence-timecode = 序列时码
 parameter-mondrian-title-option-source-timecode = 源时码
+parameter-mondrian-title-option-media-frame-rate = 媒体帧率
 parameter-mondrian-title-option-original = 原始起点
 parameter-mondrian-title-option-custom-origin = 自定义起点
 parameter-mondrian-title-option-file-name = 文件名
