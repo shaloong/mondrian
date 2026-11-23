@@ -11,8 +11,10 @@ use crate::automation::{
 use crate::{Color, MondrianError, ParameterId, Result, TimelineTime};
 use serde::{Deserialize, Serialize};
 
+mod clip_info;
 mod numbers;
 mod timecode;
+pub use clip_info::{TitleAssetMetadata, TitleAssetNames, TitleClipInfo, TitleClipInfoField};
 pub use numbers::TitleNumbersFormat;
 pub use timecode::{
     TitleMediaTimecodeSample, TitleTimecode, TitleTimecodeFormat, TitleTimecodeSource,
@@ -145,6 +147,7 @@ pub enum BasicTitleContentKind {
     Text,
     Timecode,
     Numbers,
+    ClipInfo,
 }
 
 impl BasicTitleContentKind {
@@ -261,6 +264,58 @@ impl BasicTitle {
         self.content_kind
     }
 
+    /// Create a native overlay for editorial Clip metadata.
+    pub fn new_clip_info(font_family: impl Into<String>) -> Result<Self> {
+        let title = Self::with_properties(
+            String::new(),
+            font_family.into(),
+            BasicTitleContentKind::ClipInfo,
+        )?;
+        title.validate_author_state()?;
+        Ok(title)
+    }
+
+    pub fn clip_info(&self) -> Result<Option<TitleClipInfo>> {
+        matches!(self.content_kind, BasicTitleContentKind::ClipInfo)
+            .then(|| TitleClipInfo::read_from(&self.properties))
+            .transpose()
+    }
+
+    /// Retarget the source when an owning Sequence is duplicated with its tracks.
+    pub fn remap_clip_info_track(
+        &mut self,
+        resolve: impl FnOnce(crate::TrackId) -> Option<crate::TrackId>,
+    ) -> Result<()> {
+        if let Some(id) = self.clip_info()?.and_then(|info| info.track_id).and_then(resolve) {
+            self.properties.set_static_value(
+                Self::CLIP_INFO_TRACK_PATH,
+                PropertyValue::Text(id.to_string()),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Place a sampled metadata label at its normalized Sequence anchor.
+    pub fn evaluate_clip_info_for_render(
+        &self,
+        clip_time: TimelineTime,
+        info: TitleClipInfo,
+        label: &str,
+        resolution: crate::Resolution,
+    ) -> Result<EvaluatedBasicTitle> {
+        if label.len() > BASIC_TITLE_MAX_TEXT_BYTES {
+            return Err(title_error("Clip Info label exceeds the title text budget"));
+        }
+        let mut evaluated = self.evaluate(clip_time)?;
+        evaluated.text = label.to_owned();
+        evaluated.layout_anchor = Some([
+            info.position[0] * resolution.width as f32,
+            info.position[1] * resolution.height as f32,
+        ]);
+        evaluated.vertical_align = BasicTitleVerticalAlign::Top;
+        Ok(evaluated)
+    }
+
     pub fn numbers_format(&self) -> Result<Option<TitleNumbersFormat>> {
         matches!(self.content_kind, BasicTitleContentKind::Numbers)
             .then(|| TitleNumbersFormat::read_from(&self.properties))
@@ -301,6 +356,9 @@ impl BasicTitle {
         sequence_display: crate::TimelineDisplaySettings,
         media_sample: Option<TitleMediaTimecodeSample>,
     ) -> Result<EvaluatedBasicTitle> {
+        if self.content_kind == BasicTitleContentKind::ClipInfo {
+            return Err(title_error("Clip Info rendering requires sampled metadata"));
+        }
         let mut evaluated = self.evaluate(clip_time)?;
         if let Some(timecode) = self.timecode()? {
             evaluated.text = timecode
@@ -329,7 +387,7 @@ impl BasicTitle {
     /// A caller must refuse to overwrite any decoration already present in an older payload.
     pub fn decoration_defaults() -> PropertyBag {
         let mut properties = PropertyBag::default();
-        for descriptor in decoration_descriptors(false) {
+        for descriptor in decoration_descriptors(BasicTitleContentKind::Text) {
             properties.define(descriptor);
         }
         properties
@@ -412,6 +470,7 @@ impl BasicTitle {
         if self.content_kind == BasicTitleContentKind::Numbers {
             numbers::validate(&self.properties)?;
         }
+        self.clip_info()?;
         let evaluated = self.evaluate(TimelineTime::ZERO)?;
         if evaluated.text.len() > BASIC_TITLE_MAX_TEXT_BYTES {
             return Err(title_error(format!(
@@ -513,6 +572,7 @@ fn canonical_descriptors(content_kind: BasicTitleContentKind) -> Vec<PropertyDes
         BasicTitleContentKind::Text => (96.0, 1.0, 4096.0),
         BasicTitleContentKind::Timecode => (36.0, 8.0, 128.0),
         BasicTitleContentKind::Numbers => (72.0, 1.0, 1000.0),
+        BasicTitleContentKind::ClipInfo => (120.0, 1.0, 4096.0),
     };
     let mut descriptors = vec![
         PropertyDescriptor::new(
@@ -634,18 +694,17 @@ fn canonical_descriptors(content_kind: BasicTitleContentKind) -> Vec<PropertyDes
         ]))
         .with_animatable(false),
     ];
-    descriptors.extend(decoration_descriptors(
-        content_kind == BasicTitleContentKind::Timecode,
-    ));
+    descriptors.extend(decoration_descriptors(content_kind));
     match content_kind {
         BasicTitleContentKind::Text => {}
         BasicTitleContentKind::Timecode => descriptors.extend(timecode::descriptors()),
         BasicTitleContentKind::Numbers => descriptors.extend(numbers::descriptors()),
+        BasicTitleContentKind::ClipInfo => descriptors.extend(clip_info::descriptors()),
     }
     descriptors
 }
 
-fn decoration_descriptors(timecode: bool) -> [PropertyDescriptor; 8] {
+fn decoration_descriptors(content_kind: BasicTitleContentKind) -> [PropertyDescriptor; 8] {
     let defaults = BasicTitleAppearance::default();
     let pixels = |value, max| {
         (
@@ -725,7 +784,7 @@ fn decoration_descriptors(timecode: bool) -> [PropertyDescriptor; 8] {
             BasicTitle::BACKGROUND_OPACITY_PATH,
             "mondrian.title.background_opacity",
             "背景不透明度",
-            opacity(if timecode {
+            opacity(if content_kind == BasicTitleContentKind::Timecode {
                 1.0
             } else {
                 defaults.background_opacity
@@ -735,7 +794,11 @@ fn decoration_descriptors(timecode: bool) -> [PropertyDescriptor; 8] {
             BasicTitle::OPACITY_PATH,
             "mondrian.title.opacity",
             "标题不透明度",
-            opacity(defaults.opacity),
+            opacity(if content_kind == BasicTitleContentKind::ClipInfo {
+                0.4
+            } else {
+                defaults.opacity
+            }),
         ),
     ]
 }

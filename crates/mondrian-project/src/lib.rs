@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 38;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 39;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -368,6 +368,11 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
             to: 38,
             migrate: migrate_document_v37_to_v38,
         },
+        JsonMigrationStep {
+            from: 38,
+            to: 39,
+            migrate: migrate_document_v38_to_v39,
+        },
     ],
 );
 
@@ -534,6 +539,18 @@ fn migrate_document_v37_to_v38(mut value: serde_json::Value) -> anyhow::Result<s
         Ok(())
     })?;
     value["schema_version"] = serde_json::json!(38);
+    Ok(value)
+}
+
+fn migrate_document_v38_to_v39(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    visit_document_titles(&mut value, 38, |title| {
+        anyhow::ensure!(
+            title.get("content_kind").and_then(serde_json::Value::as_str) != Some("clip_info"),
+            "schema-38 Basic Title cannot contain Clip Info settings"
+        );
+        Ok(())
+    })?;
+    value["schema_version"] = serde_json::json!(39);
     Ok(value)
 }
 
@@ -3527,6 +3544,61 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn clip_info_title_archive_preserves_track_identity_and_layout() {
+        use mondrian_core::BasicTitle;
+
+        let mut document = test_document();
+        let sequence = document.sequences.active_mut().unwrap();
+        let source = sequence.video_tracks[1].id;
+        let mut clip =
+            Clip::new_clip_info_title("Arial", TimelineTime::ZERO, TimelineTime::ONE).unwrap();
+        for (path, value) in [
+            (
+                BasicTitle::CLIP_INFO_TRACK_PATH,
+                PropertyValue::Text(source.to_string()),
+            ),
+            (
+                BasicTitle::CLIP_INFO_FIELD_PATH,
+                PropertyValue::Enum("reel_name".to_owned()),
+            ),
+            (
+                BasicTitle::CLIP_INFO_POSITION_PATH,
+                PropertyValue::Vec2([0.25, 0.6].into()),
+            ),
+        ] {
+            clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: path.to_owned(),
+                value,
+            })
+            .unwrap();
+        }
+        let id = clip.id;
+        let expected = clip.content.basic_title().unwrap().clone();
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy["schema_version"] = serde_json::json!(38);
+        let error = DOCUMENT_MIGRATIONS.migrate(legacy).unwrap_err();
+        assert!(format!("{error:#}")
+            .contains("schema-38 Basic Title cannot contain Clip Info settings"));
+        let root = unique_temp_dir("clip-info-title-round-trip");
+        let db = root.join("index.db");
+        fs::write(&db, b"sqlite placeholder").unwrap();
+        let archive = root.join("clip-info.mdp");
+        save_project_archive(&document, &db, &archive).unwrap();
+        let reopened = read_project_document_from_archive(&archive).unwrap();
+        let title = reopened
+            .sequences
+            .active()
+            .unwrap()
+            .find_clip(id)
+            .unwrap()
+            .content
+            .basic_title()
+            .unwrap();
+        assert_eq!(title, &expected);
+    }
+
     #[test]
     fn numbers_title_migration_preserves_schema_37_title_properties() {
         use mondrian_core::{BasicTitle, TitleTimecode, TitleTimecodeFormat};

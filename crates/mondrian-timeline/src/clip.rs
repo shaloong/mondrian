@@ -684,6 +684,51 @@ impl Clip {
         Ok(clip)
     }
 
+    /// Create a Clip Info Title on the generated-picture path.
+    pub fn new_clip_info_title(
+        font_family: impl Into<String>,
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
+        let title = mondrian_core::BasicTitle::new_clip_info(font_family)?;
+        let mut clip = Self::with_content(ClipContent::BasicTitle { title }, position, duration)?;
+        clip.label = Some("片段信息".to_owned());
+        Ok(clip)
+    }
+
+    pub(crate) fn clip_info_label<'a>(
+        &'a self,
+        field: mondrian_core::TitleClipInfoField,
+        title_assets: Option<&'a mondrian_core::TitleAssetMetadata>,
+    ) -> Option<&'a str> {
+        use mondrian_core::TitleClipInfoField;
+
+        let label = match field {
+            TitleClipInfoField::ClipName => match self.content {
+                ClipContent::Media { .. }
+                | ClipContent::SolidColor { .. }
+                | ClipContent::NestedSequence { .. } => self.label.as_deref(),
+                ClipContent::BasicTitle { .. } | ClipContent::AdjustmentLayer { .. } => None,
+            },
+            TitleClipInfoField::ReelName => self
+                .media_interpretation()
+                .and_then(|interpretation| interpretation.editorial_source.as_ref())
+                .and_then(|source| source.reel_name()),
+            TitleClipInfoField::AssetName | TitleClipInfoField::FileName => {
+                let ClipContent::Media { asset_id, .. } = self.content else {
+                    return None;
+                };
+                let names = title_assets?.get(&asset_id)?;
+                if field == TitleClipInfoField::AssetName {
+                    names.asset_name.as_deref()
+                } else {
+                    names.file_name.as_deref()
+                }
+            }
+        };
+        label.filter(|label| !label.trim().is_empty())
+    }
+
     pub fn new_adjustment_layer(
         asset_id: AssetId,
         position: TimelineTime,

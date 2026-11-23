@@ -2346,6 +2346,9 @@ impl Sequence {
             title
                 .remap_timecode_media_clip(|id| clip_ids.get(&id).copied())
                 .expect("a validated title can retarget a media Clip without changing its schema");
+            title.remap_clip_info_track(|id| track_ids.get(&id).copied()).expect(
+                "a validated title can retarget a source Track without changing its schema",
+            );
         }
 
         let old_channels = std::mem::take(&mut self.audio_program.track_channels);
@@ -3053,6 +3056,31 @@ fn rekey_exact_curve(curve: &mut mondrian_core::ExactAutomationCurve) {
 }
 
 impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
+    fn source_resolution(&self) -> mondrian_core::Resolution {
+        self.settings.resolution
+    }
+
+    fn title_clip_info_at<'a>(
+        &'a self,
+        time: TimelineTime,
+        info: mondrian_core::TitleClipInfo,
+        title_assets: Option<&'a mondrian_core::TitleAssetMetadata>,
+    ) -> mondrian_core::Result<Option<&'a str>> {
+        for track in self.video_tracks.iter().rev().filter(|track| {
+            track.is_visible && !track.is_muted && info.track_id.is_none_or(|id| track.id == id)
+        }) {
+            if let Some(label) = track
+                .active_clips_at(time)?
+                .into_iter()
+                .rev()
+                .find_map(|clip| clip.clip_info_label(info.field, title_assets))
+            {
+                return Ok(Some(label));
+            }
+        }
+        Ok(None)
+    }
+
     fn source_timeline_display(&self) -> TimelineDisplaySettings {
         self.settings.timeline_display
     }

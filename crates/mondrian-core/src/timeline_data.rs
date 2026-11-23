@@ -737,6 +737,17 @@ pub trait RenderPlanSource {
     /// Time base of the sequence.
     fn source_time_base(&self) -> Rational;
 
+    /// Author raster of the owning Sequence.
+    fn source_resolution(&self) -> crate::Resolution;
+
+    /// Editable metadata from the selected video track at the current editorial cut.
+    fn title_clip_info_at<'a>(
+        &'a self,
+        time: TimelineTime,
+        info: crate::TitleClipInfo,
+        title_assets: Option<&'a crate::TitleAssetMetadata>,
+    ) -> Result<Option<&'a str>>;
+
     /// Timecode origin and counting convention of the owner Sequence.
     fn source_timeline_display(&self) -> crate::TimelineDisplaySettings;
 

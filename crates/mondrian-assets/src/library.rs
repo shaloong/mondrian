@@ -1171,6 +1171,38 @@ impl AssetLibrary {
         Ok(result)
     }
 
+    /// Freeze file-backed title labels under the same lock as the Library revision.
+    /// Retired members can still be referenced by timelines.
+    pub fn capture_title_asset_metadata(&self) -> Result<(u64, mondrian_core::TitleAssetMetadata)> {
+        let db = self.db.lock();
+        let revision = connection_revision(&db)?;
+        let read = || -> rusqlite::Result<_> {
+            let mut statement = db.prepare(
+                "SELECT id, name, path FROM assets WHERE asset_type IN ('video', 'still_image')",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let id = Uuid::parse_str(&id).map(AssetId).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                let name: String = row.get(1)?;
+                let path: String = row.get(2)?;
+                Ok((
+                    id,
+                    mondrian_core::TitleAssetNames::from_source(Some(&name), Path::new(&path)),
+                ))
+            })?;
+            rows.collect()
+        };
+        let names =
+            read().map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        Ok((revision, names))
+    }
+
     /// Persist the user-selected interpretation for an asset.
     ///
     /// This stores only user intent. Automatic detection results remain in
@@ -1817,6 +1849,35 @@ mod tests {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
         PathBuf::from(sidecar)
+    }
+
+    #[test]
+    fn clip_info_title_metadata_freezes_names_and_keeps_retired_references() {
+        let library = open_test_library();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("camera-original.mov");
+        std::fs::write(&path, [0u8]).unwrap();
+        let id = commit_info(&library, &path, lightweight_video_info(&path));
+        let generated = library.create_solid_color_asset(Some("Generated")).unwrap();
+        library.rename_asset(id, "First library name").unwrap();
+        let (old_revision, frozen) = library.capture_title_asset_metadata().unwrap();
+        library.rename_asset(id, "Second library name").unwrap();
+        library.retire_assets(&[id]).unwrap();
+        let (current_revision, current) = library.capture_title_asset_metadata().unwrap();
+        assert!(current_revision > old_revision);
+        assert_eq!(
+            frozen[&id].asset_name.as_deref(),
+            Some("First library name")
+        );
+        assert_eq!(
+            current[&id].asset_name.as_deref(),
+            Some("Second library name")
+        );
+        assert_eq!(
+            current[&id].file_name.as_deref(),
+            Some("camera-original.mov")
+        );
+        assert!(!current.contains_key(&generated));
     }
 
     #[test]

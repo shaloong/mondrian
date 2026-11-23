@@ -126,6 +126,7 @@ impl PreparedVisualScheduleQueryDiagnostics {
 pub struct PreparedVisualSchedule {
     key: PreparedVisualScheduleKey,
     time_base: Rational,
+    resolution: mondrian_core::Resolution,
     timeline_display: mondrian_core::TimelineDisplaySettings,
     working_color_space: WorkingColorSpace,
     auto_tone_map_media: bool,
@@ -195,6 +196,7 @@ impl PreparedVisualSchedule {
         Ok(Self {
             key: PreparedVisualScheduleKey::for_sequence(sequence),
             time_base: sequence.time_base(),
+            resolution: sequence.settings.resolution,
             timeline_display: sequence.settings.timeline_display,
             working_color_space: sequence.settings.color.working_color_space,
             auto_tone_map_media: sequence.settings.color.input.auto_tone_map_media,
@@ -824,6 +826,39 @@ pub enum AuxiliaryClipAdmissionError {
 }
 
 impl RenderPlanSource for PreparedVisualSchedule {
+    fn source_resolution(&self) -> mondrian_core::Resolution {
+        self.resolution
+    }
+
+    fn title_clip_info_at<'a>(
+        &'a self,
+        time: TimelineTime,
+        info: mondrian_core::TitleClipInfo,
+        title_assets: Option<&'a mondrian_core::TitleAssetMetadata>,
+    ) -> Result<Option<&'a str>> {
+        let mut track_indices = self.active_tracks.query(time).values;
+        track_indices.sort_unstable();
+        for index in track_indices.into_iter().rev() {
+            let prepared = &self.tracks[index];
+            if !prepared.track.is_visible
+                || prepared.track.is_muted
+                || info.track_id.is_some_and(|id| prepared.track.id != id)
+            {
+                continue;
+            }
+            // Use Clip placement intervals directly. A dissolve uses both endpoint
+            // pictures but editorial metadata follows the half-open cut.
+            let mut clips = prepared.clip_intervals.query(time).values;
+            clips.sort_unstable();
+            if let Some(label) = clips.into_iter().rev().find_map(|clip| {
+                prepared.track.clips[clip].clip_info_label(info.field, title_assets)
+            }) {
+                return Ok(Some(label));
+            }
+        }
+        Ok(None)
+    }
+
     fn source_timeline_display(&self) -> mondrian_core::TimelineDisplaySettings {
         self.timeline_display
     }
