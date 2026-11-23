@@ -17588,6 +17588,150 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "real GPU Export decorated Basic Title parity; run independently"]
+    fn decorated_basic_title_matches_cpu_through_production_export() {
+        use mondrian_core::{BasicTitle, Color};
+        use mondrian_effects::{instantiate_effect_node, EffectType};
+        use mondrian_timeline::clip::Transform2D;
+
+        let _gpu_visual = GpuVisualExecutionGuard::activate();
+        let raster = Resolution { width: 192, height: 108 };
+        let mut child = Sequence::new("Decorated title child");
+        child.settings.resolution = raster;
+        let time_base = child.time_base();
+        let mut title = Clip::new_basic_title(
+            "Mondrian\nTitle",
+            mondrian_core::default_basic_title_font_family(),
+            tt(0, time_base),
+            tt(2, time_base),
+        )
+        .unwrap();
+        for (path, value) in [
+            (BasicTitle::FONT_SIZE_PATH, PropertyValue::Float(30.0)),
+            (BasicTitle::STROKE_WIDTH_PATH, PropertyValue::Float(3.0)),
+            (
+                BasicTitle::STROKE_COLOR_PATH,
+                PropertyValue::Color(Color::from_rgba8(240, 15, 50, 160)),
+            ),
+            (BasicTitle::SHADOW_DISTANCE_PATH, PropertyValue::Float(10.0)),
+            (BasicTitle::SHADOW_SOFTNESS_PATH, PropertyValue::Float(5.0)),
+            (
+                BasicTitle::SHADOW_COLOR_PATH,
+                PropertyValue::Color(Color::from_rgba8(15, 40, 200, 180)),
+            ),
+            (
+                BasicTitle::BACKGROUND_COLOR_PATH,
+                PropertyValue::Color(Color::from_rgba8(20, 150, 80, 170)),
+            ),
+            (
+                BasicTitle::BACKGROUND_OPACITY_PATH,
+                PropertyValue::Float(0.45),
+            ),
+            (BasicTitle::OPACITY_PATH, PropertyValue::Float(0.73)),
+            (Transform2D::OPACITY_PATH, PropertyValue::Float(0.82)),
+        ] {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.to_owned(),
+                    value,
+                })
+                .unwrap();
+        }
+        title.transform.set_position([3.5, -2.25].into());
+        title.transform.set_scale([0.91, 0.88].into());
+        let kind = EffectType::BasicCorrection;
+        let mut color = instantiate_effect_node(kind.clone()).unwrap();
+        color
+            .set_static_value_by_parameter(
+                &kind.parameter_id("exposure").unwrap(),
+                PropertyValue::Float(0.2),
+            )
+            .unwrap();
+        title.add_effect_node(color);
+        child.video_tracks[0].add_clip(title).unwrap();
+
+        let mut sequence = Sequence::new("Decorated title export root");
+        sequence.settings.resolution = raster;
+        let time_base = sequence.time_base();
+        let start = tt(0, time_base);
+        let duration = tt(2, time_base);
+        let mut background =
+            Clip::new_solid_color(AssetId::new(), Color::BLACK, start, duration).unwrap();
+        let mut ramp = instantiate_effect_node(EffectType::Ramp).unwrap();
+        for (key, point) in [("start", [0.0_f32, 0.0]), ("end", [192.0, 0.0])] {
+            ramp.set_static_value_by_parameter(
+                &EffectType::Ramp.parameter_id(key).unwrap(),
+                PropertyValue::Vec2(point.into()),
+            )
+            .unwrap();
+        }
+        background.add_effect_node(ramp);
+        sequence.video_tracks[0].add_clip(background).unwrap();
+        sequence.video_tracks[1]
+            .add_clip(Clip::new_nested_sequence(child.id, start, duration, None).unwrap())
+            .unwrap();
+
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: vec![child],
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::EntireSequence,
+        };
+        let mut session = captured_visual_session_for_test(&mut timeline);
+        let color = timeline
+            .sequence
+            .settings
+            .root_program_color_context(&timeline.color_environment)
+            .unwrap();
+        let cancellation = ExecutionCancellationToken::new();
+        let render = |session: &mut ExportVisualRenderSession, gpu| {
+            session.resource_policy.opportunistic_gpu_acceleration = gpu;
+            let mut output = Vec::new();
+            let mut context = ExportFrameRenderContext {
+                media: &timeline.media,
+                color_environment: &timeline.color_environment,
+                alpha_mode: ExportAlphaMode::Preserve,
+                delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                    ExportFrameContract::EncodedRgba8Unorm,
+                ),
+                input_color_counts: None,
+                stage_diagnostics: None,
+                composite_diagnostics: None,
+                export_diagnostics: None,
+                visual_session: session,
+                cancellation: &cancellation,
+            };
+            render_sequence_frame_into(
+                &timeline,
+                &mut context,
+                &timeline.sequence,
+                0,
+                raster,
+                color.clone(),
+                SequenceRenderTarget::Deliverable(&mut output),
+            )
+            .unwrap();
+            output
+        };
+        let cpu = render(&mut session, false);
+        assert_eq!(session.visual_diagnostics().gpu_visual_nodes_completed, 0);
+        let gpu = render(&mut session, true);
+        let diagnostics = session.visual_diagnostics();
+        assert_eq!(diagnostics.gpu_visual_nodes_completed, 2);
+        assert_eq!(diagnostics.gpu_visual_nested_outputs, 1);
+        assert_eq!(diagnostics.gpu_visual_output_readbacks, 1);
+        assert_eq!(diagnostics.gpu_visual_spatial_cpu_retries, 0);
+        assert_eq!(cpu.len(), (raster.width * raster.height * 4) as usize);
+        assert_eq!(gpu.len(), cpu.len());
+        assert!(cpu.chunks_exact(4).any(|pixel| pixel[0].abs_diff(pixel[1]) > 8));
+        let max_error = cpu.iter().zip(&gpu).map(|(cpu, gpu)| cpu.abs_diff(*gpu)).max().unwrap();
+        eprintln!("Decorated Basic Title Export maximum error: {max_error} RGBA8 steps");
+        assert!(max_error <= 1);
+    }
+
+    #[test]
     fn nested_basic_title_preserves_child_canvas_and_shared_visual_session() {
         let mut child = Sequence::new("nested Basic Title");
         child.settings.resolution = mondrian_core::Resolution { width: 640, height: 360 };

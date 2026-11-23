@@ -572,7 +572,7 @@ fn sample_layer(src_center: vec2<f32>) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     let src_size = uniforms.geometry.zw;
-    // Spatial passes that require the CPU compositor's bilinear projection set this flag.
+    // Certain generated rasters and spatial passes require the CPU compositor's projection.
     // The working texture may be unfilterable, so load and clamp each tap.
     if (uniforms.inv_transform1.z != 0.0) {
         let index = src_center - vec2<f32>(0.5);
@@ -5699,7 +5699,7 @@ struct GpuCompositeUniforms {
     mask_controls: [u32; 2],
     solid_color: [f32; 4],
     inv_transform0: [f32; 4],
-    // Inverse affine tail, then a bilinear spatial output flag and padding.
+    // Inverse affine tail, then the bilinear source projection flag and padding.
     inv_transform1: [f32; 4],
     geometry: [f32; 4],
     effects: [GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS],
@@ -6404,7 +6404,11 @@ impl GpuFrameCompositor {
                 ),
             };
             let mut transform = layer.transform;
-            let mut sample_spatial_output_bilinear = false;
+            let mut sample_bilinear = matches!(
+                layer.source,
+                GpuCompositeLayerSource::CpuFrame(frame)
+                    if frame.uses_bilinear_composite_projection()
+            );
             let layer_binding = if let Some(chain) = spatial_chain_at(index) {
                 let source_descriptor = layer_source_descriptor(layer.source).ok_or(
                     GpuCompositeError::SpatialPlanOnUnsupportedSource {
@@ -6441,17 +6445,16 @@ impl GpuFrameCompositor {
                 let extent = chain.output_bounds.extent();
                 source_size = [extent.width() as f32, extent.height() as f32];
                 transform = chain.output_bounds.project_affine(transform);
-                sample_spatial_output_bilinear =
-                    chain.stages.iter().any(|stage| match stage.spatial_pass() {
-                        Some(EffectGpuSpatialPass::DetailPreservingUpscale { grade }) => {
-                            !grade.scale().is_identity()
-                        }
-                        Some(
-                            EffectGpuSpatialPass::Glass { .. }
-                            | EffectGpuSpatialPass::VideoCollage { .. },
-                        ) => true,
-                        _ => false,
-                    });
+                sample_bilinear |= chain.stages.iter().any(|stage| match stage.spatial_pass() {
+                    Some(EffectGpuSpatialPass::DetailPreservingUpscale { grade }) => {
+                        !grade.scale().is_identity()
+                    }
+                    Some(
+                        EffectGpuSpatialPass::Glass { .. }
+                        | EffectGpuSpatialPass::VideoCollage { .. },
+                    ) => true,
+                    _ => false,
+                });
                 spatial_effect_layers = spatial_effect_layers.saturating_add(1);
                 spatial_chain_gpu_choices = spatial_chain_gpu_choices.saturating_add(1);
                 spatial_effect_passes =
@@ -6565,7 +6568,7 @@ impl GpuFrameCompositor {
                     inv_transform1: [
                         inv_transform[4],
                         inv_transform[5],
-                        f32::from(sample_spatial_output_bilinear),
+                        f32::from(sample_bilinear),
                         0.0,
                     ],
                     geometry: [width as f32, height as f32, source_size[0], source_size[1]],
@@ -27355,6 +27358,136 @@ mod tests {
             "DST-17 after Grow Bounds {bounds:?}, Float32 maximum absolute error {error:.9e}"
         );
         assert!(error <= 1.0e-4);
+    }
+
+    #[tokio::test]
+    async fn gpu_compositor_decorated_basic_title_matches_working_float_reference() {
+        use crate::{
+            composite_timeline_elements_color_frame, project_basic_title_transform,
+            BasicTitleRasterizer, TimelineCompositeElement, TimelineCompositeOptions,
+            TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineMediaLayer,
+        };
+        use mondrian_core::{
+            default_basic_title_font_family, BasicTitle, ColorEngine, ImageSampling, Resolution,
+            SampleAspectRatio, TimelineTime,
+        };
+
+        let canvas = Resolution { width: 192, height: 108 };
+        let working = WorkingColorSpace::LinearRec709;
+        let mut title = BasicTitle::new("Mondrian\nTitle", default_basic_title_font_family())
+            .unwrap()
+            .evaluate(TimelineTime::ZERO)
+            .unwrap();
+        title.font_size = 30.0;
+        title.appearance.stroke_width = 3.0;
+        title.appearance.stroke_color = Color::from_rgba8(240, 15, 50, 160);
+        title.appearance.shadow_distance = 10.0;
+        title.appearance.shadow_softness = 5.0;
+        title.appearance.shadow_color = Color::from_rgba8(15, 40, 200, 180);
+        title.appearance.background_color = Color::from_rgba8(20, 150, 80, 170);
+        title.appearance.background_opacity = 0.45;
+        title.appearance.opacity = 0.73;
+        let title = BasicTitleRasterizer::new()
+            .rasterize(
+                &title,
+                canvas,
+                0.2,
+                canvas,
+                working,
+                SampleAspectRatio::SQUARE,
+            )
+            .unwrap();
+        let transform = project_basic_title_transform(
+            [0.91, 0.0, 3.5, 0.0, 0.88, -2.25],
+            title.sampled_source_to_author(),
+            canvas,
+            canvas,
+        )
+        .unwrap();
+        let title = title.into_frame();
+        let background = CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+            sampling: ImageSampling::UNIT_SQUARE,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            width: canvas.width,
+            height: canvas.height,
+            data: (0..canvas.width * canvas.height)
+                .map(|index| {
+                    [
+                        0.1 + 0.6 * (index % canvas.width) as f32 / canvas.width as f32,
+                        0.24,
+                        0.15,
+                        0.8,
+                    ]
+                })
+                .collect(),
+            color_space: working,
+        });
+
+        let identity = mondrian_effects::identity_compiled_effect_graph().unwrap();
+        let cpu_layer = |frame, opacity, transform| {
+            TimelineCompositeElement::Media(TimelineMediaLayer {
+                frame,
+                opacity,
+                blend_mode: BlendMode::Normal,
+                transform,
+                effect_graph: identity.clone(),
+                frame_seed: 0,
+                processor_input_plan: None,
+            })
+        };
+        let same_position = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let cpu = composite_timeline_elements_color_frame(
+            canvas.width,
+            canvas.height,
+            &[
+                cpu_layer(&background, 1.0, same_position),
+                cpu_layer(&title, 0.82, transform),
+            ],
+            TimelineCompositeOptions::default(),
+            TimelineEffectColorRuntime::new(
+                &ColorEngine::mondrian_standard(),
+                working,
+                ImageSampling::UNIT_SQUARE,
+            ),
+            &mut TimelineCompositeScratch::default(),
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+        .unwrap();
+        let gpu_layer = |frame, opacity, transform| GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(frame),
+            opacity,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
+            transform,
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let gpu = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for Basic Title parity");
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            &gpu,
+            &[
+                gpu_layer(&background, 1.0, same_position),
+                gpu_layer(&title, 0.82, transform),
+            ],
+            canvas.width,
+            canvas.height,
+            working,
+        );
+        assert_eq!(diagnostics.gpu_with_upload_composites, 1);
+        assert_eq!(diagnostics.cpu_fallback_composites, 0);
+        assert!(actual.iter().any(|pixel| pixel[3] > 0.85));
+        let associated = |[r, g, b, a]: [f32; 4]| [r * a, g * a, b * a, a];
+        let error = cpu
+            .rgba_f32()
+            .data
+            .iter()
+            .zip(&actual)
+            .flat_map(|(&cpu, &gpu)| associated(cpu).into_iter().zip(associated(gpu)))
+            .map(|(cpu, gpu)| (cpu - gpu).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!("Decorated Basic Title premultiplied Float32 absolute error {error:.9e}");
+        assert!(error <= 0.002);
     }
 
     #[tokio::test]

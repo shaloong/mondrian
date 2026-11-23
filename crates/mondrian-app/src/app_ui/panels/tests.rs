@@ -1439,6 +1439,39 @@ fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
         model.clip_properties[0].value,
         PropertyValue::Text("Mondrian".to_owned())
     );
+
+    let english =
+        Localizer::new(crate::app_ui::localization::AppUiLocale::EnUs).expect("English catalog");
+    let english_model = InspectorPanelModel::from_app_state(&state, &english);
+    for (path, zh, en) in [
+        (
+            mondrian_core::BasicTitle::STROKE_WIDTH_PATH,
+            "描边宽度（px）",
+            "Outline width (px)",
+        ),
+        (
+            mondrian_core::BasicTitle::SHADOW_DISTANCE_PATH,
+            "阴影距离（px）",
+            "Shadow distance (px)",
+        ),
+        (
+            mondrian_core::BasicTitle::BACKGROUND_OPACITY_PATH,
+            "背景不透明度（%）",
+            "Background opacity (%)",
+        ),
+        (
+            mondrian_core::BasicTitle::OPACITY_PATH,
+            "标题不透明度（%）",
+            "Title opacity (%)",
+        ),
+    ] {
+        let localized = model.clip_properties.iter().find(|row| row.path == path).unwrap();
+        let translated = english_model.clip_properties.iter().find(|row| row.path == path).unwrap();
+        assert_eq!(localized.label, zh);
+        assert_eq!(translated.label, en);
+        assert_eq!(localized.address, translated.address);
+        assert!(!localized.is_animatable);
+    }
 }
 
 #[test]

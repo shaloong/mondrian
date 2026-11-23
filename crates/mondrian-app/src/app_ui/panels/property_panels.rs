@@ -487,16 +487,41 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         .with_section(style_section);
 
     if !model.clip_properties.is_empty() {
-        let mut section = PropertySection::new(localizer.text("inspector-basic-title"));
+        let mut name = None;
+        let mut section = None;
         for property in &model.clip_properties {
-            section = section.with_row(clip_property_row(
-                localizer,
-                property,
-                can_edit,
-                selected_clip,
-            ));
+            use mondrian_core::BasicTitle;
+            let heading = match property.path.as_str() {
+                BasicTitle::STROKE_WIDTH_PATH | BasicTitle::STROKE_COLOR_PATH => {
+                    "inspector-title-outline"
+                }
+                BasicTitle::SHADOW_DISTANCE_PATH
+                | BasicTitle::SHADOW_SOFTNESS_PATH
+                | BasicTitle::SHADOW_COLOR_PATH => "inspector-title-shadow",
+                BasicTitle::BACKGROUND_COLOR_PATH | BasicTitle::BACKGROUND_OPACITY_PATH => {
+                    "inspector-title-background"
+                }
+                BasicTitle::OPACITY_PATH => "inspector-title-compositing",
+                _ => "inspector-basic-title",
+            };
+            if name != Some(heading) {
+                if let Some(previous) = section.take() {
+                    panel = panel.with_section(previous);
+                }
+                name = Some(heading);
+            }
+            section
+                .get_or_insert_with(|| PropertySection::new(localizer.text(heading)))
+                .push_row(clip_property_row(
+                    localizer,
+                    property,
+                    can_edit,
+                    selected_clip,
+                ));
         }
-        panel = panel.with_section(section);
+        if let Some(last) = section {
+            panel = panel.with_section(last);
+        }
     }
 
     if !model.audio_components.is_empty() {
@@ -4119,21 +4144,35 @@ pub(super) fn inspector_property_value_widget(
         PropertyValue::Float(value) => {
             let ((min, max), (hard_min, hard_max)) = parameter_float_ranges(property);
             let selected_clip = selection;
+            let in_percent = matches!(&target, InspectorPropertyTarget::Clip { .. })
+                && matches!(
+                    property.path.as_str(),
+                    mondrian_core::BasicTitle::BACKGROUND_OPACITY_PATH
+                        | mondrian_core::BasicTitle::OPACITY_PATH
+                );
+            let scale = if in_percent { 100.0 } else { 1.0 };
             numeric_slider_input_control_with_hard_range(
-                f64::from(*value),
-                min,
-                max,
-                hard_min,
-                hard_max,
-                property.step.filter(|step| step.is_finite() && *step > 0.0),
-                numeric_decimals(property.step, *value),
+                f64::from(*value) * scale,
+                min * scale,
+                max * scale,
+                hard_min * scale,
+                hard_max * scale,
+                property
+                    .step
+                    .filter(|step| step.is_finite() && *step > 0.0)
+                    .map(|step| step * scale),
+                if in_percent {
+                    0
+                } else {
+                    numeric_decimals(property.step, *value)
+                },
                 can_edit,
                 move |v: f64| {
                     inspector_property_channel_action(
                         selected_clip,
                         target.clone(),
                         0,
-                        v.clamp(hard_min, hard_max),
+                        (v / scale).clamp(hard_min, hard_max),
                     )
                 },
             )

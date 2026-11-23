@@ -8328,6 +8328,56 @@ mod tests {
     }
 
     #[test]
+    fn basic_title_decoration_edits_reset_and_replay_by_stable_address() {
+        use mondrian_core::BasicTitle;
+
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Title decorations")));
+        state.dispatch_action(timeline_create_basic_title_action()).unwrap();
+        let clip_id = state.primary_selected_clip().unwrap().clip_id;
+        let parameter =
+            clip_parameter_address(&state, clip_id, BasicTitle::BACKGROUND_OPACITY_PATH);
+        let opacity = |state: &AppState| {
+            state
+                .active_sequence()
+                .unwrap()
+                .find_clip(clip_id)
+                .unwrap()
+                .content
+                .basic_title()
+                .unwrap()
+                .evaluate(TimelineTime::ZERO)
+                .unwrap()
+                .appearance
+                .background_opacity
+        };
+        assert_eq!(opacity(&state), 0.0);
+        state
+            .dispatch_action(clip_parameter_action(
+                clip_id,
+                parameter.clone(),
+                PropertyValue::Float(0.45),
+            ))
+            .unwrap();
+        assert_eq!(opacity(&state), 0.45);
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(opacity(&state), 0.0);
+        assert!(state.redo_timeline().unwrap());
+        assert_eq!(opacity(&state), 0.45);
+        state
+            .dispatch_action(clip_write_parameter_values_action(
+                ClipWriteParameterValuesPayload {
+                    clip_id,
+                    writes: vec![ParameterValueWrite::ResetToDefault { parameter }],
+                },
+            ))
+            .unwrap();
+        assert_eq!(opacity(&state), 0.0);
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(opacity(&state), 0.45);
+    }
+
+    #[test]
     fn dispatch_visual_effect_parameter_noop_is_rejected_without_undo_history() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let (effect_id, _, parameter, initial_value) =

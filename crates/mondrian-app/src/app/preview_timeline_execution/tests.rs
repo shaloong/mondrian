@@ -2584,6 +2584,235 @@ fn basic_title_enters_the_shared_working_linear_preview_path() {
 }
 
 #[test]
+#[ignore = "real GPU Preview decorated Basic Title parity; run independently"]
+fn decorated_basic_title_matches_cpu_through_production_preview() {
+    use crate::app::preview_cpu_execution::output_boundary_from_color_context;
+    use crate::app::preview_viewer_plan::{
+        prepare_gpu_composite_layers_with_heterogeneous_effects, PreparedPreviewViewerGpuLayers,
+    };
+    use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
+    use mondrian_core::BasicTitle;
+    use mondrian_effects::{EffectFrameExtent, EffectGraphExecutionBudget};
+    use mondrian_renderer::{
+        color::ProgramOutputModule, GpuColorFrameReadback, GpuColorFrameReadbackPlan, GpuContext,
+        HeterogeneousCpuPrefixBatchGrant, RenderCpuColorExecutionSession, RenderMonitorAdaptation,
+        ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision,
+        ViewerSourceRect,
+    };
+    use mondrian_timeline::clip::Transform2D;
+
+    ensure_mondrian_default_ocio_loaded().unwrap();
+    let raster = Resolution { width: 192, height: 108 };
+    let mut sequence = solid_sequence("Decorated title Preview", Color::BLACK);
+    sequence.settings.resolution = raster;
+    let kind = mondrian_effects::EffectType::Ramp;
+    let mut ramp = mondrian_effects::instantiate_effect_node(kind.clone()).unwrap();
+    for (key, point) in [("start", [0.0_f32, 0.0]), ("end", [192.0, 0.0])] {
+        ramp.set_static_value_by_parameter(
+            &kind.parameter_id(key).unwrap(),
+            PropertyValue::Vec2(point.into()),
+        )
+        .unwrap();
+    }
+    sequence.video_tracks[0].clips[0].add_effect_node(ramp);
+    let mut title = Clip::new_basic_title(
+        "Mondrian\nTitle",
+        mondrian_core::default_basic_title_font_family(),
+        TimelineTime::ZERO,
+        tt(24, sequence.time_base()),
+    )
+    .unwrap();
+    for (path, value) in [
+        (BasicTitle::FONT_SIZE_PATH, PropertyValue::Float(30.0)),
+        (BasicTitle::STROKE_WIDTH_PATH, PropertyValue::Float(3.0)),
+        (
+            BasicTitle::STROKE_COLOR_PATH,
+            PropertyValue::Color(Color::from_rgba8(240, 15, 50, 160)),
+        ),
+        (BasicTitle::SHADOW_DISTANCE_PATH, PropertyValue::Float(10.0)),
+        (BasicTitle::SHADOW_SOFTNESS_PATH, PropertyValue::Float(5.0)),
+        (
+            BasicTitle::SHADOW_COLOR_PATH,
+            PropertyValue::Color(Color::from_rgba8(15, 40, 200, 180)),
+        ),
+        (
+            BasicTitle::BACKGROUND_COLOR_PATH,
+            PropertyValue::Color(Color::from_rgba8(20, 150, 80, 170)),
+        ),
+        (
+            BasicTitle::BACKGROUND_OPACITY_PATH,
+            PropertyValue::Float(0.45),
+        ),
+        (BasicTitle::OPACITY_PATH, PropertyValue::Float(0.73)),
+        (Transform2D::OPACITY_PATH, PropertyValue::Float(0.82)),
+    ] {
+        title
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: path.to_owned(),
+                value,
+            })
+            .unwrap();
+    }
+    title.transform.set_position([3.5, -2.25].into());
+    title.transform.set_scale([0.91, 0.88].into());
+    let kind = mondrian_effects::EffectType::BasicCorrection;
+    let mut correction = mondrian_effects::instantiate_effect_node(kind.clone()).unwrap();
+    correction
+        .set_static_value_by_parameter(
+            &kind.parameter_id("exposure").unwrap(),
+            PropertyValue::Float(0.2),
+        )
+        .unwrap();
+    title.add_effect_node(correction);
+    sequence.video_tracks[1].add_clip(title).unwrap();
+
+    let mut rasterizer = mondrian_renderer::BasicTitleRasterizer::new();
+    let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline(
+        &sequence,
+        &[],
+        0,
+        raster,
+        PreviewResolutionScale::Full,
+        color_context(&sequence),
+        &mut |_| panic!("generated sources need no media decode"),
+        &mut |request: PreviewTimelineTitleRequest| {
+            PreviewTimelineTitleFrame::Ready(
+                rasterizer
+                    .rasterize(
+                        &request.title,
+                        request.author_resolution,
+                        request.title_safe_margin,
+                        request.target_resolution,
+                        request.working_color_space,
+                        request.sample_aspect_ratio,
+                    )
+                    .unwrap(),
+            )
+        },
+    ) else {
+        panic!("decorated title did not enter the Preview plan");
+    };
+    let plan = resolved.plan;
+    let cpu = composite_resolved_preview_working(
+        raster.width,
+        raster.height,
+        &plan.elements,
+        &plan.color_context,
+        plan.sampling,
+        &mut TimelineCompositeScratch::default(),
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .unwrap();
+    let boundary = output_boundary_from_color_context(&plan.color_context).unwrap();
+    let expected = ProgramOutputModule::execute_cpu_rgba8(
+        &cpu.frame,
+        &boundary,
+        &mut RenderCpuColorExecutionSession::new(0),
+    )
+    .unwrap()
+    .rgba;
+    assert!(expected.chunks_exact(4).any(|pixel| pixel[0].abs_diff(pixel[1]) > 8));
+    let working = plan.color_context.working_color_space();
+    let PreparedPreviewViewerGpuLayers::Ordinary { layers } =
+        prepare_gpu_composite_layers_with_heterogeneous_effects(
+            &plan.elements,
+            working,
+            plan.sampling,
+            &mut TimelineCompositeScratch::default(),
+            HeterogeneousCpuPrefixBatchGrant::new(
+                Default::default(),
+                EffectGraphExecutionBudget::new(0, 0, 0, 0, 0),
+                0,
+                0,
+            ),
+            &[],
+            EffectFrameExtent::new(raster.width, raster.height),
+        )
+        .unwrap()
+    else {
+        panic!("decorated title must use ordinary GPU layers");
+    };
+    assert_eq!(layers.len(), 2);
+    let adaptation = RenderMonitorAdaptation::new(
+        boundary.output_color_space(),
+        boundary.output_color_space(),
+        plan.color_context.engine().clone(),
+    )
+    .unwrap();
+    let gpu = pollster::block_on(GpuContext::new()).expect("real Preview GPU adapter");
+    eprintln!(
+        "Decorated Basic Title Preview adapter: {:?}",
+        gpu.adapter.get_info()
+    );
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&gpu.adapter, &gpu.device, &gpu.queue).unwrap();
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    let mut record = runtime
+        .record(
+            &gpu.device,
+            &gpu.queue,
+            &mut encoder,
+            ViewerGpuExecutionRequest {
+                sequence_id: sequence.id,
+                timeline_frame: 0,
+                width: raster.width,
+                height: raster.height,
+                working_color_space: working,
+                layers: &layers,
+                heterogeneous_inputs: Vec::new(),
+                program_output_boundary: &boundary,
+                monitor_adaptation: &adaptation,
+                source_rect: ViewerSourceRect::FULL,
+                output_width: raster.width,
+                output_height: raster.height,
+                output_precision: ViewerGpuOutputPrecision::Encoded8,
+                display_calibration: None,
+                program_scopes: None,
+                signal_monitoring: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(record.compositing_diagnostics.gpu_with_upload_composites, 1);
+    assert_eq!(record.compositing_diagnostics.cpu_fallback_composites, 0);
+    assert!(record.fallback_reasons.is_empty());
+    assert_eq!(record.output.id(), record.program_output.id());
+    let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.output.clone()).unwrap();
+    let presentation = runtime.take_presentation_output(&mut record).unwrap();
+    let readback = GpuColorFrameReadback::record_presentation_copy(
+        &gpu.device,
+        &mut encoder,
+        &readback_plan,
+        &presentation,
+    )
+    .unwrap();
+    let submission = gpu.queue.submit([encoder.finish()]);
+    let _submitted = record.assert_adapter_submission(submission.clone());
+    let (send, receive) = std::sync::mpsc::channel();
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        send.send(result).unwrap()
+    });
+    gpu.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(std::time::Duration::from_secs(15)),
+        })
+        .unwrap();
+    receive.recv_timeout(std::time::Duration::from_secs(15)).unwrap().unwrap();
+    let mapped = slice.get_mapped_range().unwrap();
+    let actual = readback_plan.unpack_mapped_rgba8(&mapped).unwrap();
+    assert_eq!(expected.len(), actual.rgba().len());
+    let max_error = expected
+        .iter()
+        .zip(actual.rgba())
+        .map(|(cpu, gpu)| cpu.abs_diff(*gpu))
+        .max()
+        .unwrap();
+    eprintln!("Decorated Basic Title Preview maximum error: {max_error} RGBA8 steps");
+    assert!(max_error <= 1);
+}
+
+#[test]
 fn nested_sequence_propagates_non_reusable_inner_execution_semantics() {
     ensure_mondrian_default_ocio_loaded().expect("default OCIO");
     let target = Resolution { width: 1, height: 1 };

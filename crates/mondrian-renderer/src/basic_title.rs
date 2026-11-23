@@ -23,6 +23,8 @@ use sha2::{Digest, Sha256};
 
 use crate::CpuColorFrame;
 
+mod title_decoration;
+
 const DEFAULT_CACHE_ENTRIES: usize = 64;
 const DEFAULT_CACHE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_RASTER_PIXELS: u64 = 16 * 1024 * 1024;
@@ -384,6 +386,29 @@ pub enum BasicTitleRasterError {
     /// Pixel allocation arithmetic overflowed.
     #[error("Basic Title raster dimensions overflowed addressable memory")]
     RasterSizeOverflow,
+    /// Expanded title output and filter scratch exceed the per-job grant.
+    #[error("Basic Title decoration requires {required} bytes, exceeding the {limit}-byte budget")]
+    DecorationByteBudgetExceeded { required: usize, limit: usize },
+    /// The allocator could not reserve an admitted decoration raster.
+    #[error("Basic Title decoration raster allocation failed")]
+    DecorationAllocationFailed,
+}
+
+impl From<title_decoration::Error> for BasicTitleRasterError {
+    fn from(error: title_decoration::Error) -> Self {
+        match error {
+            title_decoration::Error::Overflow => Self::RasterSizeOverflow,
+            title_decoration::Error::Pixels { width, height } => Self::RasterBudgetExceeded {
+                width,
+                height,
+                max_pixels: title_decoration::MAX_PIXELS,
+            },
+            title_decoration::Error::Bytes { required, limit } => {
+                Self::DecorationByteBudgetExceeded { required, limit }
+            }
+            title_decoration::Error::Allocation => Self::DecorationAllocationFailed,
+        }
+    }
 }
 
 /// Session-owned Basic Title generator with a bounded pixel cache.
@@ -615,13 +640,40 @@ impl BasicTitleRasterizer {
         let offset_x = safe_left.round() as i32;
         let offset_y = vertical_offset.round() as i32;
 
+        let appearance = title.appearance;
+        let style = title_decoration::Style {
+            fill: color_channels(title.fill),
+            stroke_width: appearance.stroke_width,
+            stroke_color: color_channels(appearance.stroke_color),
+            shadow_distance: appearance.shadow_distance,
+            shadow_softness: appearance.shadow_softness,
+            shadow_color: color_channels(appearance.shadow_color),
+            background_color: color_channels(appearance.background_color),
+            background_opacity: appearance.background_opacity,
+            opacity: appearance.opacity,
+        };
+        let geometry_active = style.geometry_active();
         let mut bounds = PixelBounds::default();
+        let mut ink: Option<title_decoration::Rect> = None;
         buffer.draw(
             font_system,
             &mut self.swash_cache,
             cosmic_text::Color::rgb(255, 255, 255),
             |x, y, width, height, color| {
-                if color.a() > 0 {
+                if color.a() == 0 || width == 0 || height == 0 {
+                    return;
+                }
+                if geometry_active {
+                    let x0 = i64::from(x) + i64::from(offset_x);
+                    let y0 = i64::from(y) + i64::from(offset_y);
+                    let glyph = title_decoration::Rect {
+                        x0,
+                        y0,
+                        x1: x0 + i64::from(width),
+                        y1: y0 + i64::from(height),
+                    };
+                    ink = Some(ink.map_or(glyph, |current| current.union(glyph)));
+                } else {
                     bounds.include(
                         x.saturating_add(offset_x),
                         y.saturating_add(offset_y),
@@ -638,18 +690,36 @@ impl BasicTitleRasterizer {
             self.max_glyph_cache_entries,
         );
 
+        let mut decoration = ink
+            .map(|ink| title_decoration::Raster::prepare(ink, style, uniform_scale))
+            .transpose()?;
+        // Geometry mode leaves the legacy bounds empty. Keeping the transparent
+        // 1x1 legacy crop there also handles text with no visible glyph ink.
         let (crop_x, crop_y, width, height) = bounds.extent()?.unwrap_or((0, 0, 1, 1));
         admit_raster(width, height)?;
         let pixel_count = (width as usize)
             .checked_mul(height as usize)
             .ok_or(BasicTitleRasterError::RasterSizeOverflow)?;
         let mut pixels = vec![[0.0f32; 4]; pixel_count];
+        let mut decoration_result = Ok(());
         buffer.draw(
             font_system,
             &mut self.swash_cache,
             cosmic_text::Color::rgb(255, 255, 255),
             |x, y, draw_width, draw_height, color| {
                 if color.a() == 0 {
+                    return;
+                }
+                if let Some(decoration) = &mut decoration {
+                    if decoration_result.is_ok() {
+                        decoration_result = decoration.add_coverage(
+                            i64::from(x) + i64::from(offset_x),
+                            i64::from(y) + i64::from(offset_y),
+                            draw_width,
+                            draw_height,
+                            color.a(),
+                        );
+                    }
                     return;
                 }
                 paint_coverage(
@@ -671,6 +741,7 @@ impl BasicTitleRasterizer {
             self.max_cache_bytes,
             self.max_glyph_cache_entries,
         );
+        decoration_result?;
         let completed_fingerprint = fingerprint_face(font_system, primary_id).ok_or_else(|| {
             BasicTitleRasterError::FontFaceUnavailable {
                 postscript_name: resolved_postscript_name.clone(),
@@ -684,15 +755,38 @@ impl BasicTitleRasterizer {
             });
         }
 
+        let title_decoration::Output { crop_x, crop_y, width, height, pixels } =
+            if let Some(decoration) = decoration {
+                decoration.finish()
+            } else {
+                if appearance.opacity != 1.0 {
+                    for pixel in &mut pixels {
+                        pixel[3] *= appearance.opacity;
+                        if pixel[3] == 0.0 {
+                            *pixel = [0.0; 4];
+                        }
+                    }
+                }
+                title_decoration::Output {
+                    crop_x: i64::from(crop_x),
+                    crop_y: i64::from(crop_y),
+                    width,
+                    height,
+                    pixels,
+                }
+            };
         let frame = BasicTitleRasterFrame {
-            frame: CpuColorFrame::working(WorkingRgbaF32Frame {
-                sampling,
-                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
-                width,
-                height,
-                data: pixels,
-                color_space: working_color_space,
-            }),
+            frame: CpuColorFrame::working_with_composite_projection(
+                WorkingRgbaF32Frame {
+                    sampling,
+                    alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    width,
+                    height,
+                    data: pixels,
+                    color_space: working_color_space,
+                },
+                geometry_active,
+            ),
             sampled_source_to_author: [
                 1.0 / uniform_scale,
                 0.0,
@@ -823,7 +917,7 @@ pub fn basic_title_raster_request_identity(
     owner_sample_aspect_ratio: mondrian_core::SampleAspectRatio,
 ) -> BasicTitleRasterRequestIdentity {
     let mut hasher =
-        BasicTitleIdentityHasher::new(b"mondrian.renderer.basic-title-raster-request.v1");
+        BasicTitleIdentityHasher::new(b"mondrian.renderer.basic-title-raster-request.v2");
     hash_title_raster_request(
         &mut hasher,
         title,
@@ -998,7 +1092,7 @@ fn title_raster_identity(
     face_fingerprint: [u8; 32],
 ) -> BasicTitleRasterIdentity {
     let mut hasher =
-        BasicTitleIdentityHasher::new(b"mondrian.renderer.basic-title-raster-frame.v1");
+        BasicTitleIdentityHasher::new(b"mondrian.renderer.basic-title-raster-frame.v2");
     request_identity.hash(&mut hasher);
     face_fingerprint.hash(&mut hasher);
     BasicTitleRasterIdentity(hasher.finish_identity())
@@ -1051,6 +1145,10 @@ fn write_hex_identity(
     Ok(())
 }
 
+fn color_channels(color: mondrian_core::Color) -> [f32; 4] {
+    [color.r, color.g, color.b, color.a]
+}
+
 fn hash_title_raster_request(
     hasher: &mut impl Hasher,
     title: &EvaluatedBasicTitle,
@@ -1061,16 +1159,30 @@ fn hash_title_raster_request(
 ) {
     // Revision tag prevents an implementation contract change from reusing
     // an earlier session key.
-    1u8.hash(hasher);
+    2u8.hash(hasher);
     title.text.hash(hasher);
     title.font_family.hash(hasher);
     title.font_weight.hash(hasher);
     title.font_style.hash(hasher);
     title.font_size.to_bits().hash(hasher);
-    title.fill.r.to_bits().hash(hasher);
-    title.fill.g.to_bits().hash(hasher);
-    title.fill.b.to_bits().hash(hasher);
-    title.fill.a.to_bits().hash(hasher);
+    let appearance = title.appearance;
+    for color in [
+        title.fill,
+        appearance.stroke_color,
+        appearance.shadow_color,
+        appearance.background_color,
+    ] {
+        color_channels(color).map(f32::to_bits).hash(hasher);
+    }
+    for value in [
+        appearance.stroke_width,
+        appearance.shadow_distance,
+        appearance.shadow_softness,
+        appearance.background_opacity,
+        appearance.opacity,
+    ] {
+        value.to_bits().hash(hasher);
+    }
     title.tracking_em.to_bits().hash(hasher);
     title.line_height.to_bits().hash(hasher);
     title.horizontal_align.hash(hasher);
@@ -1222,6 +1334,70 @@ mod tests {
         );
         assert!(output.frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
         assert!(!output.diagnostics.cache_hit);
+    }
+
+    #[test]
+    fn decorated_title_keeps_the_glyph_anchor_and_applies_opacity_to_the_group() {
+        let mut rasterizer = BasicTitleRasterizer::new();
+        let mut title = evaluated("Mondrian\nTitle");
+        title.font_size = 34.0;
+        title.horizontal_align = BasicTitleHorizontalAlign::Left;
+        title.vertical_align = BasicTitleVerticalAlign::Top;
+        let mut rasterize = |title: &EvaluatedBasicTitle| {
+            rasterizer
+                .rasterize(
+                    title,
+                    Resolution { width: 320, height: 180 },
+                    0.0,
+                    Resolution { width: 250, height: 119 },
+                    WorkingColorSpace::LinearRec709,
+                    mondrian_core::SampleAspectRatio::new(4, 3).unwrap(),
+                )
+                .unwrap()
+        };
+        let plain = rasterize(&title);
+        let same = rasterize(&title);
+        assert!(same.diagnostics.cache_hit);
+        assert_eq!(plain.frame.rgba_f32().data, same.frame.rgba_f32().data);
+        title.appearance.opacity = 0.25;
+        let dim = rasterize(&title);
+        assert_eq!(dim.sampled_source_to_author, plain.sampled_source_to_author);
+        for (source, dimmed) in plain.frame.rgba_f32().data.iter().zip(&dim.frame.rgba_f32().data) {
+            assert_eq!(&source[..3], &dimmed[..3]);
+            assert_eq!(source[3] * 0.25, dimmed[3]);
+        }
+
+        let query = BasicTitleFontQuery::from_title(&title);
+        title.appearance.stroke_width = 9.0;
+        title.appearance.shadow_distance = 6.0;
+        title.appearance.background_opacity = 0.5;
+        title.appearance.opacity = 1.0;
+        let decorated = rasterize(&title);
+        assert_eq!(BasicTitleFontQuery::from_title(&title), query);
+        assert_eq!(
+            decorated.diagnostics.face_fingerprint,
+            plain.diagnostics.face_fingerprint
+        );
+        assert_ne!(decorated.identity, plain.identity);
+        assert!(decorated.frame.descriptor().width > plain.frame.descriptor().width);
+        assert!(decorated.frame.descriptor().height > plain.frame.descriptor().height);
+        assert!(decorated.sampled_source_to_author[2] < plain.sampled_source_to_author[2]);
+        assert!(decorated.sampled_source_to_author[5] < plain.sampled_source_to_author[5]);
+        title.appearance.opacity = 0.5;
+        let dim = rasterize(&title);
+        assert_eq!(
+            dim.sampled_source_to_author,
+            decorated.sampled_source_to_author
+        );
+        for (source, dimmed) in
+            decorated.frame.rgba_f32().data.iter().zip(&dim.frame.rgba_f32().data)
+        {
+            assert_eq!(&source[..3], &dimmed[..3]);
+            assert_eq!(source[3] * 0.5, dimmed[3]);
+        }
+        title.text = "   \n   ".into();
+        let blank = rasterize(&title);
+        assert_eq!(blank.frame.rgba_f32().data, [[0.0; 4]]);
     }
 
     #[test]
@@ -1541,6 +1717,49 @@ mod tests {
         let mut changed = title.clone();
         changed.vertical_align = BasicTitleVerticalAlign::Top;
         variants.push(("vertical_align", changed));
+        let mut changed = title.clone();
+        changed.appearance.stroke_width = 1.0;
+        variants.push(("stroke_width", changed));
+        let mut changed = title.clone();
+        changed.appearance.shadow_distance = 1.0;
+        variants.push(("shadow_distance", changed));
+        let mut changed = title.clone();
+        changed.appearance.shadow_softness = 1.0;
+        variants.push(("shadow_softness", changed));
+        let mut changed = title.clone();
+        changed.appearance.background_opacity = 0.5;
+        variants.push(("background_opacity", changed));
+        let mut changed = title.clone();
+        changed.appearance.opacity = 0.5;
+        variants.push(("opacity", changed));
+        for (channel, color) in [
+            (
+                "r",
+                mondrian_core::Color { r: 0.2, ..mondrian_core::Color::BLACK },
+            ),
+            (
+                "g",
+                mondrian_core::Color { g: 0.2, ..mondrian_core::Color::BLACK },
+            ),
+            (
+                "b",
+                mondrian_core::Color { b: 0.2, ..mondrian_core::Color::BLACK },
+            ),
+            (
+                "a",
+                mondrian_core::Color { a: 0.2, ..mondrian_core::Color::BLACK },
+            ),
+        ] {
+            let mut changed = title.clone();
+            changed.appearance.stroke_color = color;
+            variants.push((channel, changed));
+            let mut changed = title.clone();
+            changed.appearance.shadow_color = color;
+            variants.push((channel, changed));
+            let mut changed = title.clone();
+            changed.appearance.background_color = color;
+            variants.push((channel, changed));
+        }
 
         for (field, changed) in variants {
             assert_ne!(

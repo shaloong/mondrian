@@ -2874,10 +2874,11 @@ impl InspectorPanelModel {
             .content
             .basic_title()
             .map(|title| {
+                let properties = title.property_bag();
                 mondrian_core::BasicTitle::PROPERTY_PATHS
                     .iter()
                     .filter_map(|path| {
-                        title.property_bag().property(path).map(|property| {
+                        properties.property(path).map(|property| {
                             inspector_property_model(path, property, clip_author_time, localizer)
                         })
                     })

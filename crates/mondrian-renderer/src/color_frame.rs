@@ -3373,11 +3373,19 @@ impl CpuAlphaMaskFrame {
 pub struct CpuColorFrame {
     descriptor: ColorFrameDescriptor,
     frame: Arc<WorkingRgbaF32Frame>,
+    bilinear_composite_projection: bool,
 }
 
 impl CpuColorFrame {
     /// Wrap a linear-light frame as a working-space render-graph frame.
     pub fn working(frame: WorkingRgbaF32Frame) -> Self {
+        Self::working_with_composite_projection(frame, false)
+    }
+
+    pub(crate) fn working_with_composite_projection(
+        frame: WorkingRgbaF32Frame,
+        bilinear: bool,
+    ) -> Self {
         let descriptor = ColorFrameDescriptor {
             width: frame.width,
             height: frame.height,
@@ -3387,7 +3395,16 @@ impl CpuColorFrame {
             residency: ColorFrameResidency::Cpu,
             alpha: frame.alpha,
         };
-        Self { descriptor, frame: Arc::new(frame) }
+        Self {
+            descriptor,
+            frame: Arc::new(frame),
+            bilinear_composite_projection: bilinear,
+        }
+    }
+
+    /// Generated decoration coverage uses the same bilinear taps as the CPU projection.
+    pub(crate) const fn uses_bilinear_composite_projection(&self) -> bool {
+        self.bilinear_composite_projection
     }
 
     /// Return the frame metadata contract.
