@@ -496,6 +496,7 @@ fn resolve_export_media_dependencies(
             *asset_id,
             ExportMediaDependency {
                 path,
+                source_asset_name: Some(asset.name.clone()),
                 source_fingerprint,
                 source_container: media_probe.container.clone(),
                 source_video_stream: primary_video.cloned(),

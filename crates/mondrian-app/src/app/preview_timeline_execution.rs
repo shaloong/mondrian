@@ -230,6 +230,7 @@ pub(crate) struct PreviewTimelineFrameRequest<'a> {
     runtime_scale: PreviewResolutionScale,
     raster_requirement: PreviewRasterRequirement,
     color_context: ProgramColorContext,
+    title_assets: Option<Arc<mondrian_core::TitleAssetMetadata>>,
 }
 
 impl<'a> PreviewTimelineFrameRequest<'a> {
@@ -250,11 +251,20 @@ impl<'a> PreviewTimelineFrameRequest<'a> {
             runtime_scale,
             raster_requirement: PreviewRasterRequirement::Viewer,
             color_context,
+            title_assets: None,
         }
     }
 
     pub(crate) fn with_raster_requirement(mut self, requirement: PreviewRasterRequirement) -> Self {
         self.raster_requirement = requirement;
+        self
+    }
+
+    pub(crate) fn with_title_assets(
+        mut self,
+        assets: Option<Arc<mondrian_core::TitleAssetMetadata>>,
+    ) -> Self {
+        self.title_assets = assets;
         self
     }
 }
@@ -510,16 +520,7 @@ fn prepare_preview_timeline_sources(
     graph: PreviewTimelineGraph<'_>,
     request: &PreviewTimelineFrameRequest<'_>,
 ) -> Result<PreviewTimelinePreparation, PreviewUnavailability> {
-    let closure = prepare_preview_frame_closure(
-        graph,
-        request.root_sequence,
-        request.sequences,
-        request.frame.max(0),
-        request.target_resolution,
-        request.color_context.clone(),
-        request.runtime_scale,
-        request.raster_requirement,
-    )?;
+    let closure = prepare_preview_frame_closure_with_projection(graph, request, None)?;
     let demands = collect_prepared_visual_source_demands(&closure)?;
     let frozen_programs = closure
         .nodes()
@@ -1428,6 +1429,7 @@ impl<'a> PreviewTimelineGraph<'a> {
         self,
         program: &Arc<mondrian_renderer::PreparedVisualProgram>,
         invocation: PreparedVisualFrameInvocation<'_>,
+        title_assets: Option<Arc<mondrian_core::TitleAssetMetadata>>,
     ) -> Result<PreparedVisualFrameEvaluation<()>, PreviewUnavailability> {
         let position = invocation.position;
         let extent =
@@ -1439,7 +1441,8 @@ impl<'a> PreviewTimelineGraph<'a> {
             extent,
             extent.full_frame_roi(),
             self.cancellation.clone(),
-        );
+        )
+        .with_title_assets(title_assets);
         let mut scratch = self.scratch.borrow_mut();
         let prepared = match invocation.target {
             PreparedVisualFrameTarget::Sequence => {
@@ -2526,61 +2529,34 @@ fn preview_temporal_tile(
     })
 }
 
-fn prepare_preview_frame_closure(
-    graph: PreviewTimelineGraph<'_>,
-    root_sequence: &Sequence,
-    sequences: &[Sequence],
-    frame: i64,
-    root_resolution: Resolution,
-    root_color_context: ProgramColorContext,
-    runtime_scale: PreviewResolutionScale,
-    raster_requirement: PreviewRasterRequirement,
-) -> Result<PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>, PreviewUnavailability>
-{
-    prepare_preview_frame_closure_with_projection(
-        graph,
-        root_sequence,
-        sequences,
-        frame,
-        root_resolution,
-        root_color_context,
-        runtime_scale,
-        raster_requirement,
-        None,
-    )
-}
-
 fn prepare_preview_frame_closure_with_projection(
     graph: PreviewTimelineGraph<'_>,
-    root_sequence: &Sequence,
-    sequences: &[Sequence],
-    frame: i64,
-    root_resolution: Resolution,
-    root_color_context: ProgramColorContext,
-    runtime_scale: PreviewResolutionScale,
-    raster_requirement: PreviewRasterRequirement,
+    request: &PreviewTimelineFrameRequest<'_>,
     projection: Option<&auxiliary_projection::SourceProjection>,
 ) -> Result<PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>, PreviewUnavailability>
 {
-    let child_canvas_policy = match raster_requirement {
+    let child_canvas_policy = match request.raster_requirement {
         PreviewRasterRequirement::CanonicalProgram => PreparedVisualChildCanvasPolicy::Authored,
-        PreviewRasterRequirement::Viewer => {
-            PreparedVisualChildCanvasPolicy::preview_scaled(runtime_scale.dimension_divisor())
-                .map_err(|error| {
-                    PreviewUnavailability::blocked(
-                        PreviewOutputStage::TimelineEvaluation,
-                        error.to_string(),
-                    )
-                })?
-        }
+        PreviewRasterRequirement::Viewer => PreparedVisualChildCanvasPolicy::preview_scaled(
+            request.runtime_scale.dimension_divisor(),
+        )
+        .map_err(|error| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                error.to_string(),
+            )
+        })?,
     };
     let closure = prepare_bound_visual_frame_closure_for_targets(
         PreparedVisualFrameClosureRequest {
-            root_sequence,
-            sequences,
-            root_position: FramePosition::new(frame, root_sequence.time_base()),
-            root_resolution,
-            root_color_context,
+            root_sequence: request.root_sequence,
+            sequences: request.sequences,
+            root_position: FramePosition::new(
+                request.frame.max(0),
+                request.root_sequence.time_base(),
+            ),
+            root_resolution: request.target_resolution,
+            root_color_context: request.color_context.clone(),
             child_canvas_policy,
         },
         |sequence| match projection {
@@ -2592,7 +2568,11 @@ fn prepare_preview_frame_closure_with_projection(
                 .map(|projection| projection.view(program, invocation.instance_path))
                 .transpose()?;
             let evaluation = graph
-                .evaluate(view.as_ref().unwrap_or(program), invocation)
+                .evaluate(
+                    view.as_ref().unwrap_or(program),
+                    invocation,
+                    request.title_assets.clone(),
+                )
                 .map_err(|error| error.to_string())?;
             match view {
                 Some(view) => Ok(evaluation.with_auxiliary_preview_program(view)),

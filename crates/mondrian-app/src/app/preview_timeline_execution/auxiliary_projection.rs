@@ -393,18 +393,9 @@ pub(super) fn prepare_sources(
         if missing != prepared.unavailable_auxiliary || visual_changed {
             let projection =
                 SourceProjection::new(prepared, graph, missing.clone(), unavailable_visual.clone());
-            let closure = prepare_preview_frame_closure_with_projection(
-                graph,
-                request.root_sequence,
-                request.sequences,
-                request.frame.max(0),
-                request.target_resolution,
-                request.color_context.clone(),
-                request.runtime_scale,
-                request.raster_requirement,
-                Some(&projection),
-            )
-            .map_err(PreviewTimelineAbort::Unavailable)?;
+            let closure =
+                prepare_preview_frame_closure_with_projection(graph, request, Some(&projection))
+                    .map_err(PreviewTimelineAbort::Unavailable)?;
             prepared.frozen_programs = projection.programs.into_inner();
             prepared.closure = Arc::new(closure);
             prepared.unavailable_auxiliary = missing;

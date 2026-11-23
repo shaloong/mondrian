@@ -1406,6 +1406,9 @@ impl AppState {
             TimelineProductAction::CreateNumbersTitle => {
                 self.create_numbers_title_at_playhead().map(|_| ())
             }
+            TimelineProductAction::CreateClipInfoTitle => {
+                self.create_clip_info_title_at_playhead().map(|_| ())
+            }
             TimelineProductAction::PlaceAsset(payload) => self.place_asset_on_timeline(payload),
             TimelineProductAction::PlaceFile(payload) => self.queue_file_on_timeline(payload),
             TimelineProductAction::InsertAsset(payload) => {
@@ -8381,6 +8384,45 @@ mod tests {
         assert_eq!(opacity(&state), 0.0);
         assert!(state.undo_timeline().unwrap());
         assert_eq!(opacity(&state), 0.45);
+    }
+
+    #[test]
+    fn clip_info_title_track_selection_uses_a_stable_undoable_property() {
+        use mondrian_core::BasicTitle;
+
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Clip Info authoring");
+        let source_track = sequence.video_tracks[0].id;
+        state.test_set_sequence(Some(sequence));
+        state
+            .dispatch_action(crate::app::ui_actions::timeline_create_clip_info_title_action())
+            .unwrap();
+        let clip_id = state.primary_selected_clip().unwrap().clip_id;
+        let info = |state: &AppState| {
+            state
+                .active_sequence()
+                .unwrap()
+                .find_clip(clip_id)
+                .unwrap()
+                .content
+                .basic_title()
+                .unwrap()
+                .clip_info()
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(info(&state).track_id, None);
+        let parameter = clip_parameter_address(&state, clip_id, BasicTitle::CLIP_INFO_TRACK_PATH);
+        state
+            .dispatch_action(clip_parameter_action(
+                clip_id,
+                parameter,
+                PropertyValue::Text(source_track.to_string()),
+            ))
+            .unwrap();
+        assert_eq!(info(&state).track_id, Some(source_track));
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(info(&state).track_id, None);
     }
 
     #[test]

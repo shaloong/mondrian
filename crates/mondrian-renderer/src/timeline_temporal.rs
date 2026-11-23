@@ -150,6 +150,7 @@ pub struct TimelineFrameExecutionRequest {
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
     auxiliary_clip: Option<TimelineClipExecutionRef>,
+    title_assets: Option<Arc<mondrian_core::TitleAssetMetadata>>,
 }
 
 /// One actual job's authority, separate from reusable semantic frame plans.
@@ -199,12 +200,26 @@ impl TimelineFrameExecutionRequest {
             frame_extent,
             output_roi,
             auxiliary_clip: None,
+            title_assets: None,
         }
     }
 
     /// Exact prepared-Sequence evaluation request.
     pub const fn evaluation(&self) -> &crate::TimelineEvaluationRequest {
         &self.evaluation
+    }
+
+    /// Bind file labels from the same host snapshot as this execution request.
+    pub fn with_title_assets(
+        mut self,
+        assets: Option<Arc<mondrian_core::TitleAssetMetadata>>,
+    ) -> Self {
+        self.title_assets = assets;
+        self
+    }
+
+    pub(crate) fn title_assets(&self) -> Option<&mondrian_core::TitleAssetMetadata> {
+        self.title_assets.as_deref()
     }
 
     /// Scheduler generation owning all prepared and executed work.
@@ -253,6 +268,7 @@ pub struct PreparedTimelineClipInputPlan {
     frame_extent: EffectFrameExtent,
     output_roi: EffectPixelRoi,
     auxiliary_clip: Option<TimelineClipExecutionRef>,
+    title_assets: Option<Arc<mondrian_core::TitleAssetMetadata>>,
 }
 
 type TimelineProcessorSourceResolver<'a> = dyn FnMut(
@@ -313,6 +329,7 @@ impl PreparedTimelineClipInputPlan {
             && self.frame_extent == other.frame_extent
             && self.output_roi == other.output_roi
             && self.auxiliary_clip == other.auxiliary_clip
+            && self.title_assets == other.title_assets
     }
 
     pub const fn placement(&self) -> TimelineClipExecutionRef {
@@ -586,6 +603,7 @@ impl PreparedTimelineClipInputPlan {
             frame_extent: self.frame_extent,
             output_roi: self.output_roi,
             auxiliary_clip: self.auxiliary_clip,
+            title_assets: self.title_assets.clone(),
         }
     }
 
@@ -841,6 +859,7 @@ impl PreparedVisualProgram {
             frame_extent: owner.frame_extent(),
             output_roi: owner.output_roi(),
             auxiliary_clip: owner.auxiliary_clip(),
+            title_assets: owner.title_assets.clone(),
         })
     }
 

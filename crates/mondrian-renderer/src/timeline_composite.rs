@@ -380,10 +380,11 @@ impl TimelineCompositeScratch {
         request: crate::TimelineFrameExecutionRequest,
     ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
         self.effect_execution.bind_generation(request.generation());
-        let plan = crate::evaluate_prepared_visual_program_with_session(
+        let plan = crate::timeline_render_plan::evaluate_prepared_visual_program_with_title_assets(
             program,
             *request.evaluation(),
             &mut self.effect_execution,
+            request.title_assets(),
         )
         .map_err(crate::TimelineFramePreparationError::Evaluation)?;
         crate::timeline_temporal::prepare_timeline_temporal_execution_with_session(
@@ -409,6 +410,7 @@ impl TimelineCompositeScratch {
             program,
             sample,
             &mut self.effect_execution,
+            request.title_assets(),
         )
         .map_err(crate::TimelineFramePreparationError::Evaluation)?;
         let evaluation = request.evaluation();
@@ -444,8 +446,12 @@ impl TimelineCompositeScratch {
                 },
             ));
         }
-        let element = crate::timeline_render_plan::compile_clip_effect_input_sample(program, input)
-            .map_err(crate::TimelineFramePreparationError::Evaluation)?;
+        let element = crate::timeline_render_plan::compile_clip_effect_input_sample(
+            program,
+            input,
+            request.title_assets(),
+        )
+        .map_err(crate::TimelineFramePreparationError::Evaluation)?;
         let evaluation = request.evaluation();
         let plan = crate::TimelineRenderPlan {
             position: evaluation.position,

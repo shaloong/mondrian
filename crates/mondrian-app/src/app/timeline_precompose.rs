@@ -98,11 +98,20 @@ impl AppState {
             let source_audio_transitions = parent.audio_program.transitions.clone();
             let source_video_transitions = parent.video_transitions.clone();
             let mut audio_edit_ids = HashMap::new();
+            let nested_video_tracks = parent
+                .video_tracks
+                .iter()
+                .zip(&nested_sequence.video_tracks)
+                .map(|(source, destination)| (source.id, destination.id))
+                .collect::<HashMap<_, _>>();
 
             for (track_index, track) in parent.video_tracks.iter().enumerate() {
                 for clip in track.clips.iter().filter(|clip| plan.selected_ids.contains(&clip.id)) {
                     let mut nested_clip = clip.clone();
                     nested_clip.position = clip.position.checked_sub(plan.min_time)?;
+                    if let Some(title) = nested_clip.content.basic_title_mut() {
+                        title.remap_clip_info_track(|id| nested_video_tracks.get(&id).copied())?;
+                    }
                     nested_sequence.video_tracks[track_index].add_clip(nested_clip)?;
                 }
             }

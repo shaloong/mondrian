@@ -63,6 +63,7 @@ pub const TIMELINE_EDIT_SELECTION: &str = "edit_selection";
 pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
 pub const TIMELINE_CREATE_TIMECODE_TITLE: &str = "create_timecode_title";
 pub const TIMELINE_CREATE_NUMBERS_TITLE: &str = "create_numbers_title";
+pub const TIMELINE_CREATE_CLIP_INFO_TITLE: &str = "create_clip_info_title";
 /// External action name for placing one Asset on a stable Timeline Track.
 pub const TIMELINE_PLACE_ASSET: &str = "place_asset";
 pub const TIMELINE_PLACE_FILE: &str = "place_file";
@@ -546,6 +547,7 @@ pub enum TimelineProductAction {
     CreateBasicTitle,
     CreateTimecodeTitle,
     CreateNumbersTitle,
+    CreateClipInfoTitle,
     /// Place one Asset on one stable Track at an explicit evaluation coordinate.
     PlaceAsset(TimelineDropAssetPayload),
     /// Probe and atomically place one external file on a Track.
@@ -715,6 +717,10 @@ impl ProductAction {
                     TIMELINE_CREATE_NUMBERS_TITLE => {
                         decode_payload::<()>(namespace, name, payload)?;
                         TimelineProductAction::CreateNumbersTitle
+                    }
+                    TIMELINE_CREATE_CLIP_INFO_TITLE => {
+                        decode_payload::<()>(namespace, name, payload)?;
+                        TimelineProductAction::CreateClipInfoTitle
                     }
                     TIMELINE_PLACE_ASSET => {
                         TimelineProductAction::PlaceAsset(decode_payload(namespace, name, payload)?)
@@ -1355,6 +1361,11 @@ impl ProductAction {
             Self::Timeline(TimelineProductAction::CreateNumbersTitle) => (
                 TIMELINE_NAMESPACE,
                 TIMELINE_CREATE_NUMBERS_TITLE,
+                serde_json::Value::Null,
+            ),
+            Self::Timeline(TimelineProductAction::CreateClipInfoTitle) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_CREATE_CLIP_INFO_TITLE,
                 serde_json::Value::Null,
             ),
             Self::Timeline(TimelineProductAction::PlaceAsset(payload)) => (
@@ -3102,7 +3113,8 @@ impl<'a> ProductActionAvailability<'a> {
             }
             TimelineProductAction::CreateBasicTitle
             | TimelineProductAction::CreateTimecodeTitle
-            | TimelineProductAction::CreateNumbersTitle => true,
+            | TimelineProductAction::CreateNumbersTitle
+            | TimelineProductAction::CreateClipInfoTitle => true,
             TimelineProductAction::PlaceAsset(payload) => {
                 self.state.can_place_asset_on_timeline(*payload)
             }
@@ -3724,6 +3736,7 @@ mod tests {
             ProductAction::Timeline(TimelineProductAction::CreateBasicTitle),
             ProductAction::Timeline(TimelineProductAction::CreateTimecodeTitle),
             ProductAction::Timeline(TimelineProductAction::CreateNumbersTitle),
+            ProductAction::Timeline(TimelineProductAction::CreateClipInfoTitle),
             ProductAction::Timeline(TimelineProductAction::PlaceAsset(
                 TimelineDropAssetPayload {
                     asset_id: AssetId::new(),

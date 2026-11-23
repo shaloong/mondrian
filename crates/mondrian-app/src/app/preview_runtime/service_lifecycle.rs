@@ -14,11 +14,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ) {
         let current = snapshot.authoring_session_id();
         let previous = self.visual_program_authoring_session.get();
-        if previous == current {
-            return;
-        }
-
-        if previous.is_some() {
+        if previous != current && previous.is_some() {
             // One mutable cache operation both rotates identity and clears
             // residency. Retire all dependent jobs and outputs before the new
             // Session can request work.
@@ -27,9 +23,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.retire_obsolete_transport_work(false);
             self.clear_all_preview_residency();
         }
-        self.future_media_window.borrow_mut().clear();
-        self.last_gallery_capture.borrow_mut().take();
-        self.visual_program_authoring_session.set(current);
+        if previous != current {
+            self.future_media_window.borrow_mut().clear();
+            self.last_gallery_capture.borrow_mut().take();
+            *self.title_assets.borrow_mut() = Default::default();
+            self.visual_program_authoring_session.set(current);
+        }
+        if let Some(authoring) = snapshot.authoring()
+            && self.title_assets.borrow_mut().refresh(authoring)
+        {
+            self.evaluation_working_set.borrow_mut().clear();
+            self.last_gallery_capture.borrow_mut().take();
+            self.invalidate_preview_generation();
+            self.execution.borrow_mut().clear_output();
+        }
     }
 
     /// Synchronize the latest authoritative transport intent.

@@ -417,7 +417,7 @@ pub fn prepare_auxiliary_clip_source(
     Ok(PreparedAuxiliaryClipSource {
         placement: sample.placement(),
         time: sample.time(),
-        element: compile_auxiliary_clip_sample(program, &sample, session)?,
+        element: compile_auxiliary_clip_sample(program, &sample, session, None)?,
     })
 }
 
@@ -425,6 +425,7 @@ pub(crate) fn compile_auxiliary_clip_sample(
     program: &PreparedVisualProgram,
     sample: &PreparedAuxiliaryClipSample,
     session: &mut EffectExecutionSession,
+    title_assets: Option<&mondrian_core::TitleAssetMetadata>,
 ) -> Result<Option<TimelineRenderPlanElement>> {
     let schedule = program.schedule();
     let placement = sample.placement();
@@ -440,7 +441,7 @@ pub(crate) fn compile_auxiliary_clip_sample(
             source.clone(),
             placement.endpoint,
             schedule,
-            VisualEvaluationFrame { time: source_time, seed: frame_seed },
+            VisualEvaluationFrame { time: source_time, seed: frame_seed, title_assets },
             &mut TimelineEvaluationDiagnostics::default(),
             &mut SessionPreparedClipEffectResolver {
                 program,
@@ -578,7 +579,7 @@ pub(crate) fn evaluate_timeline_render_plan(
     let mut effects = DirectClipEffectResolver {
         working_color_space: source.source_working_color_space(),
     };
-    evaluate_timeline_render_plan_with_effects(source, request, &mut effects)
+    evaluate_timeline_render_plan_with_effects(source, request, &mut effects, None)
 }
 
 /// Evaluate one frame through a revision-bound visual program without retaining
@@ -594,7 +595,7 @@ pub fn evaluate_prepared_visual_program(
     let mut effects =
         PreparedClipEffectResolver { program, lighting: FrameSceneLighting::default() };
     validate_prepared_auxiliary_policy(program, request)?;
-    evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
+    evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects, None)
 }
 
 /// Evaluate one prepared visual frame while retaining dynamic Effect topology
@@ -608,13 +609,27 @@ pub fn evaluate_prepared_visual_program_with_session(
     request: TimelineEvaluationRequest,
     session: &mut EffectExecutionSession,
 ) -> Result<TimelineRenderPlan> {
+    evaluate_prepared_visual_program_with_title_assets(program, request, session, None)
+}
+
+pub(crate) fn evaluate_prepared_visual_program_with_title_assets(
+    program: &PreparedVisualProgram,
+    request: TimelineEvaluationRequest,
+    session: &mut EffectExecutionSession,
+    title_assets: Option<&mondrian_core::TitleAssetMetadata>,
+) -> Result<TimelineRenderPlan> {
     validate_prepared_auxiliary_policy(program, request)?;
     let mut effects = SessionPreparedClipEffectResolver {
         program,
         session,
         lighting: FrameSceneLighting::default(),
     };
-    evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
+    evaluate_timeline_render_plan_with_effects(
+        program.schedule(),
+        request,
+        &mut effects,
+        title_assets,
+    )
 }
 
 /// Re-evaluate the original frozen program after this Sequence sample's host
@@ -638,7 +653,7 @@ pub fn evaluate_prepared_visual_program_for_auxiliary_preview(
         unavailable,
         lighting: FrameSceneLighting::default(),
     };
-    evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects)
+    evaluate_timeline_render_plan_with_effects(program.schedule(), request, &mut effects, None)
 }
 
 fn validate_prepared_auxiliary_policy(
@@ -806,6 +821,7 @@ struct SessionPreparedClipEffectResolver<'a> {
 pub(crate) fn compile_clip_effect_input_sample(
     program: &PreparedVisualProgram,
     input: &crate::PreparedClipEffectInputSample,
+    title_assets: Option<&mondrian_core::TitleAssetMetadata>,
 ) -> Result<TimelineRenderPlanElement> {
     let sample = input.sample();
     let mut source =
@@ -826,7 +842,7 @@ pub(crate) fn compile_clip_effect_input_sample(
         source,
         placement.endpoint,
         schedule,
-        VisualEvaluationFrame { time, seed: input.frame_seed() },
+        VisualEvaluationFrame { time, seed: input.frame_seed(), title_assets },
         &mut TimelineEvaluationDiagnostics::default(),
         &mut BoundClipEffectInput(input.graph()),
     )?
@@ -924,18 +940,24 @@ pub(crate) fn validate_timeline_evaluation_position(
 }
 
 #[derive(Clone, Copy)]
-struct VisualEvaluationFrame {
+struct VisualEvaluationFrame<'a> {
     time: TimelineTime,
     seed: i64,
+    title_assets: Option<&'a mondrian_core::TitleAssetMetadata>,
 }
 
 fn evaluate_timeline_render_plan_with_effects(
     source: &dyn RenderPlanSource,
     request: TimelineEvaluationRequest,
     effects: &mut dyn ClipEffectResolver,
+    title_assets: Option<&mondrian_core::TitleAssetMetadata>,
 ) -> Result<TimelineRenderPlan> {
     let current_time = validate_timeline_evaluation_position(source, request.position)?;
-    let frame = VisualEvaluationFrame { time: current_time, seed: request.position.frame };
+    let frame = VisualEvaluationFrame {
+        time: current_time,
+        seed: request.position.frame,
+        title_assets,
+    };
     let active = source.flat_visual_items_at(current_time)?;
     let mut diagnostics = TimelineEvaluationDiagnostics {
         active_visual_items: active.len(),
@@ -1045,7 +1067,7 @@ fn apply_timecode_original_compositing(elements: &mut Vec<TimelineRenderPlanElem
 fn compile_transition(
     transition: FlatVideoTransition,
     source: &dyn RenderPlanSource,
-    frame: VisualEvaluationFrame,
+    frame: VisualEvaluationFrame<'_>,
     diagnostics: &mut TimelineEvaluationDiagnostics,
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineRenderPlanElement> {
@@ -1138,7 +1160,7 @@ fn compile_transition_input(
     clip: FlatActiveClip,
     endpoint: TimelineClipEndpointContext,
     source: &dyn RenderPlanSource,
-    frame: VisualEvaluationFrame,
+    frame: VisualEvaluationFrame<'_>,
     diagnostics: &mut TimelineEvaluationDiagnostics,
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineTransitionInputPlan> {
@@ -1175,7 +1197,7 @@ fn compile_flat_clip(
     ac: FlatActiveClip,
     endpoint: TimelineClipEndpointContext,
     source: &dyn RenderPlanSource,
-    frame: VisualEvaluationFrame,
+    frame: VisualEvaluationFrame<'_>,
     diagnostics: &mut TimelineEvaluationDiagnostics,
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<Option<TimelineRenderPlanElement>> {
@@ -1256,13 +1278,28 @@ fn compile_flat_clip(
                 }
                 _ => None,
             };
-            let title = title.evaluate_for_render(
-                ac.clip_time,
-                frame.time,
-                mondrian_core::Rational::new(time_base.den, time_base.num),
-                source.source_timeline_display(),
-                media_sample,
-            )?;
+            let title = if let Some(info) = title.clip_info()? {
+                let Some(label) =
+                    source.title_clip_info_at(frame.time, info, frame.title_assets)?
+                else {
+                    diagnostics.skipped_unrenderable += 1;
+                    return Ok(None);
+                };
+                title.evaluate_clip_info_for_render(
+                    ac.clip_time,
+                    info,
+                    label,
+                    source.source_resolution(),
+                )?
+            } else {
+                title.evaluate_for_render(
+                    ac.clip_time,
+                    frame.time,
+                    mondrian_core::Rational::new(time_base.den, time_base.num),
+                    source.source_timeline_display(),
+                    media_sample,
+                )?
+            };
             TimelineRenderPlanElement::BasicTitle(TimelineBasicTitlePlan {
                 placement,
                 title,
@@ -1635,6 +1672,161 @@ mod tests {
 
         assert!((title.opacity - 0.5).abs() < 1.0e-6);
         assert!((title.title.font_size - 60.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn clip_info_title_projects_distinct_asset_and_file_names_from_the_frozen_host() {
+        use mondrian_core::{BasicTitle, TitleAssetNames};
+
+        let mut sequence = Sequence::new("Independent asset labels");
+        let grid = sequence.time_base();
+        let asset_id = AssetId::new();
+        let mut picture = Clip::new(asset_id, tt(0, grid), tt(10, grid)).unwrap();
+        picture.label = Some("Timeline name".to_owned());
+        sequence.video_tracks[0].add_clip(picture).unwrap();
+        let mut title = Clip::new_clip_info_title("Segoe UI", tt(0, grid), tt(10, grid)).unwrap();
+        let names = HashMap::from([(
+            asset_id,
+            TitleAssetNames::from_source(
+                Some("Library name"),
+                std::path::Path::new("original/camera.mov"),
+            ),
+        )]);
+        for (mode, expected) in [
+            ("clip_name", "Timeline name"),
+            ("asset_name", "Library name"),
+            ("file_name", "camera.mov"),
+        ] {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: BasicTitle::CLIP_INFO_FIELD_PATH.to_owned(),
+                    value: PropertyValue::Enum(mode.to_owned()),
+                })
+                .unwrap();
+            sequence.video_tracks[1].clips = vec![title.clone()].into();
+            let prepared = PreparedVisualProgram::prepare(&sequence).unwrap();
+            let request = TimelineEvaluationRequest::export(fp(0, grid));
+            let plan = evaluate_prepared_visual_program_with_title_assets(
+                &prepared,
+                request,
+                &mut EffectExecutionSession::default(),
+                Some(&names),
+            )
+            .unwrap();
+            let Some(TimelineRenderPlanElement::BasicTitle(title)) = plan.elements.last() else {
+                panic!("expected a Clip Info Title with host metadata");
+            };
+            assert_eq!(title.title.text, expected);
+            if mode != "clip_name" {
+                let plan = evaluate_prepared_visual_program(&prepared, request).unwrap();
+                assert_eq!(plan.elements.len(), 1);
+                assert_eq!(plan.diagnostics.skipped_unrenderable, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn clip_info_title_follows_the_edit_cut_and_stable_track_identity() {
+        use mondrian_core::timeline_data::EditorialSourceIdentity;
+        use mondrian_core::{BasicTitle, TimelineTimeRange};
+
+        let mut sequence = Sequence::new("Clip info cut");
+        sequence.settings.resolution = Resolution { width: 400, height: 100 };
+        let grid = sequence.time_base();
+        let asset_id = AssetId::new();
+        let make_source = |start, label: &str, reel: &str| {
+            let mut clip = Clip::new(asset_id, tt(start, grid), tt(8, grid)).unwrap();
+            clip.set_source_origin(tt(10, grid)).unwrap();
+            clip.label = Some(label.to_owned());
+            clip.media_interpretation_mut().unwrap().editorial_source =
+                Some(EditorialSourceIdentity::new(Some(reel.to_owned()), None, None).unwrap());
+            clip
+        };
+        let left = make_source(0, "Opening", "REEL-A");
+        let right = make_source(8, "Detail", "REEL-B");
+        let (left_id, right_id) = (left.id, right.id);
+        sequence.video_tracks[0].add_clip(left).unwrap();
+        sequence.video_tracks[0].add_clip(right).unwrap();
+        sequence.video_transitions.push(VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            TimelineTimeRange::new(tt(6, grid), tt(4, grid)).unwrap(),
+        ));
+        sequence.video_tracks[1].add_clip(make_source(0, "Upper", "REEL-C")).unwrap();
+        let source_track = sequence.video_tracks[0].id;
+        let mut title = Clip::new_clip_info_title("Segoe UI", tt(0, grid), tt(16, grid)).unwrap();
+        let title_id = title.id;
+        let set = |title: &mut Clip, path: &str, value| {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.into(),
+                    value,
+                })
+                .unwrap();
+        };
+        set(
+            &mut title,
+            BasicTitle::CLIP_INFO_TRACK_PATH,
+            PropertyValue::Text(source_track.to_string()),
+        );
+        sequence.video_tracks[2].add_clip(title).unwrap();
+
+        let label = |elements: Vec<TimelineRenderPlanElement>| {
+            elements.into_iter().find_map(|item| {
+                let TimelineRenderPlanElement::BasicTitle(title) = item else {
+                    return None;
+                };
+                assert_eq!(title.title.font_size, 120.0);
+                assert_eq!(title.title.appearance.opacity, 0.4);
+                assert_eq!(title.title.layout_anchor, Some([200.0, 88.0]));
+                Some(title.title.text)
+            })
+        };
+        let evaluate = |sequence: &Sequence, frame| {
+            let prepared = PreparedVisualProgram::prepare(sequence).unwrap();
+            let result = evaluate_prepared_visual_program(
+                &prepared,
+                TimelineEvaluationRequest::export(fp(frame, grid)),
+            )
+            .unwrap();
+            let expected = label(analysis_elements(sequence, frame));
+            let actual = label(result.elements);
+            assert_eq!(actual, expected);
+            actual
+        };
+        assert_eq!(evaluate(&sequence, 7).as_deref(), Some("Opening"));
+        assert_eq!(evaluate(&sequence, 8).as_deref(), Some("Detail"));
+
+        let frozen = PreparedVisualProgram::prepare(&sequence).unwrap();
+        sequence.find_clip_mut(right_id).unwrap().label = Some("Renamed".to_owned());
+        sequence.video_tracks.swap(0, 1);
+        assert_eq!(evaluate(&sequence, 8).as_deref(), Some("Renamed"));
+        let result = evaluate_prepared_visual_program(
+            &frozen,
+            TimelineEvaluationRequest::export(fp(8, grid)),
+        )
+        .unwrap();
+        assert_eq!(label(result.elements).as_deref(), Some("Detail"));
+
+        let mut duplicated = sequence.clone();
+        duplicated.fork_author_identities_for_sequence_duplicate();
+        assert_eq!(evaluate(&duplicated, 8).as_deref(), Some("Renamed"));
+
+        set(
+            sequence.find_clip_mut(title_id).unwrap(),
+            BasicTitle::CLIP_INFO_FIELD_PATH,
+            PropertyValue::Enum("reel_name".to_owned()),
+        );
+        assert_eq!(evaluate(&sequence, 8).as_deref(), Some("REEL-B"));
+        sequence.video_tracks[1].is_visible = false;
+        assert_eq!(evaluate(&sequence, 7), None);
+        set(
+            sequence.find_clip_mut(title_id).unwrap(),
+            BasicTitle::CLIP_INFO_TRACK_PATH,
+            PropertyValue::Text(String::new()),
+        );
+        assert_eq!(evaluate(&sequence, 7).as_deref(), Some("REEL-C"));
+        assert_eq!(evaluate(&sequence, 10), None);
     }
 
     #[test]

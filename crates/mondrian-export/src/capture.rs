@@ -1444,6 +1444,7 @@ mod tests {
             (
                 asset_id,
                 ExportMediaDependency {
+                    source_asset_name: None,
                     source_fingerprint: mondrian_media::MediaFileFingerprint::capture(
                         path.as_path(),
                     ),

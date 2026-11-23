@@ -1410,6 +1410,9 @@ impl TimelineExportSnapshot {
 pub struct ExportMediaDependency {
     /// Source path resolved when the snapshot was captured.
     pub path: PathBuf,
+    /// Asset Library name captured with the job, independent of the file name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_asset_name: Option<String>,
     /// Exact source revision that the export is allowed to publish from.
     pub source_fingerprint: MediaFileFingerprint,
     /// Decoder/container family frozen by the admitted media probe.

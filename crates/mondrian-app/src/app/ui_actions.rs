@@ -724,6 +724,10 @@ pub fn timeline_create_numbers_title_action() -> Action {
     ProductAction::Timeline(TimelineProductAction::CreateNumbersTitle).into_external_action()
 }
 
+pub fn timeline_create_clip_info_title_action() -> Action {
+    ProductAction::Timeline(TimelineProductAction::CreateClipInfoTitle).into_external_action()
+}
+
 /// Build an action that changes one visual Transition range.
 pub fn video_transition_set_range_action(payload: VideoTransitionSetRangePayload) -> Action {
     ProductAction::VideoTransition(VideoTransitionProductAction::SetRange(payload))

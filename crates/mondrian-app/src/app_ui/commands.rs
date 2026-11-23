@@ -300,6 +300,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             crate::app::ui_actions::timeline_create_numbers_title_action,
         ),
         command(
+            "timeline.create_clip_info_title",
+            "片段信息标题",
+            "片段信息标题",
+            AppUiCommandCategory::Timeline,
+            None,
+            crate::app::ui_actions::timeline_create_clip_info_title_action,
+        ),
+        command(
             "timeline.mark_in",
             "标记入点",
             "标记入点",

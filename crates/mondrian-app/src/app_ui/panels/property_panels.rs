@@ -498,6 +498,9 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 path if BasicTitle::NUMBERS_PROPERTY_PATHS.contains(&path) => {
                     "inspector-title-numbers"
                 }
+                path if BasicTitle::CLIP_INFO_PROPERTY_PATHS.contains(&path) => {
+                    "inspector-title-clip-info"
+                }
                 BasicTitle::STROKE_WIDTH_PATH | BasicTitle::STROKE_COLOR_PATH => {
                     "inspector-title-outline"
                 }
@@ -4241,6 +4244,32 @@ pub(super) fn inspector_property_value_widget(
                     PropertyValue::Color(color),
                 )
             }))
+        }
+        PropertyValue::Text(value)
+            if property.path == mondrian_core::BasicTitle::CLIP_INFO_TRACK_PATH =>
+        {
+            let automatic = localizer.text("clip-info-track-automatic");
+            let select = |id: String| {
+                inspector_property_action(selection, target.clone(), PropertyValue::Text(id))
+            };
+            let mut items =
+                vec![MenuItem::new(automatic.clone(), select(String::new()))
+                    .checked(value.is_empty())];
+            let mut tracks: Vec<_> = property.enum_labels.iter().collect();
+            tracks.sort_by(|a, b| a.1.cmp(b.1));
+            items.extend(tracks.into_iter().map(|(id, label)| {
+                MenuItem::new(label.clone(), select(id.clone())).checked(value == id)
+            }));
+            let label = if value.is_empty() {
+                automatic
+            } else {
+                property
+                    .enum_labels
+                    .get(value)
+                    .cloned()
+                    .unwrap_or_else(|| localizer.text("clip-info-track-unavailable"))
+            };
+            Box::new(Dropdown::new(label, items).enabled(can_edit && selection.is_some()))
         }
         PropertyValue::Text(value) => {
             let text = value.clone();

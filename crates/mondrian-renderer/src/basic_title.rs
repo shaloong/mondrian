@@ -638,7 +638,15 @@ impl BasicTitleRasterizer {
             BasicTitleVerticalAlign::Bottom => safe_top + (safe_height - block_height).max(0.0),
         };
         let [left, top] = title.layout_anchor.map_or([safe_left, vertical_offset], |position| {
-            position.map(|px| px * uniform_scale)
+            let alignment_offset = match title.horizontal_align {
+                BasicTitleHorizontalAlign::Left => 0.0,
+                BasicTitleHorizontalAlign::Center => safe_width.max(1.0) * 0.5,
+                BasicTitleHorizontalAlign::Right => safe_width.max(1.0),
+            };
+            [
+                position[0] * uniform_scale - alignment_offset,
+                position[1] * uniform_scale,
+            ]
         });
         let offset_x = left.round() as i32;
         let offset_y = top.round() as i32;
@@ -1314,6 +1322,54 @@ mod tests {
             )
             .expect("the default title must use its declared font");
         assert!(output.frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
+    }
+
+    #[test]
+    fn clip_info_title_aligns_about_the_requested_anchor() {
+        use mondrian_core::automation::{PropertyMutation, PropertyValue};
+
+        let resolution = Resolution { width: 400, height: 200 };
+        let mut title = BasicTitle::new_clip_info(default_basic_title_font_family()).unwrap();
+        title
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: BasicTitle::FONT_SIZE_PATH.to_owned(),
+                value: PropertyValue::Float(34.0),
+            })
+            .unwrap();
+        let mut rasterizer = BasicTitleRasterizer::new();
+        let positions: Vec<_> = ["left", "center", "right"]
+            .into_iter()
+            .map(|alignment| {
+                title
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: BasicTitle::HORIZONTAL_ALIGN_PATH.to_owned(),
+                        value: PropertyValue::Enum(alignment.to_owned()),
+                    })
+                    .unwrap();
+                let info = title.clip_info().unwrap().unwrap();
+                let evaluated = title
+                    .evaluate_clip_info_for_render(TimelineTime::ZERO, info, "Shot 12", resolution)
+                    .unwrap();
+                let frame = rasterizer
+                    .rasterize(
+                        &evaluated,
+                        resolution,
+                        0.2,
+                        resolution,
+                        WorkingColorSpace::LinearRec709,
+                        mondrian_core::SampleAspectRatio::SQUARE,
+                    )
+                    .unwrap();
+                let x = frame.sampled_source_to_author()[2];
+                (x, frame.frame().rgba_f32().width as f32)
+            })
+            .collect();
+        let [left, center, right] = positions.as_slice() else {
+            unreachable!()
+        };
+        assert!((left.0 - 200.0).abs() <= 5.0);
+        assert!((center.0 + center.1 * 0.5 - 200.0).abs() <= 5.0);
+        assert!((right.0 + right.1 - 200.0).abs() <= 5.0);
     }
 
     #[test]

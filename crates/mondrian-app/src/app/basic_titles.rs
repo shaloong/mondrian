@@ -27,6 +27,11 @@ impl AppState {
         self.create_title_at_playhead(BasicTitleContentKind::Numbers)
     }
 
+    /// Place a Clip Info overlay using the normal undoable title placement rules.
+    pub fn create_clip_info_title_at_playhead(&mut self) -> mondrian_core::Result<ClipId> {
+        self.create_title_at_playhead(BasicTitleContentKind::ClipInfo)
+    }
+
     fn create_title_at_playhead(
         &mut self,
         kind: BasicTitleContentKind,
@@ -64,6 +69,9 @@ impl AppState {
             BasicTitleContentKind::Text => ("创建基础标题", "status-title-created"),
             BasicTitleContentKind::Timecode => ("创建时间码标题", "status-timecode-title-created"),
             BasicTitleContentKind::Numbers => ("创建编号标题", "status-numbers-title-created"),
+            BasicTitleContentKind::ClipInfo => {
+                ("创建片段信息标题", "status-clip-info-title-created")
+            }
         };
         let (_sequence_id, clip_id) =
             self.commit_active_sequence_edit(description, move |sequence| {
@@ -112,6 +120,9 @@ impl AppState {
                     )?,
                     BasicTitleContentKind::Numbers => {
                         Clip::new_numbers_title(font_family, position, duration)?
+                    }
+                    BasicTitleContentKind::ClipInfo => {
+                        Clip::new_clip_info_title(font_family, position, duration)?
                     }
                 };
                 let clip_id = clip.id;

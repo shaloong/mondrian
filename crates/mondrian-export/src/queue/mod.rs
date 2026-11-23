@@ -7464,6 +7464,7 @@ struct ExportVisualRenderSession {
     title_rasterizer: BasicTitleRasterizer,
     decode_context: PreviewDecodeSessionContext,
     prepared_visual: PreparedTimelineVisualSnapshot,
+    title_assets: Option<Arc<mondrian_core::TitleAssetMetadata>>,
     #[cfg(test)]
     reference_visual_programs: Option<PreparedVisualProgramCache>,
     #[cfg(test)]
@@ -7528,6 +7529,7 @@ impl ExportVisualRenderSession {
             .map_err(|error| format!("failed to load frozen Basic Title font closure: {error}"))?,
             decode_context: PreviewDecodeSessionContext::default(),
             prepared_visual: prepared_visual.clone(),
+            title_assets: None,
             #[cfg(test)]
             reference_visual_programs: None,
             #[cfg(test)]
@@ -8256,6 +8258,21 @@ fn prepare_export_visual_frame_closure(
     root_color_context: ProgramColorContext,
     intent: TimelineVisualExecutionIntent,
 ) -> Result<PreparedExportVisualClosure, String> {
+    let title_assets = Arc::clone(visual_session.title_assets.get_or_insert_with(|| {
+        Arc::new(
+            timeline
+                .media
+                .iter()
+                .map(|(&id, source)| {
+                    let names = mondrian_core::TitleAssetNames::from_source(
+                        source.source_asset_name.as_deref(),
+                        &source.path,
+                    );
+                    (id, names)
+                })
+                .collect(),
+        )
+    }));
     let visual_session = std::cell::RefCell::new(visual_session);
     let closure = prepare_bound_visual_frame_closure_for_targets(
         PreparedVisualFrameClosureRequest {
@@ -8287,7 +8304,8 @@ fn prepare_export_visual_frame_closure(
                 extent,
                 extent.full_frame_roi(),
                 cancellation.clone(),
-            );
+            )
+            .with_title_assets(Some(Arc::clone(&title_assets)));
             let scratch = &mut visual_session.composite_scratch;
             let prepared_frame = match invocation.target {
                 PreparedVisualFrameTarget::Sequence => {
@@ -14099,6 +14117,7 @@ mod tests {
         assert!(fingerprint.authorizes_reuse());
         let dependency = crate::preset::ExportMediaDependency {
             path: source.clone(),
+            source_asset_name: None,
             source_fingerprint: fingerprint,
             source_container: probe.container.clone(),
             source_video_stream: Some(stream.clone()),
@@ -14555,6 +14574,7 @@ mod tests {
             media.insert(
                 asset_id,
                 crate::preset::ExportMediaDependency {
+                    source_asset_name: None,
                     source_fingerprint: MediaFileFingerprint::capture(&path),
                     path,
                     source_container: probe.container,
@@ -15274,6 +15294,7 @@ mod tests {
             })
         });
         crate::preset::ExportMediaDependency {
+            source_asset_name: None,
             source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
             path,
             source_container: String::new(),
@@ -17588,6 +17609,81 @@ mod tests {
     }
 
     #[test]
+    fn clip_info_title_export_reads_names_from_the_serialized_job_snapshot() {
+        use mondrian_core::BasicTitle;
+
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("camera.ppm");
+        std::fs::write(&path, b"P6\n1 1\n255\n\xff\0\0").unwrap();
+        let asset = AssetId::new();
+        let mut sequence = Sequence::new("Queued title names");
+        let time_base = sequence.time_base();
+        let start = tt(0, time_base);
+        let duration = tt(2, time_base);
+        sequence.video_tracks[0]
+            .add_clip(Clip::new(asset, start, duration).unwrap())
+            .unwrap();
+        for (track, field) in [(1, "asset_name"), (2, "file_name")] {
+            let mut title = Clip::new_clip_info_title(
+                mondrian_core::default_basic_title_font_family(),
+                start,
+                duration,
+            )
+            .unwrap();
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: BasicTitle::CLIP_INFO_FIELD_PATH.to_owned(),
+                    value: PropertyValue::Enum(field.to_owned()),
+                })
+                .unwrap();
+            sequence.video_tracks[track].add_clip(title).unwrap();
+        }
+        let mut source = test_media_dependency(path, None, Default::default(), None);
+        source.source_asset_name = Some("Library name at submission".to_owned());
+        let source_map = HashMap::from([(asset, source)]);
+        let submitted = TimelineExportSnapshot::unprepared(
+            mondrian_core::ProjectColorEnvironment::default(),
+            sequence,
+            vec![],
+            source_map,
+            TimelineExportRange::EntireSequence,
+        );
+        let mut queued: TimelineExportSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&submitted).unwrap()).unwrap();
+        let mut session = captured_visual_session_for_test(&mut queued);
+        let color = queued
+            .sequence
+            .settings
+            .root_program_color_context(&queued.color_environment)
+            .unwrap();
+        let closure = prepare_export_visual_frame_closure(
+            &queued,
+            &mut session,
+            &ExecutionCancellationToken::new(),
+            &queued.sequence,
+            FramePosition::new(0, time_base),
+            queued.sequence.settings.resolution,
+            color,
+            TimelineVisualExecutionIntent::Export,
+        )
+        .unwrap();
+        let labels = closure.nodes()[0]
+            .evaluation()
+            .plan()
+            .elements
+            .iter()
+            .filter_map(|element| {
+                if let TimelineRenderPlanElement::BasicTitle(title) = element {
+                    Some(title.title.text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["Library name at submission", "camera.ppm"]);
+    }
+
+    #[test]
     #[ignore = "real GPU Export decorated Basic Title parity; run independently"]
     fn decorated_basic_title_matches_cpu_through_production_export() {
         assert_title_matches_cpu_through_production_export(
@@ -17608,6 +17704,14 @@ mod tests {
     fn numbers_title_matches_cpu_through_production_export() {
         assert_title_matches_cpu_through_production_export(
             mondrian_core::BasicTitleContentKind::Numbers,
+        );
+    }
+
+    #[test]
+    #[ignore = "real GPU Export Clip Info Title parity; run independently"]
+    fn clip_info_title_matches_cpu_through_production_export() {
+        assert_title_matches_cpu_through_production_export(
+            mondrian_core::BasicTitleContentKind::ClipInfo,
         );
     }
 
@@ -17641,6 +17745,20 @@ mod tests {
             2
         };
         let duration = tt(child_frames, time_base);
+        if title_kind == BasicTitleContentKind::ClipInfo {
+            let asset = AssetId::new();
+            for (frame, name) in [(0, "A"), (1, "B")] {
+                let mut source = Clip::new_solid_color(
+                    asset,
+                    Color::TRANSPARENT,
+                    tt(frame, time_base),
+                    tt(1, time_base),
+                )
+                .unwrap();
+                source.label = Some(name.to_owned());
+                child.video_tracks[1].add_clip(source).unwrap();
+            }
+        }
         let mut title = if timecode {
             let mut media = Clip::new(AssetId::new(), start, duration).unwrap();
             let media_id = media.id;
@@ -17670,10 +17788,20 @@ mod tests {
             )
         } else if title_kind == BasicTitleContentKind::Numbers {
             Clip::new_numbers_title(font, start, duration)
+        } else if title_kind == BasicTitleContentKind::ClipInfo {
+            Clip::new_clip_info_title(font, start, duration)
         } else {
             Clip::new_basic_title("Mondrian\nTitle", font, start, duration)
         }
         .unwrap();
+        if title_kind == BasicTitleContentKind::ClipInfo {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: BasicTitle::CLIP_INFO_POSITION_PATH.to_owned(),
+                    value: PropertyValue::Vec2([0.5, 0.35].into()),
+                })
+                .unwrap();
+        }
         if timecode {
             title
                 .apply_property_mutation(PropertyMutation::SetStaticValue {

@@ -2603,6 +2603,12 @@ fn numbers_title_matches_cpu_through_production_preview() {
     assert_title_matches_cpu_through_production_preview(BasicTitleContentKind::Numbers);
 }
 
+#[test]
+#[ignore = "real GPU Preview Clip Info Title parity; run independently"]
+fn clip_info_title_matches_cpu_through_production_preview() {
+    assert_title_matches_cpu_through_production_preview(BasicTitleContentKind::ClipInfo);
+}
+
 fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleContentKind) {
     use crate::app::preview_cpu_execution::output_boundary_from_color_context;
     use crate::app::preview_viewer_plan::{
@@ -2643,6 +2649,19 @@ fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleCon
     sequence.video_tracks[0].clips[0].add_effect_node(ramp);
     let font = mondrian_core::default_basic_title_font_family();
     let duration = tt(24, sequence.time_base());
+    if title_kind == BasicTitleContentKind::ClipInfo {
+        let cut = tt(1, sequence.time_base());
+        let track = &mut sequence.video_tracks[0];
+        let left = &mut track.clips[0];
+        let mut right = left.clone();
+        right.fork_visual_placement_identities();
+        right.position = cut;
+        right.duration = duration.checked_sub(cut).unwrap();
+        right.label = Some("B".to_owned());
+        left.duration = cut;
+        left.label = Some("A".to_owned());
+        track.add_clip(right).unwrap();
+    }
     let mut title = if timecode {
         let mut media = Clip::new(AssetId::new(), TimelineTime::ZERO, duration).unwrap();
         let media_id = media.id;
@@ -2673,10 +2692,20 @@ fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleCon
         )
     } else if title_kind == BasicTitleContentKind::Numbers {
         Clip::new_numbers_title(font, TimelineTime::ZERO, duration)
+    } else if title_kind == BasicTitleContentKind::ClipInfo {
+        Clip::new_clip_info_title(font, TimelineTime::ZERO, duration)
     } else {
         Clip::new_basic_title("Mondrian\nTitle", font, TimelineTime::ZERO, duration)
     }
     .unwrap();
+    if title_kind == BasicTitleContentKind::ClipInfo {
+        title
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: BasicTitle::CLIP_INFO_POSITION_PATH.to_owned(),
+                value: PropertyValue::Vec2([0.5, 0.35].into()),
+            })
+            .unwrap();
+    }
     if timecode {
         title
             .apply_property_mutation(PropertyMutation::SetStaticValue {
@@ -2743,6 +2772,7 @@ fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleCon
                 BasicTitleContentKind::Text => {}
                 BasicTitleContentKind::Timecode => assert_eq!(request.title.text, "00:01:00;03"),
                 BasicTitleContentKind::Numbers => assert_eq!(request.title.text, "1"),
+                BasicTitleContentKind::ClipInfo => assert_eq!(request.title.text, "B"),
             }
             PreviewTimelineTitleFrame::Ready(
                 rasterizer

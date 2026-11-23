@@ -2373,6 +2373,46 @@ fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
     state_with_invalid_media_layers(false)
 }
 
+#[test]
+fn clip_info_title_asset_rename_retires_the_same_frame_preview_generation() {
+    use mondrian_core::{BasicTitle, PropertyHost, PropertyMutation, PropertyValue, TimelineTime};
+
+    let (mut state, asset, _) = state_with_invalid_video_asset_for_cpu_rgb(false);
+    let mut sequence = state.active_sequence().unwrap().clone();
+    let mut title = Clip::new_clip_info_title(
+        mondrian_core::default_basic_title_font_family(),
+        TimelineTime::ZERO,
+        tt(50, sequence.time_base()),
+    )
+    .unwrap();
+    title
+        .apply_property_mutation(PropertyMutation::SetStaticValue {
+            path: BasicTitle::CLIP_INFO_FIELD_PATH.to_owned(),
+            value: PropertyValue::Enum("asset_name".to_owned()),
+        })
+        .unwrap();
+    sequence.video_tracks[1].add_clip(title).unwrap();
+    state.test_set_sequence(Some(sequence));
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let authoring = snapshot.authoring().unwrap();
+    authoring.asset_library().rename_asset(asset, "First name").unwrap();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+
+    runtime.synchronize_visual_program_authoring_session(&snapshot);
+    let frozen = runtime.title_assets.borrow().names().unwrap();
+    let old_generation = runtime.execution.borrow().generation();
+    runtime.synchronize_visual_program_authoring_session(&snapshot);
+    assert_eq!(runtime.execution.borrow().generation(), old_generation);
+
+    authoring.asset_library().rename_asset(asset, "Second name").unwrap();
+    runtime.synchronize_visual_program_authoring_session(&snapshot);
+    assert_ne!(runtime.execution.borrow().generation(), old_generation);
+    let current = runtime.title_assets.borrow().names().unwrap();
+    assert_eq!(frozen[&asset].asset_name.as_deref(), Some("First name"));
+    assert_eq!(current[&asset].asset_name.as_deref(), Some("Second name"));
+    assert_eq!(current[&asset].file_name.as_deref(), Some("source.mp4"));
+}
+
 fn state_with_sequential_invalid_video_assets() -> (AppState, PathBuf) {
     ensure_test_ocio_loaded();
     let root = unique_preview_test_root("mondrian-preview-sequential-invalid-videos");
@@ -12787,6 +12827,7 @@ fn export_test_media_dependencies(
             (
                 asset_id,
                 mondrian_export::preset::ExportMediaDependency {
+                    source_asset_name: None,
                     source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
                     path,
                     source_container: String::new(),

@@ -548,7 +548,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.heterogeneous_effect_decision.get().cpu_prefix_grant().graph_execution();
         let mut execute = |work| self.execute_prepared_timeline_work(snapshot, work);
         let resolution = resolve_preview_timeline_with_programs_and_observer(
-            request,
+            request.with_title_assets(self.title_assets.borrow().names()),
             PreviewTimelineSourceAdapters::new(&mut media_frame, &mut title_frame)
                 .with_auxiliary_assets(&mut auxiliary_asset)
                 .with_execution(&mut execute),

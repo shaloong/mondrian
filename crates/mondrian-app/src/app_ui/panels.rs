@@ -2645,7 +2645,7 @@ pub struct InspectorEffectPropertyModel {
     pub group_name: Option<String>,
     /// Localized group heading, independent of adjacent-group identity.
     pub group_label: Option<String>,
-    /// Display-only enum labels indexed by exact canonical option keys.
+    /// Display-only choice labels indexed by exact author option keys.
     pub enum_labels: BTreeMap<String, String>,
     /// The evaluated value at the current playback time.
     pub value: PropertyValue,
@@ -2886,6 +2886,9 @@ impl InspectorPanelModel {
                         BasicTitle::TIMECODE_PROPERTY_PATHS.as_slice()
                     }
                     BasicTitleContentKind::Numbers => BasicTitle::NUMBERS_PROPERTY_PATHS.as_slice(),
+                    BasicTitleContentKind::ClipInfo => {
+                        BasicTitle::CLIP_INFO_PROPERTY_PATHS.as_slice()
+                    }
                 };
                 let decimal_controls = title
                     .numbers_format()
@@ -2906,8 +2909,12 @@ impl InspectorPanelModel {
                     .copied()
                     .filter(|path| match *path {
                         BasicTitle::TEXT_PATH => content_kind == BasicTitleContentKind::Text,
-                        BasicTitle::HORIZONTAL_ALIGN_PATH | BasicTitle::VERTICAL_ALIGN_PATH => {
-                            !title.is_timecode()
+                        BasicTitle::HORIZONTAL_ALIGN_PATH => !title.is_timecode(),
+                        BasicTitle::VERTICAL_ALIGN_PATH => {
+                            matches!(
+                                content_kind,
+                                BasicTitleContentKind::Text | BasicTitleContentKind::Numbers
+                            )
                         }
                         BasicTitle::TIMECODE_RATE_PATH
                         | BasicTitle::TIMECODE_DROP_PATH
@@ -2920,7 +2927,25 @@ impl InspectorPanelModel {
                     })
                     .filter_map(|path| {
                         properties.property(path).map(|property| {
-                            inspector_property_model(path, property, clip_author_time, localizer)
+                            let mut model = inspector_property_model(
+                                path,
+                                property,
+                                clip_author_time,
+                                localizer,
+                            );
+                            if path == BasicTitle::CLIP_INFO_TRACK_PATH {
+                                model.enum_labels.extend(
+                                    sequence.video_tracks.iter().enumerate().map(
+                                        |(index, track)| {
+                                            (
+                                                track.id.to_string(),
+                                                format!("V{} · {}", index + 1, track.name),
+                                            )
+                                        },
+                                    ),
+                                );
+                            }
+                            model
                         })
                     })
                     .collect()

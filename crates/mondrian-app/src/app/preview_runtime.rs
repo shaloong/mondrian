@@ -399,6 +399,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     visual_terminal_candidates: RefCell<Vec<mondrian_playback::FrameDeliveryCandidate>>,
     visual_program_authoring_session: Cell<Option<AuthoringSessionId>>,
     visual_programs: RefCell<mondrian_renderer::PreparedVisualProgramCache>,
+    title_assets: RefCell<title_assets::PreviewTitleAssets>,
     future_media_window: RefCell<request_scheduler::FutureMediaWindowCache>,
     visual_dependencies: PreviewVisualDependencyObserver,
     visual_dependency_health_failed: Cell<bool>,
@@ -3592,6 +3593,7 @@ impl ViewerPreviewGenerationKey {
 mod input;
 pub(crate) use input::*;
 mod frame_evaluation;
+mod title_assets;
 pub(crate) use frame_evaluation::*;
 mod diagnostics;
 pub use diagnostics::*;
