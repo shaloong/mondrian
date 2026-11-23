@@ -16,8 +16,8 @@ use crate::automation::PropertyBag;
 use crate::effect_data::EffectNode;
 use crate::mask_data::MaskComponent;
 use crate::types::{
-    AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, VideoTransitionId,
-    WorkingColorSpace,
+    AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, TrackId,
+    VideoTransitionId, WorkingColorSpace,
 };
 use crate::{
     BasicTitle, Result, SequenceRevision, SmpteTimecodeReference, SourceSampleTarget, TimelineTime,
@@ -747,6 +747,13 @@ pub trait RenderPlanSource {
         info: crate::TitleClipInfo,
         title_assets: Option<&'a crate::TitleAssetMetadata>,
     ) -> Result<Option<&'a str>>;
+
+    /// Find the editorial clock of the first eligible active video Clip.
+    fn metadata_source_timecode_at(
+        &self,
+        time: TimelineTime,
+        track: Option<TrackId>,
+    ) -> Result<Option<crate::TitleMediaTimecodeSample>>;
 
     /// Timecode origin and counting convention of the owner Sequence.
     fn source_timeline_display(&self) -> crate::TimelineDisplaySettings;

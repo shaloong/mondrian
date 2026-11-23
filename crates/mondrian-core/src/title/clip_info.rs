@@ -77,22 +77,7 @@ impl TitleClipInfo {
             "file_name" => TitleClipInfoField::FileName,
             _ => return Err(title_error("unknown Clip Info field")),
         };
-        let track = required_text(
-            properties,
-            BasicTitle::CLIP_INFO_TRACK_PATH,
-            TimelineTime::ZERO,
-        )?;
-        let track_id = if track.is_empty() {
-            None
-        } else {
-            let id = track
-                .parse::<uuid::Uuid>()
-                .map_err(|_| title_error("Clip Info track must be a video Track ID"))?;
-            if id.is_nil() || id.to_string() != track {
-                return Err(title_error("Clip Info track must use a canonical Track ID"));
-            }
-            Some(TrackId(id))
-        };
+        let track_id = read_metadata_track(properties, BasicTitle::CLIP_INFO_TRACK_PATH)?;
         let Some(PropertyValue::Vec2(position)) =
             properties.evaluate(BasicTitle::CLIP_INFO_POSITION_PATH, TimelineTime::ZERO)
         else {
@@ -100,6 +85,22 @@ impl TitleClipInfo {
         };
         Ok(Self { field, track_id, position: position.to_array() })
     }
+}
+
+pub(super) fn read_metadata_track(properties: &PropertyBag, path: &str) -> Result<Option<TrackId>> {
+    let track = required_text(properties, path, TimelineTime::ZERO)?;
+    if track.is_empty() {
+        return Ok(None);
+    }
+    let id = track
+        .parse::<uuid::Uuid>()
+        .map_err(|_| title_error("Metadata source track must be a video Track ID"))?;
+    if id.is_nil() || id.to_string() != track {
+        return Err(title_error(
+            "Metadata source track must use a canonical Track ID",
+        ));
+    }
+    Ok(Some(TrackId(id)))
 }
 
 pub(super) fn descriptors() -> [PropertyDescriptor; 3] {

@@ -358,20 +358,29 @@ impl TitleTimecode {
                 )
             }
         };
-        if self.format == TitleTimecodeFormat::Smpte {
-            return Ok(SmpteDisplayTimecodeContract::new(rate, counting, start)?
-                .timecode_at_frame(frame)?
-                .label());
-        }
-
-        let frame = start.checked_add(frame).ok_or(DisplayTimecodeError::FrameOffsetOverflow)?;
-        Ok(match self.format {
-            TitleTimecodeFormat::Frames => frame.to_string(),
-            TitleTimecodeFormat::FeetAndFrames35mm => film_label(frame, 16),
-            TitleTimecodeFormat::FeetAndFrames16mm => film_label(frame, 40),
-            TitleTimecodeFormat::Smpte => unreachable!("SMPTE has its own counting contract"),
-        })
+        format_label(self.format, frame, rate, counting, start)
     }
+}
+
+pub(super) fn format_label(
+    format: TitleTimecodeFormat,
+    frame: i64,
+    rate: Rational,
+    counting: SmpteCountingMode,
+    start: i64,
+) -> Result<String, DisplayTimecodeError> {
+    if format == TitleTimecodeFormat::Smpte {
+        return Ok(SmpteDisplayTimecodeContract::new(rate, counting, start)?
+            .timecode_at_frame(frame)?
+            .label());
+    }
+    let frame = start.checked_add(frame).ok_or(DisplayTimecodeError::FrameOffsetOverflow)?;
+    Ok(match format {
+        TitleTimecodeFormat::Frames => frame.to_string(),
+        TitleTimecodeFormat::FeetAndFrames35mm => film_label(frame, 16),
+        TitleTimecodeFormat::FeetAndFrames16mm => film_label(frame, 40),
+        TitleTimecodeFormat::Smpte => unreachable!("SMPTE has its own counting contract"),
+    })
 }
 
 fn custom_clock(

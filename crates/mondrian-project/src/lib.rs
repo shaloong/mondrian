@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 39;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 40;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -373,6 +373,11 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
             to: 39,
             migrate: migrate_document_v38_to_v39,
         },
+        JsonMigrationStep {
+            from: 39,
+            to: 40,
+            migrate: migrate_document_v39_to_v40,
+        },
     ],
 );
 
@@ -551,6 +556,19 @@ fn migrate_document_v38_to_v39(mut value: serde_json::Value) -> anyhow::Result<s
         Ok(())
     })?;
     value["schema_version"] = serde_json::json!(39);
+    Ok(value)
+}
+
+fn migrate_document_v39_to_v40(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    visit_document_titles(&mut value, 39, |title| {
+        anyhow::ensure!(
+            title.get("content_kind").and_then(serde_json::Value::as_str)
+                != Some("metadata_burn_in"),
+            "schema-39 Basic Title cannot contain Metadata Burn-in settings"
+        );
+        Ok(())
+    })?;
+    value["schema_version"] = serde_json::json!(40);
     Ok(value)
 }
 
@@ -3585,6 +3603,61 @@ mod tests {
         let db = root.join("index.db");
         fs::write(&db, b"sqlite placeholder").unwrap();
         let archive = root.join("clip-info.mdp");
+        save_project_archive(&document, &db, &archive).unwrap();
+        let reopened = read_project_document_from_archive(&archive).unwrap();
+        let title = reopened
+            .sequences
+            .active()
+            .unwrap()
+            .find_clip(id)
+            .unwrap()
+            .content
+            .basic_title()
+            .unwrap();
+        assert_eq!(title, &expected);
+    }
+
+    #[test]
+    fn metadata_burn_in_archive_preserves_line_track_ids_and_rejects_old_schema() {
+        use mondrian_core::TITLE_METADATA_LINE_PATHS;
+        let mut document = test_document();
+        let sequence = document.sequences.active_mut().unwrap();
+        let source = sequence.video_tracks[1].id;
+        let mut clip =
+            Clip::new_metadata_burn_in_title("Arial", TimelineTime::ZERO, TimelineTime::ONE)
+                .unwrap();
+        let last = TITLE_METADATA_LINE_PATHS[4];
+        for (path, value) in [
+            (last.enabled, PropertyValue::Bool(true)),
+            (last.field, PropertyValue::Enum("source_timecode".into())),
+            (last.track, PropertyValue::Text(source.to_string())),
+            (
+                last.time_origin,
+                PropertyValue::Enum("custom_origin".into()),
+            ),
+            (last.start_frame, PropertyValue::Int(120)),
+        ] {
+            clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: path.into(),
+                value,
+            })
+            .unwrap();
+        }
+        let id = clip.id;
+        let expected = clip.content.basic_title().unwrap().clone();
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy["schema_version"] = serde_json::json!(39);
+        let error = DOCUMENT_MIGRATIONS.migrate(legacy).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("schema-39 Basic Title cannot contain Metadata Burn-in")
+        );
+
+        let root = unique_temp_dir("metadata-burn-in-round-trip");
+        let db = root.join("index.db");
+        fs::write(&db, b"sqlite placeholder").unwrap();
+        let archive = root.join("metadata.mdp");
         save_project_archive(&document, &db, &archive).unwrap();
         let reopened = read_project_document_from_archive(&archive).unwrap();
         let title = reopened

@@ -696,6 +696,18 @@ impl Clip {
         Ok(clip)
     }
 
+    /// Create a native overlay with five individually bound metadata lines.
+    pub fn new_metadata_burn_in_title(
+        font_family: impl Into<String>,
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
+        let title = mondrian_core::BasicTitle::new_metadata_burn_in(font_family)?;
+        let mut clip = Self::with_content(ClipContent::BasicTitle { title }, position, duration)?;
+        clip.label = Some("元数据刻录".to_owned());
+        Ok(clip)
+    }
+
     pub(crate) fn clip_info_label<'a>(
         &'a self,
         field: mondrian_core::TitleClipInfoField,
@@ -999,6 +1011,26 @@ impl Clip {
             reference,
             frame: source.to_frame_position(reference.frame_rate())?.frame,
         }))
+    }
+
+    pub(crate) fn sample_metadata_source_timecode(
+        &self,
+        sequence_time: TimelineTime,
+        sequence_rate: Rational,
+    ) -> Result<Option<TitleMediaTimecodeSample>> {
+        let has_timecode = self
+            .media_interpretation()
+            .and_then(|interpretation| interpretation.editorial_source.as_ref())
+            .and_then(|identity| identity.source_timecode())
+            .is_some();
+        if !has_timecode {
+            return Ok(None);
+        }
+        self.sample_title_media_timecode(
+            sequence_time,
+            sequence_rate,
+            VisualSourceRetime::default(),
+        )
     }
 
     /// Map one source-domain time back into this Clip's Sequence placement.

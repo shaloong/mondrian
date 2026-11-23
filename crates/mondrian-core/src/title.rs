@@ -12,9 +12,13 @@ use crate::{Color, MondrianError, ParameterId, Result, TimelineTime};
 use serde::{Deserialize, Serialize};
 
 mod clip_info;
+mod metadata_burn_in;
 mod numbers;
 mod timecode;
 pub use clip_info::{TitleAssetMetadata, TitleAssetNames, TitleClipInfo, TitleClipInfoField};
+pub use metadata_burn_in::{
+    TitleMetadataField, TitleMetadataLine, TitleMetadataLinePaths, TITLE_METADATA_LINE_PATHS,
+};
 pub use numbers::TitleNumbersFormat;
 pub use timecode::{
     TitleMediaTimecodeSample, TitleTimecode, TitleTimecodeFormat, TitleTimecodeSource,
@@ -102,6 +106,8 @@ impl Default for BasicTitleAppearance {
 pub struct EvaluatedBasicTitle {
     /// Explicit author-pixel layout anchor for generated captions.
     pub layout_anchor: Option<[f32; 2]>,
+    /// Metadata lines with independent author-pixel anchors and sizes.
+    pub positioned_lines: Vec<PositionedTitleLine>,
     /// UTF-8 text, including explicit line breaks.
     pub text: String,
     /// Exact requested system font family. Missing families fail closed.
@@ -126,6 +132,14 @@ pub struct EvaluatedBasicTitle {
     pub appearance: BasicTitleAppearance,
 }
 
+/// One resolved line using the common style of its owning title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionedTitleLine {
+    pub text: String,
+    pub anchor: [f32; 2],
+    pub font_size: f32,
+}
+
 /// Sequence-local Basic Title author state.
 ///
 /// The Property Bag is a closed, definition-backed set. Unknown, missing, or
@@ -148,6 +162,7 @@ pub enum BasicTitleContentKind {
     Timecode,
     Numbers,
     ClipInfo,
+    MetadataBurnIn,
 }
 
 impl BasicTitleContentKind {
@@ -281,6 +296,43 @@ impl BasicTitle {
             .transpose()
     }
 
+    /// Create a five-line overlay with a visible sequence timecode on the first line.
+    pub fn new_metadata_burn_in(font_family: impl Into<String>) -> Result<Self> {
+        let title = Self::with_properties(
+            String::new(),
+            font_family.into(),
+            BasicTitleContentKind::MetadataBurnIn,
+        )?;
+        title.validate_author_state()?;
+        Ok(title)
+    }
+
+    /// Read each canonical line in stacking order.
+    pub fn metadata_lines(&self) -> Result<Option<[TitleMetadataLine; 5]>> {
+        if self.content_kind != BasicTitleContentKind::MetadataBurnIn {
+            return Ok(None);
+        }
+        let [first, second, third, fourth, fifth] = TITLE_METADATA_LINE_PATHS
+            .map(|paths| TitleMetadataLine::read_from(&self.properties, paths));
+        Ok(Some([first?, second?, third?, fourth?, fifth?]))
+    }
+
+    /// Retarget line sources when their owner Sequence is copied.
+    pub fn remap_metadata_tracks(
+        &mut self,
+        mut resolve: impl FnMut(crate::TrackId) -> Option<crate::TrackId>,
+    ) -> Result<()> {
+        if let Some(lines) = self.metadata_lines()? {
+            for (line, paths) in lines.into_iter().zip(TITLE_METADATA_LINE_PATHS) {
+                if let Some(id) = line.track_id.and_then(&mut resolve) {
+                    self.properties
+                        .set_static_value(paths.track, PropertyValue::Text(id.to_string()))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Retarget the source when an owning Sequence is duplicated with its tracks.
     pub fn remap_clip_info_track(
         &mut self,
@@ -303,14 +355,49 @@ impl BasicTitle {
         label: &str,
         resolution: crate::Resolution,
     ) -> Result<EvaluatedBasicTitle> {
+        self.evaluate_positioned_label(clip_time, info.position, label, resolution)
+    }
+
+    /// Evaluate common styling and size each resolved metadata line.
+    pub fn evaluate_metadata_for_render(
+        &self,
+        clip_time: TimelineTime,
+        lines: impl IntoIterator<Item = (TitleMetadataLine, String)>,
+        resolution: crate::Resolution,
+    ) -> Result<EvaluatedBasicTitle> {
+        let mut evaluated = self.evaluate(clip_time)?;
+        evaluated.vertical_align = BasicTitleVerticalAlign::Top;
+        for (line, label) in lines {
+            if label.len() > BASIC_TITLE_MAX_TEXT_BYTES {
+                return Err(title_error("Metadata label exceeds the title text budget"));
+            }
+            evaluated.positioned_lines.push(PositionedTitleLine {
+                text: label,
+                anchor: [
+                    line.position[0] * resolution.width as f32,
+                    line.position[1] * resolution.height as f32,
+                ],
+                font_size: evaluated.font_size * (line.scale_percent / 100.0),
+            });
+        }
+        Ok(evaluated)
+    }
+
+    fn evaluate_positioned_label(
+        &self,
+        clip_time: TimelineTime,
+        position: [f32; 2],
+        label: &str,
+        resolution: crate::Resolution,
+    ) -> Result<EvaluatedBasicTitle> {
         if label.len() > BASIC_TITLE_MAX_TEXT_BYTES {
-            return Err(title_error("Clip Info label exceeds the title text budget"));
+            return Err(title_error("Metadata label exceeds the title text budget"));
         }
         let mut evaluated = self.evaluate(clip_time)?;
         evaluated.text = label.to_owned();
         evaluated.layout_anchor = Some([
-            info.position[0] * resolution.width as f32,
-            info.position[1] * resolution.height as f32,
+            position[0] * resolution.width as f32,
+            position[1] * resolution.height as f32,
         ]);
         evaluated.vertical_align = BasicTitleVerticalAlign::Top;
         Ok(evaluated)
@@ -356,8 +443,13 @@ impl BasicTitle {
         sequence_display: crate::TimelineDisplaySettings,
         media_sample: Option<TitleMediaTimecodeSample>,
     ) -> Result<EvaluatedBasicTitle> {
-        if self.content_kind == BasicTitleContentKind::ClipInfo {
-            return Err(title_error("Clip Info rendering requires sampled metadata"));
+        if matches!(
+            self.content_kind,
+            BasicTitleContentKind::ClipInfo | BasicTitleContentKind::MetadataBurnIn
+        ) {
+            return Err(title_error(
+                "Metadata title rendering requires sampled fields",
+            ));
         }
         let mut evaluated = self.evaluate(clip_time)?;
         if let Some(timecode) = self.timecode()? {
@@ -471,6 +563,7 @@ impl BasicTitle {
             numbers::validate(&self.properties)?;
         }
         self.clip_info()?;
+        self.metadata_lines()?;
         let evaluated = self.evaluate(TimelineTime::ZERO)?;
         if evaluated.text.len() > BASIC_TITLE_MAX_TEXT_BYTES {
             return Err(title_error(format!(
@@ -527,6 +620,7 @@ impl BasicTitle {
 
         Ok(EvaluatedBasicTitle {
             layout_anchor: None,
+            positioned_lines: Vec::new(),
             text,
             font_family,
             font_weight,
@@ -573,6 +667,7 @@ fn canonical_descriptors(content_kind: BasicTitleContentKind) -> Vec<PropertyDes
         BasicTitleContentKind::Timecode => (36.0, 8.0, 128.0),
         BasicTitleContentKind::Numbers => (72.0, 1.0, 1000.0),
         BasicTitleContentKind::ClipInfo => (120.0, 1.0, 4096.0),
+        BasicTitleContentKind::MetadataBurnIn => (15.0, 1.0, 1000.0),
     };
     let mut descriptors = vec![
         PropertyDescriptor::new(
@@ -700,6 +795,9 @@ fn canonical_descriptors(content_kind: BasicTitleContentKind) -> Vec<PropertyDes
         BasicTitleContentKind::Timecode => descriptors.extend(timecode::descriptors()),
         BasicTitleContentKind::Numbers => descriptors.extend(numbers::descriptors()),
         BasicTitleContentKind::ClipInfo => descriptors.extend(clip_info::descriptors()),
+        BasicTitleContentKind::MetadataBurnIn => {
+            descriptors.extend(metadata_burn_in::descriptors())
+        }
     }
     descriptors
 }
@@ -794,11 +892,16 @@ fn decoration_descriptors(content_kind: BasicTitleContentKind) -> [PropertyDescr
             BasicTitle::OPACITY_PATH,
             "mondrian.title.opacity",
             "标题不透明度",
-            opacity(if content_kind == BasicTitleContentKind::ClipInfo {
-                0.4
-            } else {
-                defaults.opacity
-            }),
+            opacity(
+                if matches!(
+                    content_kind,
+                    BasicTitleContentKind::ClipInfo | BasicTitleContentKind::MetadataBurnIn
+                ) {
+                    0.4
+                } else {
+                    defaults.opacity
+                },
+            ),
         ),
     ]
 }

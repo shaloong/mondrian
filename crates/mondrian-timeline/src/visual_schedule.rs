@@ -4,6 +4,7 @@
 //! module compiles that validated state into interval indexes so repeated
 //! Preview and Export evaluation does not scan every placement on every frame.
 
+use crate::clip::Clip;
 use crate::sequence::{
     flat_video_transition_definition_snapshot, flatten_visual_clip_with_effect_snapshots,
     flatten_visual_transition_with_effect_snapshots, validate_video_transition, Sequence,
@@ -16,8 +17,9 @@ use mondrian_core::timeline_data::{
 };
 use mondrian_core::{
     AssetId, ClipId, MondrianError, Rational, Result, SequenceId, SequenceRevision,
-    SourceSampleTarget, SourceSamplingBoundary, TimelineTime, TimelineTimeRange, VideoTransitionId,
-    VisualSourceRetime, VisualSourceTimeError, VisualSourceTimeSample, WorkingColorSpace,
+    SourceSampleTarget, SourceSamplingBoundary, TimelineTime, TimelineTimeRange, TrackId,
+    VideoTransitionId, VisualSourceRetime, VisualSourceTimeError, VisualSourceTimeSample,
+    WorkingColorSpace,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -825,6 +827,37 @@ pub enum AuxiliaryClipAdmissionError {
     Evaluation(MondrianError),
 }
 
+impl PreparedVisualSchedule {
+    fn first_title_source_at<'a, T>(
+        &'a self,
+        time: TimelineTime,
+        track_id: Option<TrackId>,
+        mut sample: impl FnMut(&'a Clip) -> Result<Option<T>>,
+    ) -> Result<Option<T>> {
+        let mut track_indices = self.active_tracks.query(time).values;
+        track_indices.sort_unstable();
+        for index in track_indices.into_iter().rev() {
+            let prepared = &self.tracks[index];
+            if !prepared.track.is_visible
+                || prepared.track.is_muted
+                || track_id.is_some_and(|id| prepared.track.id != id)
+            {
+                continue;
+            }
+            // Use Clip placement intervals directly. A dissolve uses both endpoint
+            // pictures but editorial metadata follows the half-open cut.
+            let mut clips = prepared.clip_intervals.query(time).values;
+            clips.sort_unstable();
+            for clip in clips.into_iter().rev() {
+                if let Some(value) = sample(&prepared.track.clips[clip])? {
+                    return Ok(Some(value));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl RenderPlanSource for PreparedVisualSchedule {
     fn source_resolution(&self) -> mondrian_core::Resolution {
         self.resolution
@@ -836,27 +869,22 @@ impl RenderPlanSource for PreparedVisualSchedule {
         info: mondrian_core::TitleClipInfo,
         title_assets: Option<&'a mondrian_core::TitleAssetMetadata>,
     ) -> Result<Option<&'a str>> {
-        let mut track_indices = self.active_tracks.query(time).values;
-        track_indices.sort_unstable();
-        for index in track_indices.into_iter().rev() {
-            let prepared = &self.tracks[index];
-            if !prepared.track.is_visible
-                || prepared.track.is_muted
-                || info.track_id.is_some_and(|id| prepared.track.id != id)
-            {
-                continue;
-            }
-            // Use Clip placement intervals directly. A dissolve uses both endpoint
-            // pictures but editorial metadata follows the half-open cut.
-            let mut clips = prepared.clip_intervals.query(time).values;
-            clips.sort_unstable();
-            if let Some(label) = clips.into_iter().rev().find_map(|clip| {
-                prepared.track.clips[clip].clip_info_label(info.field, title_assets)
-            }) {
-                return Ok(Some(label));
-            }
-        }
-        Ok(None)
+        self.first_title_source_at(time, info.track_id, |clip| {
+            Ok(clip.clip_info_label(info.field, title_assets))
+        })
+    }
+
+    fn metadata_source_timecode_at(
+        &self,
+        time: TimelineTime,
+        track: Option<TrackId>,
+    ) -> Result<Option<mondrian_core::TitleMediaTimecodeSample>> {
+        self.first_title_source_at(time, track, |clip| {
+            clip.sample_metadata_source_timecode(
+                time,
+                Rational::new(self.time_base.den, self.time_base.num),
+            )
+        })
     }
 
     fn source_timeline_display(&self) -> mondrian_core::TimelineDisplaySettings {

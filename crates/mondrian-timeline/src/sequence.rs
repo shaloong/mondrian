@@ -2349,6 +2349,9 @@ impl Sequence {
             title.remap_clip_info_track(|id| track_ids.get(&id).copied()).expect(
                 "a validated title can retarget a source Track without changing its schema",
             );
+            title.remap_metadata_tracks(|id| track_ids.get(&id).copied()).expect(
+                "a validated metadata title can retarget source Tracks without changing schema",
+            );
         }
 
         let old_channels = std::mem::take(&mut self.audio_program.track_channels);
@@ -3055,6 +3058,26 @@ fn rekey_exact_curve(curve: &mut mondrian_core::ExactAutomationCurve) {
     }
 }
 
+impl Sequence {
+    fn first_title_source_at<'a, T>(
+        &'a self,
+        time: TimelineTime,
+        track_id: Option<TrackId>,
+        mut sample: impl FnMut(&'a Clip) -> mondrian_core::Result<Option<T>>,
+    ) -> mondrian_core::Result<Option<T>> {
+        for track in self.video_tracks.iter().rev().filter(|track| {
+            track.is_visible && !track.is_muted && track_id.is_none_or(|id| track.id == id)
+        }) {
+            for clip in track.active_clips_at(time)?.into_iter().rev() {
+                if let Some(value) = sample(clip)? {
+                    return Ok(Some(value));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
     fn source_resolution(&self) -> mondrian_core::Resolution {
         self.settings.resolution
@@ -3066,19 +3089,19 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
         info: mondrian_core::TitleClipInfo,
         title_assets: Option<&'a mondrian_core::TitleAssetMetadata>,
     ) -> mondrian_core::Result<Option<&'a str>> {
-        for track in self.video_tracks.iter().rev().filter(|track| {
-            track.is_visible && !track.is_muted && info.track_id.is_none_or(|id| track.id == id)
-        }) {
-            if let Some(label) = track
-                .active_clips_at(time)?
-                .into_iter()
-                .rev()
-                .find_map(|clip| clip.clip_info_label(info.field, title_assets))
-            {
-                return Ok(Some(label));
-            }
-        }
-        Ok(None)
+        self.first_title_source_at(time, info.track_id, |clip| {
+            Ok(clip.clip_info_label(info.field, title_assets))
+        })
+    }
+
+    fn metadata_source_timecode_at(
+        &self,
+        time: TimelineTime,
+        track: Option<TrackId>,
+    ) -> mondrian_core::Result<Option<mondrian_core::TitleMediaTimecodeSample>> {
+        self.first_title_source_at(time, track, |clip| {
+            clip.sample_metadata_source_timecode(time, self.settings.frame_rate)
+        })
     }
 
     fn source_timeline_display(&self) -> TimelineDisplaySettings {
