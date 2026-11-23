@@ -25,19 +25,24 @@ pub enum TitleClipInfoField {
     ReelName,
     AssetName,
     FileName,
+    MediaFrameRate,
 }
 
 impl TitleClipInfoField {
-    pub const fn uses_asset_names(self) -> bool {
-        matches!(self, Self::AssetName | Self::FileName)
+    pub const fn uses_asset_metadata(self) -> bool {
+        matches!(
+            self,
+            Self::AssetName | Self::FileName | Self::MediaFrameRate
+        )
     }
 }
 
-/// The two independent names observed for a file-backed Asset by a host.
+/// Title labels observed for a file-backed Asset by a host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TitleAssetNames {
     pub asset_name: Option<String>,
     pub file_name: Option<String>,
+    pub media_frame_rate: Option<String>,
 }
 
 impl TitleAssetNames {
@@ -45,11 +50,18 @@ impl TitleAssetNames {
         Self {
             asset_name: asset_name.map(str::to_owned),
             file_name: path.file_name().and_then(|name| name.to_str()).map(str::to_owned),
+            media_frame_rate: None,
         }
+    }
+
+    pub fn set_media_frame_rate(&mut self, video: &crate::VideoStreamInfo) {
+        let rate = video.frame_rate;
+        self.media_frame_rate = (video.frame_rate_proven && rate.num > 0 && rate.den > 0)
+            .then(|| format!("{} fps", rate.reduce()));
     }
 }
 
-/// Names frozen from a host's Asset Library or an admitted export snapshot.
+/// Labels frozen from a host's Asset Library or an admitted export snapshot.
 pub type TitleAssetMetadata = HashMap<AssetId, TitleAssetNames>;
 
 /// Resolved author controls for a Clip Info title.

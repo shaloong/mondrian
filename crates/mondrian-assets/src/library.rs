@@ -1173,7 +1173,10 @@ impl AssetLibrary {
 
     /// Freeze file-backed title labels under the same lock as the Library revision.
     /// Retired members can still be referenced by timelines.
-    pub fn capture_title_asset_metadata(&self) -> Result<(u64, mondrian_core::TitleAssetMetadata)> {
+    pub fn capture_title_asset_metadata(
+        &self,
+        include_frame_rates: bool,
+    ) -> Result<(u64, mondrian_core::TitleAssetMetadata)> {
         let db = self.db.lock();
         let revision = connection_revision(&db)?;
         let read = || -> rusqlite::Result<_> {
@@ -1196,7 +1199,24 @@ impl AssetLibrary {
                     mondrian_core::TitleAssetNames::from_source(Some(&name), Path::new(&path)),
                 ))
             })?;
-            rows.collect()
+            let mut names: mondrian_core::TitleAssetMetadata =
+                rows.collect::<rusqlite::Result<_>>()?;
+            if include_frame_rates {
+                let mut videos = db.prepare(
+                    "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at
+                     , interpretation, audio_components, source_fingerprint, retired_at
+                     FROM assets WHERE asset_type = 'video'",
+                )?;
+                for asset in videos.query_map([], parse_asset_row)? {
+                    let asset = asset?;
+                    if let Some(video) = asset.media_probe().and_then(MediaInfo::primary_video)
+                        && let Some(labels) = names.get_mut(&asset.id)
+                    {
+                        labels.set_media_frame_rate(video);
+                    }
+                }
+            }
+            Ok(names)
         };
         let names =
             read().map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
@@ -1860,10 +1880,10 @@ mod tests {
         let id = commit_info(&library, &path, lightweight_video_info(&path));
         let generated = library.create_solid_color_asset(Some("Generated")).unwrap();
         library.rename_asset(id, "First library name").unwrap();
-        let (old_revision, frozen) = library.capture_title_asset_metadata().unwrap();
+        let (old_revision, frozen) = library.capture_title_asset_metadata(false).unwrap();
         library.rename_asset(id, "Second library name").unwrap();
         library.retire_assets(&[id]).unwrap();
-        let (current_revision, current) = library.capture_title_asset_metadata().unwrap();
+        let (current_revision, current) = library.capture_title_asset_metadata(false).unwrap();
         assert!(current_revision > old_revision);
         assert_eq!(
             frozen[&id].asset_name.as_deref(),
@@ -1878,6 +1898,36 @@ mod tests {
             Some("camera-original.mov")
         );
         assert!(!current.contains_key(&generated));
+    }
+
+    #[test]
+    fn metadata_burn_in_frame_rates_follow_admitted_probe_revisions() {
+        let library = open_test_library();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moving.mov");
+        std::fs::write(&path, [0u8]).unwrap();
+        let mut info = lightweight_video_info(&path);
+        info.video_streams[0].frame_rate = mondrian_core::Rational::new(60_000, 2_002);
+        let id = commit_info(&library, &path, info.clone());
+        let (before, frozen) = library.capture_title_asset_metadata(true).unwrap();
+        assert_eq!(
+            frozen[&id].media_frame_rate.as_deref(),
+            Some("30000/1001 fps")
+        );
+        assert_eq!(
+            library.capture_title_asset_metadata(false).unwrap().1[&id].media_frame_rate,
+            None
+        );
+
+        info.video_streams[0].frame_rate_proven = false;
+        assert_eq!(commit_info(&library, &path, info), id);
+        let (after, current) = library.capture_title_asset_metadata(true).unwrap();
+        assert!(after > before);
+        assert_eq!(current[&id].media_frame_rate, None);
+        assert_eq!(
+            frozen[&id].media_frame_rate.as_deref(),
+            Some("30000/1001 fps")
+        );
     }
 
     #[test]

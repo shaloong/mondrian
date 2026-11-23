@@ -726,15 +726,18 @@ impl Clip {
                 .media_interpretation()
                 .and_then(|interpretation| interpretation.editorial_source.as_ref())
                 .and_then(|source| source.reel_name()),
-            TitleClipInfoField::AssetName | TitleClipInfoField::FileName => {
+            TitleClipInfoField::AssetName
+            | TitleClipInfoField::FileName
+            | TitleClipInfoField::MediaFrameRate => {
                 let ClipContent::Media { asset_id, .. } = self.content else {
                     return None;
                 };
                 let names = title_assets?.get(&asset_id)?;
-                if field == TitleClipInfoField::AssetName {
-                    names.asset_name.as_deref()
-                } else {
-                    names.file_name.as_deref()
+                match field {
+                    TitleClipInfoField::AssetName => names.asset_name.as_deref(),
+                    TitleClipInfoField::FileName => names.file_name.as_deref(),
+                    TitleClipInfoField::MediaFrameRate => names.media_frame_rate.as_deref(),
+                    TitleClipInfoField::ClipName | TitleClipInfoField::ReelName => unreachable!(),
                 }
             }
         };

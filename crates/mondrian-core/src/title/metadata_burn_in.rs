@@ -77,8 +77,8 @@ impl TitleMetadataField {
         matches!(self, Self::SequenceTimecode | Self::SourceTimecode)
     }
 
-    pub const fn uses_asset_names(self) -> bool {
-        matches!(self, Self::Clip(field) if field.uses_asset_names())
+    pub const fn uses_asset_metadata(self) -> bool {
+        matches!(self, Self::Clip(field) if field.uses_asset_metadata())
     }
 }
 
@@ -106,6 +106,7 @@ impl TitleMetadataLine {
             "reel_name" => TitleMetadataField::Clip(TitleClipInfoField::ReelName),
             "asset_name" => TitleMetadataField::Clip(TitleClipInfoField::AssetName),
             "file_name" => TitleMetadataField::Clip(TitleClipInfoField::FileName),
+            "media_frame_rate" => TitleMetadataField::Clip(TitleClipInfoField::MediaFrameRate),
             "sequence_timecode" => TitleMetadataField::SequenceTimecode,
             "source_timecode" => TitleMetadataField::SourceTimecode,
             _ => return Err(title_error("unknown Metadata Burn-in field")),
@@ -155,6 +156,32 @@ impl TitleMetadataLine {
     }
 }
 
+const FIELD_CHOICES: &[(&str, &str)] = &[
+    ("clip_name", "Clip name"),
+    ("reel_name", "Reel name"),
+    ("asset_name", "Asset Library name"),
+    ("file_name", "File name"),
+    ("sequence_timecode", "Sequence timecode"),
+    ("source_timecode", "Source timecode"),
+    ("media_frame_rate", "Media frame rate"),
+];
+
+/// Old Projects and standalone queued exports both serialize these option lists.
+pub(super) fn upgrade_field_options(properties: &mut PropertyBag) {
+    let current = enum_options(FIELD_CHOICES);
+    let legacy = &current[..current.len() - 1];
+    for paths in TITLE_METADATA_LINE_PATHS {
+        if let Some(property) = properties.property(paths.field)
+            && property.descriptor.schema.enum_options == legacy
+            && property.validate().is_ok()
+        {
+            let mut property = property.clone();
+            property.descriptor.schema.enum_options.clone_from(&current);
+            properties.upsert(property);
+        }
+    }
+}
+
 pub(super) fn descriptors() -> impl Iterator<Item = PropertyDescriptor> {
     let field = |path: &'static str, name, value| {
         let mut descriptor = PropertyDescriptor::new(path, name, value)
@@ -190,14 +217,7 @@ pub(super) fn descriptors() -> impl Iterator<Item = PropertyDescriptor> {
                         .into(),
                     ),
                 )
-                .with_enum_options(enum_options(&[
-                    ("clip_name", "Clip name"),
-                    ("reel_name", "Reel name"),
-                    ("asset_name", "Asset Library name"),
-                    ("file_name", "File name"),
-                    ("sequence_timecode", "Sequence timecode"),
-                    ("source_timecode", "Source timecode"),
-                ])),
+                .with_enum_options(enum_options(FIELD_CHOICES)),
                 field(
                     paths.position,
                     "位置",
@@ -231,4 +251,25 @@ pub(super) fn descriptors() -> impl Iterator<Item = PropertyDescriptor> {
                     .with_numeric_contract(ParameterUnit::Unitless, frames()),
             ]
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_burn_in_reads_legacy_export_titles_with_stable_line_addresses() {
+        let current = crate::BasicTitle::new_metadata_burn_in("Arial").unwrap();
+        let mut legacy = serde_json::to_value(&current).unwrap();
+        for paths in TITLE_METADATA_LINE_PATHS {
+            let options = legacy["properties"]["properties"][paths.field]["descriptor"]["schema"]
+                ["enum_options"]
+                .as_array_mut()
+                .unwrap();
+            assert_eq!(options.pop().unwrap()["key"], "media_frame_rate");
+        }
+        let restored: crate::BasicTitle = serde_json::from_value(legacy).unwrap();
+        restored.validate_author_state().unwrap();
+        assert_eq!(restored, current);
+    }
 }

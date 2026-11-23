@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 40;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 41;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -378,6 +378,11 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
             to: 40,
             migrate: migrate_document_v39_to_v40,
         },
+        JsonMigrationStep {
+            from: 40,
+            to: 41,
+            migrate: migrate_document_v40_to_v41,
+        },
     ],
 );
 
@@ -569,6 +574,12 @@ fn migrate_document_v39_to_v40(mut value: serde_json::Value) -> anyhow::Result<s
         Ok(())
     })?;
     value["schema_version"] = serde_json::json!(40);
+    Ok(value)
+}
+
+fn migrate_document_v40_to_v41(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    // BasicTitle upgrades the legacy enum options on read, including in exports.
+    value["schema_version"] = serde_json::json!(41);
     Ok(value)
 }
 
@@ -3652,6 +3663,26 @@ mod tests {
         let error = DOCUMENT_MIGRATIONS.migrate(legacy).unwrap_err();
         assert!(
             format!("{error:#}").contains("schema-39 Basic Title cannot contain Metadata Burn-in")
+        );
+
+        let mut version_40 = serde_json::to_value(&document).unwrap();
+        version_40["schema_version"] = serde_json::json!(40);
+        visit_document_titles(&mut version_40, 40, |title| {
+            for paths in TITLE_METADATA_LINE_PATHS {
+                let options = title["properties"]["properties"][paths.field]["descriptor"]
+                    ["schema"]["enum_options"]
+                    .as_array_mut()
+                    .unwrap();
+                assert_eq!(options.pop().unwrap()["key"], "media_frame_rate");
+            }
+            Ok(())
+        })
+        .unwrap();
+        let migrated: ProjectDocument =
+            serde_json::from_value(DOCUMENT_MIGRATIONS.migrate(version_40).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(migrated).unwrap(),
+            serde_json::to_value(&document).unwrap()
         );
 
         let root = unique_temp_dir("metadata-burn-in-round-trip");
