@@ -492,6 +492,9 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
         for property in &model.clip_properties {
             use mondrian_core::BasicTitle;
             let heading = match property.path.as_str() {
+                path if BasicTitle::TIMECODE_PROPERTY_PATHS.contains(&path) => {
+                    "inspector-title-timecode"
+                }
                 BasicTitle::STROKE_WIDTH_PATH | BasicTitle::STROKE_COLOR_PATH => {
                     "inspector-title-outline"
                 }

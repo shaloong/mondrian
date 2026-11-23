@@ -23,6 +23,35 @@ impl VisualLayerChoice {
     }
 }
 
+/// A timecode overlay can refer to any media placement in the owner Sequence.
+pub(super) fn timecode_media_clip_choices(
+    sequence: &Sequence,
+    consumer: ClipId,
+    needs_timecode: bool,
+) -> Vec<VisualLayerChoice> {
+    sequence
+        .video_tracks
+        .iter()
+        .flat_map(|track| {
+            track.clips.iter().filter_map(|clip| {
+                let interpretation = clip.media_interpretation()?;
+                if clip.id == consumer {
+                    return None;
+                }
+                if needs_timecode {
+                    let reference = interpretation.editorial_source.as_ref()?.source_timecode()?;
+                    reference.validate().ok()?;
+                }
+                let label = clip.label.clone().unwrap_or_else(|| clip.position.to_string());
+                Some(VisualLayerChoice {
+                    address: VisualLayerAddress::Clip(clip.id),
+                    name: format!("{} · {}", track.name, label),
+                })
+            })
+        })
+        .collect()
+}
+
 pub(super) fn visual_layer_choices(
     sequence: &Sequence,
     sequences: &[Sequence],
@@ -163,6 +192,45 @@ mod tests {
             TimelineTime::ONE,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn timecode_title_picker_requires_editorial_metadata_only_for_the_media_clock() {
+        use mondrian_core::timeline_data::EditorialSourceIdentity;
+        use mondrian_core::{Rational, SmpteCountingMode, SmpteTimecodeReference};
+
+        let mut sequence = Sequence::new("Timecode picker");
+        let consumer = solid();
+        let consumer_id = consumer.id;
+        sequence.video_tracks[0].add_clip(consumer).unwrap();
+        let asset = AssetId::new();
+        let unknown = Clip::new(asset, TimelineTime::ZERO, TimelineTime::ONE).unwrap();
+        let unknown_id = unknown.id;
+        sequence.video_tracks[1].add_clip(unknown).unwrap();
+        let mut source = Clip::new(asset, TimelineTime::ZERO, TimelineTime::ONE).unwrap();
+        let source_id = source.id;
+        let reference =
+            SmpteTimecodeReference::new(Rational::FPS_25, SmpteCountingMode::NonDropFrame, 900)
+                .unwrap();
+        source.media_interpretation_mut().unwrap().editorial_source =
+            Some(EditorialSourceIdentity::new(None, Some(reference), None).unwrap());
+        sequence.video_tracks[2].is_visible = false;
+        sequence.video_tracks[2].add_clip(source).unwrap();
+
+        let choices = |needs_timecode| {
+            timecode_media_clip_choices(&sequence, consumer_id, needs_timecode)
+                .into_iter()
+                .map(|choice| choice.address)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(choices(true), [VisualLayerAddress::Clip(source_id)]);
+        assert_eq!(
+            choices(false),
+            [
+                VisualLayerAddress::Clip(unknown_id),
+                VisualLayerAddress::Clip(source_id)
+            ]
+        );
     }
 
     #[test]

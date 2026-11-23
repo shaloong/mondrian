@@ -1400,6 +1400,9 @@ impl AppState {
             TimelineProductAction::CreateBasicTitle => {
                 self.create_basic_title_at_playhead().map(|_| ())
             }
+            TimelineProductAction::CreateTimecodeTitle => {
+                self.create_timecode_title_at_playhead().map(|_| ())
+            }
             TimelineProductAction::PlaceAsset(payload) => self.place_asset_on_timeline(payload),
             TimelineProductAction::PlaceFile(payload) => self.queue_file_on_timeline(payload),
             TimelineProductAction::InsertAsset(payload) => {
@@ -8375,6 +8378,132 @@ mod tests {
         assert_eq!(opacity(&state), 0.0);
         assert!(state.undo_timeline().unwrap());
         assert_eq!(opacity(&state), 0.45);
+    }
+
+    #[test]
+    fn timecode_title_clock_edits_render_and_undo_through_stable_addresses() {
+        use mondrian_core::{BasicTitle, TimelineDisplaySettings, VisualSourceReference};
+
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("Timecode authoring");
+        let media = Clip::new(
+            mondrian_core::AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).unwrap(),
+        )
+        .unwrap();
+        let media_id = media.id;
+        sequence.video_tracks[0].add_clip(media).unwrap();
+        state.test_set_sequence(Some(sequence));
+        state
+            .dispatch_action(crate::app::ui_actions::timeline_create_timecode_title_action())
+            .unwrap();
+        let clip_id = state.primary_selected_clip().unwrap().clip_id;
+        let edit = |state: &mut AppState, path, value| {
+            let parameter = clip_parameter_address(state, clip_id, path);
+            state.dispatch_action(clip_parameter_action(clip_id, parameter, value))
+        };
+        let evaluate = |state: &AppState| {
+            let sequence = state.active_sequence().unwrap();
+            sequence
+                .find_clip(clip_id)
+                .unwrap()
+                .content
+                .basic_title()
+                .unwrap()
+                .evaluate_for_render(
+                    TimelineTime::ZERO,
+                    TimelineTime::ZERO,
+                    sequence.settings.frame_rate,
+                    TimelineDisplaySettings::frames(0),
+                    None,
+                )
+                .unwrap()
+        };
+        edit(
+            &mut state,
+            BasicTitle::TIMECODE_SOURCE_PATH,
+            PropertyValue::Enum("custom".into()),
+        )
+        .unwrap();
+        edit(
+            &mut state,
+            BasicTitle::TIMECODE_START_PATH,
+            PropertyValue::Int(1800),
+        )
+        .unwrap();
+        assert_eq!(evaluate(&state).text, "00:01:00:00");
+
+        edit(
+            &mut state,
+            BasicTitle::TIMECODE_DROP_PATH,
+            PropertyValue::Bool(true),
+        )
+        .unwrap();
+        assert_eq!(evaluate(&state).text, "00:01:00;02");
+        assert!(edit(
+            &mut state,
+            BasicTitle::TIMECODE_RATE_PATH,
+            PropertyValue::Int(25)
+        )
+        .is_err());
+        assert_eq!(evaluate(&state).text, "00:01:00;02");
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(evaluate(&state).text, "00:01:00:00");
+        assert!(state.redo_timeline().unwrap());
+        assert_eq!(evaluate(&state).text, "00:01:00;02");
+
+        edit(
+            &mut state,
+            BasicTitle::TIMECODE_SOURCE_PATH,
+            PropertyValue::Enum("sequence".into()),
+        )
+        .unwrap();
+        assert_eq!(evaluate(&state).text, "00:00:00:00");
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(evaluate(&state).text, "00:01:00;02");
+
+        edit(
+            &mut state,
+            BasicTitle::TIMECODE_BOX_PATH,
+            PropertyValue::Bool(false),
+        )
+        .unwrap();
+        assert_eq!(evaluate(&state).appearance.background_opacity, 0.0);
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(evaluate(&state).appearance.background_opacity, 1.0);
+
+        let original_to_hide = |state: &AppState| {
+            state
+                .active_sequence()
+                .unwrap()
+                .find_clip(clip_id)
+                .unwrap()
+                .content
+                .basic_title()
+                .unwrap()
+                .timecode_original_media_to_hide()
+                .unwrap()
+        };
+        edit(
+            &mut state,
+            BasicTitle::TIMECODE_MEDIA_CLIP_PATH,
+            PropertyValue::VisualSource(VisualSourceReference::Clip {
+                clip_id: media_id,
+                retime: Default::default(),
+            }),
+        )
+        .unwrap();
+        edit(
+            &mut state,
+            BasicTitle::TIMECODE_COMPOSITE_ORIGINAL_PATH,
+            PropertyValue::Bool(false),
+        )
+        .unwrap();
+        assert_eq!(original_to_hide(&state), Some(media_id));
+        assert_eq!(evaluate(&state).appearance.background_opacity, 1.0);
+        assert!(state.undo_timeline().unwrap());
+        assert_eq!(original_to_hide(&state), None);
     }
 
     #[test]

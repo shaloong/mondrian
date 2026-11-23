@@ -17590,7 +17590,21 @@ mod tests {
     #[test]
     #[ignore = "real GPU Export decorated Basic Title parity; run independently"]
     fn decorated_basic_title_matches_cpu_through_production_export() {
-        use mondrian_core::{BasicTitle, Color};
+        assert_title_matches_cpu_through_production_export(false);
+    }
+
+    #[test]
+    #[ignore = "real GPU Export Timecode Title parity; run independently"]
+    fn timecode_title_matches_cpu_through_production_export() {
+        assert_title_matches_cpu_through_production_export(true);
+    }
+
+    fn assert_title_matches_cpu_through_production_export(timecode: bool) {
+        use mondrian_core::timeline_data::EditorialSourceIdentity;
+        use mondrian_core::{
+            BasicTitle, Color, SmpteCountingMode, SmpteTimecodeReference, TitleTimecode,
+            TitleTimecodeSource, VisualSourceReference,
+        };
         use mondrian_effects::{instantiate_effect_node, EffectType};
         use mondrian_timeline::clip::Transform2D;
 
@@ -17598,14 +17612,52 @@ mod tests {
         let raster = Resolution { width: 192, height: 108 };
         let mut child = Sequence::new("Decorated title child");
         child.settings.resolution = raster;
+        if timecode {
+            child.settings.frame_rate = mondrian_core::Rational::FPS_2997;
+        }
         let time_base = child.time_base();
-        let mut title = Clip::new_basic_title(
-            "Mondrian\nTitle",
-            mondrian_core::default_basic_title_font_family(),
-            tt(0, time_base),
-            tt(2, time_base),
-        )
+        let font = mondrian_core::default_basic_title_font_family();
+        let start = tt(0, time_base);
+        let duration = tt(2, time_base);
+        let mut title = if timecode {
+            let mut media = Clip::new(AssetId::new(), start, duration).unwrap();
+            let media_id = media.id;
+            let reference = SmpteTimecodeReference::new(
+                child.settings.frame_rate,
+                SmpteCountingMode::DropFrame,
+                1800,
+            )
+            .unwrap();
+            media.media_interpretation_mut().unwrap().editorial_source =
+                Some(EditorialSourceIdentity::new(None, Some(reference), None).unwrap());
+            child.video_tracks[1].add_clip(media).unwrap();
+            Clip::new_timecode_title(
+                TitleTimecode {
+                    source: TitleTimecodeSource::Media {
+                        reference: VisualSourceReference::Clip {
+                            clip_id: media_id,
+                            retime: Default::default(),
+                        },
+                    },
+                    position: [20.25, 29.5],
+                    ..TitleTimecode::default()
+                },
+                font,
+                start,
+                duration,
+            )
+        } else {
+            Clip::new_basic_title("Mondrian\nTitle", font, start, duration)
+        }
         .unwrap();
+        if timecode {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: BasicTitle::TIMECODE_COMPOSITE_ORIGINAL_PATH.to_owned(),
+                    value: PropertyValue::Bool(false),
+                })
+                .unwrap();
+        }
         for (path, value) in [
             (BasicTitle::FONT_SIZE_PATH, PropertyValue::Float(30.0)),
             (BasicTitle::STROKE_WIDTH_PATH, PropertyValue::Float(3.0)),
@@ -17652,6 +17704,7 @@ mod tests {
 
         let mut sequence = Sequence::new("Decorated title export root");
         sequence.settings.resolution = raster;
+        sequence.settings.frame_rate = child.settings.frame_rate;
         let time_base = sequence.time_base();
         let start = tt(0, time_base);
         let duration = tt(2, time_base);
@@ -17686,7 +17739,7 @@ mod tests {
             .root_program_color_context(&timeline.color_environment)
             .unwrap();
         let cancellation = ExecutionCancellationToken::new();
-        let render = |session: &mut ExportVisualRenderSession, gpu| {
+        let render = |session: &mut ExportVisualRenderSession, gpu, frame| {
             session.resource_policy.opportunistic_gpu_acceleration = gpu;
             let mut output = Vec::new();
             let mut context = ExportFrameRenderContext {
@@ -17707,7 +17760,7 @@ mod tests {
                 &timeline,
                 &mut context,
                 &timeline.sequence,
-                0,
+                frame,
                 raster,
                 color.clone(),
                 SequenceRenderTarget::Deliverable(&mut output),
@@ -17715,9 +17768,17 @@ mod tests {
             .unwrap();
             output
         };
-        let cpu = render(&mut session, false);
+        let frame = i64::from(timecode);
+        let cpu = render(&mut session, false, frame);
+        if timecode {
+            assert_ne!(
+                cpu,
+                render(&mut session, false, 0),
+                "adjacent labels must change the exported pixels"
+            );
+        }
         assert_eq!(session.visual_diagnostics().gpu_visual_nodes_completed, 0);
-        let gpu = render(&mut session, true);
+        let gpu = render(&mut session, true, frame);
         let diagnostics = session.visual_diagnostics();
         assert_eq!(diagnostics.gpu_visual_nodes_completed, 2);
         assert_eq!(diagnostics.gpu_visual_nested_outputs, 1);
@@ -17727,7 +17788,7 @@ mod tests {
         assert_eq!(gpu.len(), cpu.len());
         assert!(cpu.chunks_exact(4).any(|pixel| pixel[0].abs_diff(pixel[1]) > 8));
         let max_error = cpu.iter().zip(&gpu).map(|(cpu, gpu)| cpu.abs_diff(*gpu)).max().unwrap();
-        eprintln!("Decorated Basic Title Export maximum error: {max_error} RGBA8 steps");
+        eprintln!("Title Export (timecode={timecode}) maximum error: {max_error} RGBA8 steps");
         assert!(max_error <= 1);
     }
 

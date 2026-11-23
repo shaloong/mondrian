@@ -319,7 +319,7 @@ impl ResourceDraft {
         );
         draft.visual_original = Some(original);
         draft.visual_layer = VisualLayerAddress::from_reference(original);
-        if draft.visual_layer.is_some() {
+        if draft.visual_layer.is_some() || draft.is_timecode_media_clip() {
             draft.kind = ResourceKind::VisualLayer;
         }
         draft
@@ -327,6 +327,10 @@ impl ResourceDraft {
 
     pub(crate) fn is_visual_source(&self) -> bool {
         self.visual_original.is_some()
+    }
+
+    fn is_timecode_media_clip(&self) -> bool {
+        self.schema.parameter_id.as_str() == mondrian_core::BasicTitle::TIMECODE_MEDIA_CLIP_ID
     }
 
     pub(crate) fn is_visual_layer_mode(&self) -> bool {
@@ -371,6 +375,9 @@ impl ResourceDraft {
 
     /// Whether the provider admits this reference kind in its authoring schema.
     pub(crate) fn allows_kind(&self, kind: ResourceKind) -> bool {
+        if self.is_timecode_media_clip() {
+            return matches!(kind, ResourceKind::Unbound | ResourceKind::VisualLayer);
+        }
         if self.is_visual_source() {
             return match kind {
                 ResourceKind::Unbound | ResourceKind::ProjectAsset | ResourceKind::VisualLayer => {
@@ -772,6 +779,25 @@ impl ResourceDialog {
         let generation = state.project_author_generation();
         if self.draft.is_visual_source() && self.visual_author_generation != Some(generation) {
             self.visual_layers = match state.active_sequence() {
+                Some(sequence) if self.draft.is_timecode_media_clip() => {
+                    let clock = sequence
+                        .find_clip(self.draft.clip_id)
+                        .and_then(|clip| clip.content.basic_title())
+                        .map(|title| title.timecode())
+                        .transpose()?
+                        .flatten();
+                    let needs_timecode = clock.is_some_and(|clock| {
+                        matches!(
+                            clock.source,
+                            mondrian_core::TitleTimecodeSource::Media { .. }
+                        )
+                    });
+                    visual_layers::timecode_media_clip_choices(
+                        sequence,
+                        self.draft.clip_id,
+                        needs_timecode,
+                    )
+                }
                 Some(sequence) => visual_layers::visual_layer_choices(
                     sequence,
                     state.sequences(),

@@ -994,17 +994,9 @@ impl PreparedVisualProgram {
                 let sample = self
                     .sample_clip_source(placement, time)
                     .map_err(|e| sampling_error(placement.clip_id, e))?;
-                let source_sample = if let Some(rate) = interpretation.frame_rate_override {
-                    let position = sample
-                        .to_frame_position(rate)
-                        .map_err(|e| sampling_error(placement.clip_id, e))?;
-                    SourceSampleTarget::covering(
-                        TimelineTime::from_frame_position(position)
-                            .map_err(|e| sampling_error(placement.clip_id, e))?,
-                    )
-                } else {
-                    sample
-                };
+                let source_sample = interpretation
+                    .resolve_source_sample(sample)
+                    .map_err(|e| sampling_error(placement.clip_id, e))?;
                 TimelineTemporalSource::Media {
                     asset_id: *asset_id,
                     source_sample,

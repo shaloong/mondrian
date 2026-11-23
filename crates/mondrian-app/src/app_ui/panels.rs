@@ -2874,9 +2874,36 @@ impl InspectorPanelModel {
             .content
             .basic_title()
             .map(|title| {
+                use mondrian_core::{BasicTitle, TitleTimecode, TitleTimecodeSource};
+
                 let properties = title.property_bag();
-                mondrian_core::BasicTitle::PROPERTY_PATHS
+                let clock_paths = if title.is_timecode() {
+                    BasicTitle::TIMECODE_PROPERTY_PATHS.as_slice()
+                } else {
+                    &[]
+                };
+                let clock =
+                    title.timecode().ok().flatten().map(|TitleTimecode { source, .. }| source);
+                let is_custom = matches!(clock, Some(TitleTimecodeSource::Custom { .. }));
+                let is_media = matches!(clock, Some(TitleTimecodeSource::Media { .. }));
+                let shows_original = properties.evaluate(
+                    BasicTitle::TIMECODE_COMPOSITE_ORIGINAL_PATH,
+                    clip_author_time,
+                ) == Some(PropertyValue::Bool(true));
+                clock_paths
                     .iter()
+                    .chain(&BasicTitle::PROPERTY_PATHS)
+                    .copied()
+                    .filter(|path| match *path {
+                        BasicTitle::TEXT_PATH
+                        | BasicTitle::HORIZONTAL_ALIGN_PATH
+                        | BasicTitle::VERTICAL_ALIGN_PATH => !title.is_timecode(),
+                        BasicTitle::TIMECODE_RATE_PATH
+                        | BasicTitle::TIMECODE_DROP_PATH
+                        | BasicTitle::TIMECODE_START_PATH => is_custom,
+                        BasicTitle::TIMECODE_MEDIA_CLIP_PATH => is_media || !shows_original,
+                        _ => true,
+                    })
                     .filter_map(|path| {
                         properties.property(path).map(|property| {
                             inspector_property_model(path, property, clip_author_time, localizer)

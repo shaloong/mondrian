@@ -2586,12 +2586,26 @@ fn basic_title_enters_the_shared_working_linear_preview_path() {
 #[test]
 #[ignore = "real GPU Preview decorated Basic Title parity; run independently"]
 fn decorated_basic_title_matches_cpu_through_production_preview() {
+    assert_title_matches_cpu_through_production_preview(false);
+}
+
+#[test]
+#[ignore = "real GPU Preview Timecode Title parity; run independently"]
+fn timecode_title_matches_cpu_through_production_preview() {
+    assert_title_matches_cpu_through_production_preview(true);
+}
+
+fn assert_title_matches_cpu_through_production_preview(timecode: bool) {
     use crate::app::preview_cpu_execution::output_boundary_from_color_context;
     use crate::app::preview_viewer_plan::{
         prepare_gpu_composite_layers_with_heterogeneous_effects, PreparedPreviewViewerGpuLayers,
     };
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
-    use mondrian_core::BasicTitle;
+    use mondrian_core::timeline_data::EditorialSourceIdentity;
+    use mondrian_core::{
+        BasicTitle, SmpteCountingMode, SmpteTimecodeReference, TitleTimecode, TitleTimecodeSource,
+        VisualSourceReference,
+    };
     use mondrian_effects::{EffectFrameExtent, EffectGraphExecutionBudget};
     use mondrian_renderer::{
         color::ProgramOutputModule, GpuColorFrameReadback, GpuColorFrameReadbackPlan, GpuContext,
@@ -2605,6 +2619,9 @@ fn decorated_basic_title_matches_cpu_through_production_preview() {
     let raster = Resolution { width: 192, height: 108 };
     let mut sequence = solid_sequence("Decorated title Preview", Color::BLACK);
     sequence.settings.resolution = raster;
+    if timecode {
+        sequence.settings.frame_rate = mondrian_core::Rational::FPS_2997;
+    }
     let kind = mondrian_effects::EffectType::Ramp;
     let mut ramp = mondrian_effects::instantiate_effect_node(kind.clone()).unwrap();
     for (key, point) in [("start", [0.0_f32, 0.0]), ("end", [192.0, 0.0])] {
@@ -2615,13 +2632,48 @@ fn decorated_basic_title_matches_cpu_through_production_preview() {
         .unwrap();
     }
     sequence.video_tracks[0].clips[0].add_effect_node(ramp);
-    let mut title = Clip::new_basic_title(
-        "Mondrian\nTitle",
-        mondrian_core::default_basic_title_font_family(),
-        TimelineTime::ZERO,
-        tt(24, sequence.time_base()),
-    )
+    let font = mondrian_core::default_basic_title_font_family();
+    let duration = tt(24, sequence.time_base());
+    let mut title = if timecode {
+        let mut media = Clip::new(AssetId::new(), TimelineTime::ZERO, duration).unwrap();
+        let media_id = media.id;
+        let reference = SmpteTimecodeReference::new(
+            sequence.settings.frame_rate,
+            SmpteCountingMode::DropFrame,
+            1800,
+        )
+        .unwrap();
+        media.media_interpretation_mut().unwrap().editorial_source =
+            Some(EditorialSourceIdentity::new(None, Some(reference), None).unwrap());
+        sequence.add_video_track();
+        sequence.video_tracks.last_mut().unwrap().add_clip(media).unwrap();
+        Clip::new_timecode_title(
+            TitleTimecode {
+                source: TitleTimecodeSource::Media {
+                    reference: VisualSourceReference::Clip {
+                        clip_id: media_id,
+                        retime: Default::default(),
+                    },
+                },
+                position: [20.25, 29.5],
+                ..TitleTimecode::default()
+            },
+            font,
+            TimelineTime::ZERO,
+            duration,
+        )
+    } else {
+        Clip::new_basic_title("Mondrian\nTitle", font, TimelineTime::ZERO, duration)
+    }
     .unwrap();
+    if timecode {
+        title
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: BasicTitle::TIMECODE_COMPOSITE_ORIGINAL_PATH.to_owned(),
+                value: PropertyValue::Bool(false),
+            })
+            .unwrap();
+    }
     for (path, value) in [
         (BasicTitle::FONT_SIZE_PATH, PropertyValue::Float(30.0)),
         (BasicTitle::STROKE_WIDTH_PATH, PropertyValue::Float(3.0)),
@@ -2670,12 +2722,15 @@ fn decorated_basic_title_matches_cpu_through_production_preview() {
     let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline(
         &sequence,
         &[],
-        0,
+        i64::from(timecode),
         raster,
         PreviewResolutionScale::Full,
         color_context(&sequence),
         &mut |_| panic!("generated sources need no media decode"),
         &mut |request: PreviewTimelineTitleRequest| {
+            if timecode {
+                assert_eq!(request.title.text, "00:01:00;03");
+            }
             PreviewTimelineTitleFrame::Ready(
                 rasterizer
                     .rasterize(
@@ -2808,7 +2863,7 @@ fn decorated_basic_title_matches_cpu_through_production_preview() {
         .map(|(cpu, gpu)| cpu.abs_diff(*gpu))
         .max()
         .unwrap();
-    eprintln!("Decorated Basic Title Preview maximum error: {max_error} RGBA8 steps");
+    eprintln!("Title Preview (timecode={timecode}) maximum error: {max_error} RGBA8 steps");
     assert!(max_error <= 1);
 }
 

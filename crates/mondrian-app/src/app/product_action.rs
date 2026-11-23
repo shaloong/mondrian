@@ -61,6 +61,7 @@ pub const TIMELINE_APPLY_RANGE_EDIT: &str = "apply_range_edit";
 pub const TIMELINE_EDIT_SELECTION: &str = "edit_selection";
 /// External action name for creating a generated Basic Title at the current edit range.
 pub const TIMELINE_CREATE_BASIC_TITLE: &str = "create_basic_title";
+pub const TIMELINE_CREATE_TIMECODE_TITLE: &str = "create_timecode_title";
 /// External action name for placing one Asset on a stable Timeline Track.
 pub const TIMELINE_PLACE_ASSET: &str = "place_asset";
 pub const TIMELINE_PLACE_FILE: &str = "place_file";
@@ -542,6 +543,7 @@ pub enum TimelineProductAction {
     EditSelection(TimelineSelectionEdit),
     /// Create one generated Basic Title using current edit state.
     CreateBasicTitle,
+    CreateTimecodeTitle,
     /// Place one Asset on one stable Track at an explicit evaluation coordinate.
     PlaceAsset(TimelineDropAssetPayload),
     /// Probe and atomically place one external file on a Track.
@@ -703,6 +705,10 @@ impl ProductAction {
                     TIMELINE_CREATE_BASIC_TITLE => {
                         decode_payload::<()>(namespace, name, payload)?;
                         TimelineProductAction::CreateBasicTitle
+                    }
+                    TIMELINE_CREATE_TIMECODE_TITLE => {
+                        decode_payload::<()>(namespace, name, payload)?;
+                        TimelineProductAction::CreateTimecodeTitle
                     }
                     TIMELINE_PLACE_ASSET => {
                         TimelineProductAction::PlaceAsset(decode_payload(namespace, name, payload)?)
@@ -1333,6 +1339,11 @@ impl ProductAction {
             Self::Timeline(TimelineProductAction::CreateBasicTitle) => (
                 TIMELINE_NAMESPACE,
                 TIMELINE_CREATE_BASIC_TITLE,
+                serde_json::Value::Null,
+            ),
+            Self::Timeline(TimelineProductAction::CreateTimecodeTitle) => (
+                TIMELINE_NAMESPACE,
+                TIMELINE_CREATE_TIMECODE_TITLE,
                 serde_json::Value::Null,
             ),
             Self::Timeline(TimelineProductAction::PlaceAsset(payload)) => (
@@ -3078,7 +3089,8 @@ impl<'a> ProductActionAvailability<'a> {
             TimelineProductAction::EditSelection(edit) => {
                 self.state.can_apply_timeline_selection_edit(*edit)
             }
-            TimelineProductAction::CreateBasicTitle => true,
+            TimelineProductAction::CreateBasicTitle
+            | TimelineProductAction::CreateTimecodeTitle => true,
             TimelineProductAction::PlaceAsset(payload) => {
                 self.state.can_place_asset_on_timeline(*payload)
             }
@@ -3698,6 +3710,7 @@ mod tests {
                 TimelineSelectionEdit::SetClipsEnabled { enabled: false },
             )),
             ProductAction::Timeline(TimelineProductAction::CreateBasicTitle),
+            ProductAction::Timeline(TimelineProductAction::CreateTimecodeTitle),
             ProductAction::Timeline(TimelineProductAction::PlaceAsset(
                 TimelineDropAssetPayload {
                     asset_id: AssetId::new(),

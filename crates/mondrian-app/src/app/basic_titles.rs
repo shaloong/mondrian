@@ -14,6 +14,18 @@ impl AppState {
     /// existing Track is occupied, the new Track and Clip are committed
     /// together so one Undo removes both.
     pub fn create_basic_title_at_playhead(&mut self) -> mondrian_core::Result<ClipId> {
+        self.create_title_at_playhead(None)
+    }
+
+    /// Place a generated Timecode Title using the same undoable placement rules.
+    pub fn create_timecode_title_at_playhead(&mut self) -> mondrian_core::Result<ClipId> {
+        self.create_title_at_playhead(Some(mondrian_core::TitleTimecode::default()))
+    }
+
+    fn create_title_at_playhead(
+        &mut self,
+        timecode: Option<mondrian_core::TitleTimecode>,
+    ) -> mondrian_core::Result<ClipId> {
         let sequence = self.active_sequence().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "create_basic_title".to_owned(),
@@ -43,8 +55,13 @@ impl AppState {
             .max(1);
         let font_family = default_basic_title_font_family().to_owned();
 
+        let (description, status) = if timecode.is_some() {
+            ("创建时间码标题", "status-timecode-title-created")
+        } else {
+            ("创建基础标题", "status-title-created")
+        };
         let (_sequence_id, clip_id) =
-            self.commit_active_sequence_edit("创建基础标题", move |sequence| {
+            self.commit_active_sequence_edit(description, move |sequence| {
                 let time_base = sequence.time_base();
                 let position =
                     TimelineTime::from_frame_position(FramePosition::new(start_frame, time_base))?;
@@ -78,7 +95,12 @@ impl AppState {
                     })
                     .unwrap_or_else(|| sequence.add_video_track());
 
-                let clip = Clip::new_basic_title("标题", font_family, position, duration)?;
+                let clip = match timecode {
+                    Some(clock) => {
+                        Clip::new_timecode_title(clock, font_family, position, duration)?
+                    }
+                    None => Clip::new_basic_title("标题", font_family, position, duration)?,
+                };
                 let clip_id = clip.id;
                 sequence
                     .video_track_mut(track_id)
@@ -89,7 +111,7 @@ impl AppState {
                 Ok((sequence.id, clip_id))
             })?;
         self.select_clip_by_id(clip_id);
-        self.set_status_hint(AppMessage::new("status-title-created"), false);
+        self.set_status_hint(AppMessage::new(status), false);
         Ok(clip_id)
     }
 }
@@ -109,6 +131,34 @@ fn title_range_is_free(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timecode_title_menu_action_creates_an_undoable_clock_clip() {
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Timecode")));
+        state
+            .dispatch_action(crate::app::ui_actions::timeline_create_timecode_title_action())
+            .unwrap();
+
+        let clip = state
+            .active_sequence()
+            .unwrap()
+            .video_tracks
+            .iter()
+            .find_map(|track| track.clips.first())
+            .unwrap();
+        assert_eq!(
+            clip.content.basic_title().unwrap().timecode().unwrap(),
+            Some(mondrian_core::TitleTimecode::default())
+        );
+        assert!(state.undo_timeline().unwrap());
+        assert!(state
+            .active_sequence()
+            .unwrap()
+            .video_tracks
+            .iter()
+            .all(|track| track.clips.is_empty()));
+    }
 
     #[test]
     fn occupied_tracks_create_title_and_track_in_one_undo_step() {

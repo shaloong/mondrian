@@ -273,6 +273,14 @@ impl AppState {
                 });
             }
 
+            for &clip_id in id_map.values() {
+                if let Some(title) =
+                    seq.find_clip_mut(clip_id).and_then(|clip| clip.content.basic_title_mut())
+                {
+                    title.remap_timecode_media_clip(|id| id_map.get(&id).copied())?;
+                }
+            }
+
             for mut transition in audio_transitions {
                 let (Some(left), Some(right)) = (
                     audio_edit_ids.get(&transition.left).copied(),

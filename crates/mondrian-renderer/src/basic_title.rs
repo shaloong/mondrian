@@ -637,8 +637,11 @@ impl BasicTitleRasterizer {
             }
             BasicTitleVerticalAlign::Bottom => safe_top + (safe_height - block_height).max(0.0),
         };
-        let offset_x = safe_left.round() as i32;
-        let offset_y = vertical_offset.round() as i32;
+        let [left, top] = title.layout_anchor.map_or([safe_left, vertical_offset], |position| {
+            position.map(|px| px * uniform_scale)
+        });
+        let offset_x = left.round() as i32;
+        let offset_y = top.round() as i32;
 
         let appearance = title.appearance;
         let style = title_decoration::Style {
@@ -785,7 +788,7 @@ impl BasicTitleRasterizer {
                     data: pixels,
                     color_space: working_color_space,
                 },
-                geometry_active,
+                geometry_active || title.layout_anchor.is_some(),
             ),
             sampled_source_to_author: [
                 1.0 / uniform_scale,
@@ -1159,7 +1162,7 @@ fn hash_title_raster_request(
 ) {
     // Revision tag prevents an implementation contract change from reusing
     // an earlier session key.
-    2u8.hash(hasher);
+    3u8.hash(hasher);
     title.text.hash(hasher);
     title.font_family.hash(hasher);
     title.font_weight.hash(hasher);
@@ -1187,6 +1190,7 @@ fn hash_title_raster_request(
     title.line_height.to_bits().hash(hasher);
     title.horizontal_align.hash(hasher);
     title.vertical_align.hash(hasher);
+    title.layout_anchor.map(|anchor| anchor.map(f32::to_bits)).hash(hasher);
     author.width.hash(hasher);
     author.height.hash(hasher);
     title_safe_margin.to_bits().hash(hasher);
@@ -1310,6 +1314,62 @@ mod tests {
             )
             .expect("the default title must use its declared font");
         assert!(output.frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
+    }
+
+    #[test]
+    fn timecode_title_raster_identity_includes_label_and_anchor() {
+        use mondrian_core::{Rational, TimelineDisplaySettings, TitleTimecode};
+
+        let clock = TitleTimecode::default();
+        let evaluate = |clock, sequence_time| {
+            BasicTitle::new_timecode(clock, default_basic_title_font_family())
+                .unwrap()
+                .evaluate_for_render(
+                    TimelineTime::ZERO,
+                    sequence_time,
+                    Rational::FPS_30,
+                    TimelineDisplaySettings::frames(0),
+                    None,
+                )
+                .unwrap()
+        };
+        let resolution = Resolution { width: 320, height: 180 };
+        let mut rasterizer = BasicTitleRasterizer::new();
+        let mut render = |title: &EvaluatedBasicTitle| {
+            rasterizer
+                .rasterize(
+                    title,
+                    resolution,
+                    0.20,
+                    resolution,
+                    WorkingColorSpace::LinearRec709,
+                    mondrian_core::SampleAspectRatio::SQUARE,
+                )
+                .unwrap()
+        };
+        let at_origin = evaluate(clock, TimelineTime::ZERO);
+        let first = render(&at_origin);
+        assert!(render(&at_origin).diagnostics.cache_hit);
+        assert!(first.frame().rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
+
+        let next = evaluate(clock, TimelineTime::new(1, 30).unwrap());
+        assert_eq!(next.text, "00:00:00:01");
+        assert_ne!(render(&next).identity(), first.identity());
+
+        let moved = evaluate(
+            TitleTimecode { position: [45.6, 31.6], ..clock },
+            TimelineTime::ZERO,
+        );
+        let moved = render(&moved);
+        assert_ne!(moved.identity(), first.identity());
+        let a = first.sampled_source_to_author();
+        let b = moved.sampled_source_to_author();
+        assert_eq!([b[2] - a[2], b[5] - a[5]], [20.0, 6.0]);
+        assert_eq!(first.frame().rgba_f32().data, moved.frame().rgba_f32().data);
+
+        let mut transparent = at_origin;
+        transparent.appearance.background_opacity = 0.0;
+        assert!(render(&transparent).frame().uses_bilinear_composite_projection());
     }
 
     #[test]

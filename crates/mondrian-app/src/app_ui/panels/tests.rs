@@ -1475,6 +1475,64 @@ fn inspector_model_exposes_basic_title_properties_in_canonical_order() {
 }
 
 #[test]
+fn timecode_title_inspector_exposes_only_relevant_localized_clock_controls() {
+    use mondrian_core::{BasicTitle, TitleTimecode, TitleTimecodeSource};
+
+    for source in [
+        TitleTimecodeSource::Sequence,
+        TitleTimecodeSource::Media {
+            reference: mondrian_core::VisualSourceReference::Unbound,
+        },
+        TitleTimecodeSource::Custom {
+            frames_per_second: 30,
+            drop_frame: false,
+            start_frame: 0,
+        },
+    ] {
+        let mut sequence = Sequence::new("Timecode");
+        let track_id = sequence.video_tracks[0].id;
+        let clip = Clip::new_timecode_title(
+            TitleTimecode { source, ..TitleTimecode::default() },
+            mondrian_core::default_basic_title_font_family(),
+            TimelineTime::ZERO,
+            tt(25, sequence.time_base()),
+        )
+        .unwrap();
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
+        let model = InspectorPanelModel::from_app_state(&state, &chinese_localizer());
+        let property = |path| model.clip_properties.iter().find(|item| item.path == path);
+        assert_eq!(
+            property(BasicTitle::TIMECODE_FORMAT_PATH).unwrap().label,
+            "显示格式"
+        );
+        assert_eq!(
+            property(BasicTitle::TIMECODE_POSITION_PATH).unwrap().label,
+            "文本位置（像素）"
+        );
+        assert!(property(BasicTitle::TEXT_PATH).is_none());
+        assert_eq!(
+            property(BasicTitle::TIMECODE_MEDIA_CLIP_PATH).map(|model| model.label.as_str()),
+            matches!(source, TitleTimecodeSource::Media { .. }).then_some("媒体片段")
+        );
+        for path in [
+            BasicTitle::TIMECODE_RATE_PATH,
+            BasicTitle::TIMECODE_DROP_PATH,
+            BasicTitle::TIMECODE_START_PATH,
+        ] {
+            assert_eq!(
+                property(path).is_some(),
+                matches!(source, TitleTimecodeSource::Custom { .. })
+            );
+        }
+    }
+}
+
+#[test]
 fn asset_browser_tabs_expose_effect_browser() {
     let tabs = visible_tabs_for_slot(PanelKind::Assets, &[]);
 

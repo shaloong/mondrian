@@ -6,12 +6,14 @@ use mondrian_core::{
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
     ClipId, ColorEncodingSpec, EvaluatedBasicTitle, FrameRounding, MondrianError, Result,
-    TimelineTime, VisualSourceRetime, VisualSourceTimeSample, WorkingColorSpace,
+    TimelineTime, TitleTimecode, TitleTimecodeSource, VisualSourceReference, VisualSourceRetime,
+    VisualSourceTimeSample, WorkingColorSpace,
 };
 use mondrian_effects::{CompiledEffectGraph, EffectExecutionSession};
 use mondrian_timeline::visual_schedule::{
     AuxiliaryClipAdmissionError, PreparedAuxiliaryClipSample,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::prepared_visual_program::PreparedVisualProgram;
@@ -266,6 +268,8 @@ pub struct TimelineBasicTitlePlan {
     pub placement: TimelineClipExecutionRef,
     /// Typed title semantics evaluated at the Clip's exact visual author time.
     pub title: EvaluatedBasicTitle,
+    /// Optional Clip picture to exclude from the owner Sequence's composite.
+    original_media_to_hide: Option<ClipId>,
     /// Clip opacity evaluated at the same author time.
     pub opacity: f32,
     /// Clip blend mode used by ordinary Timeline compositing.
@@ -965,6 +969,8 @@ fn evaluate_timeline_render_plan_with_effects(
         }
     }
 
+    apply_timecode_original_compositing(&mut elements);
+
     if let Some(effect_graph) = effects.evaluate_timeline_grade(current_time)? {
         let effect_graph = effects.scene_lighting(&effect_graph, current_time)?;
         elements.push(TimelineRenderPlanElement::TimelineGrade(
@@ -981,6 +987,59 @@ fn evaluate_timeline_render_plan_with_effects(
         elements,
         diagnostics,
     })
+}
+
+fn apply_timecode_original_compositing(elements: &mut Vec<TimelineRenderPlanElement>) {
+    let mut exclusions = HashMap::<ClipId, f32>::new();
+    let mut exclude = |title: &TimelineBasicTitlePlan,
+                       amount,
+                       other_endpoint: Option<&TimelineTransitionInputPlan>| {
+        // A transition already attenuates its other endpoint.
+        if let Some(id) = title.original_media_to_hide
+            && amount > 0.0
+            && !matches!(other_endpoint, Some(TimelineTransitionInputPlan::Media(media)) if media.placement.clip_id == id)
+        {
+            *exclusions.entry(id).or_default() += amount;
+        }
+    };
+    for element in elements.iter() {
+        match element {
+            TimelineRenderPlanElement::BasicTitle(title) => exclude(title, 1.0, None),
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                if let TimelineTransitionInputPlan::BasicTitle(title) = &transition.left {
+                    exclude(title, 1.0 - transition.progress, Some(&transition.right));
+                }
+                if let TimelineTransitionInputPlan::BasicTitle(title) = &transition.right {
+                    exclude(title, transition.progress, Some(&transition.left));
+                }
+            }
+            _ => {}
+        }
+    }
+    if exclusions.is_empty() {
+        return;
+    }
+
+    let adjust_media = |media: &mut TimelineMediaPlan| {
+        if let Some(&amount) = exclusions.get(&media.placement.clip_id) {
+            media.opacity *= (1.0 - amount).max(0.0);
+        }
+        media.opacity > 0.0
+    };
+    elements.retain_mut(|element| match element {
+        TimelineRenderPlanElement::Media(media) => adjust_media(media),
+        TimelineRenderPlanElement::CrossDissolve(transition) => {
+            for input in [&mut transition.left, &mut transition.right] {
+                if let TimelineTransitionInputPlan::Media(media) = input
+                    && !adjust_media(media)
+                {
+                    *input = TimelineTransitionInputPlan::Transparent;
+                }
+            }
+            true
+        }
+        _ => true,
+    });
 }
 
 fn compile_transition(
@@ -1086,11 +1145,10 @@ fn compile_transition_input(
     if clip.is_disabled || clip.opacity.clamp(0.0, 1.0) <= 0.0 {
         return Ok(TimelineTransitionInputPlan::Transparent);
     }
-    let element = compile_flat_clip(clip, endpoint, source, frame, diagnostics, effects)?
-        .ok_or_else(|| MondrianError::WorkflowStepFailed {
-            step_id: "compile_video_transition".to_owned(),
-            reason: "Transition endpoint did not produce a visual input".to_owned(),
-        })?;
+    let Some(element) = compile_flat_clip(clip, endpoint, source, frame, diagnostics, effects)?
+    else {
+        return Ok(TimelineTransitionInputPlan::Transparent);
+    };
     match element {
         TimelineRenderPlanElement::Media(media) => Ok(TimelineTransitionInputPlan::Media(media)),
         TimelineRenderPlanElement::SolidColor(solid) => {
@@ -1174,10 +1232,41 @@ fn compile_flat_clip(
             })
         }
         ClipContent::BasicTitle { title } => {
-            let title = title.evaluate(ac.clip_time)?;
+            let time_base = source.source_time_base();
+            let original_media_to_hide = title.timecode_original_media_to_hide()?;
+            let media_sample = match title.timecode()? {
+                Some(TitleTimecode {
+                    source: TitleTimecodeSource::Media { reference }, ..
+                }) => {
+                    let sample = match reference {
+                        VisualSourceReference::Clip { clip_id, retime } => {
+                            source.sample_title_media_timecode(clip_id, frame.time, retime)?
+                        }
+                        VisualSourceReference::Unbound => None,
+                        VisualSourceReference::Asset { .. }
+                        | VisualSourceReference::Sequence { .. } => {
+                            unreachable!("validated Timecode Title source is a Clip or unbound")
+                        }
+                    };
+                    let Some(sample) = sample else {
+                        diagnostics.skipped_unrenderable += 1;
+                        return Ok(None);
+                    };
+                    Some(sample)
+                }
+                _ => None,
+            };
+            let title = title.evaluate_for_render(
+                ac.clip_time,
+                frame.time,
+                mondrian_core::Rational::new(time_base.den, time_base.num),
+                source.source_timeline_display(),
+                media_sample,
+            )?;
             TimelineRenderPlanElement::BasicTitle(TimelineBasicTitlePlan {
                 placement,
                 title,
+                original_media_to_hide,
                 opacity,
                 blend_mode: ac.blend_mode,
                 transform: ac.transform_matrix,
@@ -1186,13 +1275,7 @@ fn compile_flat_clip(
             })
         }
         ClipContent::Media { asset_id, interpretation } => {
-            let source_sample = if let Some(frame_rate) = interpretation.frame_rate_override {
-                mondrian_core::SourceSampleTarget::covering(TimelineTime::from_frame_position(
-                    ac.source_sample.to_frame_position(frame_rate)?,
-                )?)
-            } else {
-                ac.source_sample
-            };
+            let source_sample = interpretation.resolve_source_sample(ac.source_sample)?;
             TimelineRenderPlanElement::Media(TimelineMediaPlan {
                 placement,
                 asset_id,
@@ -1552,6 +1635,294 @@ mod tests {
 
         assert!((title.opacity - 0.5).abs() < 1.0e-6);
         assert!((title.title.font_size - 60.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn timecode_title_plan_uses_frozen_sequence_and_clip_clocks() {
+        use mondrian_core::{
+            TimelineDisplaySettings, TitleTimecode, TitleTimecodeFormat, TitleTimecodeSource,
+        };
+
+        let mut sequence = Sequence::new("timecode title owner");
+        sequence.settings.timeline_display = TimelineDisplaySettings::frames(1000);
+        let grid = sequence.time_base();
+        let at = tt(10, grid);
+        let mut custom = Clip::new_timecode_title(
+            TitleTimecode {
+                format: TitleTimecodeFormat::Frames,
+                source: TitleTimecodeSource::Custom {
+                    frames_per_second: 24,
+                    drop_frame: false,
+                    start_frame: -2,
+                },
+                position: [40.0, 50.0],
+            },
+            "Segoe UI",
+            at,
+            tt(20, grid),
+        )
+        .unwrap();
+        custom.clip_time_in = TimelineTime::new(1, 1).unwrap();
+        custom.set_source_origin(TimelineTime::new(12, 1).unwrap()).unwrap();
+        let owner = Clip::new_timecode_title(
+            TitleTimecode {
+                format: TitleTimecodeFormat::Frames,
+                ..TitleTimecode::default()
+            },
+            "Segoe UI",
+            at,
+            tt(20, grid),
+        )
+        .unwrap();
+        sequence.video_tracks[0].add_clip(owner).unwrap();
+        sequence.video_tracks[1].add_clip(custom).unwrap();
+        let prepared = PreparedVisualProgram::prepare(&sequence).unwrap();
+        sequence.settings.timeline_display = TimelineDisplaySettings::frames(9999);
+
+        for request in [
+            TimelineEvaluationRequest::preview(fp(10, grid), 0.5),
+            TimelineEvaluationRequest::export(fp(10, grid)),
+        ] {
+            let plan = evaluate_prepared_visual_program(&prepared, request).unwrap();
+            let titles: Vec<_> = plan
+                .elements
+                .iter()
+                .map(|element| {
+                    let TimelineRenderPlanElement::BasicTitle(title) = element else {
+                        panic!("test contains only Timecode Titles");
+                    };
+                    (title.title.text.as_str(), title.title.layout_anchor)
+                })
+                .collect();
+            assert_eq!(
+                titles,
+                [("1010", Some([25.6, 25.6])), ("22", Some([40.0, 50.0]))]
+            );
+        }
+
+        let plan = evaluate_prepared_visual_program(
+            &prepared,
+            TimelineEvaluationRequest::export(fp(15, grid)),
+        )
+        .unwrap();
+        let TimelineRenderPlanElement::BasicTitle(owner) = &plan.elements[0] else {
+            panic!("expected timecode title")
+        };
+        assert_eq!(owner.title.text, "1015");
+    }
+
+    #[test]
+    fn timecode_title_samples_exact_editorial_media_placement() {
+        use mondrian_core::timeline_data::EditorialSourceIdentity;
+        use mondrian_core::{
+            SmpteCountingMode, SmpteTimecodeReference, TitleTimecodeFormat, VisualSourceBoundary,
+        };
+
+        let mut sequence = Sequence::new("media timecode");
+        sequence.settings.frame_rate = Rational::FPS_24;
+        let grid = sequence.time_base();
+        let asset_id = AssetId::new();
+        let mut add_media = |start_frame, origin, scale, rate_override| {
+            let mut clip = Clip::new(asset_id, tt(0, grid), tt(8, grid)).unwrap();
+            clip.is_disabled = true;
+            clip.set_constant_source_time_map(tt(origin, grid), scale).unwrap();
+            let interpretation = clip.media_interpretation_mut().unwrap();
+            interpretation.editorial_source = Some(
+                EditorialSourceIdentity::new(
+                    None,
+                    Some(
+                        SmpteTimecodeReference::new(
+                            Rational::FPS_24,
+                            SmpteCountingMode::NonDropFrame,
+                            start_frame,
+                        )
+                        .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            );
+            interpretation.frame_rate_override = rate_override;
+            let id = clip.id;
+            sequence.add_video_track();
+            sequence.video_tracks.last_mut().unwrap().add_clip(clip).unwrap();
+            id
+        };
+        let forward = add_media(100, 2, TimeScale::new(3, 2).unwrap(), None);
+        let reverse = add_media(200, 8, TimeScale::NEGATIVE_ONE, None);
+        let held = add_media(
+            300,
+            5,
+            TimeScale::new(0, 1).unwrap(),
+            Some(Rational::new(12, 1)),
+        );
+        let mut add_title = |clip_id, mode| {
+            let title = Clip::new_timecode_title(
+                TitleTimecode {
+                    format: TitleTimecodeFormat::Frames,
+                    source: TitleTimecodeSource::Media {
+                        reference: VisualSourceReference::Clip {
+                            clip_id,
+                            retime: VisualSourceRetime { mode, ..VisualSourceRetime::default() },
+                        },
+                    },
+                    ..TitleTimecode::default()
+                },
+                "Segoe UI",
+                TimelineTime::ZERO,
+                tt(12, grid),
+            )
+            .unwrap();
+            let id = title.id;
+            sequence.add_video_track();
+            sequence.video_tracks.last_mut().unwrap().add_clip(title).unwrap();
+            id
+        };
+        let first_title = add_title(forward, VisualSourceBoundary::Transparent);
+        add_title(reverse, VisualSourceBoundary::Clamp);
+        add_title(held, VisualSourceBoundary::Hold);
+
+        let labels = |elements: Vec<TimelineRenderPlanElement>| {
+            elements
+                .into_iter()
+                .map(|element| match element {
+                    TimelineRenderPlanElement::BasicTitle(title) => title.title.text,
+                    _ => panic!("disabled media must only contribute metadata"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let prepared = PreparedVisualProgram::prepare(&sequence).unwrap();
+        let mut duplicated = sequence.clone();
+        duplicated.fork_author_identities_for_sequence_duplicate();
+        for (frame, expected) in [
+            (0, &["102", "207", "304"][..]),
+            (1, &["103", "206", "304"]),
+            (8, &["200", "304"]),
+        ] {
+            let position = fp(frame, grid);
+            assert_eq!(labels(analysis_elements(&sequence, frame)), expected);
+            assert_eq!(labels(analysis_elements(&duplicated, frame)), expected);
+            assert_eq!(
+                labels(
+                    evaluate_prepared_visual_program(
+                        &prepared,
+                        TimelineEvaluationRequest::export(position),
+                    )
+                    .unwrap()
+                    .elements
+                ),
+                expected
+            );
+        }
+
+        sequence
+            .video_tracks
+            .iter_mut()
+            .for_each(|track| track.clips.retain(|clip| clip.id != forward));
+        let error = evaluate_timeline_render_plan(
+            &sequence,
+            TimelineEvaluationRequest::analysis(fp(1, grid)),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(&forward.to_string()));
+        assert!(sequence.find_clip(first_title).is_some());
+    }
+
+    #[test]
+    fn timecode_title_original_switch_only_changes_the_bound_picture() {
+        use mondrian_core::BasicTitle;
+
+        let mut sequence = Sequence::new("timecode original picture");
+        let grid = sequence.time_base();
+        let asset = AssetId::new();
+        let bound = Clip::new(asset, tt(0, grid), tt(10, grid)).unwrap();
+        let next = Clip::new(asset, tt(10, grid), tt(10, grid)).unwrap();
+        let unaffected = Clip::new(asset, tt(0, grid), tt(20, grid)).unwrap();
+        let (bound_id, next_id, unaffected_id) = (bound.id, next.id, unaffected.id);
+        sequence.video_tracks[0].add_clip(bound).unwrap();
+        sequence.video_tracks[0].add_clip(next).unwrap();
+        sequence.video_tracks[1].add_clip(unaffected).unwrap();
+        sequence.video_transitions.push(VideoTransition::cross_dissolve(
+            bound_id,
+            next_id,
+            mondrian_core::TimelineTimeRange::new(tt(8, grid), tt(4, grid)).unwrap(),
+        ));
+
+        let mut title = Clip::new_timecode_title(
+            TitleTimecode::default(),
+            "Segoe UI",
+            tt(0, grid),
+            tt(20, grid),
+        )
+        .unwrap();
+        let title_id = title.id;
+        let set = |clip: &mut Clip, path: &str, value| {
+            clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: path.to_owned(),
+                value,
+            })
+            .unwrap();
+        };
+        set(
+            &mut title,
+            BasicTitle::TIMECODE_MEDIA_CLIP_PATH,
+            PropertyValue::VisualSource(VisualSourceReference::Clip {
+                clip_id: bound_id,
+                retime: VisualSourceRetime::default(),
+            }),
+        );
+        sequence.add_video_track();
+        sequence.video_tracks.last_mut().unwrap().add_clip(title).unwrap();
+        assert_eq!(analysis_elements(&sequence, 7).len(), 3);
+
+        set(
+            sequence.find_clip_mut(title_id).unwrap(),
+            BasicTitle::TIMECODE_COMPOSITE_ORIGINAL_PATH,
+            PropertyValue::Bool(false),
+        );
+        let before_cut = analysis_elements(&sequence, 7);
+        let [TimelineRenderPlanElement::Media(unaffected), TimelineRenderPlanElement::BasicTitle(_)] =
+            before_cut.as_slice()
+        else {
+            panic!("only the bound media placement should be excluded");
+        };
+        assert_eq!(unaffected.placement.clip_id, unaffected_id);
+
+        let prepared = PreparedVisualProgram::prepare(&sequence).unwrap();
+        let transition_frame = evaluate_prepared_visual_program(
+            &prepared,
+            TimelineEvaluationRequest::export(fp(10, grid)),
+        )
+        .unwrap();
+        let TimelineRenderPlanElement::CrossDissolve(transition) = &transition_frame.elements[0]
+        else {
+            panic!("transition should remain in the ordered plan");
+        };
+        assert!(matches!(
+            transition.left,
+            TimelineTransitionInputPlan::Transparent
+        ));
+        let TimelineTransitionInputPlan::Media(next) = &transition.right else {
+            panic!("the other endpoint remains visible");
+        };
+        assert_eq!((next.placement.clip_id, next.opacity), (next_id, 1.0));
+
+        let mut title = sequence.video_tracks.last_mut().unwrap().remove_clip(title_id).unwrap();
+        title.position = tt(10, grid);
+        sequence.video_tracks[0].remove_clip(next_id).unwrap();
+        sequence.video_tracks[0].add_clip(title).unwrap();
+        sequence.video_transitions[0].right = title_id;
+        let direct_dissolve = analysis_elements(&sequence, 10);
+        let TimelineRenderPlanElement::CrossDissolve(transition) = &direct_dissolve[0] else {
+            panic!("expected direct dissolve between the media and its timecode title");
+        };
+        let TimelineTransitionInputPlan::Media(bound) = &transition.left else {
+            panic!("media in the same transition should keep its normal crossfade");
+        };
+        assert_eq!(
+            (bound.placement.clip_id, bound.opacity, transition.progress),
+            (bound_id, 1.0, 0.5)
+        );
     }
 
     #[test]
