@@ -1392,6 +1392,23 @@ fn metadata_line_label(
                 sample.frame,
             )
         }
+        TitleMetadataField::SoundTimecode => {
+            let Some(assets) = frame.title_assets else {
+                return Ok(None);
+            };
+            let Some(sample) =
+                source.metadata_sound_timecode_at(frame.time, line.track_id, assets)?
+            else {
+                return Ok(None);
+            };
+            let grid = source.source_time_base();
+            let rate = Rational::new(grid.den, grid.num);
+            let mode = match source.source_timeline_display().format {
+                TimelineDisplayFormat::Timecode(mode) => mode,
+                TimelineDisplayFormat::Frames => SmpteCountingMode::NonDropFrame,
+            };
+            line.format_sound_timecode(sample.recording, sample.source, rate, mode)
+        }
     };
     label.map(Some).map_err(|error| MondrianError::WorkflowStepFailed {
         step_id: "metadata_burn_in".to_owned(),
@@ -1809,6 +1826,79 @@ mod tests {
             [15.0, 15.0, 30.0]
         );
         assert_ne!(lines[1].anchor, lines[2].anchor);
+    }
+
+    #[test]
+    fn sound_timecode_follows_the_selected_audio_track_and_half_open_component_cut() {
+        use mondrian_core::{
+            AudioSourceComponentId, AudioSourceTimecode, TitleAssetNames, TITLE_METADATA_LINE_PATHS,
+        };
+        let mut sequence = Sequence::new("Sound clock cuts");
+        sequence.settings.frame_rate = Rational::FPS_25;
+        let time_base = sequence.time_base();
+        let asset = AssetId::new();
+        let a1 = sequence.audio_tracks[0].id;
+        let a2 = sequence.add_audio_track();
+        let first_id = AudioSourceComponentId::primary();
+        let second_id = AudioSourceComponentId::new();
+        for (track, start, end, id) in [
+            (a1, 0, 6, first_id),
+            (a2, 0, 3, first_id),
+            (a2, 3, 6, second_id),
+        ] {
+            let mut clip =
+                Clip::new(asset, tt(start, time_base), tt(end - start, time_base)).unwrap();
+            clip.set_source_origin(tt(1, time_base)).unwrap();
+            sequence.add_media_audio_clip(track, clip, id).unwrap();
+        }
+        let mut title =
+            Clip::new_metadata_burn_in_title("Segoe UI", tt(0, time_base), tt(8, time_base))
+                .unwrap();
+        let first = TITLE_METADATA_LINE_PATHS[0];
+        for (path, value) in [
+            (first.field, PropertyValue::Enum("sound_timecode".into())),
+            (first.track, PropertyValue::Text(a2.to_string())),
+            (first.format, PropertyValue::Enum("frames".into())),
+        ] {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.into(),
+                    value,
+                })
+                .unwrap();
+        }
+        sequence.video_tracks[0].add_clip(title).unwrap();
+        let mut labels = TitleAssetNames::from_source(None, std::path::Path::new("sound.wav"));
+        for (id, seconds) in [(first_id, 10), (second_id, 20)] {
+            labels.sound_timecodes.insert(
+                id,
+                AudioSourceTimecode::from_sample_count(seconds * 48_000, 48_000, None).unwrap(),
+            );
+        }
+        let names = HashMap::from([(asset, labels)]);
+        let prepared = PreparedVisualProgram::prepare(&sequence).unwrap();
+        for (frame, expected) in [(2, Some("253")), (3, Some("501")), (6, None)] {
+            let plan = evaluate_prepared_visual_program_with_title_assets(
+                &prepared,
+                TimelineEvaluationRequest::export(fp(frame, time_base)),
+                &mut EffectExecutionSession::default(),
+                Some(&names),
+            )
+            .unwrap();
+            let label = plan.elements.iter().find_map(|element| {
+                let TimelineRenderPlanElement::BasicTitle(title) = element else {
+                    return None;
+                };
+                Some(title.title.positioned_lines[0].text.as_str())
+            });
+            assert_eq!(label, expected, "timecode at frame {frame}");
+        }
+        let mut stale = sequence.clone();
+        stale.audio_track_mut(a2).unwrap().clips[1].audio_components[0].enabled = false;
+        assert_ne!(
+            crate::prepared_visual_program::prepared_visual_author_fingerprint(&stale).unwrap(),
+            prepared.visual_author_fingerprint(),
+        );
     }
 
     #[test]

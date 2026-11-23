@@ -1417,6 +1417,17 @@ impl RenderQueue {
                 detail: "immutable export visual execution snapshot is unavailable".to_owned(),
             });
         };
+        let requested_sound_timecodes = prepared_execution.visual().sound_timecode_components();
+        if job.config.timeline.sound_timecodes.iter().any(|(asset_id, components)| {
+            components.iter().any(|(component_id, recording)| {
+                !requested_sound_timecodes.contains(&(*asset_id, *component_id))
+                    || recording.origin().is_negative()
+            })
+        }) {
+            return self.reject(ExportAdmissionError::InvalidDelivery {
+                detail: "sound timecode snapshot contains unadmitted recording clocks".to_owned(),
+            });
+        }
         if let Err(error) = validate_timeline_export_execution_snapshot_with_audio_selection(
             &job.config.timeline.sequence,
             &job.config.timeline.sequences,

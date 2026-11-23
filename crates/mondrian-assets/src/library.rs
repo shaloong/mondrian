@@ -165,11 +165,28 @@ impl AssetRecord {
         &self,
         component_id: AudioSourceComponentId,
     ) -> Option<AudioSourceSelection> {
+        let (stream, fingerprint) = self.admitted_audio_stream(component_id)?;
+        Some(AudioSourceSelection::from_stream(stream, fingerprint))
+    }
+
+    /// Match a recording clock to the Asset revision and stable Component ID.
+    pub fn admitted_audio_source_timecode(
+        &self,
+        component_id: AudioSourceComponentId,
+    ) -> Option<mondrian_core::AudioSourceTimecode> {
+        let (stream, _) = self.admitted_audio_stream(component_id)?;
+        stream.source_timecode
+    }
+
+    fn admitted_audio_stream(
+        &self,
+        component_id: AudioSourceComponentId,
+    ) -> Option<(&mondrian_core::AudioStreamInfo, MediaFileFingerprint)> {
         let fingerprint = self.source_fingerprint()?;
         let probe = self.media_probe()?;
         let stream =
             self.audio_components.resolve_current(component_id, probe, fingerprint).ok()?;
-        Some(AudioSourceSelection::from_stream(stream, fingerprint))
+        Some((stream, fingerprint))
     }
 
     /// Whether this file Asset requires a fresh probe before execution.
@@ -1176,6 +1193,7 @@ impl AssetLibrary {
     pub fn capture_title_asset_metadata(
         &self,
         include_frame_rates: bool,
+        include_sound_timecodes: bool,
     ) -> Result<(u64, mondrian_core::TitleAssetMetadata)> {
         let db = self.db.lock();
         let revision = connection_revision(&db)?;
@@ -1201,18 +1219,37 @@ impl AssetLibrary {
             })?;
             let mut names: mondrian_core::TitleAssetMetadata =
                 rows.collect::<rusqlite::Result<_>>()?;
-            if include_frame_rates {
-                let mut videos = db.prepare(
+            if include_frame_rates || include_sound_timecodes {
+                let mut sources = db.prepare(
                     "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at
                      , interpretation, audio_components, source_fingerprint, retired_at
-                     FROM assets WHERE asset_type = 'video'",
+                     FROM assets WHERE asset_type = 'video' OR (?1 AND asset_type = 'audio')",
                 )?;
-                for asset in videos.query_map([], parse_asset_row)? {
+                for asset in sources.query_map([include_sound_timecodes], parse_asset_row)? {
                     let asset = asset?;
-                    if let Some(video) = asset.media_probe().and_then(MediaInfo::primary_video)
+                    if include_frame_rates
+                        && let Some(video) = asset.media_probe().and_then(MediaInfo::primary_video)
                         && let Some(labels) = names.get_mut(&asset.id)
                     {
                         labels.set_media_frame_rate(video);
+                    }
+                    if include_sound_timecodes && let Some(path) = asset.file_path() {
+                        for component in &asset.audio_components.components {
+                            if let Some(timecode) =
+                                asset.admitted_audio_source_timecode(component.id)
+                            {
+                                names
+                                    .entry(asset.id)
+                                    .or_insert_with(|| {
+                                        mondrian_core::TitleAssetNames::from_source(
+                                            Some(&asset.name),
+                                            path,
+                                        )
+                                    })
+                                    .sound_timecodes
+                                    .insert(component.id, timecode);
+                            }
+                        }
                     }
                 }
             }
@@ -1880,10 +1917,11 @@ mod tests {
         let id = commit_info(&library, &path, lightweight_video_info(&path));
         let generated = library.create_solid_color_asset(Some("Generated")).unwrap();
         library.rename_asset(id, "First library name").unwrap();
-        let (old_revision, frozen) = library.capture_title_asset_metadata(false).unwrap();
+        let (old_revision, frozen) = library.capture_title_asset_metadata(false, false).unwrap();
         library.rename_asset(id, "Second library name").unwrap();
         library.retire_assets(&[id]).unwrap();
-        let (current_revision, current) = library.capture_title_asset_metadata(false).unwrap();
+        let (current_revision, current) =
+            library.capture_title_asset_metadata(false, false).unwrap();
         assert!(current_revision > old_revision);
         assert_eq!(
             frozen[&id].asset_name.as_deref(),
@@ -1909,19 +1947,19 @@ mod tests {
         let mut info = lightweight_video_info(&path);
         info.video_streams[0].frame_rate = mondrian_core::Rational::new(60_000, 2_002);
         let id = commit_info(&library, &path, info.clone());
-        let (before, frozen) = library.capture_title_asset_metadata(true).unwrap();
+        let (before, frozen) = library.capture_title_asset_metadata(true, false).unwrap();
         assert_eq!(
             frozen[&id].media_frame_rate.as_deref(),
             Some("30000/1001 fps")
         );
         assert_eq!(
-            library.capture_title_asset_metadata(false).unwrap().1[&id].media_frame_rate,
+            library.capture_title_asset_metadata(false, false).unwrap().1[&id].media_frame_rate,
             None
         );
 
         info.video_streams[0].frame_rate_proven = false;
         assert_eq!(commit_info(&library, &path, info), id);
-        let (after, current) = library.capture_title_asset_metadata(true).unwrap();
+        let (after, current) = library.capture_title_asset_metadata(true, false).unwrap();
         assert!(after > before);
         assert_eq!(current[&id].media_frame_rate, None);
         assert_eq!(

@@ -2891,10 +2891,8 @@ impl InspectorPanelModel {
                         BasicTitle::CLIP_INFO_PROPERTY_PATHS.as_slice()
                     }
                 };
-                let metadata_paths = title
-                    .metadata_lines()
-                    .ok()
-                    .flatten()
+                let metadata_lines = title.metadata_lines().ok().flatten();
+                let metadata_paths = metadata_lines
                     .into_iter()
                     .flatten()
                     .zip(TITLE_METADATA_LINE_PATHS)
@@ -2963,16 +2961,27 @@ impl InspectorPanelModel {
                             if path == BasicTitle::CLIP_INFO_TRACK_PATH
                                 || TITLE_METADATA_LINE_PATHS.iter().any(|line| path == line.track)
                             {
-                                model.enum_labels.extend(
-                                    sequence.video_tracks.iter().enumerate().map(
-                                        |(index, track)| {
-                                            (
-                                                track.id.to_string(),
-                                                format!("V{} · {}", index + 1, track.name),
-                                            )
+                                let sound = metadata_lines.is_some_and(|lines| {
+                                    lines.into_iter().zip(TITLE_METADATA_LINE_PATHS).any(
+                                        |(line, paths)| {
+                                            paths.track == path
+                                                && line.field == TitleMetadataField::SoundTimecode
                                         },
-                                    ),
-                                );
+                                    )
+                                });
+                                let (prefix, tracks) = if sound {
+                                    ("A", &sequence.audio_tracks)
+                                } else {
+                                    ("V", &sequence.video_tracks)
+                                };
+                                model.enum_labels.extend(tracks.iter().enumerate().map(
+                                    |(index, track)| {
+                                        (
+                                            track.id.to_string(),
+                                            format!("{prefix}{} · {}", index + 1, track.name),
+                                        )
+                                    },
+                                ));
                             }
                             model
                         })

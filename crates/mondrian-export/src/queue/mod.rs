@@ -8259,25 +8259,31 @@ fn prepare_export_visual_frame_closure(
     intent: TimelineVisualExecutionIntent,
 ) -> Result<PreparedExportVisualClosure, String> {
     let title_assets = Arc::clone(visual_session.title_assets.get_or_insert_with(|| {
-        Arc::new(
-            timeline
-                .media
-                .iter()
-                .map(|(&id, source)| {
-                    let mut names = mondrian_core::TitleAssetNames::from_source(
-                        source.source_asset_name.as_deref(),
-                        &source.path,
-                    );
-                    if source.picture_source_extent
-                        != Some(mondrian_timeline::PictureSourceExtent::Still)
-                        && let Some(video) = &source.source_video_stream
-                    {
-                        names.set_media_frame_rate(video);
-                    }
-                    (id, names)
-                })
-                .collect(),
-        )
+        let mut assets: mondrian_core::TitleAssetMetadata = timeline
+            .media
+            .iter()
+            .map(|(&id, source)| {
+                let mut names = mondrian_core::TitleAssetNames::from_source(
+                    source.source_asset_name.as_deref(),
+                    &source.path,
+                );
+                if source.picture_source_extent
+                    != Some(mondrian_timeline::PictureSourceExtent::Still)
+                    && let Some(video) = &source.source_video_stream
+                {
+                    names.set_media_frame_rate(video);
+                }
+                (id, names)
+            })
+            .collect();
+        for (id, timecodes) in &timeline.sound_timecodes {
+            assets
+                .entry(*id)
+                .or_insert_with(|| mondrian_core::TitleAssetNames::from_source(None, Path::new("")))
+                .sound_timecodes
+                .clone_from(timecodes);
+        }
+        Arc::new(assets)
     }));
     let visual_session = std::cell::RefCell::new(visual_session);
     let closure = prepare_bound_visual_frame_closure_for_targets(
@@ -14142,6 +14148,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::from([(asset_id, dependency)]),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -14618,6 +14625,7 @@ mod tests {
             sequences: Vec::new(),
             media,
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -15159,6 +15167,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: Some(prepared_execution),
             range: TimelineExportRange::SequenceInOut,
         }
@@ -17116,6 +17125,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -17300,6 +17310,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -17388,6 +17399,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -17466,6 +17478,7 @@ mod tests {
                 sequences: Vec::new(),
                 media: HashMap::new(),
                 color_environment,
+                sound_timecodes: Default::default(),
                 prepared_execution: None,
                 range: TimelineExportRange::SequenceInOut,
             };
@@ -17571,6 +17584,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -17615,8 +17629,12 @@ mod tests {
     }
 
     #[test]
-    fn metadata_burn_in_export_reads_names_and_frame_rate_from_the_serialized_job_snapshot() {
-        use mondrian_core::{BasicTitle, TITLE_METADATA_LINE_PATHS};
+    fn metadata_burn_in_export_reads_names_frame_rate_and_sound_timecode_from_the_queued_snapshot()
+    {
+        use mondrian_core::{
+            AudioSourceComponentId, AudioSourceTimecode, BasicTitle, SmpteCountingMode,
+            TITLE_METADATA_LINE_PATHS,
+        };
 
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("camera.mp4");
@@ -17634,6 +17652,16 @@ mod tests {
         let time_base = sequence.time_base();
         let start = tt(0, time_base);
         let duration = tt(2, time_base);
+        let audio = AssetId::new();
+        let component = AudioSourceComponentId::primary();
+        let audio_track = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                audio_track,
+                Clip::new(audio, start, duration).unwrap(),
+                component,
+            )
+            .unwrap();
         sequence.video_tracks[0]
             .add_clip(Clip::new(asset, start, duration).unwrap())
             .unwrap();
@@ -17665,6 +17693,19 @@ mod tests {
                 value: PropertyValue::Enum("media_frame_rate".into()),
             })
             .unwrap();
+        let second = TITLE_METADATA_LINE_PATHS[1];
+        for (path, value) in [
+            (second.enabled, PropertyValue::Bool(true)),
+            (second.field, PropertyValue::Enum("sound_timecode".into())),
+            (second.track, PropertyValue::Text(audio_track.to_string())),
+        ] {
+            metadata
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.into(),
+                    value,
+                })
+                .unwrap();
+        }
         sequence.video_tracks.last_mut().unwrap().add_clip(metadata).unwrap();
 
         let mut source = test_media_dependency(path, None, Default::default(), None);
@@ -17678,13 +17719,20 @@ mod tests {
             TimelineTimeRange::new(start, duration).unwrap(),
         ));
         let source_map = HashMap::from([(asset, source)]);
-        let submitted = TimelineExportSnapshot::unprepared(
+        let mut submitted = TimelineExportSnapshot::unprepared(
             mondrian_core::ProjectColorEnvironment::default(),
             sequence,
             vec![],
             source_map,
             TimelineExportRange::EntireSequence,
         );
+        let clock = AudioSourceTimecode::from_sample_count(
+            172_801_440,
+            48_000,
+            Some((Rational::FPS_2997, SmpteCountingMode::DropFrame)),
+        )
+        .unwrap();
+        submitted.sound_timecodes.insert(audio, HashMap::from([(component, clock)]));
         let mut queued: TimelineExportSnapshot =
             serde_json::from_slice(&serde_json::to_vec(&submitted).unwrap()).unwrap();
         let mut session = captured_visual_session_for_test(&mut queued);
@@ -17722,7 +17770,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let rate = format!("{} fps", video.frame_rate.reduce());
-        assert_eq!(labels, ["Library name at submission", "camera.mp4", &rate]);
+        assert_eq!(
+            labels,
+            [
+                "Library name at submission",
+                "camera.mp4",
+                &rate,
+                "01:00:00;01"
+            ]
+        );
     }
 
     #[test]
@@ -17770,8 +17826,9 @@ mod tests {
     ) {
         use mondrian_core::timeline_data::EditorialSourceIdentity;
         use mondrian_core::{
-            BasicTitle, BasicTitleContentKind, Color, SmpteCountingMode, SmpteTimecodeReference,
-            TitleTimecode, TitleTimecodeSource, VisualSourceReference,
+            AudioSourceComponentId, AudioSourceTimecode, BasicTitle, BasicTitleContentKind, Color,
+            SmpteCountingMode, SmpteTimecodeReference, TitleTimecode, TitleTimecodeSource,
+            VisualSourceReference,
         };
         use mondrian_effects::{instantiate_effect_node, EffectType};
         use mondrian_timeline::clip::Transform2D;
@@ -17846,16 +17903,27 @@ mod tests {
             Clip::new_basic_title("Mondrian\nTitle", font, start, duration)
         }
         .unwrap();
+        let mut sound_timecodes = HashMap::new();
         if title_kind == BasicTitleContentKind::MetadataBurnIn {
             let [first, second, ..] = mondrian_core::TITLE_METADATA_LINE_PATHS;
+            let asset = AssetId::new();
+            let track = child.audio_tracks[0].id;
+            let component = AudioSourceComponentId::primary();
+            child
+                .add_media_audio_clip(track, Clip::new(asset, start, duration).unwrap(), component)
+                .unwrap();
+            let clock = AudioSourceTimecode::from_sample_count(
+                172_801_440,
+                48_000,
+                Some((Rational::FPS_2997, SmpteCountingMode::DropFrame)),
+            )
+            .unwrap();
+            sound_timecodes.insert(asset, HashMap::from([(component, clock)]));
             for (path, value) in [
                 (first.position, PropertyValue::Vec2([0.42, 0.20].into())),
                 (second.enabled, PropertyValue::Bool(true)),
-                (
-                    second.field,
-                    PropertyValue::Enum("sequence_timecode".into()),
-                ),
-                (second.format, PropertyValue::Enum("frames".into())),
+                (second.field, PropertyValue::Enum("sound_timecode".into())),
+                (second.track, PropertyValue::Text(track.to_string())),
                 (second.position, PropertyValue::Vec2([0.52, 0.35].into())),
             ] {
                 title
@@ -17957,6 +18025,7 @@ mod tests {
             sequences: vec![child],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes,
             prepared_execution: None,
             range: TimelineExportRange::EntireSequence,
         };
@@ -18062,6 +18131,7 @@ mod tests {
             sequences: vec![child],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -18141,6 +18211,7 @@ mod tests {
             sequences: vec![child],
             media: HashMap::new(),
             color_environment,
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -18339,6 +18410,7 @@ mod tests {
             sequences: vec![],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::EntireSequence,
         };
@@ -18584,6 +18656,7 @@ mod tests {
             sequences: vec![child],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::EntireSequence,
         };
@@ -18728,6 +18801,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -18951,6 +19025,7 @@ mod tests {
             sequences: vec![nested],
             media,
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -19060,6 +19135,7 @@ mod tests {
             sequences: vec![nested],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
         };
@@ -19460,6 +19536,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -19483,6 +19560,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::EntireSequence,
         };
@@ -19504,6 +19582,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::EntireSequence,
         };
@@ -19543,6 +19622,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -19609,6 +19689,7 @@ mod tests {
             sequences: vec![child],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
         };
@@ -19692,6 +19773,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
         };
@@ -19795,6 +19877,7 @@ mod tests {
             sequences: vec![unrelated],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
         };
@@ -19955,6 +20038,7 @@ mod tests {
             sequences: vec![child],
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: Some(admitted_execution),
             range,
         };
@@ -20040,6 +20124,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 10 },
         };
@@ -20126,6 +20211,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
         };
@@ -20201,6 +20287,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::WorkArea { start_frame: 0, end_frame_exclusive: 1 },
         };
@@ -20307,6 +20394,7 @@ mod tests {
             // different diagnostic and prove admission happened too late.
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::WorkArea { start_frame: 1, end_frame_exclusive: 2 },
         };
@@ -20395,6 +20483,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -21335,6 +21424,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -21398,6 +21488,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -21462,6 +21553,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -21507,6 +21599,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -21579,6 +21672,7 @@ mod tests {
             sequences: Vec::new(),
             media,
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -21708,6 +21802,7 @@ mod tests {
                 sequences: Vec::new(),
                 media: HashMap::from([(asset_id, dependency)]),
                 color_environment: mondrian_core::ProjectColorEnvironment::default(),
+                sound_timecodes: Default::default(),
                 prepared_execution: None,
                 range: TimelineExportRange::SequenceInOut,
             }
@@ -21891,6 +21986,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
@@ -21944,6 +22040,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };

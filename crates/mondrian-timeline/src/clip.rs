@@ -1,6 +1,6 @@
 //! Clip（时间线剪辑片段）
 
-use crate::audio::AudioComponentEdit;
+use crate::audio::{AudioComponentEdit, AudioComponentSource};
 use glam::Vec2;
 use mondrian_core::{
     automation::{
@@ -981,6 +981,15 @@ impl Clip {
     ) -> Result<mondrian_core::SourceSampleTarget> {
         let local = timeline_time.checked_sub(self.position)?;
         self.source_time_map.sample(local)
+    }
+
+    pub(crate) fn sound_timecode_components(
+        &self,
+    ) -> impl Iterator<Item = AudioSourceComponentId> + '_ {
+        self.audio_components.iter().filter_map(|edit| match edit.source {
+            AudioComponentSource::Media { component_id } if edit.enabled => Some(component_id),
+            AudioComponentSource::Media { .. } | AudioComponentSource::NestedOutput { .. } => None,
+        })
     }
 
     pub(crate) fn sample_title_media_timecode(

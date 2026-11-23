@@ -96,6 +96,11 @@ impl PreparedTimelineVisualSnapshot {
         self.closure.media_asset_ids()
     }
 
+    /// Stable Components whose recording metadata can appear on a selected title.
+    pub fn sound_timecode_components(&self) -> &BTreeSet<(AssetId, AudioSourceComponentId)> {
+        self.closure.sound_timecode_components()
+    }
+
     /// Selected Transition identities grouped by their owner Sequence.
     pub fn transition_ids(&self) -> &BTreeMap<SequenceId, BTreeSet<VideoTransitionId>> {
         self.closure.transition_ids()
@@ -718,6 +723,15 @@ pub fn validate_timeline_export_execution_snapshot_with_audio_selection(
             TimelineExportDependencyError::VisualClosureEvidenceMismatch {
                 detail: "selected media identities differ from frozen Program reachability"
                     .to_owned(),
+            },
+        );
+    }
+    if closure.sound_timecode_components() != visual.sound_timecode_components() {
+        return Err(
+            TimelineExportDependencyError::VisualClosureEvidenceMismatch {
+                detail:
+                    "selected sound timecode components differ from frozen Program reachability"
+                        .to_owned(),
             },
         );
     }

@@ -12,9 +12,9 @@ use crate::{
     PreparedVisualProgramBinding,
 };
 use mondrian_core::{
-    AssetId, ClipId, FramePosition, SequenceId, SequenceRevision, SourceSampleTarget, TimelineTime,
-    TimelineTimeRange, VideoTransitionId, VisualSourceBoundary, VisualSourceReference,
-    VisualSourceRetime, VisualSourceTimeError,
+    AssetId, AudioSourceComponentId, ClipId, FramePosition, SequenceId, SequenceRevision,
+    SourceSampleTarget, TimelineTime, TimelineTimeRange, VideoTransitionId, VisualSourceBoundary,
+    VisualSourceReference, VisualSourceRetime, VisualSourceTimeError,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -28,6 +28,7 @@ pub struct PreparedVisualRangeClosure {
     sequence_ids: BTreeSet<SequenceId>,
     programs: BTreeMap<SequenceId, Arc<PreparedVisualProgram>>,
     media_asset_ids: BTreeSet<AssetId>,
+    sound_timecode_components: BTreeSet<(AssetId, AudioSourceComponentId)>,
     transition_ids: BTreeMap<SequenceId, BTreeSet<VideoTransitionId>>,
     basic_title_font_queries: BTreeSet<BasicTitleFontQuery>,
 }
@@ -63,6 +64,10 @@ impl PreparedVisualRangeClosure {
     /// File-backed picture media identities reachable in the requested range.
     pub fn media_asset_ids(&self) -> &BTreeSet<AssetId> {
         &self.media_asset_ids
+    }
+
+    pub fn sound_timecode_components(&self) -> &BTreeSet<(AssetId, AudioSourceComponentId)> {
+        &self.sound_timecode_components
     }
 
     /// Selected Transition identities grouped by their owning Sequence.
@@ -474,6 +479,7 @@ where
         active_path: Vec::new(),
         selected_sequence_ids: BTreeSet::new(),
         media_asset_ids: BTreeSet::new(),
+        sound_timecode_components: BTreeSet::new(),
         transition_ids: BTreeMap::new(),
         basic_title_font_queries: BTreeSet::new(),
         strict_auxiliary,
@@ -503,6 +509,7 @@ where
         sequence_ids: selected_sequence_ids,
         programs: selected_programs,
         media_asset_ids: builder.media_asset_ids,
+        sound_timecode_components: builder.sound_timecode_components,
         transition_ids: builder.transition_ids,
         basic_title_font_queries: builder.basic_title_font_queries,
     })
@@ -619,6 +626,7 @@ struct PreparedVisualRangeClosureBuilder<'a, 'programs, Prepare> {
     active_path: Vec<SequenceId>,
     selected_sequence_ids: BTreeSet<SequenceId>,
     media_asset_ids: BTreeSet<AssetId>,
+    sound_timecode_components: BTreeSet<(AssetId, AudioSourceComponentId)>,
     transition_ids: BTreeMap<SequenceId, BTreeSet<VideoTransitionId>>,
     basic_title_font_queries: BTreeSet<BasicTitleFontQuery>,
     strict_auxiliary: bool,
@@ -660,6 +668,7 @@ where
                     }
                 })?;
             self.media_asset_ids.extend(reachability.media_asset_ids);
+            self.sound_timecode_components.extend(reachability.sound_timecode_components);
             if !reachability.transition_ids.is_empty() {
                 self.transition_ids
                     .entry(sequence.id)

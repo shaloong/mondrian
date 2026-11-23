@@ -755,6 +755,14 @@ pub trait RenderPlanSource {
         track: Option<TrackId>,
     ) -> Result<Option<crate::TitleMediaTimecodeSample>>;
 
+    /// Find the recording clock of the first eligible active audio Component.
+    fn metadata_sound_timecode_at(
+        &self,
+        time: TimelineTime,
+        track: Option<TrackId>,
+        title_assets: &crate::TitleAssetMetadata,
+    ) -> Result<Option<crate::TitleSoundTimecodeSample>>;
+
     /// Timecode origin and counting convention of the owner Sequence.
     fn source_timeline_display(&self) -> crate::TimelineDisplaySettings;
 

@@ -420,14 +420,45 @@ pub(crate) fn capture_timeline_export_snapshot_with_audio_selection(
         })
         .collect();
 
-    Ok(TimelineExportSnapshot::captured(
+    let mut snapshot = TimelineExportSnapshot::captured(
         state.project_color_environment().clone(),
         sequence,
         nested_sequences,
         media,
         range,
         dependencies.execution_snapshot().clone(),
-    ))
+    );
+    let requested = dependencies.execution_snapshot().visual().sound_timecode_components();
+    if !requested.is_empty()
+        && let Some(library) = state.asset_library()
+    {
+        let mut assets = HashMap::new();
+        for &(asset_id, component_id) in requested {
+            let record = match assets.entry(asset_id) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let record = library.get_asset(asset_id).map_err(|error| error.to_string())?;
+                    entry.insert(record.filter(|record| {
+                        record.file_path().is_some_and(|path| {
+                            Some(mondrian_media::MediaFileFingerprint::capture(path))
+                                == record.source_fingerprint()
+                        })
+                    }))
+                }
+            };
+            if let Some(timecode) = record
+                .as_ref()
+                .and_then(|record| record.admitted_audio_source_timecode(component_id))
+            {
+                snapshot
+                    .sound_timecodes
+                    .entry(asset_id)
+                    .or_default()
+                    .insert(component_id, timecode);
+            }
+        }
+    }
+    Ok(snapshot)
 }
 
 fn resolve_export_media_dependencies(
@@ -661,6 +692,10 @@ mod tests {
     }
 
     fn write_minimal_wav(path: &std::path::Path) {
+        write_test_wav(path, None);
+    }
+
+    fn write_test_wav(path: &std::path::Path, time_reference: Option<u64>) {
         let sample_rate = 8_000u32;
         let channels = 1u16;
         let bits_per_sample = 16u16;
@@ -686,8 +721,107 @@ mod tests {
         for sample in samples {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
+        if let Some(samples) = time_reference {
+            let mut bext = [0; 602];
+            bext[338..346].copy_from_slice(&samples.to_le_bytes());
+            let ixml = b"<BWFXML><SPEED><TIMECODE_RATE>30000/1001</TIMECODE_RATE><TIMECODE_FLAG>DF</TIMECODE_FLAG></SPEED></BWFXML>";
+            for (name, chunk) in [(b"bext", bext.as_slice()), (b"iXML", ixml.as_slice())] {
+                bytes.extend_from_slice(name);
+                bytes.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(chunk);
+                if !chunk.len().is_multiple_of(2) {
+                    bytes.push(0);
+                }
+            }
+            let riff_size = (bytes.len() - 8) as u32;
+            bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        }
 
         std::fs::write(path, bytes).expect("write wav fixture");
+    }
+
+    #[test]
+    fn sound_timecode_is_frozen_from_real_bwf_for_video_only_export() {
+        use mondrian_core::{
+            PropertyHost, PropertyMutation, PropertyValue, Rational, TimelineTime,
+            TITLE_METADATA_LINE_PATHS,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recording.wav");
+        write_test_wav(&path, Some(28_800_240));
+        let path = std::fs::canonicalize(path).unwrap();
+        let library = AssetLibrary::open(directory.path().join("library")).unwrap();
+        let probe = mondrian_media::probe_media_info(&path).unwrap();
+        let candidate = mondrian_assets::AssetMediaProbeCandidate::new(
+            path.clone(),
+            mondrian_media::MediaFileFingerprint::capture(&path),
+            probe,
+        )
+        .unwrap();
+        let asset = library.commit_media_probe(candidate, None).unwrap();
+        let component = AudioSourceComponentId::primary();
+        let mut state = AppState::default();
+        state.test_set_asset_library(Some(library));
+        let mut sequence = Sequence::new("Audio timecode in video-only output");
+        let duration = TimelineTime::new(1, 500).unwrap();
+        let track = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track,
+                Clip::new(asset, TimelineTime::ZERO, duration).unwrap(),
+                component,
+            )
+            .unwrap();
+        // An unrelated audio Clip outside the title/window must not enter the
+        // recording-clock closure or require a physical export dependency.
+        sequence
+            .add_media_audio_clip(
+                track,
+                Clip::new(AssetId::new(), TimelineTime::ONE, duration).unwrap(),
+                component,
+            )
+            .unwrap();
+        let mut title = Clip::new_metadata_burn_in_title(
+            mondrian_core::default_basic_title_font_family(),
+            TimelineTime::ZERO,
+            duration,
+        )
+        .unwrap();
+        let line = TITLE_METADATA_LINE_PATHS[0];
+        for (path, value) in [
+            (line.field, PropertyValue::Enum("sound_timecode".into())),
+            (line.track, PropertyValue::Text(track.to_string())),
+        ] {
+            title
+                .apply_property_mutation(PropertyMutation::SetStaticValue {
+                    path: path.into(),
+                    value,
+                })
+                .unwrap();
+        }
+        sequence.video_tracks[0].add_clip(title).unwrap();
+        let snapshot = capture_timeline_export_snapshot(
+            &state,
+            sequence,
+            Vec::new(),
+            TimelineExportRange::EntireSequence,
+            false,
+        )
+        .unwrap();
+        assert!(snapshot.media.is_empty());
+        let (_, previews) = state
+            .asset_library()
+            .unwrap()
+            .capture_title_asset_metadata(false, true)
+            .unwrap();
+        assert_eq!(snapshot.sound_timecodes.len(), 1);
+        let recording = snapshot.sound_timecodes[&asset][&component];
+        assert_eq!(recording, previews[&asset].sound_timecodes[&component]);
+        assert_eq!(recording.origin(), TimelineTime::new(360_003, 100).unwrap());
+        assert_eq!(recording.grid().unwrap().frame_rate(), Rational::FPS_2997);
+        let restored: TimelineExportSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.sound_timecodes, snapshot.sound_timecodes);
     }
 
     #[test]

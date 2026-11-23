@@ -3059,6 +3059,27 @@ fn rekey_exact_curve(curve: &mut mondrian_core::ExactAutomationCurve) {
 }
 
 impl Sequence {
+    /// Unmuted audio Tracks requested by active Sound Timecode title fields.
+    pub fn sound_timecode_tracks(&self) -> impl Iterator<Item = &Track> {
+        let mut requested = HashSet::new();
+        for track in self.video_tracks.iter().filter(|track| track.is_visible && !track.is_muted) {
+            for clip in track.clips.iter().filter(|clip| !clip.is_disabled) {
+                if let Some(title) = clip.content.basic_title()
+                    && let Ok(Some(lines)) = title.metadata_lines()
+                {
+                    requested.extend(lines.into_iter().filter_map(|line| {
+                        (line.enabled
+                            && line.field == mondrian_core::TitleMetadataField::SoundTimecode)
+                            .then_some(line.track_id)
+                    }));
+                }
+            }
+        }
+        self.audio_tracks.iter().filter(move |track| {
+            !track.is_muted && (requested.contains(&None) || requested.contains(&Some(track.id)))
+        })
+    }
+
     fn first_title_source_at<'a, T>(
         &'a self,
         time: TimelineTime,
@@ -3102,6 +3123,37 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
         self.first_title_source_at(time, track, |clip| {
             clip.sample_metadata_source_timecode(time, self.settings.frame_rate)
         })
+    }
+
+    fn metadata_sound_timecode_at(
+        &self,
+        time: TimelineTime,
+        track_id: Option<TrackId>,
+        title_assets: &mondrian_core::TitleAssetMetadata,
+    ) -> mondrian_core::Result<Option<mondrian_core::TitleSoundTimecodeSample>> {
+        for track in self
+            .audio_tracks
+            .iter()
+            .filter(|track| !track.is_muted && track_id.is_none_or(|id| track.id == id))
+        {
+            for clip in track.active_clips_at(time)?.into_iter().rev() {
+                let Some(asset) =
+                    clip.content.media_asset_id().and_then(|id| title_assets.get(&id))
+                else {
+                    continue;
+                };
+                if let Some(recording) = clip
+                    .sound_timecode_components()
+                    .find_map(|id| asset.sound_timecodes.get(&id).copied())
+                {
+                    return Ok(Some(mondrian_core::TitleSoundTimecodeSample {
+                        recording,
+                        source: clip.timeline_to_source_sample(time)?,
+                    }));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn source_timeline_display(&self) -> TimelineDisplaySettings {

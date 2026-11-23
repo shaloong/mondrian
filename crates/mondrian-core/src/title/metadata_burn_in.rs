@@ -6,8 +6,8 @@ use crate::automation::{
     PropertyBag, PropertyDescriptor, PropertyValue,
 };
 use crate::{
-    DisplayTimecodeError, ParameterId, Rational, Result, SmpteCountingMode, TimelineTime,
-    TitleClipInfoField, TitleTimecodeFormat, TrackId,
+    AudioSourceTimecode, DisplayTimecodeError, ParameterId, Rational, Result, SmpteCountingMode,
+    SourceSampleTarget, TimelineTime, TitleClipInfoField, TitleTimecodeFormat, TrackId,
 };
 
 /// Stable author paths for an independently positioned metadata line.
@@ -70,15 +70,27 @@ pub enum TitleMetadataField {
     Clip(TitleClipInfoField),
     SequenceTimecode,
     SourceTimecode,
+    SoundTimecode,
+}
+
+/// One selected audio recording with its placement's exact source coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TitleSoundTimecodeSample {
+    pub recording: AudioSourceTimecode,
+    pub source: SourceSampleTarget,
 }
 
 impl TitleMetadataField {
     pub const fn is_timecode(self) -> bool {
-        matches!(self, Self::SequenceTimecode | Self::SourceTimecode)
+        matches!(
+            self,
+            Self::SequenceTimecode | Self::SourceTimecode | Self::SoundTimecode
+        )
     }
 
     pub const fn uses_asset_metadata(self) -> bool {
         matches!(self, Self::Clip(field) if field.uses_asset_metadata())
+            || matches!(self, Self::SoundTimecode)
     }
 }
 
@@ -109,6 +121,7 @@ impl TitleMetadataLine {
             "media_frame_rate" => TitleMetadataField::Clip(TitleClipInfoField::MediaFrameRate),
             "sequence_timecode" => TitleMetadataField::SequenceTimecode,
             "source_timecode" => TitleMetadataField::SourceTimecode,
+            "sound_timecode" => TitleMetadataField::SoundTimecode,
             _ => return Err(title_error("unknown Metadata Burn-in field")),
         };
         let Some(PropertyValue::Vec2(position)) = properties.evaluate(paths.position, time) else {
@@ -154,6 +167,27 @@ impl TitleMetadataLine {
             .ok_or(DisplayTimecodeError::FrameOffsetOverflow)?;
         timecode::format_label(self.format, frame, rate, counting, start)
     }
+
+    /// Format exact audio source time on its declared grid, or on the given
+    /// owner grid when the recording supplies only a wall-clock origin.
+    pub fn format_sound_timecode(
+        self,
+        recording: AudioSourceTimecode,
+        source: SourceSampleTarget,
+        sequence_rate: Rational,
+        sequence_counting: SmpteCountingMode,
+    ) -> std::result::Result<String, DisplayTimecodeError> {
+        let (rate, counting) =
+            recording.grid().map_or((sequence_rate, sequence_counting), |grid| {
+                (grid.frame_rate(), grid.mode())
+            });
+        let frame = if self.custom_start_frame.is_some() {
+            source.to_frame_position(rate)?
+        } else {
+            recording.frame_at(source, rate)?
+        };
+        self.format_timecode(rate, counting, 0, frame.frame)
+    }
 }
 
 const FIELD_CHOICES: &[(&str, &str)] = &[
@@ -164,15 +198,17 @@ const FIELD_CHOICES: &[(&str, &str)] = &[
     ("sequence_timecode", "Sequence timecode"),
     ("source_timecode", "Source timecode"),
     ("media_frame_rate", "Media frame rate"),
+    ("sound_timecode", "Sound timecode"),
 ];
 
 /// Old Projects and standalone queued exports both serialize these option lists.
 pub(super) fn upgrade_field_options(properties: &mut PropertyBag) {
     let current = enum_options(FIELD_CHOICES);
-    let legacy = &current[..current.len() - 1];
     for paths in TITLE_METADATA_LINE_PATHS {
         if let Some(property) = properties.property(paths.field)
-            && property.descriptor.schema.enum_options == legacy
+            && [6, 7]
+                .into_iter()
+                .any(|count| property.descriptor.schema.enum_options == current[..count])
             && property.validate().is_ok()
         {
             let mut property = property.clone();
@@ -260,16 +296,60 @@ mod tests {
     #[test]
     fn metadata_burn_in_reads_legacy_export_titles_with_stable_line_addresses() {
         let current = crate::BasicTitle::new_metadata_burn_in("Arial").unwrap();
-        let mut legacy = serde_json::to_value(&current).unwrap();
-        for paths in TITLE_METADATA_LINE_PATHS {
-            let options = legacy["properties"]["properties"][paths.field]["descriptor"]["schema"]
-                ["enum_options"]
-                .as_array_mut()
-                .unwrap();
-            assert_eq!(options.pop().unwrap()["key"], "media_frame_rate");
+        for count in [6, 7] {
+            let mut legacy = serde_json::to_value(&current).unwrap();
+            for paths in TITLE_METADATA_LINE_PATHS {
+                legacy["properties"]["properties"][paths.field]["descriptor"]["schema"]
+                    ["enum_options"]
+                    .as_array_mut()
+                    .unwrap()
+                    .truncate(count);
+            }
+            let restored: crate::BasicTitle = serde_json::from_value(legacy).unwrap();
+            restored.validate_author_state().unwrap();
+            assert_eq!(restored, current);
         }
-        let restored: crate::BasicTitle = serde_json::from_value(legacy).unwrap();
-        restored.validate_author_state().unwrap();
-        assert_eq!(restored, current);
+    }
+
+    #[test]
+    fn sound_timecode_preserves_subframe_origin_and_reverse_edge_ownership() {
+        let title = crate::BasicTitle::new_metadata_burn_in("Arial").unwrap();
+        let mut line = title.metadata_lines().unwrap().unwrap()[0];
+        let rate = Rational::FPS_2997;
+        let mode = SmpteCountingMode::DropFrame;
+        let sound = AudioSourceTimecode::from_sample_count(172_801_440, 48_000, Some((rate, mode)))
+            .unwrap();
+        let format = |line: TitleMetadataLine, source| {
+            line.format_sound_timecode(
+                sound,
+                source,
+                Rational::FPS_25,
+                SmpteCountingMode::NonDropFrame,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            format(line, SourceSampleTarget::covering(TimelineTime::ZERO)),
+            "01:00:00;01"
+        );
+        let first_boundary = TimelineTime::new(107_894 * 1001, 30_000)
+            .unwrap()
+            .checked_sub(sound.origin())
+            .unwrap();
+        assert_eq!(
+            format(line, SourceSampleTarget::covering(first_boundary)),
+            "01:00:00;02"
+        );
+        assert_eq!(
+            format(line, SourceSampleTarget::strict_predecessor(first_boundary)),
+            "01:00:00;01",
+        );
+        line.custom_start_frame = Some(100);
+        line.offset_frames = -1;
+        line.format = TitleTimecodeFormat::Frames;
+        assert_eq!(
+            format(line, SourceSampleTarget::covering(TimelineTime::ZERO)),
+            "99"
+        );
     }
 }

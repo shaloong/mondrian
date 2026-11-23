@@ -1320,6 +1320,11 @@ pub struct TimelineExportSnapshot {
     /// the encoded audio Program Output over `range`.
     #[serde(default)]
     pub media: HashMap<AssetId, ExportMediaDependency>,
+    /// Optional, frozen recording-clock facts used by reachable titles.
+    /// These sources need no essence admission or audio decode.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sound_timecodes:
+        HashMap<AssetId, HashMap<AudioSourceComponentId, mondrian_core::AudioSourceTimecode>>,
     #[serde(default)]
     pub range: TimelineExportRange,
     /// Non-persistent immutable visual/audio Programs and font bytes that
@@ -1348,6 +1353,7 @@ impl TimelineExportSnapshot {
             sequence,
             sequences,
             media,
+            sound_timecodes: HashMap::new(),
             range,
             prepared_execution: None,
         }
@@ -1371,6 +1377,7 @@ impl TimelineExportSnapshot {
             sequence,
             sequences,
             media,
+            sound_timecodes: HashMap::new(),
             range,
             prepared_execution: Some(prepared_execution),
         }

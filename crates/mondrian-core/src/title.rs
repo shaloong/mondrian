@@ -17,7 +17,8 @@ mod numbers;
 mod timecode;
 pub use clip_info::{TitleAssetMetadata, TitleAssetNames, TitleClipInfo, TitleClipInfoField};
 pub use metadata_burn_in::{
-    TitleMetadataField, TitleMetadataLine, TitleMetadataLinePaths, TITLE_METADATA_LINE_PATHS,
+    TitleMetadataField, TitleMetadataLine, TitleMetadataLinePaths, TitleSoundTimecodeSample,
+    TITLE_METADATA_LINE_PATHS,
 };
 pub use numbers::TitleNumbersFormat;
 pub use timecode::{

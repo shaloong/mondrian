@@ -253,8 +253,8 @@ pub struct PreparedVisualAuthorFingerprintError {
 /// color workflow, authored Preview raster scale, Basic Title safe-area
 /// settings, and the ordered scene lights. It deliberately
 /// includes complete video Track records so a newly introduced visual field
-/// cannot silently evade snapshot validation; changing that projection
-/// requires a domain/version bump.
+/// cannot silently evade snapshot validation. It also binds the displayed
+/// sequence clock and audio Tracks selected for Sound Timecode titles.
 pub fn prepared_visual_author_fingerprint(
     sequence: &Sequence,
 ) -> std::result::Result<[u8; 32], PreparedVisualAuthorFingerprintError> {
@@ -266,7 +266,9 @@ pub fn prepared_visual_author_fingerprint(
         &sequence.settings.color,
         sequence.settings.preview.resolution_scale,
         sequence.settings.title_safe_margin,
+        sequence.settings.timeline_display,
         &sequence.video_tracks,
+        sequence.sound_timecode_tracks().collect::<Vec<_>>(),
         &sequence.video_transitions,
         &sequence.grade_definitions,
         &sequence.grade_groups,
@@ -278,7 +280,7 @@ pub fn prepared_visual_author_fingerprint(
         reason: error.to_string(),
     })?;
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.prepared-visual-author-fingerprint.v5");
+    hasher.update(b"mondrian.prepared-visual-author-fingerprint.v6");
     hasher.update((canonical.len() as u64).to_le_bytes());
     hasher.update(canonical);
     Ok(hasher.finalize().into())
@@ -478,6 +480,8 @@ pub struct PreparedVisualRangeReachability {
     /// Static font queries selected by reachable Basic Title Clips and
     /// Transition endpoints.
     pub basic_title_font_queries: Vec<BasicTitleFontQuery>,
+    /// Stable audio Component identities required only for title labels.
+    pub sound_timecode_components: Vec<(AssetId, mondrian_core::AudioSourceComponentId)>,
     /// Nested Sequence windows that can contribute transitively.
     pub nested_demands: Vec<PreparedVisualNestedRangeDemand>,
 }
@@ -932,7 +936,8 @@ impl PreparedVisualProgram {
             schedule.diagnostics(),
             &clip_effects,
             &transitions,
-        );
+        )
+        .saturating_add(schedule.sound_timecode_retained_bytes());
         Ok(Self {
             key,
             materialization: PreparedVisualMaterializationContract {
@@ -1568,6 +1573,23 @@ impl PreparedVisualProgram {
                 reachability.basic_title_font_queries.push(BasicTitleFontQuery::from_title(
                     &title.evaluate(TimelineTime::ZERO)?,
                 ));
+                if let Some(lines) = title.metadata_lines()? {
+                    let mut sound = lines
+                        .into_iter()
+                        .filter(|line| {
+                            line.enabled
+                                && line.field == mondrian_core::TitleMetadataField::SoundTimecode
+                        })
+                        .peekable();
+                    if sound.peek().is_some() {
+                        let window = self.sound_timecode_window(&clip)?;
+                        for line in sound {
+                            reachability.sound_timecode_components.extend(
+                                self.schedule.sound_timecode_dependencies(line.track_id, window),
+                            );
+                        }
+                    }
+                }
             }
             let ClipContent::NestedSequence { sequence_id, .. } = clip.content else {
                 continue;
@@ -1622,6 +1644,8 @@ impl PreparedVisualProgram {
         reachability.transition_ids.dedup();
         reachability.basic_title_font_queries.sort();
         reachability.basic_title_font_queries.dedup();
+        reachability.sound_timecode_components.sort_unstable();
+        reachability.sound_timecode_components.dedup();
         reachability.nested_demands.sort_unstable_by_key(|demand| {
             (
                 demand.sequence_id.to_string(),
@@ -1713,6 +1737,37 @@ impl PreparedVisualProgram {
                 })?;
         }
         Ok(dependencies)
+    }
+
+    fn sound_timecode_window(
+        &self,
+        clip: &mondrian_timeline::visual_schedule::PreparedVisualScheduleRangeClip,
+    ) -> Result<Option<(TimelineTime, TimelineTime)>> {
+        let temporal = self
+            .clip_execution_envelope(clip.placement.clip_id)
+            .map(|envelope| envelope.aggregate().temporal_input)
+            .unwrap_or(mondrian_effects::EffectTemporalInputExtent::UNBOUNDED);
+        if matches!(temporal.past, EffectTemporalSpan::Unbounded)
+            || matches!(temporal.future, EffectTemporalSpan::Unbounded)
+        {
+            return Ok(None);
+        }
+        let mut first = clip.first_clip_time;
+        let mut last = clip.last_clip_time;
+        if let EffectTemporalSpan::Finite(past) = temporal.past {
+            first = first.checked_sub(past)?;
+        }
+        if let EffectTemporalSpan::Finite(future) = temporal.future {
+            last = last.checked_add(future)?;
+        }
+        if let Some((history_first, history_last)) = self.clip_input_history_window(clip)? {
+            first = first.min(history_first);
+            last = last.max(history_last);
+        }
+        Ok(Some((
+            self.schedule.clip_to_sequence_time(clip.placement, first)?,
+            self.schedule.clip_to_sequence_time(clip.placement, last)?,
+        )))
     }
 
     fn clip_input_history_window(
@@ -3875,6 +3930,59 @@ pub(crate) mod tests {
                 range: PreparedVisualNestedRange::Bounded { first: tt(3, rate), last: tt(5, rate) },
             }]
         );
+    }
+
+    #[test]
+    fn sound_timecode_keeps_earlier_audio_components_for_title_history() {
+        use mondrian_core::{
+            AudioSourceComponentId, PropertyHost, PropertyMutation, TITLE_METADATA_LINE_PATHS,
+        };
+
+        let mut sequence = Sequence::new("Sound timecode temporal closure");
+        let grid = sequence.time_base();
+        let track = sequence.audio_tracks[0].id;
+        let component = AudioSourceComponentId::primary();
+        let past_asset = AssetId::new();
+        let current_asset = AssetId::new();
+        for (asset, start, duration) in [(past_asset, 1, 2), (current_asset, 3, 5)] {
+            sequence
+                .add_media_audio_clip(
+                    track,
+                    Clip::new(asset, tt(start, grid), tt(duration, grid)).unwrap(),
+                    component,
+                )
+                .unwrap();
+        }
+        let mut title =
+            Clip::new_metadata_burn_in_title("Segoe UI", tt(0, grid), tt(8, grid)).unwrap();
+        title
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: TITLE_METADATA_LINE_PATHS[0].field.into(),
+                value: PropertyValue::Enum("sound_timecode".into()),
+            })
+            .unwrap();
+        sequence.video_tracks[0].add_clip(title).unwrap();
+        let selected = tt(4, grid);
+        let dependencies = |sequence: &Sequence| {
+            prepare_stable(sequence)
+                .preflight_range_dependencies(selected, selected)
+                .unwrap()
+                .sound_timecode_components
+        };
+        assert_eq!(dependencies(&sequence), vec![(current_asset, component)]);
+        sequence.video_tracks[0].clips[0].add_effect_node(identity_effect_with_contract(
+            "sound_title_history",
+            EffectExecutionContract {
+                temporal_input: EffectTemporalInputExtent {
+                    past: EffectTemporalSpan::Finite(tt(3, grid)),
+                    future: EffectTemporalSpan::None,
+                },
+                ..cpu_float_contract()
+            },
+        ));
+        let mut expected = vec![(past_asset, component), (current_asset, component)];
+        expected.sort_unstable();
+        assert_eq!(dependencies(&sequence), expected);
     }
 
     #[test]

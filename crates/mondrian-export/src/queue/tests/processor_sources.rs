@@ -358,6 +358,7 @@ fn render_history_with_domain(
         sequences: Vec::new(),
         media: HashMap::from([(asset, dependency)]),
         color_environment: Default::default(),
+        sound_timecodes: Default::default(),
         prepared_execution: None,
         range: TimelineExportRange::EntireSequence,
     };

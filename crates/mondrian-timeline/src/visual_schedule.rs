@@ -4,7 +4,7 @@
 //! module compiles that validated state into interval indexes so repeated
 //! Preview and Export evaluation does not scan every placement on every frame.
 
-use crate::clip::Clip;
+use crate::clip::{Clip, ClipSourceTimeMap};
 use crate::sequence::{
     flat_video_transition_definition_snapshot, flatten_visual_clip_with_effect_snapshots,
     flatten_visual_transition_with_effect_snapshots, validate_video_transition, Sequence,
@@ -16,10 +16,10 @@ use mondrian_core::timeline_data::{
     RenderPlanSource, TimelineClipEndpointContext, TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    AssetId, ClipId, MondrianError, Rational, Result, SequenceId, SequenceRevision,
-    SourceSampleTarget, SourceSamplingBoundary, TimelineTime, TimelineTimeRange, TrackId,
-    VideoTransitionId, VisualSourceRetime, VisualSourceTimeError, VisualSourceTimeSample,
-    WorkingColorSpace,
+    AssetId, AudioSourceComponentId, ClipId, MondrianError, Rational, Result, SequenceId,
+    SequenceRevision, SourceSampleTarget, SourceSamplingBoundary, TimelineTime, TimelineTimeRange,
+    TitleAssetMetadata, TitleSoundTimecodeSample, TrackId, VideoTransitionId, VisualSourceRetime,
+    VisualSourceTimeError, VisualSourceTimeSample, WorkingColorSpace,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -120,11 +120,9 @@ impl PreparedVisualScheduleQueryDiagnostics {
 
 /// Immutable Sequence visual execution index shared by Preview and Export.
 ///
-/// The schedule retains only video Tracks and visual Transitions. Audio,
-/// navigation, Project color-engine state, and consumer scheduling policy do
-/// not enter it. Dynamic Clip properties are still evaluated at the requested
-/// exact Sequence time after the interval index selects the active author
-/// entities.
+/// The schedule retains video Tracks and visual Transitions, plus compact
+/// audio placement facts for Tracks requested by Sound Timecode titles.
+/// Dynamic Clip properties are evaluated only after interval selection.
 pub struct PreparedVisualSchedule {
     key: PreparedVisualScheduleKey,
     time_base: Rational,
@@ -135,6 +133,7 @@ pub struct PreparedVisualSchedule {
     tracks: Vec<PreparedVisualTrack>,
     active_tracks: IntervalIndex<usize>,
     clip_locations: HashMap<ClipId, (usize, usize)>,
+    sound_timecode_tracks: Vec<PreparedSoundTimecodeTrack>,
     diagnostics: PreparedVisualScheduleDiagnostics,
 }
 
@@ -204,6 +203,10 @@ impl PreparedVisualSchedule {
             auto_tone_map_media: sequence.settings.color.input.auto_tone_map_media,
             active_tracks,
             clip_locations,
+            sound_timecode_tracks: sequence
+                .sound_timecode_tracks()
+                .map(PreparedSoundTimecodeTrack::compile)
+                .collect::<Result<_>>()?,
             diagnostics: PreparedVisualScheduleDiagnostics {
                 sequence_id: sequence.id,
                 revision: sequence.revision,
@@ -224,6 +227,42 @@ impl PreparedVisualSchedule {
     /// Exact author revision compiled by this schedule.
     pub const fn revision(&self) -> SequenceRevision {
         self.key.revision
+    }
+
+    /// Sound metadata evidence reachable on the selected audio Track(s) over
+    /// one inclusive Sequence window, or all placements for unbounded history.
+    /// No audio essence is needed.
+    pub fn sound_timecode_dependencies(
+        &self,
+        track_id: Option<TrackId>,
+        window: Option<(TimelineTime, TimelineTime)>,
+    ) -> impl Iterator<Item = (AssetId, AudioSourceComponentId)> + '_ {
+        self.sound_timecode_tracks
+            .iter()
+            .filter(move |track| track_id.is_none_or(|id| track.id == id))
+            .flat_map(move |track| {
+                let indices = match window {
+                    Some((first, last)) => track.intervals.query_range(first, last).values,
+                    None => (0..track.clips.len()).collect(),
+                };
+                indices.into_iter().flat_map(|index| {
+                    let clip = &track.clips[index];
+                    clip.components.iter().copied().map(|id| (clip.asset, id))
+                })
+            })
+    }
+
+    /// Conservative heap estimate for the compact audio title index.
+    pub fn sound_timecode_retained_bytes(&self) -> usize {
+        self.sound_timecode_tracks.iter().fold(0usize, |bytes, track| {
+            bytes
+                .saturating_add(std::mem::size_of::<PreparedSoundTimecodeTrack>() + 64)
+                .saturating_add(track.clips.iter().fold(0usize, |bytes, clip| {
+                    bytes
+                        .saturating_add(std::mem::size_of::<PreparedSoundTimecodeClip>() + 256)
+                        .saturating_add(std::mem::size_of_val(clip.components.as_ref()))
+                }))
+        })
     }
 
     /// Return immutable preparation facts.
@@ -887,6 +926,35 @@ impl RenderPlanSource for PreparedVisualSchedule {
         })
     }
 
+    fn metadata_sound_timecode_at(
+        &self,
+        time: TimelineTime,
+        track_id: Option<TrackId>,
+        title_assets: &TitleAssetMetadata,
+    ) -> Result<Option<TitleSoundTimecodeSample>> {
+        for track in self
+            .sound_timecode_tracks
+            .iter()
+            .filter(|track| track_id.is_none_or(|id| track.id == id))
+        {
+            let mut clips = track.intervals.query(time).values;
+            clips.sort_unstable();
+            for index in clips.into_iter().rev() {
+                let clip = &track.clips[index];
+                if let Some(asset) = title_assets.get(&clip.asset)
+                    && let Some(recording) =
+                        clip.components.iter().find_map(|id| asset.sound_timecodes.get(id))
+                {
+                    return Ok(Some(TitleSoundTimecodeSample {
+                        recording: *recording,
+                        source: clip.source_map.sample(time.checked_sub(clip.position)?)?,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn source_timeline_display(&self) -> mondrian_core::TimelineDisplaySettings {
         self.timeline_display
     }
@@ -929,6 +997,51 @@ impl RenderPlanSource for PreparedVisualSchedule {
 
     fn auto_tone_map_media(&self) -> bool {
         self.auto_tone_map_media
+    }
+}
+
+struct PreparedSoundTimecodeClip {
+    position: TimelineTime,
+    asset: AssetId,
+    source_map: ClipSourceTimeMap,
+    components: Box<[AudioSourceComponentId]>,
+}
+
+struct PreparedSoundTimecodeTrack {
+    id: TrackId,
+    clips: Vec<PreparedSoundTimecodeClip>,
+    intervals: IntervalIndex<usize>,
+}
+
+impl PreparedSoundTimecodeTrack {
+    fn compile(track: &Track) -> Result<Self> {
+        let mut clips = Vec::new();
+        let mut intervals = Vec::new();
+        for clip in track.clips.iter().filter(|clip| !clip.is_disabled) {
+            let Some(asset) = clip.content.media_asset_id() else {
+                continue;
+            };
+            let components: Box<[_]> = clip.sound_timecode_components().collect();
+            if components.is_empty() {
+                continue;
+            }
+            intervals.push(IntervalEntry {
+                start: clip.position,
+                end: clip.end_position()?,
+                value: clips.len(),
+            });
+            clips.push(PreparedSoundTimecodeClip {
+                position: clip.position,
+                asset,
+                source_map: clip.source_time_map().clone(),
+                components,
+            });
+        }
+        Ok(Self {
+            id: track.id,
+            clips,
+            intervals: IntervalIndex::new(intervals),
+        })
     }
 }
 

@@ -2623,7 +2623,8 @@ fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleCon
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::timeline_data::EditorialSourceIdentity;
     use mondrian_core::{
-        BasicTitle, SmpteCountingMode, SmpteTimecodeReference, TitleTimecode, TitleTimecodeSource,
+        AudioSourceComponentId, AudioSourceTimecode, BasicTitle, SmpteCountingMode,
+        SmpteTimecodeReference, TitleAssetNames, TitleTimecode, TitleTimecodeSource,
         VisualSourceReference,
     };
     use mondrian_effects::{EffectFrameExtent, EffectGraphExecutionBudget};
@@ -2706,16 +2707,35 @@ fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleCon
         Clip::new_basic_title("Mondrian\nTitle", font, TimelineTime::ZERO, duration)
     }
     .unwrap();
+    let mut title_assets = mondrian_core::TitleAssetMetadata::new();
     if title_kind == BasicTitleContentKind::MetadataBurnIn {
         let [first, second, ..] = mondrian_core::TITLE_METADATA_LINE_PATHS;
+        let asset_id = AssetId::new();
+        let track = sequence.audio_tracks[0].id;
+        let component = AudioSourceComponentId::primary();
+        sequence
+            .add_media_audio_clip(
+                track,
+                Clip::new(asset_id, TimelineTime::ZERO, duration).unwrap(),
+                component,
+            )
+            .unwrap();
+        let mut names = TitleAssetNames::from_source(None, std::path::Path::new("recording.wav"));
+        names.sound_timecodes.insert(
+            component,
+            AudioSourceTimecode::from_sample_count(
+                172_801_440,
+                48_000,
+                Some((Rational::FPS_2997, SmpteCountingMode::DropFrame)),
+            )
+            .unwrap(),
+        );
+        title_assets.insert(asset_id, names);
         for (path, value) in [
             (first.position, PropertyValue::Vec2([0.42, 0.20].into())),
             (second.enabled, PropertyValue::Bool(true)),
-            (
-                second.field,
-                PropertyValue::Enum("sequence_timecode".into()),
-            ),
-            (second.format, PropertyValue::Enum("frames".into())),
+            (second.field, PropertyValue::Enum("sound_timecode".into())),
+            (second.track, PropertyValue::Text(track.to_string())),
             (second.position, PropertyValue::Vec2([0.52, 0.35].into())),
         ] {
             title
@@ -2787,40 +2807,57 @@ fn assert_title_matches_cpu_through_production_preview(title_kind: BasicTitleCon
     sequence.video_tracks[1].add_clip(title).unwrap();
 
     let mut rasterizer = mondrian_renderer::BasicTitleRasterizer::new();
-    let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline(
-        &sequence,
-        &[],
-        i64::from(title_kind != BasicTitleContentKind::Text),
-        raster,
-        PreviewResolutionScale::Full,
-        color_context(&sequence),
-        &mut |_| panic!("generated sources need no media decode"),
-        &mut |request: PreviewTimelineTitleRequest| {
-            match title_kind {
-                BasicTitleContentKind::Text => {}
-                BasicTitleContentKind::Timecode => assert_eq!(request.title.text, "00:01:00;03"),
-                BasicTitleContentKind::Numbers => assert_eq!(request.title.text, "1"),
-                BasicTitleContentKind::ClipInfo => assert_eq!(request.title.text, "B"),
-                BasicTitleContentKind::MetadataBurnIn => {
-                    let lines = &request.title.positioned_lines;
-                    assert_eq!(lines.len(), 2);
-                    assert_eq!(lines[0].text, "00:00:00:01");
-                    assert_eq!(lines[1].text, "1");
+    let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline_with_graph(
+        PreviewTimelineFrameRequest::new(
+            &sequence,
+            &[],
+            i64::from(title_kind != BasicTitleContentKind::Text),
+            raster,
+            PreviewResolutionScale::Full,
+            color_context(&sequence),
+        )
+        .with_title_assets(Some(Arc::new(title_assets))),
+        PreviewTimelineSourceAdapters::new(
+            &mut |_| panic!("generated sources need no media decode"),
+            &mut |request: PreviewTimelineTitleRequest| {
+                match title_kind {
+                    BasicTitleContentKind::Text => {}
+                    BasicTitleContentKind::Timecode => {
+                        assert_eq!(request.title.text, "00:01:00;03")
+                    }
+                    BasicTitleContentKind::Numbers => assert_eq!(request.title.text, "1"),
+                    BasicTitleContentKind::ClipInfo => assert_eq!(request.title.text, "B"),
+                    BasicTitleContentKind::MetadataBurnIn => {
+                        let lines = &request.title.positioned_lines;
+                        assert_eq!(lines.len(), 2);
+                        assert_eq!(lines[0].text, "00:00:00:01");
+                        assert_eq!(lines[1].text, "01:00:00;02");
+                    }
                 }
-            }
-            PreviewTimelineTitleFrame::Ready(
-                rasterizer
-                    .rasterize(
-                        &request.title,
-                        request.author_resolution,
-                        request.title_safe_margin,
-                        request.target_resolution,
-                        request.working_color_space,
-                        request.sample_aspect_ratio,
-                    )
-                    .unwrap(),
-            )
+                PreviewTimelineTitleFrame::Ready(
+                    rasterizer
+                        .rasterize(
+                            &request.title,
+                            request.author_resolution,
+                            request.title_safe_margin,
+                            request.target_resolution,
+                            request.working_color_space,
+                            request.sample_aspect_ratio,
+                        )
+                        .unwrap(),
+                )
+            },
+        ),
+        PreviewTimelineGraph {
+            programs: &RefCell::new(PreparedVisualProgramCache::default()),
+            scratch: &RefCell::new(TimelineCompositeScratch::default()),
+            dependency_observer: None,
+            generation: 0,
+            cancellation: &ExecutionCancellationToken::new(),
+            author_snapshot: None,
+            heterogeneous_graph_budget: standalone_preview_heterogeneous_graph_budget(),
         },
+        None,
     ) else {
         panic!("decorated title did not enter the Preview plan");
     };

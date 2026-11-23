@@ -117,6 +117,7 @@ pub fn export_gain_case(
         _ => panic!("gain fixture requires Mono or Stereo input"),
     };
     let dependency = ExportMediaDependency {
+        source_asset_name: None,
         path: source,
         source_fingerprint: fingerprint.clone(),
         source_container: "wav".into(),

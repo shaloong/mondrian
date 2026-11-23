@@ -690,6 +690,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         }
@@ -1016,6 +1017,7 @@ mod tests {
             sequences: Vec::new(),
             media: HashMap::new(),
             color_environment: timeline.color_environment.clone(),
+            sound_timecodes: Default::default(),
             prepared_execution: None,
             range: TimelineExportRange::EntireSequence,
         };
@@ -1099,6 +1101,7 @@ mod tests {
                 sequences: Vec::new(),
                 media: HashMap::new(),
                 color_environment: timeline.color_environment.clone(),
+                sound_timecodes: Default::default(),
                 prepared_execution: None,
                 range: TimelineExportRange::EntireSequence,
             };

@@ -8,6 +8,7 @@ pub(super) struct PreviewTitleAssets {
     author_generation: Option<u64>,
     needs_metadata: bool,
     include_frame_rates: bool,
+    include_sound_timecodes: bool,
     library_revision: Option<u64>,
     names: Option<Arc<TitleAssetMetadata>>,
 }
@@ -25,6 +26,7 @@ impl PreviewTitleAssets {
             self.author_generation = Some(generation);
             let mut needs_metadata = false;
             let mut include_frame_rates = false;
+            let mut include_sound_timecodes = false;
             for title in authoring
                 .sequences()
                 .iter()
@@ -42,15 +44,19 @@ impl PreviewTitleAssets {
                         needs_metadata |= line.field.uses_asset_metadata();
                         include_frame_rates |= line.field
                             == TitleMetadataField::Clip(TitleClipInfoField::MediaFrameRate);
+                        include_sound_timecodes |= line.field == TitleMetadataField::SoundTimecode;
                     }
                 }
-                if include_frame_rates {
+                if include_frame_rates && include_sound_timecodes {
                     break;
                 }
             }
             self.needs_metadata = needs_metadata;
-            if self.include_frame_rates != include_frame_rates {
+            if self.include_frame_rates != include_frame_rates
+                || self.include_sound_timecodes != include_sound_timecodes
+            {
                 self.include_frame_rates = include_frame_rates;
+                self.include_sound_timecodes = include_sound_timecodes;
                 self.library_revision = None;
             }
         }
@@ -61,7 +67,10 @@ impl PreviewTitleAssets {
             {
                 return false;
             }
-            match library.capture_title_asset_metadata(self.include_frame_rates) {
+            match library.capture_title_asset_metadata(
+                self.include_frame_rates,
+                self.include_sound_timecodes,
+            ) {
                 Ok((revision, names)) => (Some(revision), Some(Arc::new(names))),
                 Err(error) => {
                     tracing::warn!(%error, "Title Asset Library snapshot unavailable");

@@ -3,7 +3,10 @@ use crate::automation::{
     ParameterInvalidValuePolicy, ParameterNumericContract, ParameterTextMode, ParameterUnit,
     PropertyBag, PropertyDescriptor, PropertyValue,
 };
-use crate::{AssetId, BasicTitle, ParameterId, Result, TimelineTime, TrackId};
+use crate::{
+    AssetId, AudioSourceComponentId, AudioSourceTimecode, BasicTitle, ParameterId, Result,
+    TimelineTime, TrackId,
+};
 use std::{collections::HashMap, path::Path};
 
 impl BasicTitle {
@@ -37,12 +40,13 @@ impl TitleClipInfoField {
     }
 }
 
-/// Title labels observed for a file-backed Asset by a host.
+/// Title labels and recording clocks observed for a file-backed Asset by a host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TitleAssetNames {
     pub asset_name: Option<String>,
     pub file_name: Option<String>,
     pub media_frame_rate: Option<String>,
+    pub sound_timecodes: HashMap<AudioSourceComponentId, AudioSourceTimecode>,
 }
 
 impl TitleAssetNames {
@@ -51,6 +55,7 @@ impl TitleAssetNames {
             asset_name: asset_name.map(str::to_owned),
             file_name: path.file_name().and_then(|name| name.to_str()).map(str::to_owned),
             media_frame_rate: None,
+            sound_timecodes: HashMap::new(),
         }
     }
 
