@@ -47,6 +47,7 @@ fn install_drag_video_asset(state: &mut AppState) -> (PathBuf, AssetId) {
                 picture: Default::default(),
                 frame_rate: Rational::FPS_30,
                 frame_rate_proven: true,
+                source_timecode: None,
                 pixel_format: mondrian_core::PixelFormat::Yuv420p,
                 pixel_format_proven: true,
                 color_range: mondrian_media::DecodedVideoRange::Unknown,

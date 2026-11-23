@@ -376,6 +376,7 @@ fn video_media_info(file_size: u64) -> MediaInfo {
         picture: Default::default(),
         frame_rate: Rational::FPS_24,
         frame_rate_proven: true,
+        source_timecode: None,
         pixel_format: PixelFormat::Yuv420p,
         pixel_format_proven: true,
         color_range: DecodedVideoRange::Limited,

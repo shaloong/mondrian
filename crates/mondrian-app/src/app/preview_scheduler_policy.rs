@@ -505,6 +505,7 @@ mod tests {
             picture: mondrian_core::PictureStreamMetadata::default(),
             frame_rate: Rational::new(60_000, 1_001),
             frame_rate_proven: true,
+            source_timecode: None,
             pixel_format,
             pixel_format_proven: true,
             color_range: mondrian_media::DecodedVideoRange::Limited,

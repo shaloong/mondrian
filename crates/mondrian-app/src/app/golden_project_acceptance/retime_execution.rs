@@ -80,6 +80,7 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
                         picture: Default::default(),
                         frame_rate: Rational::FPS_25,
                         frame_rate_proven: true,
+                        source_timecode: None,
                         pixel_format: PixelFormat::Yuv420p,
                         pixel_format_proven: true,
                         color_range: DecodedVideoRange::Limited,

@@ -3,9 +3,11 @@
 use super::product_action::TimelineInsertAssetPayload;
 use super::AppState;
 use mondrian_assets::AssetKind;
+use mondrian_core::timeline_data::EditorialSourceIdentity;
 use mondrian_core::{
     events::AppEvent, AudioSourceComponentId, ClipLinkGroupId, FramePosition, FrameRounding,
-    MondrianError, TimelineTime,
+    MondrianError, PictureInterpretationError, Resolution, ResolvedPictureGeometry,
+    SmpteTimecodeReference, TimelineTime, VideoStreamInfo,
 };
 use mondrian_timeline::{
     apply_insert_edit, Clip, InsertEditOutcome, InsertEditPlacement, InsertEditRequest,
@@ -76,22 +78,11 @@ impl AppState {
                     clip.label = Some(asset.name.clone());
                     clip.link_group = link_group;
                     if let Some(video) = media_probe.and_then(|probe| probe.primary_video()) {
-                        auto_fit_picture(
-                            sequence,
-                            &mut clip,
-                            mondrian_core::ResolvedPictureGeometry::resolve(
-                                mondrian_core::Resolution {
-                                    width: video.width,
-                                    height: video.height,
-                                },
-                                video.picture,
-                                None,
-                                None,
-                            )
+                        AssetPlacementPicture::resolve(video)
                             .map_err(|error| {
                                 insert_error(format!("素材图片解释不受支持：{error}"))
-                            })?,
-                        )?;
+                            })?
+                            .apply(sequence, &mut clip)?;
                     }
                     placements.push(InsertEditPlacement {
                         track_id,
@@ -341,10 +332,47 @@ fn create_asset_clip(
     }
 }
 
-pub(super) fn auto_fit_picture(
+/// Picture geometry and the optional editorial clock from one Asset revision.
+#[derive(Clone, Copy)]
+pub(super) struct AssetPlacementPicture {
+    geometry: ResolvedPictureGeometry,
+    source_timecode: Option<SmpteTimecodeReference>,
+}
+
+impl AssetPlacementPicture {
+    pub(super) fn resolve(video: &VideoStreamInfo) -> Result<Self, PictureInterpretationError> {
+        Ok(Self {
+            geometry: ResolvedPictureGeometry::resolve(
+                Resolution { width: video.width, height: video.height },
+                video.picture,
+                None,
+                None,
+            )?,
+            source_timecode: video.source_timecode,
+        })
+    }
+
+    pub(super) fn apply(
+        self,
+        sequence: &mondrian_timeline::Sequence,
+        clip: &mut Clip,
+    ) -> mondrian_core::Result<()> {
+        auto_fit_picture(sequence, clip, self.geometry)?;
+        if let Some(interpretation) = clip.media_interpretation_mut()
+            && interpretation.editorial_source.is_none()
+            && let Some(timecode) = self.source_timecode
+        {
+            interpretation.editorial_source =
+                EditorialSourceIdentity::new(None, Some(timecode), None).ok();
+        }
+        Ok(())
+    }
+}
+
+fn auto_fit_picture(
     sequence: &mondrian_timeline::Sequence,
     clip: &mut Clip,
-    picture: mondrian_core::ResolvedPictureGeometry,
+    picture: ResolvedPictureGeometry,
 ) -> mondrian_core::Result<()> {
     let [media_width, media_height] = picture.display_extent();
     if !media_width.is_finite()

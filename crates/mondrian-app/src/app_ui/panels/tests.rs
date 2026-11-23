@@ -12448,6 +12448,7 @@ fn test_video_media_info(path: &Path) -> mondrian_media::MediaInfo {
             picture: Default::default(),
             frame_rate: Rational::FPS_24,
             frame_rate_proven: true,
+            source_timecode: None,
             pixel_format: mondrian_media::info::PixelFormat::Yuv420p,
             pixel_format_proven: true,
             color_range: mondrian_media::DecodedVideoRange::Limited,

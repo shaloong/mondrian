@@ -8,13 +8,14 @@ use super::media_import::MediaImportPreparedCandidate;
 use super::product_action::{
     AssetTargetPayload, TimelineDropAssetPayload, TimelineDropFilePayload,
 };
+use super::timeline_insert::AssetPlacementPicture;
 use super::timeline_position::lower_exact_sequence_frame;
 use super::{resolve_track_conflicts, Clip};
 use super::{AppState, DraggingAsset};
 use crate::app::AppMessage;
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::{AssetId, AudioSourceComponentId, ClipId, ClipLinkGroupId, TrackId};
-use mondrian_core::{FramePosition, MondrianError, ResolvedPictureGeometry, TimelineTime};
+use mondrian_core::{FramePosition, MondrianError, TimelineTime};
 use mondrian_timeline::{ClipOverlapMode, Sequence, TrackType};
 use std::time::Duration;
 
@@ -298,7 +299,7 @@ fn staged_dragging_asset(
     })
 }
 
-fn staged_picture(asset: &AssetRecord) -> mondrian_core::Result<Option<ResolvedPictureGeometry>> {
+fn staged_picture(asset: &AssetRecord) -> mondrian_core::Result<Option<AssetPlacementPicture>> {
     if !matches!(asset.kind, AssetKind::Video | AssetKind::StillImage) {
         return Ok(None);
     }
@@ -306,14 +307,9 @@ fn staged_picture(asset: &AssetRecord) -> mondrian_core::Result<Option<ResolvedP
         .media_probe()
         .and_then(|probe| probe.primary_video())
         .ok_or_else(|| placement_error("素材没有可执行的视频流"))?;
-    ResolvedPictureGeometry::resolve(
-        mondrian_core::Resolution { width: video.width, height: video.height },
-        video.picture,
-        None,
-        None,
-    )
-    .map(Some)
-    .map_err(|error| placement_error(format!("素材图片解释不受支持：{error}")))
+    AssetPlacementPicture::resolve(video)
+        .map(Some)
+        .map_err(|error| placement_error(format!("素材图片解释不受支持：{error}")))
 }
 
 fn staged_time(frame: i64, sequence: &Sequence) -> mondrian_core::Result<TimelineTime> {
@@ -330,7 +326,7 @@ fn staged_duration_frames(sequence: &Sequence, dragging: &DraggingAsset) -> i64 
 fn add_staged_video_clip(
     sequence: &mut Sequence,
     dragging: &DraggingAsset,
-    picture: Option<ResolvedPictureGeometry>,
+    picture: Option<AssetPlacementPicture>,
     track_id: TrackId,
     frame: i64,
 ) -> mondrian_core::Result<(ClipId, i64)> {
@@ -344,7 +340,7 @@ fn add_staged_video_clip(
     };
     clip.label = Some(dragging.name.clone());
     if let Some(picture) = picture {
-        super::timeline_insert::auto_fit_picture(sequence, &mut clip, picture)?;
+        picture.apply(sequence, &mut clip)?;
     }
     let clip_id = clip.id;
     let linked_audio = if dragging.kind == AssetKind::Video && dragging.has_linked_audio {
@@ -474,6 +470,112 @@ mod tests {
         assert!(library
             .snapshot_database(old_revision, &root.path().join("old-save.db"))
             .is_err());
+    }
+
+    #[test]
+    fn native_media_timecode_survives_file_drop_and_reaches_the_render_plan() {
+        use mondrian_core::{Rational, TitleTimecode, TitleTimecodeSource, VisualSourceReference};
+        use mondrian_renderer::{
+            evaluate_prepared_visual_program, PreparedVisualProgram, TimelineEvaluationRequest,
+            TimelineRenderPlanElement,
+        };
+
+        let root = tempfile::tempdir().expect("timecode fixture directory");
+        let path = root.path().join("camera.mov");
+        let output = mondrian_media::ffmpeg_command()
+            .expect("admit timecode fixture command")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=gray:s=64x64:r=30000/1001",
+                "-frames:v",
+                "5",
+                "-c:v",
+                "mpeg4",
+                "-timecode",
+                "01:00:59;29",
+            ])
+            .arg(&path)
+            .output()
+            .expect("create drop-frame MOV");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = path.canonicalize().expect("canonical fixture");
+        let candidate = MediaImportPreparedCandidate {
+            source_fingerprint: mondrian_core::MediaFileFingerprint::capture(&path),
+            info: mondrian_media::probe_media_info(&path).expect("probe camera file"),
+            canonical_path: path.clone(),
+            folder_id: None,
+        };
+
+        let library =
+            mondrian_assets::AssetLibrary::open(root.path().join("library")).expect("library");
+        let mut sequence = Sequence::new("Camera timecode");
+        sequence.settings.frame_rate = Rational::FPS_2997;
+        let track_id = sequence.video_tracks[0].id;
+        let grid = sequence.time_base();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(std::sync::Arc::clone(&library)));
+        let asset_id = state
+            .commit_staged_file_drop(
+                TimelineDropFilePayload {
+                    path,
+                    target_track_id: track_id,
+                    position: FramePosition::new(0, grid),
+                },
+                candidate,
+            )
+            .expect("commit Asset and Clip");
+        let asset = library.get_asset(asset_id).unwrap().expect("persisted Asset");
+        let clock = asset.media_probe().unwrap().primary_video().unwrap().source_timecode;
+        let mut sequence = state.active_sequence().unwrap().clone();
+        let clip = &sequence.video_tracks[0].clips[0];
+        assert!(clock.is_some());
+        assert_eq!(
+            clip.media_interpretation()
+                .unwrap()
+                .editorial_source
+                .as_ref()
+                .unwrap()
+                .source_timecode(),
+            clock,
+        );
+        let title = Clip::new_timecode_title(
+            TitleTimecode {
+                source: TitleTimecodeSource::Media {
+                    reference: VisualSourceReference::Clip {
+                        clip_id: clip.id,
+                        retime: Default::default(),
+                    },
+                },
+                ..TitleTimecode::default()
+            },
+            mondrian_core::default_basic_title_font_family(),
+            TimelineTime::ZERO,
+            clip.duration,
+        )
+        .unwrap();
+        sequence.video_tracks[1].add_clip(title).unwrap();
+        let prepared = PreparedVisualProgram::prepare(&sequence).unwrap();
+        for (frame, expected) in [(0, "01:00:59;29"), (1, "01:01:00;02")] {
+            let plan = evaluate_prepared_visual_program(
+                &prepared,
+                TimelineEvaluationRequest::export(FramePosition::new(frame, grid)),
+            )
+            .unwrap();
+            let Some(TimelineRenderPlanElement::BasicTitle(title)) = plan.elements.last() else {
+                panic!("expected the media timecode title");
+            };
+            assert_eq!(title.title.text, expected);
+        }
     }
 
     #[test]

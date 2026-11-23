@@ -36,6 +36,7 @@ pub(crate) fn asset_fixture_with_picture(
             picture,
             frame_rate: Rational::new(24, 1),
             frame_rate_proven: true,
+            source_timecode: None,
             pixel_format: PixelFormat::Rgba,
             pixel_format_proven: true,
             color_range: DecodedVideoRange::Full,

@@ -239,6 +239,7 @@ fn video_asset_with_picture(
             picture,
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
+            source_timecode: None,
             pixel_format,
             pixel_format_proven,
             color_range: DecodedVideoRange::Limited,

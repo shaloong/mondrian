@@ -1964,17 +1964,11 @@ impl AppState {
                     format: "素材没有与当前修订一致的视频图片合同".to_owned(),
                 })?;
             Some(
-                mondrian_core::ResolvedPictureGeometry::resolve(
-                    mondrian_core::Resolution { width: video.width, height: video.height },
-                    video.picture,
-                    None,
-                    None,
-                )
-                .map_err(|error| {
-                    mondrian_core::MondrianError::UnsupportedFormat {
+                super::timeline_insert::AssetPlacementPicture::resolve(&video).map_err(
+                    |error| mondrian_core::MondrianError::UnsupportedFormat {
                         format: format!("素材图片解释不受支持：{error}"),
-                    }
-                })?,
+                    },
+                )?,
             )
         } else {
             None
@@ -2012,7 +2006,7 @@ impl AppState {
                 };
                 clip.label = Some(dragging.name.clone());
                 if let Some(picture) = media_picture {
-                    super::timeline_insert::auto_fit_picture(seq, &mut clip, picture)?;
+                    picture.apply(seq, &mut clip)?;
                 }
                 let clip_id = clip.id;
 
