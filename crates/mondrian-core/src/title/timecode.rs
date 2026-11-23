@@ -503,7 +503,7 @@ mod tests {
         };
         let title = crate::BasicTitle::new_timecode(clock, "Arial").unwrap();
         let value = serde_json::to_value(&title).unwrap();
-        assert_eq!(value["timecode"], true);
+        assert_eq!(value["content_kind"], "timecode");
         let reopened: crate::BasicTitle = serde_json::from_value(value).unwrap();
         reopened.validate_author_state().unwrap();
         assert_eq!(reopened.timecode().unwrap(), Some(clock));

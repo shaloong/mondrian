@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 37;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 38;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -363,6 +363,11 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
             to: 37,
             migrate: migrate_document_v36_to_v37,
         },
+        JsonMigrationStep {
+            from: 37,
+            to: 38,
+            migrate: migrate_document_v37_to_v38,
+        },
     ],
 );
 
@@ -504,6 +509,31 @@ fn migrate_document_v36_to_v37(mut value: serde_json::Value) -> anyhow::Result<s
         Ok(())
     })?;
     value["schema_version"] = serde_json::json!(37);
+    Ok(value)
+}
+
+fn migrate_document_v37_to_v38(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    use serde_json::Value;
+
+    visit_document_titles(&mut value, 37, |title| {
+        let fields = title.as_object_mut().context("schema-37 Basic Title is not an object")?;
+        anyhow::ensure!(
+            !fields.contains_key("content_kind"),
+            "schema-37 Basic Title cannot contain a native title content kind"
+        );
+        match fields.remove("timecode") {
+            Some(Value::Bool(true)) => {
+                fields.insert(
+                    "content_kind".to_owned(),
+                    Value::String("timecode".to_owned()),
+                );
+            }
+            Some(Value::Bool(false)) | None => {}
+            Some(_) => anyhow::bail!("schema-37 Basic Title timecode flag must be boolean"),
+        }
+        Ok(())
+    })?;
+    value["schema_version"] = serde_json::json!(38);
     Ok(value)
 }
 
@@ -3497,6 +3527,77 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn numbers_title_migration_preserves_schema_37_title_properties() {
+        use mondrian_core::{BasicTitle, TitleTimecode, TitleTimecodeFormat};
+
+        let mut current = DOCUMENT_MIGRATIONS.migrate(ttl01_schema35_title_fixture()).unwrap();
+        let path = "/sequences/sequences/1/video_tracks/0/clips/0/content/title";
+        let clock = TitleTimecode {
+            format: TitleTimecodeFormat::Frames,
+            ..Default::default()
+        };
+        let title = BasicTitle::new_timecode(clock, "Arial").unwrap();
+        *current.pointer_mut(path).unwrap() = serde_json::to_value(&title).unwrap();
+        let mut legacy = current.clone();
+        legacy["schema_version"] = serde_json::json!(37);
+        let child = legacy.pointer_mut(path).unwrap().as_object_mut().unwrap();
+        child.remove("content_kind");
+        child.insert("timecode".to_owned(), serde_json::Value::Bool(true));
+        assert_eq!(DOCUMENT_MIGRATIONS.migrate(legacy).unwrap(), current);
+
+        let mut invalid = current.clone();
+        invalid["schema_version"] = serde_json::json!(37);
+        let error = DOCUMENT_MIGRATIONS.migrate(invalid).unwrap_err();
+        assert!(format!("{error:#}")
+            .contains("schema-37 Basic Title cannot contain a native title content kind"));
+    }
+
+    #[test]
+    fn numbers_title_archive_round_trips_authored_values_and_parameter_ids() {
+        use mondrian_core::BasicTitle;
+
+        let mut document = test_document();
+        let mut clip =
+            Clip::new_numbers_title("Arial", TimelineTime::ZERO, TimelineTime::ONE).unwrap();
+        for (path, value) in [
+            (
+                BasicTitle::NUMBERS_START_PATH,
+                PropertyValue::Double(12_345.123_456_78),
+            ),
+            (BasicTitle::NUMBERS_STEP_PATH, PropertyValue::Double(-0.025)),
+            (
+                BasicTitle::NUMBERS_PREFIX_PATH,
+                PropertyValue::Text("编号 ".to_owned()),
+            ),
+        ] {
+            clip.apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: path.to_owned(),
+                value,
+            })
+            .unwrap();
+        }
+        let id = clip.id;
+        let expected = clip.content.basic_title().unwrap().clone();
+        document.sequences.active_mut().unwrap().video_tracks[0].add_clip(clip).unwrap();
+        let root = unique_temp_dir("numbers-title-round-trip");
+        let db = root.join("index.db");
+        fs::write(&db, b"sqlite placeholder").unwrap();
+        let archive = root.join("numbers.mdp");
+        save_project_archive(&document, &db, &archive).unwrap();
+        let reopened = read_project_document_from_archive(&archive).unwrap();
+        let title = reopened
+            .sequences
+            .active()
+            .unwrap()
+            .find_clip(id)
+            .unwrap()
+            .content
+            .basic_title()
+            .unwrap();
+        assert_eq!(title, &expected);
+    }
+
     #[test]
     fn timecode_title_migration_preserves_plain_titles_and_rejects_legacy_clock_settings() {
         let current = DOCUMENT_MIGRATIONS.migrate(ttl01_schema35_title_fixture()).unwrap();

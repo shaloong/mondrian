@@ -672,6 +672,18 @@ impl Clip {
         Ok(clip)
     }
 
+    /// Create a Numbers Title on the ordinary generated-picture path.
+    pub fn new_numbers_title(
+        font_family: impl Into<String>,
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
+        let title = mondrian_core::BasicTitle::new_numbers(font_family)?;
+        let mut clip = Self::with_content(ClipContent::BasicTitle { title }, position, duration)?;
+        clip.label = Some("编号".to_owned());
+        Ok(clip)
+    }
+
     pub fn new_adjustment_layer(
         asset_id: AssetId,
         position: TimelineTime,
