@@ -514,6 +514,7 @@ fn inspector_model_projects_asset_components_and_physical_binding_separately() {
         channel_layout: ChannelLayout::Stereo,
         bit_depth: 24,
         avg_bitrate: 256_000,
+        source_timecode: None,
     };
     let info = mondrian_media::MediaInfo {
         duration: std::time::Duration::from_secs(1),

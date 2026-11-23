@@ -800,6 +800,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     channel_layout,
                     bit_depth,
                     avg_bitrate: 0,
+                    source_timecode: None,
                 });
             }
             _ => {}
@@ -852,6 +853,12 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
     }
 
     capture_video_source_timecodes(&input, &mut video_streams);
+    if container == "wav"
+        && let [audio] = audio_streams.as_mut_slice()
+        && audio.sample_rate > 0
+    {
+        audio.source_timecode = crate::wave_timecode::read(path);
+    }
     let info = MediaProbeSnapshot {
         duration,
         file_size,

@@ -2392,6 +2392,7 @@ mod tests {
             channel_layout: ChannelLayout::Stereo,
             bit_depth: 24,
             avg_bitrate: 256_000,
+            source_timecode: None,
         };
         MediaInfo {
             duration: Duration::from_secs(1),

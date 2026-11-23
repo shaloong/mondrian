@@ -43,6 +43,7 @@ pub mod proxy;
 #[cfg(feature = "validation")]
 mod qualified_ffmpeg;
 mod resident_encode;
+mod wave_timecode;
 pub mod waveform;
 
 pub use audio::{

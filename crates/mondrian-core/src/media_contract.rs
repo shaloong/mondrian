@@ -1582,6 +1582,64 @@ pub struct AudioStreamInfo {
     pub bit_depth: u16,
     /// Average encoded bitrate in bits per second.
     pub avg_bitrate: u64,
+    /// Exact recording-clock evidence for this physical audio stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_timecode: Option<AudioSourceTimecode>,
+}
+
+/// Audio recording origin and optional declared SMPTE grid.
+///
+/// The origin remains a time, since quantizing the BWF sample count to a
+/// frame would discard its phase relative to the timecode grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AudioSourceTimecode {
+    origin: crate::TimelineTime,
+    grid: Option<crate::SmpteTimecodeReference>,
+}
+
+impl AudioSourceTimecode {
+    /// Build recording evidence from a sample count and its native sample rate.
+    pub fn from_sample_count(
+        samples_since_midnight: u64,
+        sample_rate: u32,
+        clock: Option<(Rational, crate::SmpteCountingMode)>,
+    ) -> Option<Self> {
+        let origin = crate::TimelineTime::new(
+            i64::try_from(samples_since_midnight).ok()?,
+            i64::from(sample_rate),
+        )
+        .ok()?;
+        let grid =
+            clock.and_then(|(rate, mode)| crate::SmpteTimecodeReference::new(rate, mode, 0).ok());
+        Some(Self { origin, grid })
+    }
+
+    /// Exact offset of the physical stream's first sample from midnight.
+    pub const fn origin(self) -> crate::TimelineTime {
+        self.origin
+    }
+
+    /// Validated native frame grid, with no frame offset.
+    pub fn grid(self) -> Option<crate::SmpteTimecodeReference> {
+        self.grid.filter(|grid| grid.start_frame() == 0 && grid.validate().is_ok())
+    }
+
+    /// Resolve the recording time after applying the exact source offset.
+    /// Reverse playback retains strict-predecessor ownership at frame edges.
+    pub fn frame_at(
+        self,
+        source: crate::SourceSampleTarget,
+        rate: Rational,
+    ) -> std::result::Result<crate::FramePosition, crate::TimelineTimeError> {
+        let time = self.origin.checked_add(source.time())?;
+        let target = match source.boundary() {
+            crate::SourceSamplingBoundary::Covering => crate::SourceSampleTarget::covering(time),
+            crate::SourceSamplingBoundary::StrictPredecessor => {
+                crate::SourceSampleTarget::strict_predecessor(time)
+            }
+        };
+        target.to_frame_position(rate)
+    }
 }
 
 /// One explicitly selected physical audio stream and its source revision.

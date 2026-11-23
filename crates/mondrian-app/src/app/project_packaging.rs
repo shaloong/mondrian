@@ -1924,6 +1924,7 @@ colorspaces:
                 channel_layout: ChannelLayout::Stereo,
                 bit_depth: 24,
                 avg_bitrate: 192_000,
+                source_timecode: None,
             }],
             has_video: false,
             has_audio: true,

@@ -697,6 +697,7 @@ mod tests {
                     channel_layout: ChannelLayout::Stereo,
                     bit_depth: 24,
                     avg_bitrate: 2_304_000,
+                    source_timecode: None,
                 }],
                 has_video: true,
                 has_audio: true,

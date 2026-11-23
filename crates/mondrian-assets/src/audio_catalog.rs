@@ -310,6 +310,7 @@ mod tests {
             channel_layout: layout,
             bit_depth: 24,
             avg_bitrate: 256_000,
+            source_timecode: None,
         }
     }
 

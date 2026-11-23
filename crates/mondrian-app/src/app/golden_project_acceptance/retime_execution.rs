@@ -126,6 +126,7 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
                         channel_layout: ChannelLayout::Stereo,
                         bit_depth: 24,
                         avg_bitrate: 2_304_000,
+                        source_timecode: None,
                     }],
                     has_video: true,
                     has_audio: true,
