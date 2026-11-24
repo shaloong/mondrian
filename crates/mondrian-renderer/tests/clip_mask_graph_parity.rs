@@ -309,7 +309,7 @@ fn route_and_prefix(
             seen_ops.push(*mask_op);
         }
     }
-    assert_eq!(seen_ops, OPS);
+    assert_eq!(seen_ops, OPS.map(mondrian_effects::MaskCombineMode::from));
     let Some(PreparedHeterogeneousGpuDispatch::MatteMix { node, matte, waits, .. }) =
         dispatches.last().copied()
     else {

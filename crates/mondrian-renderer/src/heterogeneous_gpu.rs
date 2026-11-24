@@ -1312,7 +1312,7 @@ fn record_gpu_suffix(
                             reason: "gpu_mask_combine_right_not_materialized",
                         },
                     )?;
-                    let record = resources.compositor.record_alpha_mask_combine_pass(
+                    let record = resources.compositor.record_alpha_mask_combine_with_mode(
                         resources.device,
                         resources.queue,
                         resources.encoder,
@@ -1331,7 +1331,12 @@ fn record_gpu_suffix(
                 }
                 PreparedHeterogeneousGpuStep::Dispatch(
                     PreparedHeterogeneousGpuDispatch::MatteMix {
-                        base, graded, matte, output, ..
+                        base,
+                        graded,
+                        matte,
+                        amount,
+                        output,
+                        ..
                     },
                 ) => {
                     let base_handle = handles.get(base).ok_or(
@@ -1349,7 +1354,7 @@ fn record_gpu_suffix(
                             reason: "gpu_matte_mix_matte_not_materialized",
                         },
                     )?;
-                    let record = resources.compositor.record_matte_mix_pass(
+                    let record = resources.compositor.record_weighted_matte_mix_pass(
                         resources.device,
                         resources.encoder,
                         resources.ids,
@@ -1358,6 +1363,7 @@ fn record_gpu_suffix(
                         base_handle,
                         graded_handle,
                         matte_handle,
+                        *amount,
                         working_color_space,
                     )?;
                     if handles.insert(*output, record.output).is_some() {
@@ -2670,6 +2676,7 @@ fn validate_gpu_suffix_schedule(
                     base,
                     graded,
                     matte,
+                    amount: _,
                     output,
                     waits,
                     signal,
@@ -4555,7 +4562,7 @@ mod tests {
                 PreparedHeterogeneousGpuDispatch::MaskCombine {
                     output,
                     signal,
-                    mask_op: MaskOp::Difference,
+                    mask_op: mondrian_effects::MaskCombineMode::Coverage(MaskOp::Difference),
                     ..
                 } => Some((*output, *signal)),
                 _ => None,

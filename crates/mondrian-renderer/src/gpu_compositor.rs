@@ -310,6 +310,10 @@ fn combine_alpha_masks(left_px: vec4<f32>, right_px: vec4<f32>) -> vec4<f32> {
         output = min(left, right);
     } else if (uniforms.mask_op == 3u) {
         output = abs(left - right);
+    } else if (uniforms.mask_op == 4u) {
+        output = left + (1.0 - left) * right;
+    } else if (uniforms.mask_op == 5u) {
+        output = left * right;
     }
     return vec4<f32>(0.0, 0.0, 0.0, output);
 }
@@ -352,6 +356,9 @@ fn qualifier_hue_saturation(rgb: vec3<f32>) -> vec2<f32> {
 }
 
 fn qualifier_range_matte(value: f32, low: f32, high: f32, softness: f32) -> f32 {
+    if (softness == 0.0) {
+        return select(0.0, 1.0, value >= low && value <= high);
+    }
     return qualifier_safe_smoothstep(low - softness, low, value) *
         (1.0 - qualifier_safe_smoothstep(high, high + softness, value));
 }
@@ -498,8 +505,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return apply_alpha_mask(base_px, mask_px);
     }
     if (uniforms.source_kind == 10u) {
-        let right_px = textureSample(layer_tex, linear_sampler, in.uv);
-        return combine_alpha_masks(base_px, right_px);
+        let coordinate = vec2<i32>(floor(in.position.xy));
+        return combine_alpha_masks(
+            textureLoad(accum_tex, coordinate, 0),
+            textureLoad(layer_tex, coordinate, 0),
+        );
     }
     if (uniforms.source_kind == 7u || uniforms.source_kind == 8u) {
         let position = vec2<i32>(floor(in.position.xy));
@@ -5121,6 +5131,7 @@ struct VsOut {
 @group(0) @binding(0) var base_tex: texture_2d<f32>;
 @group(0) @binding(1) var graded_tex: texture_2d<f32>;
 @group(0) @binding(2) var matte_tex: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> controls: vec4<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
@@ -5139,9 +5150,15 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let coordinate = vec2<i32>(floor(in.position.xy));
     let base = textureLoad(base_tex, coordinate, 0);
+    let weight = clamp(textureLoad(matte_tex, coordinate, 0).a, 0.0, 1.0) * controls.x;
+    if (weight == 0.0) {
+        return base;
+    }
     let graded = textureLoad(graded_tex, coordinate, 0);
-    let matte = clamp(textureLoad(matte_tex, coordinate, 0).a, 0.0, 1.0);
-    return vec4<f32>(mix(base.rgb, graded.rgb, matte), base.a);
+    if (weight == 1.0) {
+        return vec4<f32>(graded.rgb, base.a);
+    }
+    return vec4<f32>(mix(base.rgb, graded.rgb, weight), base.a);
 }
 "#;
 
@@ -5862,7 +5879,21 @@ impl GpuFrameCompositor {
         let matte_mix_texture_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("mondrian_gpu_matte_mix_textures"),
-                entries: &[texture_binding(0), texture_binding(1), texture_binding(2)],
+                entries: &[
+                    texture_binding(0),
+                    texture_binding(1),
+                    texture_binding(2),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(16),
+                        },
+                        count: None,
+                    },
+                ],
             });
         let matte_mix_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mondrian_gpu_matte_mix_layout"),
@@ -7721,6 +7752,32 @@ impl GpuFrameCompositor {
         right: &GpuColorFrameHandle,
         mask_op: MaskOp,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        self.record_alpha_mask_combine_with_mode(
+            device,
+            queue,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            left,
+            right,
+            mask_op.into(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_alpha_mask_combine_with_mode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        left: &GpuColorFrameHandle,
+        right: &GpuColorFrameHandle,
+        mask_op: mondrian_effects::MaskCombineMode,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         validate_alpha_mask_pair(left, right)?;
         let descriptor = left.descriptor();
         let left_resource = table.get(left).map_err(GpuCompositeError::ResourceTable)?;
@@ -7746,7 +7803,14 @@ impl GpuFrameCompositor {
                 blend_mode: gpu_blend_mode_id(BlendMode::Normal),
                 frame_seed_lo: 0,
                 frame_seed_hi: 0,
-                mask_controls: [gpu_mask_op_id(mask_op), 0],
+                mask_controls: [
+                    match mask_op {
+                        mondrian_effects::MaskCombineMode::Coverage(op) => gpu_mask_op_id(op),
+                        mondrian_effects::MaskCombineMode::Screen => 4,
+                        mondrian_effects::MaskCombineMode::Multiply => 5,
+                    },
+                    0,
+                ],
                 solid_color: [0.0; 4],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -7788,6 +7852,36 @@ impl GpuFrameCompositor {
         matte: &GpuColorFrameHandle,
         working_color_space: mondrian_core::WorkingColorSpace,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        self.record_weighted_matte_mix_pass(
+            device,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            base,
+            graded,
+            matte,
+            1.0,
+            working_color_space,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_weighted_matte_mix_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        base: &GpuColorFrameHandle,
+        graded: &GpuColorFrameHandle,
+        matte: &GpuColorFrameHandle,
+        amount: f32,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        use wgpu::util::DeviceExt;
+
         validate_matte_mix_inputs(base, graded, matte, working_color_space)?;
         let descriptor = base.descriptor();
         let base_resource = table.get(base).map_err(GpuCompositeError::ResourceTable)?;
@@ -7800,6 +7894,11 @@ impl GpuFrameCompositor {
             "gpu-matte-mix-output",
             resource_pool,
         )?;
+        let controls = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gpu-matte-mix-controls"),
+            contents: bytemuck::cast_slice(&[amount, 0.0, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mondrian_gpu_matte_mix_binding"),
             layout: &self.matte_mix_texture_layout,
@@ -7822,6 +7921,7 @@ impl GpuFrameCompositor {
                         &matte_resource.resource().texture_view,
                     ),
                 },
+                wgpu::BindGroupEntry { binding: 3, resource: controls.as_entire_binding() },
             ],
         });
         self.texture_bind_group_creations.fetch_add(1, Ordering::Relaxed);
@@ -7918,9 +8018,9 @@ impl GpuFrameCompositor {
                 device,
                 queue,
                 encoder,
-                GpuCompositeTextureBinding::Resource(source),
-                &target.resource().texture_view,
                 GpuCompositeTextureBinding::ProceduralDummy,
+                &target.resource().texture_view,
+                GpuCompositeTextureBinding::Resource(source),
                 qualifier_uniforms(
                     qualifier,
                     input_descriptor.width,
@@ -7980,9 +8080,9 @@ impl GpuFrameCompositor {
             device,
             queue,
             encoder,
-            GpuCompositeTextureBinding::Resource(input_resource.resource()),
-            &output_resource.resource().texture_view,
             GpuCompositeTextureBinding::ProceduralDummy,
+            &output_resource.resource().texture_view,
+            GpuCompositeTextureBinding::Resource(input_resource.resource()),
             GpuCompositeUniforms {
                 opacity: 1.0,
                 source_kind: 9,
@@ -8201,14 +8301,11 @@ impl GpuFrameCompositor {
     ) -> Result<(), GpuCompositeError> {
         let operations = point_operations.unwrap_or_default();
         let creative_lut_binding = self.creative_luts.prepare_ops(device, queue, operations)?;
-        uniforms.effect_count = operations.len() as u32;
-        uniforms.effects = effect_uniforms_for_ops(operations, Some(&creative_lut_binding))?;
-        // Test signals places its geometry from the frame extent, but
-        // `effect_uniforms_for_ops` has no extent in scope. Stamp it here, where
-        // the composite path and `record_point_effect_pass` converge: the point
-        // uniform's `extra0` is `[width, height, 0, 0]` for that op, exactly
-        // as `TestSignalsGrade::gpu_controls` documents.
-        {
+        if point_operations.is_some() {
+            uniforms.effect_count = operations.len() as u32;
+            uniforms.effects = effect_uniforms_for_ops(operations, Some(&creative_lut_binding))?;
+            // Test signals places its geometry from the frame extent, but
+            // the operation packer has no extent in scope.
             let source_extent = [uniforms.geometry[2], uniforms.geometry[3], 0.0, 0.0];
             for (uniform, operation) in uniforms.effects.iter_mut().zip(operations) {
                 if matches!(operation, EffectGpuPointOp::TestSignals { .. }) {

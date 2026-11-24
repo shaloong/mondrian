@@ -16099,25 +16099,41 @@ mod tests {
 
     #[test]
     fn fixed_media_calibration_uses_the_same_native_decode_across_output_times() {
-        verify_fixed_media_calibration(false);
+        verify_fixed_media_calibration(false, None);
     }
 
     #[test]
     #[ignore = "real GPU Export calibration qualification; run independently"]
     fn fixed_media_calibration_matches_production_gpu_export() {
-        verify_fixed_media_calibration(true);
+        verify_fixed_media_calibration(true, None);
     }
 
-    fn verify_fixed_media_calibration(verify_gpu: bool) {
+    #[test]
+    #[ignore = "real GPU Export grain output matte qualification"]
+    fn fixed_media_calibration_mixes_original_through_screen_mattes_on_gpu() {
+        verify_fixed_media_calibration(true, Some(mondrian_effects::MaskCombineMode::Screen));
+    }
+
+    #[test]
+    #[ignore = "real GPU Export grain output matte qualification"]
+    fn fixed_media_calibration_mixes_original_through_multiply_mattes_on_gpu() {
+        verify_fixed_media_calibration(true, Some(mondrian_effects::MaskCombineMode::Multiply));
+    }
+
+    fn verify_fixed_media_calibration(
+        verify_gpu: bool,
+        protection: Option<mondrian_effects::MaskCombineMode>,
+    ) {
         use mondrian_effects::{
             grain_calibration::{
                 calibrate_grain, GrainCalibrationRequest, GrainCalibrationSettings,
             },
             grain_spatial::{GrainSpatialGrade, GrainSpatialShaping},
             grain_temporal::GrainTemporalGrade,
-            register_effect_definition, EffectColorDomainContract, EffectDefinition,
-            EffectExecutionContract, EffectExecutionModes, EffectNode, EffectRenderOp,
-            EffectRoiPropagation, EffectType,
+            register_effect_definition, EffectColorDomain, EffectColorDomainContract,
+            EffectDefinition, EffectExecutionContract, EffectExecutionModes, EffectNode,
+            EffectRenderOp, EffectRoiPropagation, EffectType, PreparedQualifier,
+            QualifierAuthoring, QualifierMode,
         };
         use mondrian_renderer::timeline_auxiliary_frame_view;
         use mondrian_timeline::PictureSourceExtent;
@@ -16349,8 +16365,42 @@ mod tests {
             GrainSpatialShaping::default(),
         )
         .unwrap();
-        let kind =
-            EffectType::External(format!("test.export.source-calibrated-grain.{verify_gpu}"));
+        let qualifiers = protection.map(|mode| {
+            let grades = [(0.02, 0.26, 0.8), (0.04, 0.35, 0.0)].map(|(low, high, blur)| {
+                Arc::new(
+                    PreparedQualifier::new(
+                        QualifierAuthoring {
+                            mode: QualifierMode::Hsl,
+                            hue_center_degrees: 0.0,
+                            hue_width_degrees: 360.0,
+                            hue_softness_degrees: 0.0,
+                            saturation_low: 0.0,
+                            saturation_high: 1.0,
+                            saturation_softness: 0.0,
+                            luminance_low: low,
+                            luminance_high: high,
+                            luminance_softness: 0.04,
+                            samples: None,
+                            three_d_tolerance: 0.0,
+                            three_d_softness: 0.0,
+                            denoise_radius: 0,
+                            blur_radius: blur,
+                            clean_black: 0.0,
+                            clean_white: 0.0,
+                        },
+                        WorkingColorSpace::LinearRec709,
+                    )
+                    .unwrap(),
+                )
+            });
+            (grades, mode)
+        });
+        let halo = spatial.halo().max(qualifiers.as_ref().map_or(0, |(grades, _)| {
+            grades.iter().map(|grade| grade.input_halo()).max().unwrap_or(0)
+        }));
+        let kind = EffectType::External(format!(
+            "test.export.source-calibrated-grain.{verify_gpu}.{protection:?}"
+        ));
         register_effect_definition(
             EffectDefinition::new(
                 kind.key(),
@@ -16362,14 +16412,30 @@ mod tests {
                 execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
                 temporal_input: temporal.temporal_extent(),
                 roi_propagation: EffectRoiPropagation::Expand {
-                    horizontal_pixels: spatial.halo(),
-                    vertical_pixels: spatial.halo(),
+                    horizontal_pixels: halo,
+                    vertical_pixels: halo,
                 },
                 ..EffectExecutionContract::IDENTITY
             })
-            .with_graph_builder(Arc::new(move |_, _, graph| {
+            .with_branching_graph_builder(Arc::new(move |_, _, graph| {
+                let original = graph.current_output();
                 graph.append_unary(EffectRenderOp::TemporalGrain { grade: temporal });
-                graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial });
+                let filtered = graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial });
+                if let Some((qualifiers, mode)) = &qualifiers {
+                    let [left, right] = qualifiers.each_ref().map(|qualifier| {
+                        graph.set_current_output(original);
+                        graph.append_unary_in_domain(
+                            EffectRenderOp::Qualifier { qualifier: Arc::clone(qualifier) },
+                            EffectColorDomainContract {
+                                input: EffectColorDomain::SceneLinearRgb,
+                                output: EffectColorDomain::AlphaMask,
+                            },
+                        )
+                    });
+                    let matte = graph.add_mask_combine_with_mode(left, right, *mode);
+                    let mix = graph.add_matte_mix_with_amount(filtered, original, matte, 0.65);
+                    graph.set_current_output(mix);
+                }
                 Ok(())
             })),
         )
@@ -16438,6 +16504,12 @@ mod tests {
                     after.temporal_gpu_schedules - before.temporal_gpu_schedules,
                     1
                 );
+                if protection.is_some() {
+                    assert_eq!(
+                        after.temporal_gpu_dispatches - before.temporal_gpu_dispatches,
+                        6
+                    );
+                }
                 assert_eq!(
                     after.temporal_gpu_readbacks - before.temporal_gpu_readbacks,
                     1
