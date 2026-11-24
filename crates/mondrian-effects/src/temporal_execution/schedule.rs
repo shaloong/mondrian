@@ -86,14 +86,27 @@ pub(super) fn temporal_scalar_required_bytes(
                     | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
                         let input = temporal_program.address_for_input(context, *input)?;
                         plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
-                        if matches!(op, crate::EffectRenderOp::TemporalFrameBlend { .. }) {
-                            let sample = temporal_program.temporal_sample(*address).ok_or(
+                        if matches!(
+                            op,
+                            crate::EffectRenderOp::TemporalFrameBlend { .. }
+                                | crate::EffectRenderOp::TemporalGrain { .. }
+                        ) {
+                            let reads = temporal_program.temporal_reads(*address).ok_or(
                                 EffectTemporalExecutionError::InvalidGraphLiveness {
-                                    reason: "temporal value has no planned sample edge",
+                                    reason: "temporal value has no planned sample bindings",
                                 },
                             )?;
-                            plan_take_value(sample, &mut live, &mut remaining_uses, &mut working)?;
-                            working.release_frame()?;
+                            for sample in reads.values() {
+                                plan_take_value(
+                                    sample,
+                                    &mut live,
+                                    &mut remaining_uses,
+                                    &mut working,
+                                )?;
+                            }
+                            for _ in reads.values() {
+                                working.release_frame()?;
+                            }
                         } else {
                             let scratch_bytes = render_op_f32_scratch_frames(op)
                                 .checked_mul(frame_bytes)

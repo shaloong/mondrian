@@ -27,6 +27,23 @@ pub(super) enum TemporalValueAddress {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TemporalReads {
+    Blend(TemporalValueAddress),
+    Neighbors([Option<TemporalValueAddress>; 2]),
+}
+
+impl TemporalReads {
+    pub(super) fn values(self) -> impl Iterator<Item = TemporalValueAddress> {
+        match self {
+            Self::Blend(sample) => [Some(sample), None],
+            Self::Neighbors(neighbors) => neighbors,
+        }
+        .into_iter()
+        .flatten()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct TemporalGraphContext {
     pub(super) time: TimelineTime,
@@ -40,7 +57,7 @@ pub(super) struct PreparedTemporalValueProgram {
     ordered_values: Arc<[TemporalValueAddress]>,
     root: TemporalValueAddress,
     remaining_uses: HashMap<TemporalValueAddress, usize>,
-    temporal_samples: HashMap<TemporalValueAddress, TemporalValueAddress>,
+    temporal_samples: HashMap<TemporalValueAddress, TemporalReads>,
     source_times: Arc<[TimelineTime]>,
     fingerprint: [u8; 32],
     temporal_nodes: usize,
@@ -67,6 +84,13 @@ impl PreparedTemporalValueProgram {
         &self,
         address: TemporalValueAddress,
     ) -> Option<TemporalValueAddress> {
+        match self.temporal_reads(address)? {
+            TemporalReads::Blend(sample) => Some(sample),
+            TemporalReads::Neighbors(_) => None,
+        }
+    }
+
+    pub(super) fn temporal_reads(&self, address: TemporalValueAddress) -> Option<TemporalReads> {
         self.temporal_samples.get(&address).copied()
     }
 
@@ -179,7 +203,7 @@ struct TemporalProgramBuilder<'a> {
     visit: HashMap<TemporalValueAddress, VisitState>,
     ordered_values: Vec<TemporalValueAddress>,
     remaining_uses: HashMap<TemporalValueAddress, usize>,
-    temporal_samples: HashMap<TemporalValueAddress, TemporalValueAddress>,
+    temporal_samples: HashMap<TemporalValueAddress, TemporalReads>,
     source_times: Vec<TimelineTime>,
     seen_source_times: HashSet<TimelineTime>,
     temporal_nodes: usize,
@@ -273,42 +297,46 @@ impl TemporalProgramBuilder<'_> {
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
                 let input_address = self.visit_graph_value(context, input)?;
                 self.add_use(input_address)?;
-                if let crate::EffectRenderOp::TemporalFrameBlend { sample_offset, mix } = op {
-                    validate_temporal_blend(sample_offset, mix)?;
+                let reads = match op {
+                    crate::EffectRenderOp::TemporalFrameBlend { sample_offset, mix } => {
+                        validate_temporal_blend(sample_offset, mix)?;
+                        let stage = self.temporal_owner_stage(context, node_id, input)?;
+                        Some(TemporalReads::Blend(self.visit_sample(
+                            context,
+                            stage,
+                            input_address,
+                            sample_offset,
+                        )?))
+                    }
+                    crate::EffectRenderOp::TemporalGrain { grade } => {
+                        let stage = self.temporal_owner_stage(context, node_id, input)?;
+                        let mut neighbors = [None; 2];
+                        for (sample, offset) in neighbors.iter_mut().zip(grade.offsets()) {
+                            if let Some(offset) = offset {
+                                *sample = Some(self.visit_sample(
+                                    context,
+                                    stage,
+                                    input_address,
+                                    offset,
+                                )?);
+                            }
+                        }
+                        Some(TemporalReads::Neighbors(neighbors))
+                    }
+                    _ => None,
+                };
+                if let Some(reads) = reads {
                     self.temporal_nodes = self.temporal_nodes.checked_add(1).ok_or(
                         EffectTemporalExecutionError::InvalidGraphLiveness {
                             reason: "temporal node count overflowed",
                         },
                     )?;
-                    let stage_index = self.temporal_owner_stage(context, node_id, input)?;
-                    let sample_time =
-                        temporal_sample_time(self.contexts[context].time, sample_offset)?;
-                    let sample_address = if sample_time == self.contexts[context].time {
-                        input_address
-                    } else if stage_index == 0 {
-                        self.visit_source(sample_time)?
-                    } else {
-                        let sample_context = self.context_for_sample(sample_time)?;
-                        let binding = self.contexts[sample_context]
-                            .graph
-                            .stage_bindings()
-                            .get(stage_index)
-                            .ok_or(EffectTemporalExecutionError::SampledStageContractChanged {
-                                stage_index,
-                            })?;
-                        if binding.stage_index() != stage_index {
-                            return Err(
-                                EffectTemporalExecutionError::SampledStageContractChanged {
-                                    stage_index,
-                                },
-                            );
-                        }
-                        self.visit_graph_value(sample_context, binding.input_value())?
-                    };
-                    self.add_use(sample_address)?;
-                    if self.temporal_samples.insert(address, sample_address).is_some() {
+                    for sample in reads.values() {
+                        self.add_use(sample)?;
+                    }
+                    if self.temporal_samples.insert(address, reads).is_some() {
                         return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
-                            reason: "temporal graph value received more than one sample edge",
+                            reason: "temporal graph value received duplicate sample bindings",
                         });
                     }
                 }
@@ -441,6 +469,31 @@ impl TemporalProgramBuilder<'_> {
         Ok(owner.stage_index())
     }
 
+    fn visit_sample(
+        &mut self,
+        context: usize,
+        stage_index: usize,
+        input: TemporalValueAddress,
+        offset: TimelineTime,
+    ) -> Result<TemporalValueAddress, EffectTemporalExecutionError> {
+        let time = self.contexts[context].time;
+        let sample_time = temporal_sample_time(time, offset)?;
+        if sample_time == time {
+            return Ok(input);
+        }
+        if stage_index == 0 {
+            return self.visit_source(sample_time);
+        }
+        let sample_context = self.context_for_sample(sample_time)?;
+        let binding = self.contexts[sample_context]
+            .graph
+            .stage_bindings()
+            .get(stage_index)
+            .filter(|binding| binding.stage_index() == stage_index)
+            .ok_or(EffectTemporalExecutionError::SampledStageContractChanged { stage_index })?;
+        self.visit_graph_value(sample_context, binding.input_value())
+    }
+
     fn context_for_sample(
         &mut self,
         time: TimelineTime,
@@ -492,7 +545,7 @@ fn fingerprint_program(
     contexts: &[TemporalGraphContext],
     schedule: &[TemporalValueAddress],
     remaining_uses: &HashMap<TemporalValueAddress, usize>,
-    temporal_samples: &HashMap<TemporalValueAddress, TemporalValueAddress>,
+    temporal_samples: &HashMap<TemporalValueAddress, TemporalReads>,
     root: TemporalValueAddress,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -511,11 +564,21 @@ fn fingerprint_program(
                 .unwrap_or(u64::MAX)
                 .to_le_bytes(),
         );
-        if let Some(sample) = temporal_samples.get(address) {
-            hasher.update([1]);
-            hash_address(&mut hasher, *sample);
-        } else {
-            hasher.update([0]);
+        match temporal_samples.get(address) {
+            None => hasher.update([0]),
+            Some(TemporalReads::Blend(sample)) => {
+                hasher.update([1]);
+                hash_address(&mut hasher, *sample);
+            }
+            Some(TemporalReads::Neighbors(neighbors)) => {
+                hasher.update([2]);
+                for sample in neighbors {
+                    hasher.update([u8::from(sample.is_some())]);
+                    if let Some(sample) = sample {
+                        hash_address(&mut hasher, *sample);
+                    }
+                }
+            }
         }
     }
     hash_address(&mut hasher, root);

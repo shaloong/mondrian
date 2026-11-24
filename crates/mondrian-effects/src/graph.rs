@@ -1410,10 +1410,16 @@ impl CompiledEffectGraph {
                 | EffectGraphNodeKind::DomainEffect { op, .. }
                 | EffectGraphNodeKind::CustomSource { op, .. }
                 | EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
-                    temporal_kernel |= matches!(op, EffectRenderOp::TemporalFrameBlend { .. });
+                    temporal_kernel |= matches!(
+                        op,
+                        EffectRenderOp::TemporalFrameBlend { .. }
+                            | EffectRenderOp::TemporalGrain { .. }
+                    );
                     closed_current &= !matches!(
                         op,
-                        EffectRenderOp::Custom { .. } | EffectRenderOp::TemporalFrameBlend { .. }
+                        EffectRenderOp::Custom { .. }
+                            | EffectRenderOp::TemporalFrameBlend { .. }
+                            | EffectRenderOp::TemporalGrain { .. }
                     ) && raw_render_op_execution_requirements(op).temporal_input
                         == EffectTemporalInputExtent::CURRENT_FRAME;
                 }
@@ -3587,6 +3593,11 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
                 ..cpu_float
             }
         }
+        EffectRenderOp::TemporalGrain { grade } => EffectImplementationRequirements {
+            execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
+            temporal_input: grade.temporal_extent(),
+            ..cpu_float
+        },
         EffectRenderOp::Lut3D { .. } => EffectImplementationRequirements {
             execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
             resource_lifetime: EffectResourceLifetime::PreparedProgram,

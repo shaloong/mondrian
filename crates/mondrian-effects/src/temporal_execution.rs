@@ -2730,6 +2730,20 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                 )?;
                                 self.temporal_blend(input, sample, mix, control)?
                             }
+                            crate::EffectRenderOp::TemporalGrain { grade } => {
+                                let input =
+                                    self.temporal_program.address_for_input(context, input)?;
+                                let Some(program::TemporalReads::Neighbors(neighbors)) =
+                                    self.temporal_program.temporal_reads(address)
+                                else {
+                                    return Err(
+                                        EffectTemporalExecutionError::InvalidGraphLiveness {
+                                            reason: "temporal grain value has no planned neighbors",
+                                        },
+                                    );
+                                };
+                                self.temporal_grain(input, neighbors, grade, control)?
+                            }
                             op => {
                                 let input =
                                     self.temporal_program.address_for_input(context, input)?;
@@ -3188,6 +3202,38 @@ impl<'a> ScalarTemporalEvaluator<'a> {
             processor_input_checkpoint(self.request, control)
         })?;
         self.working.release_frame()?;
+        Ok(current)
+    }
+
+    fn temporal_grain(
+        &mut self,
+        input: TemporalValueAddress,
+        neighbors: [Option<TemporalValueAddress>; 2],
+        grade: crate::grain_temporal::GrainTemporalGrade,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
+        let mut current = self.take_value(input)?;
+        let mut frames = [None, None];
+        for (slot, address) in frames.iter_mut().zip(neighbors) {
+            if let Some(address) = address {
+                let sample = self.take_value(address)?;
+                if sample.len() != current.len() {
+                    return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+                        reason: "temporal grain input frames do not have equal pixel counts",
+                    });
+                }
+                *slot = Some(sample);
+            }
+        }
+        grade.apply_controlled(
+            &mut current,
+            frames.each_ref().map(|frame| frame.as_deref()),
+            &mut || processor_input_checkpoint(self.request, control),
+        )?;
+        for frame in frames.into_iter().flatten() {
+            drop(frame);
+            self.working.release_frame()?;
+        }
         Ok(current)
     }
 
@@ -3744,6 +3790,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         crate::EffectRenderOp::Stroke { .. } => "stroke",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
+        crate::EffectRenderOp::TemporalGrain { .. } => "temporal_grain",
         crate::EffectRenderOp::Lut3D { .. } => "lut3d",
         crate::EffectRenderOp::DifferenceMatte { .. } => "difference_matte",
         crate::EffectRenderOp::Blend { .. } => "blend",
@@ -4126,6 +4173,56 @@ mod tests {
         assert!(
             matches!(run(1.0, true), Err(EffectTemporalExecutionError::AuxiliaryFrameMissing { time, slot: 0 }) if time == historical)
         );
+    }
+
+    #[test]
+    fn temporal_grain_freezes_two_signed_roi_reads_and_rejects_motion() {
+        use crate::grain_temporal::GrainTemporalGrade;
+        let previous = TimelineTime::new(-1, 8).unwrap();
+        let following = TimelineTime::new(1, 4).unwrap();
+        let offsets = [Some(previous), Some(following)];
+        let extent = EffectFrameExtent::new(4, 2);
+        let request = EffectTemporalExecutionRequest::new(
+            9,
+            EffectExecutionContinuity::Discontinuous,
+            TimelineTime::ZERO,
+            extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            EffectPixelRoi::new(1, 0, 2, 1),
+            ExecutionCancellationToken::new(),
+        );
+        let run = |sigma: [f32; 3]| {
+            let grade = GrainTemporalGrade::new(offsets, sigma, 1.0, 1.0).unwrap();
+            let graph = bind_linear(
+                [crate::EffectRenderOp::TemporalGrain { grade }],
+                EffectExecutionContract {
+                    temporal_input: grade.temporal_extent(),
+                    ..temporal_contract(TimelineTime::ZERO, EffectRoiPropagation::PixelLocal)
+                },
+            );
+            let mut provider = GradientProvider::new(extent);
+            let output = EffectExecutionSession::default()
+                .execute_temporal_roi_f32(&graph, &request, &mut provider)
+                .unwrap();
+            assert_eq!(
+                provider.requests.iter().map(|sample| sample.time()).collect::<Vec<_>>(),
+                [TimelineTime::ZERO, previous, following],
+            );
+            assert!(provider
+                .requests
+                .iter()
+                .all(|sample| sample.input_roi().region() == request.output_roi()));
+            output
+        };
+        let stationary = run([0.2; 3]);
+        let moving = run([0.001; 3]);
+        assert!((stationary.tile().pixels()[0][0] - (0.1 + 0.125 / 3.0)).abs() < 1.0e-6);
+        assert_eq!(stationary.tile().pixels()[0][3], 1.0);
+        assert_eq!(
+            moving.tile().pixels()[0],
+            GradientProvider::pixel(TimelineTime::ZERO, 1, 0)
+        );
+        assert_ne!(stationary.cache_identity(), moving.cache_identity());
     }
 
     #[test]

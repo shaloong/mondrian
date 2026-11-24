@@ -2956,6 +2956,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::Beam { .. } => 151,
         EffectRenderOp::InnerOuterKey { .. } => 153,
         EffectRenderOp::MaskPathStroke { .. } => 155,
+        EffectRenderOp::TemporalGrain { .. } => 156,
         EffectRenderOp::Shape { .. } => 154,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
@@ -5455,6 +5456,7 @@ fn cpu_node_scratch_frames(
                 Ok(render_op_f32_scratch_frames(op))
             }
             crate::EffectRenderOp::TemporalFrameBlend { .. }
+            | crate::EffectRenderOp::TemporalGrain { .. }
             | crate::EffectRenderOp::VideoCollage { .. }
             | crate::EffectRenderOp::Custom { processor: None, .. } => {
                 Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })

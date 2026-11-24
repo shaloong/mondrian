@@ -121,6 +121,15 @@ pub enum TemporalGpuStepOperation {
         /// Weight of `sample`, matching `coverage::mix_straight_rgba`.
         mix: f32,
     },
+    /// Motion-gated grain reduction using the same two samples as scalar execution.
+    TemporalGrain {
+        /// Value at the output instant.
+        input: TemporalGpuValue,
+        /// Previous and following values in author time, when available.
+        neighbors: [Option<TemporalGpuValue>; 2],
+        /// Frozen noise profile and motion controls.
+        grade: crate::grain_temporal::GrainTemporalGrade,
+    },
     /// Composite one value over another with the graph's own blend policy.
     Blend {
         /// Base value.
@@ -481,6 +490,27 @@ impl PreparedEffectTemporalExecution {
                                     sample: gpu_value(program, sample)?,
                                     mix: *mix,
                                 }
+                            } else if let crate::EffectRenderOp::TemporalGrain { grade } = op {
+                                let Some(super::program::TemporalReads::Neighbors(samples)) =
+                                    program.temporal_reads(*address)
+                                else {
+                                    return Err(EffectTemporalGpuPlanBlocker::MissingSampleEdge {
+                                        node_id,
+                                    });
+                                };
+                                let [previous, following] = samples;
+                                TemporalGpuStepOperation::TemporalGrain {
+                                    input,
+                                    neighbors: [
+                                        previous
+                                            .map(|sample| gpu_value(program, sample))
+                                            .transpose()?,
+                                        following
+                                            .map(|sample| gpu_value(program, sample))
+                                            .transpose()?,
+                                    ],
+                                    grade: *grade,
+                                }
                             } else if let Some(pass) = crate::gpu_pipeline::spatial_pass_for(op) {
                                 if !pass.raster_change().is_identity()
                                     || pass.auxiliary_slot().is_some()
@@ -706,6 +736,9 @@ mod tests {
             | TemporalGpuStepOperation::Spatial { input, .. } => vec![*input],
             TemporalGpuStepOperation::TemporalBlend { input, sample, .. } => {
                 vec![*input, *sample]
+            }
+            TemporalGpuStepOperation::TemporalGrain { input, neighbors, .. } => {
+                std::iter::once(*input).chain(neighbors.iter().flatten().copied()).collect()
             }
             TemporalGpuStepOperation::Blend { base, overlay, .. } => vec![*base, *overlay],
             TemporalGpuStepOperation::Auxiliary { input, auxiliary, .. } => {

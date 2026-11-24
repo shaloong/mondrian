@@ -1165,6 +1165,11 @@ pub enum EffectRenderOp {
         /// Weight of the offset sample in `[0, 1]`.
         mix: f32,
     },
+    /// Motion-gated grain reduction over the entering value's two neighbors.
+    TemporalGrain {
+        /// Bound offsets and shared RGB calibration.
+        grade: crate::grain_temporal::GrainTemporalGrade,
+    },
     /// Channel blur: blurs the red, green, blue and alpha channels independently.
     ChannelBlur {
         /// Authored per-channel amounts, edge behaviour, and direction.
@@ -1841,6 +1846,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .field("sample_offset", sample_offset)
                 .field("mix", mix)
                 .finish(),
+            Self::TemporalGrain { grade } => {
+                formatter.debug_tuple("TemporalGrain").field(grade).finish()
+            }
             Self::RemoveColorMatting { grade } => {
                 formatter.debug_struct("RemoveColorMatting").field("grade", grade).finish()
             }
@@ -2971,6 +2979,10 @@ impl EffectRenderOp {
                 sample_offset.hash(state);
                 mix.to_bits().hash(state);
             }
+            EffectRenderOp::TemporalGrain { grade } => {
+                156u8.hash(state);
+                grade.hash_controls(state);
+            }
             EffectRenderOp::RemoveColorMatting { grade } => {
                 106u8.hash(state);
                 // Every channel of the authored color, alpha included, so two
@@ -3460,6 +3472,7 @@ impl EffectRenderOp {
             EffectRenderOp::Sharpen { .. } => 4,
             EffectRenderOp::ChromaticAberration { .. } => 4,
             EffectRenderOp::TemporalFrameBlend { .. } => 2,
+            EffectRenderOp::TemporalGrain { .. } => 3,
             EffectRenderOp::RemoveColorMatting { .. } => 1,
             EffectRenderOp::PhotoFilter { .. } => 1,
             EffectRenderOp::JpegDamage { .. } => 1,

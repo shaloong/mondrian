@@ -1248,6 +1248,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         EffectRenderOp::Stroke { .. } => "stroke",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
+        EffectRenderOp::TemporalGrain { .. } => "temporal_grain",
         EffectRenderOp::Lut3D { .. } => "lut_3d",
         EffectRenderOp::DifferenceMatte { .. } => "difference_matte",
         EffectRenderOp::Blend { .. } => "blend",
