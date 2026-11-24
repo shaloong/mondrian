@@ -1018,6 +1018,22 @@ pub struct CompiledEffectGpuPipeline {
 }
 
 impl CompiledEffectGpuPipeline {
+    pub(crate) fn temporal_spatial_stage(
+        compiled: &CompiledEffectGraph,
+        input: EffectGraphNodeId,
+        output: EffectGraphNodeId,
+        pass: EffectGpuSpatialPass,
+    ) -> Self {
+        Self {
+            stages: vec![EffectGpuStage::Spatial { pass, node_id: output }],
+            graph_signature: compiled.signature_hash(),
+            graph_fingerprint: compiled.semantic_fingerprint(),
+            source_value: input,
+            output_value: output,
+            processing_domain: EffectColorDomain::SceneLinearRgb,
+        }
+    }
+
     /// Whether recording requires the selected source's image sampling.
     pub fn requires_image_sampling(&self) -> bool {
         self.stages.iter().any(|stage| {

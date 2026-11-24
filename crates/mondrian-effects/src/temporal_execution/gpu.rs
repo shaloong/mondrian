@@ -10,8 +10,9 @@
 //! silently different graph.
 
 use super::*;
-use crate::gpu_pipeline::EffectGpuSpatialPass;
+use crate::gpu_pipeline::{CompiledEffectGpuPipeline, EffectGpuSpatialPass};
 use crate::gpu_plan::CompiledEffectGpuPlan;
+use crate::EffectColorDomain;
 use mondrian_core::BlendMode;
 use std::fmt;
 
@@ -108,8 +109,8 @@ pub enum TemporalGpuStepOperation {
     Spatial {
         /// Input value.
         input: TemporalGpuValue,
-        /// Admitted pass.
-        pass: EffectGpuSpatialPass,
+        /// Admitted single-stage pipeline in the schedule's working space.
+        plan: Arc<CompiledEffectGpuPipeline>,
     },
     /// Straight-alpha cross-fade between the current instant and one sample.
     TemporalBlend {
@@ -467,9 +468,10 @@ impl PreparedEffectTemporalExecution {
                         .node(node_id)
                         .ok_or(EffectTemporalGpuPlanBlocker::MissingGraphNode { node_id })?;
                     let operation = match &node.kind {
-                        EffectGraphNodeKind::UnaryEffect { input, op }
-                        | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
-                            let input = gpu_value(program, node_input(program, context, *input)?)?;
+                        EffectGraphNodeKind::UnaryEffect { input: graph_input, op }
+                        | EffectGraphNodeKind::DomainEffect { input: graph_input, op, .. } => {
+                            let input =
+                                gpu_value(program, node_input(program, context, *graph_input)?)?;
                             if let crate::EffectRenderOp::TemporalFrameBlend { mix, .. } = op {
                                 let sample = program.temporal_sample(*address).ok_or(
                                     EffectTemporalGpuPlanBlocker::MissingSampleEdge { node_id },
@@ -480,7 +482,39 @@ impl PreparedEffectTemporalExecution {
                                     mix: *mix,
                                 }
                             } else if let Some(pass) = crate::gpu_pipeline::spatial_pass_for(op) {
-                                TemporalGpuStepOperation::Spatial { input, pass }
+                                if !pass.raster_change().is_identity()
+                                    || pass.auxiliary_slot().is_some()
+                                    || matches!(&node.kind, EffectGraphNodeKind::DomainEffect {
+                                        domain_contract, ..
+                                    } if domain_contract.input != EffectColorDomain::SceneLinearRgb
+                                        || domain_contract.output != EffectColorDomain::SceneLinearRgb)
+                                {
+                                    return Err(EffectTemporalGpuPlanBlocker::NodeNotAdmitted {
+                                        node_id,
+                                        reason: format!(
+                                            "{} requires a different raster, color domain, or auxiliary binding",
+                                            pass.name(),
+                                        ),
+                                    });
+                                }
+                                let plan = CompiledEffectGpuPipeline::temporal_spatial_stage(
+                                    &frozen.graph,
+                                    *graph_input,
+                                    node_id,
+                                    pass,
+                                );
+                                if plan.requires_scene_projection() {
+                                    return Err(EffectTemporalGpuPlanBlocker::NodeNotAdmitted {
+                                        node_id,
+                                        reason: "spatial pass requires scene projection".to_owned(),
+                                    });
+                                }
+                                let plan = if plan.requires_image_sampling() {
+                                    plan.with_image_sampling(request.sampling())
+                                } else {
+                                    plan
+                                };
+                                TemporalGpuStepOperation::Spatial { input, plan: Arc::new(plan) }
                             } else {
                                 let plan =
                                     crate::gpu_plan::lower_effect_graph_node_to_gpu_point_plan(
@@ -612,8 +646,7 @@ mod tests {
     use crate::EffectType;
     use mondrian_core::{AssetId, PropertyValue, VisualSourceReference, WorkingColorSpace};
 
-    /// Echo over an optional Set Matte, exactly as production compiles it.
-    fn echo_program(with_matte: bool) -> PreparedEffectProgram {
+    fn authored_echo() -> mondrian_core::effect_data::EffectNode {
         let mut echo = crate::instantiate_effect_node(EffectType::Echo).unwrap();
         for (key, value) in [
             ("echo_time", PropertyValue::Float(-0.25)),
@@ -623,6 +656,11 @@ mod tests {
             echo.set_static_value_by_parameter(&EffectType::Echo.parameter_id(key).unwrap(), value)
                 .unwrap();
         }
+        echo
+    }
+
+    /// Echo over an optional Set Matte, exactly as production compiles it.
+    fn echo_program(with_matte: bool) -> PreparedEffectProgram {
         let mut effects = Vec::new();
         if with_matte {
             let mut matte = crate::instantiate_effect_node(EffectType::SetMatte).unwrap();
@@ -637,7 +675,7 @@ mod tests {
                 .unwrap();
             effects.push(matte);
         }
-        effects.push(echo);
+        effects.push(authored_echo());
         PreparedEffectProgram::prepare(&effects, &[], WorkingColorSpace::LinearRec709).unwrap()
     }
 
@@ -792,6 +830,33 @@ mod tests {
         assert_eq!(
             execution.plan_gpu_execution().unwrap_err(),
             EffectTemporalGpuPlanBlocker::PartialRoi
+        );
+    }
+
+    #[test]
+    fn temporal_spatial_step_refuses_a_changed_raster() {
+        let mut grow = crate::instantiate_effect_node(EffectType::GrowBounds).unwrap();
+        grow.set_static_value_by_parameter(
+            &EffectType::GrowBounds.parameter_id("pixels").unwrap(),
+            PropertyValue::Float(2.0),
+        )
+        .unwrap();
+        let program = PreparedEffectProgram::prepare(
+            &[grow, authored_echo()],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .unwrap();
+        let execution = frozen(
+            &program,
+            TimelineTime::new(1, 2).unwrap(),
+            extent().full_frame_roi(),
+        );
+        let error = execution.plan_gpu_execution().unwrap_err();
+        assert!(
+            matches!(error, EffectTemporalGpuPlanBlocker::NodeNotAdmitted { ref reason, .. }
+                if reason.contains("grow_bounds") && reason.contains("different raster")),
+            "{error}",
         );
     }
 
