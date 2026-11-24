@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-const GAUSSIAN_BOX_PASS_COUNT: usize = 3;
+pub(crate) const GAUSSIAN_BOX_PASS_COUNT: usize = 3;
 
 pub use crate::execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass, CustomEffectRenderProcessor,
@@ -2968,7 +2968,7 @@ fn apply_render_op_f32_region_impl<E>(
             let Some(radius) = crate::unsharp_mask::valid_unsharp_mask_radius(*radius) else {
                 return Ok(false);
             };
-            if *gain <= 1.0e-4 {
+            if *gain <= crate::unsharp_mask::MIN_EFFECTIVE_GAIN {
                 return Ok(true);
             }
             let blurred = gaussian_blur_rgba_f32_controlled(
@@ -3509,12 +3509,12 @@ fn gaussian_blur_rgba_f32_in_place_controlled<E>(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FractionalBoxKernel {
-    whole_radius: usize,
-    edge_weight: f32,
+pub(crate) struct FractionalBoxKernel {
+    pub(crate) whole_radius: usize,
+    pub(crate) edge_weight: f32,
 }
 
-fn gaussian_fractional_box_kernel(radius: f32) -> FractionalBoxKernel {
+pub(crate) fn gaussian_fractional_box_kernel(radius: f32) -> FractionalBoxKernel {
     let sigma = radius / 3.0;
     let target_pass_variance = sigma * sigma / GAUSSIAN_BOX_PASS_COUNT as f32;
     let whole_radius = (((1.0 + 12.0 * target_pass_variance).sqrt() - 1.0) * 0.5).floor() as usize;

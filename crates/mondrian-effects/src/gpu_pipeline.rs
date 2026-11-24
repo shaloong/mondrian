@@ -34,6 +34,15 @@ use crate::{BoxBlurDirection, EffectExecutionModes};
 /// and CPU paths evaluate the same math for the same graph.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EffectGpuSpatialPass {
+    /// Gaussian difference sharpening with a per-channel dead zone.
+    UnsharpMask {
+        /// Dimensionless amplification of the difference.
+        gain: f32,
+        /// Radius of the blur in source pixels.
+        radius: f32,
+        /// Absolute per-channel difference dead zone.
+        threshold: f32,
+    },
     /// Separable box blur; `iterations` passes per blurred axis.
     BoxBlur {
         /// Fractional blur radius in pixels.
@@ -533,6 +542,7 @@ impl EffectGpuSpatialPass {
     /// Stable name used by diagnostics and renderer dispatch.
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::UnsharpMask { .. } => "unsharp_mask",
             Self::BoxBlur { .. } => "box_blur",
             Self::DirectionalBlur { .. } => "directional_blur",
             Self::FindEdges { .. } => "find_edges",
@@ -624,6 +634,9 @@ impl EffectGpuSpatialPass {
     /// sufficient.
     pub fn horizontal_halo(&self) -> u32 {
         match *self {
+            Self::UnsharpMask { radius, .. } => {
+                crate::adjustment::gaussian_blur_input_halo(radius).unwrap_or(u32::MAX)
+            }
             Self::BoxBlur { radius, iterations, direction, .. } => {
                 crate::box_blur::box_blur_axis_halo(radius, iterations, direction)
                     .map(|(horizontal, _)| horizontal)
@@ -758,6 +771,7 @@ impl EffectGpuSpatialPass {
     /// Vertical reach of the kernel in source pixels.
     pub fn vertical_halo(&self) -> u32 {
         match *self {
+            Self::UnsharpMask { .. } => self.horizontal_halo(),
             Self::BoxBlur { radius, iterations, direction, .. } => {
                 crate::box_blur::box_blur_axis_halo(radius, iterations, direction)
                     .map(|(_, vertical)| vertical)
@@ -1362,6 +1376,18 @@ fn flush_point_stage(
 /// defined for it. Everything else keeps travelling through the CPU path.
 pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
     match op {
+        EffectRenderOp::UnsharpMask { gain, radius, threshold } => {
+            let radius = crate::unsharp_mask::valid_unsharp_mask_radius(*radius)?;
+            Some(EffectGpuSpatialPass::UnsharpMask {
+                gain: if *gain <= crate::unsharp_mask::MIN_EFFECTIVE_GAIN {
+                    0.0
+                } else {
+                    *gain
+                },
+                radius,
+                threshold: threshold.max(0.0),
+            })
+        }
         EffectRenderOp::BoxBlur { radius, iterations, direction, repeat_edge_pixels } => {
             Some(EffectGpuSpatialPass::BoxBlur {
                 radius: *radius,
@@ -1615,6 +1641,21 @@ mod tests {
             pipeline.processing_domain(),
             EffectColorDomain::SceneLinearRgb
         );
+    }
+
+    #[test]
+    fn unsharp_mask_lowers_with_the_cpu_gaussian_halo() {
+        let mut builder = EffectGraphBuilderState::new();
+        let radius = 23.75;
+        builder.append_unary(EffectRenderOp::UnsharpMask { gain: 1.2, radius, threshold: 0.03 });
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&compile(builder)).unwrap();
+        let [EffectGpuStage::Spatial { pass, .. }] = pipeline.stages() else {
+            panic!("expected a dedicated unsharp mask pass");
+        };
+        assert!(matches!(pass, EffectGpuSpatialPass::UnsharpMask { .. }));
+        let halo = crate::adjustment::gaussian_blur_input_halo(radius).unwrap();
+        assert!(halo > 0);
+        assert_eq!((pass.horizontal_halo(), pass.vertical_halo()), (halo, halo));
     }
 
     #[test]

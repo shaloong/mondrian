@@ -3505,7 +3505,7 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             ..cpu_float
         },
         EffectRenderOp::UnsharpMask { radius, .. } => EffectImplementationRequirements {
-            execution_modes: EffectExecutionModes::CPU_F32,
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: crate::adjustment::gaussian_blur_input_halo(*radius).map_or(
                 EffectRoiPropagation::FullFrame,
                 |halo| EffectRoiPropagation::Expand {

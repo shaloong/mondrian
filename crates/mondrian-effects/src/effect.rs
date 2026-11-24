@@ -19426,7 +19426,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ..cpu_linear
         },
         EffectType::UnsharpMask => EffectExecutionContract {
-            execution_modes: EffectExecutionModes::CPU_F32,
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Same bounded-expansion envelope as the Gaussian blur it compares
             // against; the radius parameter is capped at 500 pixels.
             roi_propagation: finite_kernel_roi_contract(
@@ -20243,7 +20243,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     context.time,
                     50.0,
                 ));
-                if gain <= 1.0e-4 {
+                if gain <= crate::unsharp_mask::MIN_EFFECTIVE_GAIN {
                     return Ok(());
                 }
                 let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 1.0);

@@ -19,6 +19,22 @@ pub const UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS: f32 = 500.0;
 /// Largest authorable amount, in percent.
 pub const UNSHARP_MASK_AUTHOR_MAX_AMOUNT_PERCENT: f32 = 500.0;
 
+pub(crate) const MIN_EFFECTIVE_GAIN: f32 = 1.0e-4;
+
+/// Number of passes along each axis in the shared Gaussian approximation.
+pub const UNSHARP_MASK_BLUR_ITERATIONS: u32 = crate::adjustment::GAUSSIAN_BOX_PASS_COUNT as u32;
+
+/// Integer radius, outer-tap weight and total weight for a single blur axis.
+pub fn unsharp_mask_blur_controls(radius: f32) -> [f32; 3] {
+    let kernel = crate::adjustment::gaussian_fractional_box_kernel(radius);
+    let whole = kernel.whole_radius as f32;
+    [
+        whole,
+        kernel.edge_weight,
+        whole.mul_add(2.0, 1.0) + 2.0 * kernel.edge_weight,
+    ]
+}
+
 /// Validates an author-facing blur radius.
 pub(crate) fn valid_unsharp_mask_radius(radius: f32) -> Option<f32> {
     (radius.is_finite()
