@@ -866,15 +866,20 @@ mod tests {
 
     #[test]
     fn device_temporal_grain_matches_scalar_with_two_or_missing_neighbors() {
-        verify_temporal_grain(false);
+        verify_temporal_grain(false, false);
     }
 
     #[test]
     fn device_temporal_grain_feeds_calibrated_spatial_grain_in_the_same_graph() {
-        verify_temporal_grain(true);
+        verify_temporal_grain(true, false);
     }
 
-    fn verify_temporal_grain(spatial_after: bool) {
+    #[test]
+    fn device_temporal_grain_runs_unsharp_mask_after_spatial_grain() {
+        verify_temporal_grain(true, true);
+    }
+
+    fn verify_temporal_grain(spatial_after: bool, sharpen_after: bool) {
         use mondrian_effects::{
             grain_spatial::{GrainSpatialGrade, GrainSpatialShaping},
             grain_temporal::GrainTemporalGrade,
@@ -917,7 +922,9 @@ mod tests {
         .enumerate()
         {
             let grade = GrainTemporalGrade::new(offsets, [0.025; 3], 0.85, 0.9).unwrap();
-            let kind = EffectType::External(format!("test.temporal-grain.{spatial_after}.{case}"));
+            let kind = EffectType::External(format!(
+                "test.temporal-grain.{spatial_after}.{sharpen_after}.{case}"
+            ));
             register_effect_definition(
                 EffectDefinition::new(
                     kind.key(),
@@ -957,12 +964,21 @@ mod tests {
                 PropertyValue::Float(1.0),
             )
             .unwrap();
-            let program = PreparedEffectProgram::prepare(
-                &[blur, EffectNode::new(kind)],
-                &[],
-                WorkingColorSpace::LinearRec709,
-            )
-            .unwrap();
+            let mut effects = vec![blur, EffectNode::new(kind)];
+            if sharpen_after {
+                let mut unsharp =
+                    mondrian_effects::instantiate_effect_node(EffectType::UnsharpMask).unwrap();
+                unsharp
+                    .set_static_value_by_parameter(
+                        &EffectType::UnsharpMask.parameter_id("radius").unwrap(),
+                        PropertyValue::Float(5.5),
+                    )
+                    .unwrap();
+                effects.push(unsharp);
+            }
+            let program =
+                PreparedEffectProgram::prepare(&effects, &[], WorkingColorSpace::LinearRec709)
+                    .unwrap();
             let request = EffectTemporalExecutionRequest::new(
                 17,
                 EffectExecutionContinuity::Discontinuous,
@@ -986,9 +1002,13 @@ mod tests {
                         TemporalGpuStepOperation::Spatial { .. }
                     ))
                     .count(),
-                expected_leaves + usize::from(spatial_after)
+                expected_leaves + usize::from(spatial_after) + usize::from(sharpen_after)
             );
-            if spatial_after {
+            if sharpen_after {
+                assert!(
+                    matches!(schedule.steps().last().unwrap().operation(), TemporalGpuStepOperation::Spatial { plan, .. } if matches!(plan.stages(), [mondrian_effects::EffectGpuStage::Spatial { pass: mondrian_effects::EffectGpuSpatialPass::UnsharpMask { .. }, .. }]))
+                );
+            } else if spatial_after {
                 assert!(
                     matches!(schedule.steps().last().unwrap().operation(), TemporalGpuStepOperation::Spatial { plan, .. } if matches!(plan.stages(), [mondrian_effects::EffectGpuStage::Spatial { pass: mondrian_effects::EffectGpuSpatialPass::SpatialGrain { .. }, .. }]))
                 );
@@ -1059,7 +1079,7 @@ mod tests {
             assert_eq!(gpu.readbacks(), 1);
             assert_eq!(
                 gpu.dispatches(),
-                expected_leaves + 1 + usize::from(spatial_after)
+                expected_leaves + 1 + usize::from(spatial_after) + usize::from(sharpen_after)
             );
             stationary_probe[case] = gpu.output().tile().pixels()[8 * 33 + 5][0];
         }

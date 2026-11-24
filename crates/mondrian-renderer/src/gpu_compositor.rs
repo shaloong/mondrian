@@ -22939,6 +22939,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_unsharp_mask_matches_authored_cpu_graph() {
+        use mondrian_core::{
+            ColorFrameAlpha, ImageSampling, PropertyValue, TimelineTime, WorkingColorSpace,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, compile_clip_effect_graph,
+            instantiate_effect_node, lower_effect_graph_to_gpu_pipeline, EffectColorDomain,
+            EffectFloatFrameView, EffectFrameExtent, EffectGpuStage, EffectType, EffectValueFormat,
+            EffectWorkingPrecision,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping unsharp mask parity test: no GPU adapter available");
+            return;
+        };
+        let extent = EffectFrameExtent::new(71, 29);
+        let (width, height) = (extent.width(), extent.height());
+        let pixels: Vec<_> = (0..width * height)
+            .map(|i| {
+                let x = i % width;
+                let edge = if x < width / 2 { -0.3 } else { 1.76 };
+                [
+                    edge + (i % 3) as f32 * 0.02,
+                    0.6 - edge * 0.25,
+                    1.0 + edge,
+                    if x == 3 {
+                        0.0
+                    } else {
+                        0.5 + (i % 3) as f32 / 4.0
+                    },
+                ]
+            })
+            .collect();
+        let input = EffectFloatFrameView::new(
+            extent,
+            EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                ColorFrameAlpha::StraightCoverage,
+            ),
+            ImageSampling::UNIT_SQUARE,
+            &pixels,
+        );
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let source = key_cleaner_upload(&context, &pixels, width, height);
+        let scratch = key_cleaner_scratch(&context, width, height, 2);
+        for (radius, amount, threshold) in [
+            (0.1, 50.0, 0.0),
+            (1.0, 50.0, 0.02),
+            (5.5, 230.0, 0.0),
+            (23.75, 120.0, 0.03),
+            (500.0, 500.0, 0.0),
+        ] {
+            let kind = EffectType::UnsharpMask;
+            let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+            for (parameter, value) in [
+                ("radius", radius),
+                ("amount", amount),
+                ("threshold", threshold),
+            ] {
+                effect
+                    .set_static_value_by_parameter(
+                        &kind.parameter_id(parameter).unwrap(),
+                        PropertyValue::Float(value),
+                    )
+                    .unwrap();
+            }
+            let graph = compile_clip_effect_graph(
+                &[effect],
+                &[],
+                TimelineTime::ZERO,
+                WorkingColorSpace::LinearRec709,
+            )
+            .unwrap();
+            let cpu = apply_compiled_effect_graph_rgba_f32(input, &graph, 0).unwrap();
+            let plan = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            let [EffectGpuStage::Spatial { pass, .. }] = plan.stages() else {
+                panic!("expected a dedicated GPU unsharp pass");
+            };
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            let texture = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    pass,
+                    &source,
+                    &scratch,
+                    width,
+                    height,
+                )
+                .unwrap();
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &texture, width, height);
+            let mut maximum = 0.0_f32;
+            assert_eq!(gpu.len(), pixels.len());
+            assert!(cpu.pixels().iter().zip(&pixels).any(|(a, b)| (a[0] - b[0]).abs() > 1.0e-5));
+            for ((reference, actual), original) in cpu.pixels().iter().zip(&gpu).zip(&pixels) {
+                assert_eq!(actual[3].to_bits(), original[3].to_bits());
+                if original[3] == 0.0 {
+                    assert_eq!(actual, original);
+                }
+                for (expected, value) in reference.iter().zip(actual) {
+                    assert!(value.is_finite());
+                    maximum = maximum.max((expected - value).abs());
+                }
+            }
+            eprintln!("Unsharp Mask radius={radius} amount={amount} threshold={threshold} max Float32 error {maximum:.9e}");
+            assert!(maximum <= 1.0e-4);
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_smart_blur_matches_the_cpu_kernel() {
         use mondrian_effects::{
             smart_blur_frame_f32, EffectGpuSpatialPass, SmartBlurGrade, SmartBlurMode,

@@ -372,6 +372,14 @@ fn estimate_ns(
 
 /// Per-pixel GPU cost of one texture pass of this kernel.
 fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
+    if let EffectGpuSpatialPass::UnsharpMask { gain, radius, .. } = pass {
+        if *gain == 0.0 {
+            return GPU_DEFAULT_NS_PER_PX;
+        }
+        let [whole, ..] = mondrian_effects::unsharp_mask::unsharp_mask_blur_controls(*radius);
+        // The GPU sums each window; the CPU maintains a sliding accumulator.
+        return 0.9 + 0.35 * f64::from(2.0 * whole + 3.0);
+    }
     match pass.name() {
         // Separable blurs and multi-pass morphology stay close to the two
         // texture reads and one write that bound every pass.
@@ -603,6 +611,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // box blur, plus the dot product and the comparison.
         "smart_blur" => 4.0,
         "spatial_grain" => 5.0,
+        "unsharp_mask" => 9.0,
         // Two separable tent passes over the radius plus the quantising
         // combine; the loop body is cheaper than smart blur's gated taps, so it
         // lands just under it.

@@ -402,6 +402,12 @@ pub fn gpu_spatial_chain_plan_with_auxiliary(
                             if let EffectGpuSpatialPass::InnerOuterKey { grade } = pass {
                                 minimum_draw_passes = grade.draw_pass_count();
                             }
+                            if matches!(pass, EffectGpuSpatialPass::UnsharpMask { gain, .. } if *gain > 0.0)
+                            {
+                                minimum_draw_passes = 2
+                                    * mondrian_effects::unsharp_mask::UNSHARP_MASK_BLUR_ITERATIONS
+                                    + 1;
+                            }
                             passes
                         }
                         Err(EffectSpatialGpuError::UnsupportedPass(name)) => {
@@ -876,6 +882,26 @@ mod tests {
                 vertical_halo: u32::MAX,
                 ..
             }]
+        ));
+    }
+
+    #[test]
+    fn spatial_chain_unsharp_mask_reuses_two_planes_at_dci_4k() {
+        let mut graph = EffectGraphBuilderState::new();
+        graph.append_unary(EffectRenderOp::UnsharpMask {
+            gain: 0.5,
+            radius: 23.75,
+            threshold: 0.03,
+        });
+        let graph = compile_reference_render_graph(graph.finish()).unwrap();
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+        let plan = gpu_spatial_chain_plan(&pipeline, 4096, 2160).unwrap();
+        assert_eq!(plan.spatial_passes, 7);
+        assert_eq!(plan.scratch_textures, 3);
+        assert_eq!(plan.scratch_bytes, 424_673_280);
+        assert!(matches!(
+            plan.stages.as_slice(),
+            [GpuSpatialStagePlan::Spatial { scratch_textures: 2, draw_passes: 7, .. }]
         ));
     }
 

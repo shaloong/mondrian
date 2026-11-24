@@ -118,6 +118,7 @@ pub(crate) struct EffectSpatialGpu {
     color_offset: wgpu::RenderPipeline,
     convolution: wgpu::RenderPipeline,
     deband: wgpu::RenderPipeline,
+    unsharp_mask: wgpu::RenderPipeline,
     glow_extract: wgpu::RenderPipeline,
     glow_composite: wgpu::RenderPipeline,
     fractal_noise: wgpu::RenderPipeline,
@@ -2021,6 +2022,34 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let unsharp_mask = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.unsharp-mask"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_unsharp_mask"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let glow_extract = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.glow-extract"),
             layout: Some(&layout),
@@ -2883,6 +2912,7 @@ impl EffectSpatialGpu {
             color_offset,
             convolution,
             deband,
+            unsharp_mask,
             glow_extract,
             glow_composite,
             fractal_noise,
@@ -4712,6 +4742,9 @@ impl EffectSpatialGpu {
         pass: &EffectGpuSpatialPass,
     ) -> Result<u32, EffectSpatialGpuError> {
         match pass {
+            EffectGpuSpatialPass::UnsharpMask { gain, .. } => {
+                Ok(if *gain == 0.0 { 1 } else { 2 })
+            }
             EffectGpuSpatialPass::BoxBlur { direction, iterations, .. } => {
                 let axes =
                     u32::from(direction.blurs_horizontal()) + u32::from(direction.blurs_vertical());
@@ -4953,6 +4986,15 @@ impl EffectSpatialGpu {
         }
         // Single-pass kernels write one texture and need no scratch pool.
         match pass {
+            EffectGpuSpatialPass::UnsharpMask { gain, radius, threshold } => {
+                return self.record_unsharp_mask(
+                    device,
+                    encoder,
+                    source,
+                    scratch,
+                    [*gain, *radius, *threshold],
+                );
+            }
             EffectGpuSpatialPass::SpatialGrain { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 let [params, extra, aces] = grade.gpu_controls();
@@ -6887,6 +6929,89 @@ impl EffectSpatialGpu {
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
+    fn record_unsharp_mask(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source: &wgpu::Texture,
+        scratch: &[wgpu::Texture],
+        controls: [f32; 3],
+    ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
+        use mondrian_effects::unsharp_mask::{
+            unsharp_mask_blur_controls, UNSHARP_MASK_BLUR_ITERATIONS,
+        };
+        let [gain, radius, threshold] = controls;
+        let size = [source.width() as f32, source.height() as f32, 0.0, 0.0];
+        let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+        let source_view = source.create_view(&Default::default());
+        let destination_view = destination.create_view(&Default::default());
+        let uniforms = SpatialPassUniform {
+            size,
+            params: [gain, threshold, 0.0, 0.0],
+            extra: [0.0; 4],
+            aces: [0.0; 4],
+            extra1: [0.0; 4],
+        };
+        if gain == 0.0 {
+            self.record_composite_pass(
+                device,
+                encoder,
+                &self.unsharp_mask,
+                &source_view,
+                &source_view,
+                &destination_view,
+                &uniforms,
+            );
+            return Ok(destination.clone());
+        }
+        let alternate = scratch.get(1).ok_or(EffectSpatialGpuError::UnsupportedPass(
+            "unsharp_mask_scratch_geometry",
+        ))?;
+        let alternate_view = alternate.create_view(&Default::default());
+        let [whole, edge_weight, normalization] = unsharp_mask_blur_controls(radius);
+        for iteration in 0..UNSHARP_MASK_BLUR_ITERATIONS {
+            let first = iteration == 0;
+            let horizontal = SpatialPassUniform {
+                size,
+                params: [0.0, 0.0, whole, edge_weight],
+                extra: [normalization, 1.0, f32::from(u8::from(first)), 0.0],
+                aces: [0.0; 4],
+                extra1: [0.0; 4],
+            };
+            self.record_pass(
+                device,
+                encoder,
+                &self.box_blur,
+                if first { &source_view } else { &alternate_view },
+                &destination_view,
+                &horizontal,
+            );
+            let vertical = SpatialPassUniform {
+                params: [0.0, 1.0, whole, edge_weight],
+                extra: [normalization, 1.0, 0.0, 0.0],
+                ..horizontal
+            };
+            self.record_pass(
+                device,
+                encoder,
+                &self.box_blur,
+                &destination_view,
+                &alternate_view,
+                &vertical,
+            );
+        }
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.unsharp_mask,
+            &source_view,
+            &alternate_view,
+            &destination_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
+
     /// Records the three-pass deband chain.
     ///
     /// The horizontal and vertical box blur passes reuse [`Self::box_blur`] and
@@ -12304,6 +12429,21 @@ fn fs_deband(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         mixed = vec4<f32>(mixed.rgb + vec3<f32>(dither), mixed.a);
     }
     return unpremultiply(mixed);
+}
+
+@fragment
+fn fs_unsharp_mask(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(floor(position.xy));
+    let original = load_clamped_from(original_texture, pixel);
+    let gain = uniforms.params.x;
+    if (gain == 0.0 || original.a <= 0.0) {
+        return original;
+    }
+    let blurred = unpremultiply(load_clamped_from(auxiliary_texture, pixel));
+    let difference = original.rgb - blurred.rgb;
+    let sharpened = original.rgb + difference * gain;
+    let rgb = select(original.rgb, sharpened, abs(difference) > vec3<f32>(uniforms.params.y));
+    return vec4<f32>(rgb, original.a);
 }
 
 // Cartoon luma ignores hidden colour on fully transparent samples, exactly
