@@ -22841,6 +22841,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_spatial_grain_matches_the_calibrated_cpu_kernel() {
+        use mondrian_effects::{
+            grain_spatial::{grain_spatial_frame_f32, GrainSpatialGrade, GrainSpatialShaping},
+            EffectGpuSpatialPass,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping spatial grain parity test: no GPU adapter available");
+            return;
+        };
+        let (width, height) = (43u32, 21u32);
+        let pixels: Vec<_> = (0..width * height)
+            .map(|i| {
+                let x = i % width;
+                let grain = ((i * 47 % 137) as f32 / 137.0 - 0.5) * 0.09;
+                let base = if x < width / 2 { -0.3 } else { 1.76 };
+                [
+                    base + grain,
+                    0.6 - 1.7 * grain,
+                    0.2 + grain,
+                    if x == 3 {
+                        0.0
+                    } else {
+                        0.5 + 0.5 * (i % 3) as f32 / 2.0
+                    },
+                ]
+            })
+            .collect();
+        let executor = crate::spatial_pass_gpu::EffectSpatialGpu::new(&context.device);
+        let source = key_cleaner_upload(&context, &pixels, width, height);
+        let final_texture = key_cleaner_scratch(&context, width, height, 1);
+        for (bias, texture, cleanup, chroma, amount) in [
+            (0.0, 0.1, 0.0, 1.0, [1.0, 0.8, 0.0]),
+            (-0.5, 0.65, 0.2, 0.0, [0.5, 1.0, 0.0]),
+            (0.55, 0.2, 0.5, 3.0, [1.0, 0.7, 0.0]),
+            (1.0, 0.0, 1.0, 10.0, [0.9, 0.5, 0.0]),
+            (0.55, 0.2, 0.5, 3.0, [0.0; 3]),
+        ] {
+            let grade = GrainSpatialGrade::new(
+                [0.035, 0.05, 0.023],
+                amount,
+                GrainSpatialShaping {
+                    texture,
+                    size_bias: bias,
+                    solid_cleanup: cleanup,
+                    chroma,
+                },
+            )
+            .unwrap();
+            let mut cpu = pixels.clone();
+            assert!(grain_spatial_frame_f32(
+                &mut cpu,
+                width as usize,
+                height as usize,
+                grade
+            ));
+            if !grade.is_identity() {
+                assert!(cpu.iter().zip(&pixels).any(|(a, b)| (a[0] - b[0]).abs() > 0.002));
+            }
+            let pass = EffectGpuSpatialPass::SpatialGrain { grade };
+            assert_eq!(
+                crate::spatial_pass_gpu::EffectSpatialGpu::texture_pass_count(&pass).unwrap(),
+                1
+            );
+            let mut encoder = context.device.create_command_encoder(&Default::default());
+            let output = executor
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &pass,
+                    &source,
+                    &final_texture,
+                    width,
+                    height,
+                )
+                .unwrap();
+            context.queue.submit(Some(encoder.finish()));
+            let gpu = key_cleaner_readback(&context, &output, width, height);
+            assert_eq!(gpu.len(), cpu.len());
+            let mut max_error = 0.0_f32;
+            for ((reference, actual), source) in cpu.iter().zip(&gpu).zip(&pixels) {
+                assert_eq!(actual[3].to_bits(), source[3].to_bits());
+                assert_eq!(actual[2].to_bits(), source[2].to_bits());
+                if source[3] == 0.0 || grade.is_identity() {
+                    assert_eq!(actual, source);
+                }
+                for c in 0..3 {
+                    let error = (reference[c] - actual[c]).abs();
+                    assert!(error.is_finite());
+                    max_error = max_error.max(error);
+                }
+            }
+            eprintln!("Spatial grain {bias}/{texture}/{cleanup}/{chroma} max Float32 error {max_error:.9e}");
+            assert!(max_error <= 1.0e-4);
+        }
+    }
+
+    #[tokio::test]
     async fn gpu_smart_blur_matches_the_cpu_kernel() {
         use mondrian_effects::{
             smart_blur_frame_f32, EffectGpuSpatialPass, SmartBlurGrade, SmartBlurMode,

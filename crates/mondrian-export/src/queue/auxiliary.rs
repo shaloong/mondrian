@@ -1454,10 +1454,12 @@ mod tests {
 
     #[test]
     #[ignore = "real GPU Export temporal grain schedule qualification; run independently"]
-    fn export_temporal_grain_reads_the_animated_prefix_on_both_sides() {
+    fn export_temporal_and_spatial_grain_read_the_animated_prefix() {
         use mondrian_core::Keyframe;
         use mondrian_effects::{
-            grain_temporal::GrainTemporalGrade, EffectExecutionContract, EffectExecutionModes,
+            grain_spatial::{grain_spatial_frame_f32, GrainSpatialGrade, GrainSpatialShaping},
+            grain_temporal::GrainTemporalGrade,
+            EffectExecutionContract, EffectExecutionModes, EffectRoiPropagation,
         };
 
         let step = TimelineTime::new(1, 8).unwrap();
@@ -1468,7 +1470,13 @@ mod tests {
             0.9,
         )
         .unwrap();
-        let kind = EffectType::External("test.export.temporal-grain".to_owned());
+        let spatial = GrainSpatialGrade::new(
+            [0.5; 3],
+            [2.0; 3],
+            GrainSpatialShaping { size_bias: 0.55, ..Default::default() },
+        )
+        .unwrap();
+        let kind = EffectType::External("test.export.temporal-and-spatial-grain".to_owned());
         register_effect_definition(
             EffectDefinition::new(
                 kind.key(),
@@ -1479,10 +1487,15 @@ mod tests {
             .with_execution_contract(EffectExecutionContract {
                 execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
                 temporal_input: grade.temporal_extent(),
+                roi_propagation: EffectRoiPropagation::Expand {
+                    horizontal_pixels: spatial.halo(),
+                    vertical_pixels: spatial.halo(),
+                },
                 ..EffectExecutionContract::IDENTITY
             })
             .with_graph_builder(Arc::new(move |_, _, builder| {
                 builder.append_unary(EffectRenderOp::TemporalGrain { grade });
+                builder.append_unary(EffectRenderOp::SpatialGrain { grade: spatial });
                 Ok(())
             })),
         )
@@ -1504,9 +1517,17 @@ mod tests {
         }
         let mut timeline = snapshot_with_effect(prefix);
         timeline.sequence.settings.frame_rate = Rational::new(8, 1);
-        timeline.sequence.video_tracks[1].clips[0]
-            .set_solid_color(Color::from_rgba8(40, 64, 80, 255))
+        let mut ramp = instantiate_effect_node(EffectType::Ramp).unwrap();
+        for (key, point) in [("start", [0.0, 0.0]), ("end", [15.0, 15.0])] {
+            ramp.set_static_value_by_parameter(
+                &EffectType::Ramp.parameter_id(key).unwrap(),
+                PropertyValue::Vec2(point.into()),
+            )
             .unwrap();
+        }
+        let clip = &mut timeline.sequence.video_tracks[1].clips[0];
+        clip.set_solid_color(Color::WHITE).unwrap();
+        clip.effects.insert(0, ramp);
         let cancellation = ExecutionCancellationToken::new();
         let render_working = |timeline: &TimelineExportSnapshot,
                               frame,
@@ -1554,22 +1575,27 @@ mod tests {
         let _gpu = GpuVisualExecutionGuard::activate();
         let mut session = ExportVisualRenderSession::default();
         let cpu = render_working(&timeline, 3, &mut session, false);
-        assert!((cpu[2] - current[2]).abs() > 0.003);
-        for i in 0..cpu.len() {
-            let expected = (previous[i] + current[i] + following[i]) / 3.0;
-            assert!(
-                (cpu[i] - expected).abs() <= 1.0e-6,
-                "sample {i}: actual {}, expected {expected} from [{}, {}, {}]",
-                cpu[i],
-                previous[i],
-                current[i],
-                following[i]
-            );
-        }
+        let temporal: Vec<[f32; 4]> = (0..cpu.len() / 4)
+            .map(|i| {
+                std::array::from_fn(|c| {
+                    let index = i * 4 + c;
+                    (previous[index] + current[index] + following[index]) / 3.0
+                })
+            })
+            .collect();
+        assert!(temporal.iter().flatten().zip(&current).any(|(a, b)| (a - b).abs() > 0.003));
+        let mut expected = temporal.clone();
+        assert!(grain_spatial_frame_f32(&mut expected, 16, 16, spatial));
+        assert!(expected
+            .iter()
+            .flatten()
+            .zip(temporal.iter().flatten())
+            .any(|(a, b)| (a - b).abs() > 0.003));
+        assert!(cpu.iter().zip(expected.iter().flatten()).all(|(a, b)| (a - b).abs() <= 1.0e-6));
         let gpu = render_working(&timeline, 3, &mut session, true);
         let diagnostics = session.visual_diagnostics();
         assert_eq!(diagnostics.temporal_gpu_schedules, 1);
-        assert_eq!(diagnostics.temporal_gpu_dispatches, 4);
+        assert_eq!(diagnostics.temporal_gpu_dispatches, 8);
         assert_eq!(diagnostics.temporal_gpu_readbacks, 1);
         assert_eq!(diagnostics.temporal_gpu_cpu_fallbacks, 0);
         assert_eq!(gpu.len(), cpu.len());

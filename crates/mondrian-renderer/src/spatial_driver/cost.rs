@@ -389,6 +389,7 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // the gate usually short-circuits the sum; the average tap is cheaper
         // than a convolution tap because there is no tap table to read.
         "smart_blur" => 1.4,
+        "spatial_grain" => 2.0,
         // Two separable tent passes plus a four-read combine. The taps match
         // smart blur's window but the gate is a single luma difference, so the
         // average tap is cheaper still.
@@ -601,6 +602,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // Two separable passes with a luma gate per tap: the same tap count as a
         // box blur, plus the dot product and the comparison.
         "smart_blur" => 4.0,
+        "spatial_grain" => 5.0,
         // Two separable tent passes over the radius plus the quantising
         // combine; the loop body is cheaper than smart blur's gated taps, so it
         // lands just under it.

@@ -866,11 +866,22 @@ mod tests {
 
     #[test]
     fn device_temporal_grain_matches_scalar_with_two_or_missing_neighbors() {
+        verify_temporal_grain(false);
+    }
+
+    #[test]
+    fn device_temporal_grain_feeds_calibrated_spatial_grain_in_the_same_graph() {
+        verify_temporal_grain(true);
+    }
+
+    fn verify_temporal_grain(spatial_after: bool) {
         use mondrian_effects::{
-            grain_temporal::GrainTemporalGrade, register_effect_definition,
-            EffectColorDomainContract, EffectDefinition, EffectExecutionContract,
-            EffectExecutionModes, EffectFrameTileF32, EffectNode, EffectRenderOp,
-            PreparedTemporalAuxiliarySet, PreparedTemporalFrameSet,
+            grain_spatial::{GrainSpatialGrade, GrainSpatialShaping},
+            grain_temporal::GrainTemporalGrade,
+            register_effect_definition, EffectColorDomainContract, EffectDefinition,
+            EffectExecutionContract, EffectExecutionModes, EffectFrameTileF32, EffectNode,
+            EffectRenderOp, EffectRoiPropagation, PreparedTemporalAuxiliarySet,
+            PreparedTemporalFrameSet,
         };
 
         let Ok(context) = pollster::block_on(crate::GpuContext::new()) else {
@@ -890,6 +901,12 @@ mod tests {
         let identity = EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([0x35; 32]);
         let mut auxiliary = PreparedTemporalAuxiliarySet::prepare(identity, 17, []).unwrap();
         let mut stationary_probe = [0.0; 4];
+        let spatial = GrainSpatialGrade::new(
+            [0.025; 3],
+            [1.2, 2.0, 0.0],
+            GrainSpatialShaping { size_bias: 0.4, ..Default::default() },
+        )
+        .unwrap();
         for (case, offsets) in [
             [Some(previous), Some(following)],
             [Some(previous), None],
@@ -900,7 +917,7 @@ mod tests {
         .enumerate()
         {
             let grade = GrainTemporalGrade::new(offsets, [0.025; 3], 0.85, 0.9).unwrap();
-            let kind = EffectType::External(format!("test.temporal-grain.{case}"));
+            let kind = EffectType::External(format!("test.temporal-grain.{spatial_after}.{case}"));
             register_effect_definition(
                 EffectDefinition::new(
                     kind.key(),
@@ -912,10 +929,21 @@ mod tests {
                     execution_modes: EffectExecutionModes::CPU_F32
                         .union(EffectExecutionModes::GPU_F32),
                     temporal_input: grade.temporal_extent(),
+                    roi_propagation: if spatial_after {
+                        EffectRoiPropagation::Expand {
+                            horizontal_pixels: spatial.halo(),
+                            vertical_pixels: spatial.halo(),
+                        }
+                    } else {
+                        EffectRoiPropagation::PixelLocal
+                    },
                     ..EffectExecutionContract::IDENTITY
                 })
                 .with_graph_builder(Arc::new(move |_, _, graph| {
                     graph.append_unary(EffectRenderOp::TemporalGrain { grade });
+                    if spatial_after {
+                        graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial });
+                    }
                     Ok(())
                 })),
             )
@@ -958,8 +986,13 @@ mod tests {
                         TemporalGpuStepOperation::Spatial { .. }
                     ))
                     .count(),
-                expected_leaves
+                expected_leaves + usize::from(spatial_after)
             );
+            if spatial_after {
+                assert!(
+                    matches!(schedule.steps().last().unwrap().operation(), TemporalGpuStepOperation::Spatial { plan, .. } if matches!(plan.stages(), [mondrian_effects::EffectGpuStage::Spatial { pass: mondrian_effects::EffectGpuSpatialPass::SpatialGrain { .. }, .. }]))
+                );
+            }
             let mut frames = PreparedTemporalFrameSet::prepare(
                 identity,
                 execution.demands().clone(),
@@ -1024,7 +1057,10 @@ mod tests {
             assert!(error <= PARITY_TOLERANCE);
             assert_eq!(gpu.uploads(), expected_leaves);
             assert_eq!(gpu.readbacks(), 1);
-            assert_eq!(gpu.dispatches(), expected_leaves + 1);
+            assert_eq!(
+                gpu.dispatches(),
+                expected_leaves + 1 + usize::from(spatial_after)
+            );
             stationary_probe[case] = gpu.output().tile().pixels()[8 * 33 + 5][0];
         }
         assert!(stationary_probe[1] < stationary_probe[3] - 0.008);

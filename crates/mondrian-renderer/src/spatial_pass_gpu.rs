@@ -137,6 +137,7 @@ pub(crate) struct EffectSpatialGpu {
     inner_outer_key_feather: wgpu::RenderPipeline,
     inner_outer_key_composite: wgpu::RenderPipeline,
     smart_blur: wgpu::RenderPipeline,
+    spatial_grain: wgpu::RenderPipeline,
     minimax: wgpu::RenderPipeline,
     channel_blur: wgpu::RenderPipeline,
     median: wgpu::RenderPipeline,
@@ -2394,6 +2395,30 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
+        let spatial_grain = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian.effect-spatial.grain"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_spatial_grain"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::TextureFormat::Rgba32Float.into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         // Minimax runs one separable minimum or maximum step per pass and writes
         // straight into the scratch ping-pong: no separate composite stage.
         let minimax = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2878,6 +2903,7 @@ impl EffectSpatialGpu {
             inner_outer_key_feather,
             inner_outer_key_composite,
             smart_blur,
+            spatial_grain,
             bilateral: std::sync::OnceLock::new(),
             mask_deformation: std::sync::OnceLock::new(),
             mask_path_stroke: std::sync::OnceLock::new(),
@@ -4766,6 +4792,7 @@ impl EffectSpatialGpu {
             // 512 MiB spatial scratch budget while a three-pass declaration
             // would not.
             EffectGpuSpatialPass::SmartBlur { .. } => Ok(2),
+            EffectGpuSpatialPass::SpatialGrain { .. } => Ok(1),
             EffectGpuSpatialPass::BilateralBlur { .. } => Ok(1),
             // The chain is one pass per operation step and axis: 1, 2 or 4.
             // `record_minimax` executes exactly the same table.
@@ -4926,6 +4953,26 @@ impl EffectSpatialGpu {
         }
         // Single-pass kernels write one texture and need no scratch pool.
         match pass {
+            EffectGpuSpatialPass::SpatialGrain { grade } => {
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let [params, extra, aces] = grade.gpu_controls();
+                let uniforms = SpatialPassUniform {
+                    size: [width as f32, height as f32, 0.0, 0.0],
+                    params,
+                    extra,
+                    aces,
+                    extra1: [0.0; 4],
+                };
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.spatial_grain,
+                    &source.create_view(&Default::default()),
+                    &destination.create_view(&Default::default()),
+                    &uniforms,
+                );
+                return Ok(destination.clone());
+            }
             EffectGpuSpatialPass::Highlight { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
                 return Ok(self.record_highlight(device, encoder, *grade, source, destination));
@@ -8500,6 +8547,75 @@ fn frame_dims() -> vec2<i32> {
 fn load_clamped(p: vec2<i32>) -> vec4<f32> {
     let limit = frame_dims() - vec2<i32>(1);
     return textureLoad(src, clamp(p, vec2<i32>(0), limit), 0);
+}
+
+fn grain_finite_rgba(pixel: vec4<f32>) -> bool {
+    let mask = vec4<u32>(0x7f800000u);
+    return all((bitcast<vec4<u32>>(pixel) & mask) != mask);
+}
+
+fn grain_fade(value: f32) -> f32 {
+    let t = clamp(value, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn grain_residual(index: vec2<i32>, center: vec4<f32>, spacing: i32) -> vec3<f32> {
+    var weighted_delta = vec3<f32>(0.0);
+    var total = 0.0;
+    for (var y = -1; y <= 1; y += 1) {
+        let wy = select(1.0, uniforms.extra.w, y == 0);
+        for (var x = -1; x <= 1; x += 1) {
+            let tap = load_clamped(index + vec2<i32>(x, y) * spacing);
+            if tap.a <= 0.0 || !grain_finite_rgba(tap) {
+                continue;
+            }
+            let delta = center.rgb - tap.rgb;
+            let floor_sigma = 0.0001 * max(max(abs(center.rgb), abs(tap.rgb)), vec3<f32>(1.0));
+            let distances = abs(delta) / max(uniforms.params.rgb, floor_sigma);
+            let distance = max(max(distances.x, distances.y), distances.z);
+            let wx = select(1.0, uniforms.extra.w, x == 0);
+            let weight = wy * wx * min(tap.a, 1.0) * (1.0 - grain_fade((distance - 3.5) / 3.5));
+            if weight > 0.0 {
+                total += weight;
+                weighted_delta += delta * weight;
+            }
+        }
+    }
+    if total > 0.0 {
+        return weighted_delta / total;
+    }
+    return vec3<f32>(0.0);
+}
+
+@fragment
+fn fs_spatial_grain(in: VsOut) -> @location(0) vec4<f32> {
+    let index = vec2<i32>(in.position.xy);
+    let center = load_clamped(index);
+    if center.a <= 0.0 || !grain_finite_rgba(center) || all(uniforms.aces.rgb == vec3<f32>(0.0)) {
+        return center;
+    }
+    let radius_mix = uniforms.params.w;
+    var detail = vec3<f32>(0.0);
+    if radius_mix < 1.0 {
+        detail += grain_residual(index, center, 1) * (1.0 - radius_mix);
+    }
+    if radius_mix > 0.0 {
+        detail += grain_residual(index, center, 2) * radius_mix;
+    }
+    var correction = vec3<f32>(0.0);
+    for (var c = 0u; c < 3u; c += 1u) {
+        if uniforms.aces[c] > 0.0 && (bitcast<u32>(detail[c]) & 0x7f800000u) != 0x7f800000u {
+            correction[c] = detail[c] * uniforms.aces[c] * (1.0 - grain_fade(abs(detail[c]) / uniforms.extra[c] - 1.0));
+        }
+    }
+    if uniforms.aces.w != 1.0 {
+        let luma = (correction.r * 0.2126 + correction.g * 0.7152) + correction.b * 0.0722;
+        correction = vec3<f32>(luma) + (correction - vec3<f32>(luma)) * uniforms.aces.w;
+    }
+    let value = center.rgb - correction;
+    let finite = (bitcast<vec3<u32>>(value) & vec3<u32>(0x7f800000u)) != vec3<u32>(0x7f800000u);
+    let enabled = select(center.rgb, value, uniforms.aces.rgb > vec3<f32>(0.0));
+    return vec4<f32>(select(center.rgb, enabled, finite), center.a);
 }
 
 fn load_clamped_from(texture: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {

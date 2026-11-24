@@ -663,6 +663,29 @@ mod tests {
     }
 
     #[test]
+    fn spatial_chain_calibrated_grain_fits_dci_4k() {
+        use mondrian_effects::grain_spatial::{GrainSpatialGrade, GrainSpatialShaping};
+        let grade = GrainSpatialGrade::new(
+            [0.025; 3],
+            [1.0; 3],
+            GrainSpatialShaping { size_bias: 1.0, ..Default::default() },
+        )
+        .unwrap();
+        let mut graph = EffectGraphBuilderState::new();
+        graph.append_unary(EffectRenderOp::SpatialGrain { grade });
+        let graph = compile_reference_render_graph(graph.finish()).unwrap();
+        let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+        let plan = gpu_spatial_chain_plan(&pipeline, 4096, 2160).unwrap();
+        assert_eq!(plan.spatial_passes, 1);
+        assert_eq!(plan.scratch_textures, 2);
+        assert_eq!(plan.scratch_bytes, 283_115_520);
+        assert!(matches!(
+            gpu_spatial_chain_plan(&pipeline, 8192, 2160),
+            Err(GpuSpatialChainBlocker::ScratchBudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
     fn spatial_chain_chromatic_aberration_removal_fits_dci_4k() {
         let plan =
             gpu_spatial_chain_plan(&chromatic_aberration_removal_pipeline(), 4096, 2160).unwrap();
