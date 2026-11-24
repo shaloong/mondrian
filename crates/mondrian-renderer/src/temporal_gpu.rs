@@ -454,6 +454,24 @@ pub fn execute_temporal_schedule(
                         )
                         .map_err(TemporalGpuExecutionError::Composite)?
                 }
+                TemporalGpuStepOperation::TemporalGrain { input, neighbors, grade } => {
+                    let input = input_handle(*input)?;
+                    let [previous, following] =
+                        neighbors.map(|sample| sample.map(input_handle).transpose());
+                    compositor
+                        .record_temporal_grain_pass(
+                            device,
+                            &mut encoder,
+                            ids,
+                            table,
+                            resource_pool.as_ref(),
+                            &input,
+                            [previous?.as_ref(), following?.as_ref()],
+                            *grade,
+                            working_color_space,
+                        )
+                        .map_err(TemporalGpuExecutionError::Composite)?
+                }
                 TemporalGpuStepOperation::Blend { base, overlay, opacity, blend_mode } => {
                     let base = input_handle(*base)?;
                     let overlay = input_handle(*overlay)?;
@@ -844,6 +862,176 @@ mod tests {
             .zip(right)
             .flat_map(|(left, right)| left.iter().zip(right).map(|(l, r)| (l - r).abs()))
             .fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    fn device_temporal_grain_matches_scalar_with_two_or_missing_neighbors() {
+        use mondrian_effects::{
+            grain_temporal::GrainTemporalGrade, register_effect_definition,
+            EffectColorDomainContract, EffectDefinition, EffectExecutionContract,
+            EffectExecutionModes, EffectFrameTileF32, EffectNode, EffectRenderOp,
+            PreparedTemporalAuxiliarySet, PreparedTemporalFrameSet,
+        };
+
+        let Ok(context) = pollster::block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping temporal grain test: no GPU adapter available");
+            return;
+        };
+        eprintln!("Temporal grain adapter: {:?}", context.adapter.get_info());
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .unwrap();
+        let extent = EffectFrameExtent::new(33, 19);
+        let now = TimelineTime::new(2, 24).unwrap();
+        let previous = TimelineTime::new(-1, 24).unwrap();
+        let following = TimelineTime::new(1, 24).unwrap();
+        let identity = EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([0x35; 32]);
+        let mut auxiliary = PreparedTemporalAuxiliarySet::prepare(identity, 17, []).unwrap();
+        let mut stationary_probe = [0.0; 4];
+        for (case, offsets) in [
+            [Some(previous), Some(following)],
+            [Some(previous), None],
+            [None, Some(following)],
+            [None, None],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let grade = GrainTemporalGrade::new(offsets, [0.025; 3], 0.85, 0.9).unwrap();
+            let kind = EffectType::External(format!("test.temporal-grain.{case}"));
+            register_effect_definition(
+                EffectDefinition::new(
+                    kind.key(),
+                    "Bound temporal grain",
+                    Default::default(),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                )
+                .with_execution_contract(EffectExecutionContract {
+                    execution_modes: EffectExecutionModes::CPU_F32
+                        .union(EffectExecutionModes::GPU_F32),
+                    temporal_input: grade.temporal_extent(),
+                    ..EffectExecutionContract::IDENTITY
+                })
+                .with_graph_builder(Arc::new(move |_, _, graph| {
+                    graph.append_unary(EffectRenderOp::TemporalGrain { grade });
+                    Ok(())
+                })),
+            )
+            .unwrap();
+            // Put a spatial stage before the grain operation, so sampled values
+            // must run the upstream graph at each of the requested instants.
+            let mut blur =
+                mondrian_effects::instantiate_effect_node(EffectType::SmartBlur).unwrap();
+            blur.set_static_value_by_parameter(
+                &EffectType::SmartBlur.parameter_id("radius").unwrap(),
+                PropertyValue::Float(1.0),
+            )
+            .unwrap();
+            let program = PreparedEffectProgram::prepare(
+                &[blur, EffectNode::new(kind)],
+                &[],
+                WorkingColorSpace::LinearRec709,
+            )
+            .unwrap();
+            let request = EffectTemporalExecutionRequest::new(
+                17,
+                EffectExecutionContinuity::Discontinuous,
+                now,
+                extent,
+                ImageSampling::UNIT_SQUARE,
+                extent.full_frame_roi(),
+                ExecutionCancellationToken::new(),
+            );
+            let execution =
+                prepare_temporal_frame_execution(&program, &request, |_| Ok(1)).unwrap();
+            let schedule = execution.plan_gpu_execution().unwrap();
+            let expected_leaves = 1 + offsets.iter().flatten().count();
+            assert_eq!(schedule.leaves().len(), expected_leaves);
+            assert_eq!(
+                schedule
+                    .steps()
+                    .iter()
+                    .filter(|step| matches!(
+                        step.operation(),
+                        TemporalGpuStepOperation::Spatial { .. }
+                    ))
+                    .count(),
+                expected_leaves
+            );
+            let mut frames = PreparedTemporalFrameSet::prepare(
+                identity,
+                execution.demands().clone(),
+                execution.demands().requests().iter().copied().map(|sample| {
+                    let pixels = (0..33 * 19)
+                        .map(|i| {
+                            let x = i % 33;
+                            let y = i / 33;
+                            let edge = if x >= 17 { 1.6 } else { -0.3 };
+                            let delta = if sample.time() == now {
+                                0.0
+                            } else if sample.time() < now {
+                                if y == 2 {
+                                    1.35
+                                } else {
+                                    -0.045
+                                }
+                            } else if y == 14 {
+                                -0.95
+                            } else {
+                                0.07
+                            };
+                            let grain = ((i * 41 % 97) as f32 / 97.0 - 0.5) * 0.03;
+                            [
+                                edge + delta + grain,
+                                0.82 + grain,
+                                0.15 + grain,
+                                if y == 0 { 0.0 } else { 0.6 },
+                            ]
+                        })
+                        .collect();
+                    (
+                        sample,
+                        EffectFrameTileF32::new(
+                            sample.time(),
+                            extent,
+                            sample.sampling(),
+                            extent.full_frame_roi(),
+                            1,
+                            pixels,
+                        )
+                        .unwrap(),
+                    )
+                }),
+            )
+            .unwrap();
+            let cpu = EffectExecutionSession::default()
+                .execute_prepared_temporal_f32(&execution, &mut frames)
+                .unwrap();
+            let gpu = runtime
+                .execute_temporal_schedule(
+                    &schedule,
+                    &mut frames,
+                    &mut auxiliary,
+                    WorkingColorSpace::LinearRec709,
+                    Instant::now() + Duration::from_secs(120),
+                    request.cancellation(),
+                )
+                .unwrap();
+            let error = max_channel_difference(cpu.tile().pixels(), gpu.output().tile().pixels());
+            eprintln!("Temporal grain case {case}: {expected_leaves} leaves, Float32 maximum error {error:.9e}");
+            assert!(error <= PARITY_TOLERANCE);
+            assert_eq!(gpu.uploads(), expected_leaves);
+            assert_eq!(gpu.readbacks(), 1);
+            assert_eq!(gpu.dispatches(), expected_leaves + 1);
+            stationary_probe[case] = gpu.output().tile().pixels()[8 * 33 + 5][0];
+        }
+        assert!(stationary_probe[1] < stationary_probe[3] - 0.008);
+        assert!(stationary_probe[2] > stationary_probe[3] + 0.014);
+        assert!(
+            stationary_probe[0] > stationary_probe[1] && stationary_probe[0] < stationary_probe[2]
+        );
     }
 
     #[test]

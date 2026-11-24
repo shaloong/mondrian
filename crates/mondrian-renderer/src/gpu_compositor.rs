@@ -5619,6 +5619,7 @@ pub struct GpuFrameCompositor {
     pipeline: wgpu::RenderPipeline,
     pipeline_layout: wgpu::PipelineLayout,
     adjustment_mix_pipeline: OnceLock<wgpu::RenderPipeline>,
+    temporal_grain_pipeline: OnceLock<crate::temporal_grain_gpu::TemporalGrainPipeline>,
     opaque_normal_pipeline: wgpu::RenderPipeline,
     matte_mix_pipeline: wgpu::RenderPipeline,
     matte_mix_texture_layout: wgpu::BindGroupLayout,
@@ -5953,6 +5954,7 @@ impl GpuFrameCompositor {
             pipeline,
             pipeline_layout: layout,
             adjustment_mix_pipeline: OnceLock::new(),
+            temporal_grain_pipeline: OnceLock::new(),
             opaque_normal_pipeline,
             matte_mix_pipeline,
             matte_mix_texture_layout,
@@ -7643,6 +7645,63 @@ impl GpuFrameCompositor {
                 pass: spatial_failure_pass(&error),
                 detail: error.to_string(),
             })?;
+        let handle = output.handle().clone();
+        table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(handle)
+    }
+
+    /// Apply one frozen temporal grain step to straight working frames.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_temporal_grain_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: &GpuColorFrameWgpuResourcePool,
+        input: &GpuColorFrameHandle,
+        [previous, following]: [Option<&GpuColorFrameHandle>; 2],
+        grade: mondrian_effects::grain_temporal::GrainTemporalGrade,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
+        let expected = ColorFrameDescriptor {
+            color_space: working_color_space.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            ..input.descriptor()
+        };
+        let frames = [input, previous.unwrap_or(input), following.unwrap_or(input)];
+        for frame in frames {
+            let actual = frame.descriptor();
+            if actual != expected {
+                return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
+            }
+            if frame.texture_format() != product_gpu_working_texture_format() {
+                return Err(GpuCompositeError::SpatialChainFailed {
+                    pass: "temporal_grain",
+                    detail: "expected working Float32 textures".to_owned(),
+                });
+            }
+        }
+        let [current, previous, following] =
+            frames.map(|frame| table.get(frame).map_err(GpuCompositeError::ResourceTable));
+        let inputs = [
+            &current?.resource().texture,
+            &previous?.resource().texture,
+            &following?.resource().texture,
+        ];
+        let output = create_working_resource(
+            device,
+            ids,
+            expected,
+            "gpu-temporal-grain-output",
+            Some(resource_pool),
+        )?;
+        self.temporal_grain_pipeline
+            .get_or_init(|| crate::temporal_grain_gpu::TemporalGrainPipeline::new(device))
+            .record(device, encoder, inputs, &output.resource().texture, grade);
         let handle = output.handle().clone();
         table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
         Ok(handle)

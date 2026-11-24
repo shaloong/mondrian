@@ -1453,6 +1453,130 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "real GPU Export temporal grain schedule qualification; run independently"]
+    fn export_temporal_grain_reads_the_animated_prefix_on_both_sides() {
+        use mondrian_core::Keyframe;
+        use mondrian_effects::{
+            grain_temporal::GrainTemporalGrade, EffectExecutionContract, EffectExecutionModes,
+        };
+
+        let step = TimelineTime::new(1, 8).unwrap();
+        let grade = GrainTemporalGrade::new(
+            [Some(TimelineTime::new(-1, 8).unwrap()), Some(step)],
+            [0.5; 3],
+            1.0,
+            0.9,
+        )
+        .unwrap();
+        let kind = EffectType::External("test.export.temporal-grain".to_owned());
+        register_effect_definition(
+            EffectDefinition::new(
+                kind.key(),
+                "Temporal grain Export proof",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+                temporal_input: grade.temporal_extent(),
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_graph_builder(Arc::new(move |_, _, builder| {
+                builder.append_unary(EffectRenderOp::TemporalGrain { grade });
+                Ok(())
+            })),
+        )
+        .unwrap();
+
+        let mut prefix = instantiate_effect_node(EffectType::BasicCorrection).unwrap();
+        let exposure = EffectType::BasicCorrection.property_path("exposure");
+        for (frame, stops) in [(2, -0.25), (3, 0.125), (4, 0.75)] {
+            prefix
+                .properties
+                .set_keyframe(
+                    &exposure,
+                    Keyframe::linear(
+                        TimelineTime::new(frame, 8).unwrap(),
+                        PropertyValue::Float(stops),
+                    ),
+                )
+                .unwrap();
+        }
+        let mut timeline = snapshot_with_effect(prefix);
+        timeline.sequence.settings.frame_rate = Rational::new(8, 1);
+        timeline.sequence.video_tracks[1].clips[0]
+            .set_solid_color(Color::from_rgba8(40, 64, 80, 255))
+            .unwrap();
+        let cancellation = ExecutionCancellationToken::new();
+        let render_working = |timeline: &TimelineExportSnapshot,
+                              frame,
+                              session: &mut ExportVisualRenderSession,
+                              allow_gpu| {
+            session.resource_policy.opportunistic_gpu_acceleration = allow_gpu;
+            let color = timeline
+                .sequence
+                .settings
+                .root_program_color_context(&timeline.color_environment)
+                .unwrap();
+            let mut context = ExportFrameRenderContext {
+                media: &timeline.media,
+                color_environment: &timeline.color_environment,
+                alpha_mode: ExportAlphaMode::Preserve,
+                delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                    ExportFrameContract::FloatMasterRgba32,
+                ),
+                input_color_counts: None,
+                stage_diagnostics: None,
+                composite_diagnostics: None,
+                export_diagnostics: None,
+                visual_session: session,
+                cancellation: &cancellation,
+            };
+            let mut output = None;
+            render_sequence_frame_into(
+                timeline,
+                &mut context,
+                &timeline.sequence,
+                frame,
+                timeline.sequence.settings.resolution,
+                color,
+                SequenceRenderTarget::Working(&mut output),
+            )
+            .unwrap();
+            output.unwrap().into_rgba_f32().data.into_iter().flatten().collect::<Vec<_>>()
+        };
+        let mut reference = ExportVisualRenderSession::default();
+        let [previous, current, following] =
+            [2, 3, 4].map(|frame| render_working(&timeline, frame, &mut reference, false));
+        timeline.sequence.video_tracks[1].clips[0]
+            .add_effect_node(instantiate_effect_node(kind).unwrap());
+
+        let _gpu = GpuVisualExecutionGuard::activate();
+        let mut session = ExportVisualRenderSession::default();
+        let cpu = render_working(&timeline, 3, &mut session, false);
+        assert!((cpu[2] - current[2]).abs() > 0.003);
+        for i in 0..cpu.len() {
+            let expected = (previous[i] + current[i] + following[i]) / 3.0;
+            assert!(
+                (cpu[i] - expected).abs() <= 1.0e-6,
+                "sample {i}: actual {}, expected {expected} from [{}, {}, {}]",
+                cpu[i],
+                previous[i],
+                current[i],
+                following[i]
+            );
+        }
+        let gpu = render_working(&timeline, 3, &mut session, true);
+        let diagnostics = session.visual_diagnostics();
+        assert_eq!(diagnostics.temporal_gpu_schedules, 1);
+        assert_eq!(diagnostics.temporal_gpu_dispatches, 4);
+        assert_eq!(diagnostics.temporal_gpu_readbacks, 1);
+        assert_eq!(diagnostics.temporal_gpu_cpu_fallbacks, 0);
+        assert_eq!(gpu.len(), cpu.len());
+        assert_auxiliary_float32_parity(&cpu, &gpu);
+    }
+
+    #[test]
     fn export_historical_video_collage_range_includes_the_prefixs_earlier_clip_dependency() {
         let source = solid(Color::WHITE, TimelineTime::ZERO);
         let clip_id = source.id;
