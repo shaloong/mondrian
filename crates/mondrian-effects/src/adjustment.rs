@@ -538,6 +538,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::SpatialGrain { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "spatial_grain",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::ChromaticAberrationRemoval { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "chromatic_aberration_removal",
@@ -1428,6 +1434,13 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         // The premultiplied source snapshot is the gate reference for both
         // passes, and the horizontal pass writes a second full-frame plane.
         EffectRenderOp::SmartBlur { .. } => 2,
+        EffectRenderOp::SpatialGrain { grade } => {
+            if grade.is_identity() {
+                0
+            } else {
+                1
+            }
+        }
         EffectRenderOp::BilateralBlur { grade } => {
             if grade.filters_neighbors() {
                 2
@@ -2309,6 +2322,15 @@ fn apply_render_op_f32_region_impl<E>(
                 region.width as usize,
                 region.height as usize,
                 grade,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::SpatialGrain { grade } => {
+            crate::grain_spatial::apply_grain_spatial_controlled(
+                working,
+                [region.width as usize, region.height as usize],
+                *grade,
                 checkpoint,
             )?;
             Ok(true)

@@ -3791,6 +3791,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Stroke { .. } => "stroke",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         crate::EffectRenderOp::TemporalGrain { .. } => "temporal_grain",
+        crate::EffectRenderOp::SpatialGrain { .. } => "spatial_grain",
         crate::EffectRenderOp::Lut3D { .. } => "lut3d",
         crate::EffectRenderOp::DifferenceMatte { .. } => "difference_matte",
         crate::EffectRenderOp::Blend { .. } => "blend",
@@ -4223,6 +4224,68 @@ mod tests {
             GradientProvider::pixel(TimelineTime::ZERO, 1, 0)
         );
         assert_ne!(stationary.cache_identity(), moving.cache_identity());
+    }
+
+    #[test]
+    fn spatial_grain_after_temporal_grain_uses_the_exact_raster_halo() {
+        use crate::{grain_spatial::GrainSpatialGrade, grain_temporal::GrainTemporalGrade};
+
+        let radius = TimelineTime::new(1, 8).unwrap();
+        let temporal = GrainTemporalGrade::new(
+            [Some(past_offset(radius)), Some(radius)],
+            [0.15; 3],
+            0.8,
+            0.9,
+        )
+        .unwrap();
+        let spatial = GrainSpatialGrade::new(
+            [0.12; 3],
+            [2.0; 3],
+            crate::grain_spatial::GrainSpatialShaping { size_bias: 0.4, ..Default::default() },
+        )
+        .unwrap();
+        let contract = EffectExecutionContract {
+            temporal_input: temporal.temporal_extent(),
+            ..temporal_contract(
+                radius,
+                EffectRoiPropagation::Expand { horizontal_pixels: 2, vertical_pixels: 2 },
+            )
+        };
+        let graph = bind_linear(
+            [
+                crate::EffectRenderOp::TemporalGrain { grade: temporal },
+                crate::EffectRenderOp::SpatialGrain { grade: spatial },
+            ],
+            contract,
+        );
+        let extent = EffectFrameExtent::new(11, 10);
+        let run = |roi| {
+            let request = EffectTemporalExecutionRequest::new(
+                11,
+                EffectExecutionContinuity::Discontinuous,
+                TimelineTime::ZERO,
+                extent,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                roi,
+                ExecutionCancellationToken::new(),
+            );
+            let mut provider = GradientProvider::new(extent);
+            let frame = EffectExecutionSession::default()
+                .execute_temporal_roi_f32(&graph, &request, &mut provider)
+                .unwrap();
+            (frame, provider.requests)
+        };
+        let (full, _) = run(extent.full_frame_roi());
+        let (tile, demands) = run(EffectPixelRoi::new(3, 3, 2, 2));
+        assert_eq!(demands.len(), 3);
+        assert!(demands
+            .iter()
+            .all(|demand| demand.input_roi().region() == EffectPixelRoi::new(1, 1, 6, 6)));
+        let full = full.tile().pixels();
+        assert_eq!(
+            tile.tile().pixels(),
+            [full[36], full[37], full[47], full[48]]
+        );
     }
 
     #[test]

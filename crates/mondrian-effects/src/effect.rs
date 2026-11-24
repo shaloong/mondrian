@@ -1170,6 +1170,11 @@ pub enum EffectRenderOp {
         /// Bound offsets and shared RGB calibration.
         grade: crate::grain_temporal::GrainTemporalGrade,
     },
+    /// Spatial noise-band attenuation driven by a frozen RGB calibration.
+    SpatialGrain {
+        /// Bound spatial kernel coefficients.
+        grade: crate::grain_spatial::GrainSpatialGrade,
+    },
     /// Channel blur: blurs the red, green, blue and alpha channels independently.
     ChannelBlur {
         /// Authored per-channel amounts, edge behaviour, and direction.
@@ -1848,6 +1853,9 @@ impl std::fmt::Debug for EffectRenderOp {
                 .finish(),
             Self::TemporalGrain { grade } => {
                 formatter.debug_tuple("TemporalGrain").field(grade).finish()
+            }
+            Self::SpatialGrain { grade } => {
+                formatter.debug_tuple("SpatialGrain").field(grade).finish()
             }
             Self::RemoveColorMatting { grade } => {
                 formatter.debug_struct("RemoveColorMatting").field("grade", grade).finish()
@@ -2983,6 +2991,10 @@ impl EffectRenderOp {
                 156u8.hash(state);
                 grade.hash_controls(state);
             }
+            EffectRenderOp::SpatialGrain { grade } => {
+                157u8.hash(state);
+                grade.hash_controls(state);
+            }
             EffectRenderOp::RemoveColorMatting { grade } => {
                 106u8.hash(state);
                 // Every channel of the authored color, alpha included, so two
@@ -3473,6 +3485,7 @@ impl EffectRenderOp {
             EffectRenderOp::ChromaticAberration { .. } => 4,
             EffectRenderOp::TemporalFrameBlend { .. } => 2,
             EffectRenderOp::TemporalGrain { .. } => 3,
+            EffectRenderOp::SpatialGrain { .. } => 3,
             EffectRenderOp::RemoveColorMatting { .. } => 1,
             EffectRenderOp::PhotoFilter { .. } => 1,
             EffectRenderOp::JpegDamage { .. } => 1,

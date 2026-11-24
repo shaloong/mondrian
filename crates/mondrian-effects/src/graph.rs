@@ -3598,6 +3598,14 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             temporal_input: grade.temporal_extent(),
             ..cpu_float
         },
+        EffectRenderOp::SpatialGrain { grade } => EffectImplementationRequirements {
+            execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
+            roi_from_effect_input: EffectRoiPropagation::Expand {
+                horizontal_pixels: grade.halo(),
+                vertical_pixels: grade.halo(),
+            },
+            ..cpu_float
+        },
         EffectRenderOp::Lut3D { .. } => EffectImplementationRequirements {
             execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
             resource_lifetime: EffectResourceLifetime::PreparedProgram,

@@ -2957,6 +2957,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::InnerOuterKey { .. } => 153,
         EffectRenderOp::MaskPathStroke { .. } => 155,
         EffectRenderOp::TemporalGrain { .. } => 156,
+        EffectRenderOp::SpatialGrain { .. } => 157,
         EffectRenderOp::Shape { .. } => 154,
         EffectRenderOp::GrowBounds { .. } => 119,
         EffectRenderOp::Smear { .. } => 122,
@@ -5377,6 +5378,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Colorama { .. }
             | crate::EffectRenderOp::KeyCleaner { .. }
             | crate::EffectRenderOp::SmartBlur { .. }
+            | crate::EffectRenderOp::SpatialGrain { .. }
             | crate::EffectRenderOp::BilateralBlur { .. }
             | crate::EffectRenderOp::ChromaticAberrationRemoval { .. }
             | crate::EffectRenderOp::Basic3D { .. }

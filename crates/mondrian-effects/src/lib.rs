@@ -23,6 +23,7 @@ pub use displacement_map::{
 };
 pub mod glass;
 pub mod grain_calibration;
+pub mod grain_spatial;
 pub mod grain_temporal;
 pub mod grow_bounds;
 pub mod video_collage;

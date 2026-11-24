@@ -262,6 +262,11 @@ pub enum EffectGpuSpatialPass {
         /// Authored radius, threshold and the output mode.
         grade: crate::SmartBlurGrade,
     },
+    /// Edge-gated spatial grain attenuation on the actual raster grid.
+    SpatialGrain {
+        /// Frozen RGB noise and shaping coefficients.
+        grade: crate::grain_spatial::GrainSpatialGrade,
+    },
     /// Rebuild the odd rows from the retained even-row neighbours.
     Deinterlace {
         /// Authored softness, which selects the vertical tap count.
@@ -576,6 +581,7 @@ impl EffectGpuSpatialPass {
             Self::DustScratches { .. } => "dust_scratches",
             Self::KeyCleaner { .. } => "key_cleaner",
             Self::SmartBlur { .. } => "smart_blur",
+            Self::SpatialGrain { .. } => "spatial_grain",
             Self::Deinterlace { .. } => "deinterlace",
             Self::Watercolor { .. } => "watercolor",
             Self::Abstraction { .. } => "abstraction",
@@ -694,6 +700,7 @@ impl EffectGpuSpatialPass {
             // The blur window is the authored radius plus the one fractional
             // tap, so it is bounded by the authoring ceiling of 100.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            Self::SpatialGrain { grade } => grade.halo(),
             // The rebuild reads only the same column, so it never leaves it.
             Self::Deinterlace { .. } => 0,
             // The square window reaches the same distance on both axes.
@@ -817,6 +824,7 @@ impl EffectGpuSpatialPass {
             Self::KeyCleaner { .. } => u32::MAX,
             // Same reach as the horizontal halo.
             Self::SmartBlur { grade } => smart_blur_halo(grade),
+            Self::SpatialGrain { grade } => grade.halo(),
             // The rebuild reads only the same column, so it never leaves it.
             Self::Deinterlace { grade } => grade.halo(),
             // The square window reaches the same distance on both axes.
@@ -1483,6 +1491,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::SmartBlur { grade } => {
             Some(EffectGpuSpatialPass::SmartBlur { grade: *grade })
+        }
+        EffectRenderOp::SpatialGrain { grade } => {
+            Some(EffectGpuSpatialPass::SpatialGrain { grade: *grade })
         }
         EffectRenderOp::Deinterlace { grade } => {
             Some(EffectGpuSpatialPass::Deinterlace { grade: *grade })
