@@ -22,6 +22,7 @@ pub use displacement_map::{
     DISPLACEMENT_MAP_MAX_PIXELS,
 };
 pub mod glass;
+pub mod grain_calibration;
 pub mod grow_bounds;
 pub mod video_collage;
 pub use glass::{
