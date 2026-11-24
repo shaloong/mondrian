@@ -2155,7 +2155,7 @@ pub enum PreparedHeterogeneousGpuDispatch {
         output: EffectMaterializationId,
         waits: Arc<[EffectCompletionToken]>,
         signal: EffectCompletionToken,
-        mask_op: crate::mask::MaskOp,
+        mask_op: crate::MaskCombineMode,
     },
     /// Mix base/graded working RGB through an AlphaMask-domain materialization.
     MatteMix {
@@ -2163,6 +2163,7 @@ pub enum PreparedHeterogeneousGpuDispatch {
         base: EffectMaterializationId,
         graded: EffectMaterializationId,
         matte: EffectMaterializationId,
+        amount: f32,
         output: EffectMaterializationId,
         waits: Arc<[EffectCompletionToken]>,
         signal: EffectCompletionToken,
@@ -4002,7 +4003,7 @@ fn execute_cpu_dag_prefix(
                 })?;
                 left
             }
-            EffectGraphNodeKind::MatteMix { .. } => {
+            EffectGraphNodeKind::MatteMix { amount, .. } => {
                 if inputs.len() != 3 {
                     return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
                         node: dispatch.node,
@@ -4042,7 +4043,7 @@ fn execute_cpu_dag_prefix(
                 )?;
                 base.ensure_same_grid(graded.view())?;
                 base.ensure_same_grid(matte.view())?;
-                matte_mix_f32_controlled(&mut base, &graded, &matte, &mut || {
+                matte_mix_f32_controlled(&mut base, &graded, &matte, amount, &mut || {
                     heterogeneous_processor_checkpoint(control, generation)
                 })?;
                 base
@@ -5002,7 +5003,7 @@ fn prepare_gpu_suffix(
                                 mask_op: *mask_op,
                             })
                         }
-                        EffectGraphNodeKind::MatteMix { .. } => {
+                        EffectGraphNodeKind::MatteMix { amount, .. } => {
                             if inputs.len() != 3 {
                                 return Err(
                                     PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
@@ -5047,6 +5048,7 @@ fn prepare_gpu_suffix(
                                 base: inputs[0],
                                 graded: inputs[1],
                                 matte: inputs[2],
+                                amount: *amount,
                                 output: *output,
                                 waits: Arc::clone(waits),
                                 signal: *signal,

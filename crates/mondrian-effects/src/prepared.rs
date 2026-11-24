@@ -2434,11 +2434,14 @@ fn remap_graph_node_kind(
                 mask_op: *mask_op,
             }
         }
-        EffectGraphNodeKind::MatteMix { base, graded, matte } => EffectGraphNodeKind::MatteMix {
-            base: remap(*base)?,
-            graded: remap(*graded)?,
-            matte: remap(*matte)?,
-        },
+        EffectGraphNodeKind::MatteMix { base, graded, matte, amount } => {
+            EffectGraphNodeKind::MatteMix {
+                base: remap(*base)?,
+                graded: remap(*graded)?,
+                matte: remap(*matte)?,
+                amount: *amount,
+            }
+        }
         EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset } => {
             EffectGraphNodeKind::ExternalInput {
                 slot: slots.get(slot).copied().ok_or(EffectGraphBuildError::InvalidGraph)?,
@@ -2546,7 +2549,7 @@ fn inject_masks(
                     kind: EffectGraphNodeKind::MaskCombine {
                         left,
                         right: source_id,
-                        mask_op: params.mask_op,
+                        mask_op: params.mask_op.into(),
                     },
                 });
                 emitted_nodes.push(combine_id);
@@ -2558,7 +2561,7 @@ fn inject_masks(
         let mix_id = EffectGraphNodeId(next_id);
         graph.nodes.push(EffectGraphNode {
             id: mix_id,
-            kind: EffectGraphNodeKind::MatteMix { base, graded, matte },
+            kind: EffectGraphNodeKind::MatteMix { base, graded, matte, amount: 1.0 },
         });
         emitted_nodes.push(mix_id);
         graph.output = Some(mix_id);

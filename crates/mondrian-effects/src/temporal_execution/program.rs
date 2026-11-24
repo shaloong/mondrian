@@ -372,7 +372,7 @@ impl TemporalProgramBuilder<'_> {
                 self.add_use(left)?;
                 self.add_use(right)?;
             }
-            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+            EffectGraphNodeKind::MatteMix { base, graded, matte, .. } => {
                 for input in [base, graded, matte] {
                     let input = self.visit_graph_value(context, input)?;
                     self.add_use(input)?;

@@ -165,7 +165,7 @@ pub(super) fn temporal_scalar_required_bytes(
                         plan_take_value(right, &mut live, &mut remaining_uses, &mut working)?;
                         working.release_frame()?;
                     }
-                    EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                    EffectGraphNodeKind::MatteMix { base, graded, matte, .. } => {
                         for input in [*base, *graded, *matte] {
                             let input = temporal_program.address_for_input(context, input)?;
                             plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;

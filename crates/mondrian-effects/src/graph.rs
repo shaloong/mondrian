@@ -324,6 +324,23 @@ pub enum EffectGraphError {
     InvalidVideoCollageSources { node: EffectGraphNodeId },
 }
 
+/// How two AlphaMask planes are combined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MaskCombineMode {
+    /// Existing coverage-stack operation used by authored Clip masks.
+    Coverage(crate::mask::MaskOp),
+    /// Screen, giving `a + b - a × b`.
+    Screen,
+    /// Multiply, giving `a × b`.
+    Multiply,
+}
+
+impl From<crate::mask::MaskOp> for MaskCombineMode {
+    fn from(op: crate::mask::MaskOp) -> Self {
+        Self::Coverage(op)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum EffectGraphNodeKind {
     Source,
@@ -371,7 +388,7 @@ pub enum EffectGraphNodeKind {
     MaskCombine {
         left: EffectGraphNodeId,
         right: EffectGraphNodeId,
-        mask_op: crate::mask::MaskOp,
+        mask_op: MaskCombineMode,
     },
     /// Mix an ungraded base and graded result through one AlphaMask value.
     ///
@@ -382,6 +399,8 @@ pub enum EffectGraphNodeKind {
         base: EffectGraphNodeId,
         graded: EffectGraphNodeId,
         matte: EffectGraphNodeId,
+        /// Scale applied to the matte coverage when mixing picture RGB.
+        amount: f32,
     },
     /// Ordered N-input visual compositing node.
     ///
@@ -478,7 +497,7 @@ impl EffectGraphNode {
             EffectGraphNodeKind::Mask { input, mask, .. } => vec![input, mask],
             EffectGraphNodeKind::MaskSource { .. } => Vec::new(),
             EffectGraphNodeKind::MaskCombine { left, right, .. } => vec![left, right],
-            EffectGraphNodeKind::MatteMix { base, graded, matte } => vec![base, graded, matte],
+            EffectGraphNodeKind::MatteMix { base, graded, matte, .. } => vec![base, graded, matte],
             EffectGraphNodeKind::MultiInput { ref inputs, .. } => inputs.clone(),
             EffectGraphNodeKind::ExternalInput { .. } => Vec::new(),
             EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
@@ -568,11 +587,12 @@ impl EffectGraphIdentity {
                     right.hash(&mut writer);
                     mask_op.hash(&mut writer);
                 }
-                EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                EffectGraphNodeKind::MatteMix { base, graded, matte, amount } => {
                     10u8.hash(&mut writer);
                     base.hash(&mut writer);
                     graded.hash(&mut writer);
                     matte.hash(&mut writer);
+                    amount.to_bits().hash(&mut writer);
                 }
                 EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                     7u8.hash(&mut writer);
@@ -2062,7 +2082,7 @@ fn derive_implementation_requirements<'a>(
                     .merge_branches(requirement_for(*right, &requirements))
                     .compose_node(gpu_mask_node_requirements())
             }
-            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+            EffectGraphNodeKind::MatteMix { base, graded, matte, .. } => {
                 requirement_for(*base, &requirements)
                     .merge_branches(requirement_for(*graded, &requirements))
                     .merge_branches(requirement_for(*matte, &requirements))
@@ -2711,6 +2731,16 @@ impl EffectGraphBuilderState {
         right: EffectGraphNodeId,
         mask_op: crate::mask::MaskOp,
     ) -> EffectGraphNodeId {
+        self.add_mask_combine_with_mode(left, right, mask_op.into())
+    }
+
+    /// Combine two AlphaMask planes by the specified coverage or pixel algebra.
+    pub fn add_mask_combine_with_mode(
+        &mut self,
+        left: EffectGraphNodeId,
+        right: EffectGraphNodeId,
+        mask_op: MaskCombineMode,
+    ) -> EffectGraphNodeId {
         let id = self.alloc_id();
         self.graph.nodes.push(EffectGraphNode {
             id,
@@ -2726,10 +2756,21 @@ impl EffectGraphBuilderState {
         graded: EffectGraphNodeId,
         matte: EffectGraphNodeId,
     ) -> EffectGraphNodeId {
+        self.add_matte_mix_with_amount(base, graded, matte, 1.0)
+    }
+
+    /// Mix the two pictures through a unit matte scaled by an authored unit amount.
+    pub fn add_matte_mix_with_amount(
+        &mut self,
+        base: EffectGraphNodeId,
+        graded: EffectGraphNodeId,
+        matte: EffectGraphNodeId,
+        amount: f32,
+    ) -> EffectGraphNodeId {
         let id = self.alloc_id();
         self.graph.nodes.push(EffectGraphNode {
             id,
-            kind: EffectGraphNodeKind::MatteMix { base, graded, matte },
+            kind: EffectGraphNodeKind::MatteMix { base, graded, matte, amount },
         });
         id
     }
@@ -3983,7 +4024,7 @@ pub(crate) fn compile_effect_domain_plan(
                 }
                 EffectColorDomain::AlphaMask
             }
-            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+            EffectGraphNodeKind::MatteMix { base, graded, matte, .. } => {
                 let base_domain = *plan.node_output_domains.get(base)?;
                 let graded_domain = *plan.node_output_domains.get(graded)?;
                 plan_domain_edge(
@@ -4448,6 +4489,11 @@ pub fn prepare_effect_graph_topology(
 
 fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
     let output = graph.output?;
+    if graph.nodes.iter().any(|node| {
+        matches!(node.kind, EffectGraphNodeKind::MatteMix { amount, .. } if !(0.0..=1.0).contains(&amount))
+    }) {
+        return None;
+    }
     let nodes = graph
         .nodes
         .iter()
@@ -4481,7 +4527,7 @@ fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
             EffectGraphNodeKind::MaskCombine { left, right, .. } => {
                 EffectGraphNodeShape::MaskCombine { id: node.id, left: *left, right: *right }
             }
-            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+            EffectGraphNodeKind::MatteMix { base, graded, matte, .. } => {
                 EffectGraphNodeShape::MatteMix {
                     id: node.id,
                     base: *base,
@@ -4779,7 +4825,7 @@ pub(crate) fn compile_effect_node_profiles(
                     output_cache_enabled: false,
                 }
             }
-            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+            EffectGraphNodeKind::MatteMix { base, graded, matte, amount } => {
                 let base_profile = profiles.get(base)?;
                 let graded_profile = profiles.get(graded)?;
                 let matte_profile = profiles.get(matte)?;
@@ -4788,6 +4834,7 @@ pub(crate) fn compile_effect_node_profiles(
                 base_profile.subtree_signature.hash(&mut hasher);
                 graded_profile.subtree_signature.hash(&mut hasher);
                 matte_profile.subtree_signature.hash(&mut hasher);
+                amount.to_bits().hash(&mut hasher);
                 let cache_policy = base_profile
                     .cache_policy
                     .combine(graded_profile.cache_policy)

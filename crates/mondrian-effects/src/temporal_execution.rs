@@ -2987,7 +2987,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                             self.working.release_frame()?;
                             output
                         }
-                        EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                        EffectGraphNodeKind::MatteMix { base, graded, matte, amount } => {
                             let base = self.temporal_program.address_for_input(context, base)?;
                             let graded =
                                 self.temporal_program.address_for_input(context, graded)?;
@@ -3000,9 +3000,13 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     reason: "MatteMix values do not cover the same region",
                                 });
                             }
-                            matte_mix_f32_controlled(&mut output, &graded, &matte, &mut || {
-                                processor_input_checkpoint(self.request, control)
-                            })?;
+                            matte_mix_f32_controlled(
+                                &mut output,
+                                &graded,
+                                &matte,
+                                amount,
+                                &mut || processor_input_checkpoint(self.request, control),
+                            )?;
                             self.working.release_frame()?;
                             self.working.release_frame()?;
                             output
@@ -4808,6 +4812,7 @@ mod tests {
 
     #[test]
     fn temporal_power_window_dag_matches_full_frame_reference_in_direct_and_tiled_execution() {
+        let amount = 0.625;
         let offset = TimelineTime::new(1, 2).expect("offset");
         let mask_shape = crate::mask::MaskShape::Path {
             points: vec![
@@ -4864,7 +4869,7 @@ mod tests {
                         kind: EffectGraphNodeKind::MaskCombine {
                             left: EffectGraphNodeId(2),
                             right: EffectGraphNodeId(3),
-                            mask_op: crate::mask::MaskOp::Difference,
+                            mask_op: crate::mask::MaskOp::Difference.into(),
                         },
                     },
                     EffectGraphNode {
@@ -4873,6 +4878,7 @@ mod tests {
                             base: EffectGraphNodeId(0),
                             graded: EffectGraphNodeId(1),
                             matte: EffectGraphNodeId(4),
+                            amount,
                         },
                     },
                 ],
@@ -4942,10 +4948,15 @@ mod tests {
         crate::execution::combine_alpha_masks_f32_in_place(
             &mut combined_matte,
             &inverted_secondary,
-            crate::mask::MaskOp::Difference,
+            crate::mask::MaskOp::Difference.into(),
         );
         let mut reference = current;
-        crate::execution::matte_mix_f32_in_place(&mut reference, &mixed, &combined_matte);
+        for ((base, graded), matte) in reference.iter_mut().zip(&mixed).zip(&combined_matte) {
+            let weight = matte[3] * amount;
+            for channel in 0..3 {
+                base[channel] = base[channel] * (1.0 - weight) + graded[channel] * weight;
+            }
+        }
 
         let mut direct_session = EffectExecutionSession::default();
         let mut direct_provider = GradientProvider::new(extent);

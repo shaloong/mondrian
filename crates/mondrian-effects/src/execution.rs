@@ -821,7 +821,7 @@ fn execute_effect_graph_with_auxiliary(
                 release_execution_buffer(&mut buffer_pool, right_frame);
                 outputs.insert(node.id, left_frame);
             }
-            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+            EffectGraphNodeKind::MatteMix { base, graded, matte, amount } => {
                 let Some(mut base_frame) = take_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
@@ -849,7 +849,7 @@ fn execute_effect_graph_with_auxiliary(
                 ) else {
                     return Err(EffectExecutionError::InvalidGraph);
                 };
-                matte_mix_u8_in_place(&mut base_frame, &graded_frame, &matte_frame);
+                matte_mix_u8_in_place(&mut base_frame, &graded_frame, &matte_frame, *amount);
                 release_execution_buffer(&mut buffer_pool, graded_frame);
                 release_execution_buffer(&mut buffer_pool, matte_frame);
                 outputs.insert(node.id, base_frame);
@@ -2192,7 +2192,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 release_float_execution_buffer(&mut buffer_pool, right_frame);
                 outputs.insert(node.id, left_frame);
             }
-            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+            EffectGraphNodeKind::MatteMix { base, graded, matte, amount } => {
                 let Some(base_frame) = take_float_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
@@ -2239,7 +2239,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 );
                 base_frame.ensure_same_grid(graded_frame.view())?;
                 base_frame.ensure_same_grid(matte_frame.view())?;
-                matte_mix_f32_in_place(&mut base_frame, &graded_frame, &matte_frame);
+                matte_mix_f32_in_place(&mut base_frame, &graded_frame, &matte_frame, *amount);
                 release_float_execution_buffer(&mut buffer_pool, graded_frame);
                 release_float_execution_buffer(&mut buffer_pool, matte_frame);
                 outputs.insert(node.id, base_frame);
@@ -3692,7 +3692,7 @@ pub(crate) fn invert_alpha_mask_f32_in_place(mask: &mut [[f32; 4]]) {
     }
 }
 
-fn combine_alpha_masks_u8_in_place(left: &mut [u8], right: &[u8], mask_op: crate::mask::MaskOp) {
+fn combine_alpha_masks_u8_in_place(left: &mut [u8], right: &[u8], mask_op: crate::MaskCombineMode) {
     for (left_pixel, right_pixel) in left.chunks_exact_mut(4).zip(right.chunks_exact(4)) {
         let a = left_pixel[3] as f32 / 255.0;
         let b = right_pixel[3] as f32 / 255.0;
@@ -3700,11 +3700,11 @@ fn combine_alpha_masks_u8_in_place(left: &mut [u8], right: &[u8], mask_op: crate
     }
 }
 
-fn matte_mix_u8_in_place(base: &mut [u8], graded: &[u8], matte: &[u8]) {
+fn matte_mix_u8_in_place(base: &mut [u8], graded: &[u8], matte: &[u8], amount: f32) {
     for ((base_pixel, graded_pixel), matte_pixel) in
         base.chunks_exact_mut(4).zip(graded.chunks_exact(4)).zip(matte.chunks_exact(4))
     {
-        let weight = matte_pixel[3] as f32 / 255.0;
+        let weight = (matte_pixel[3] as f32 / 255.0) * amount;
         for channel in 0..3 {
             base_pixel[channel] = unit_to_u8(
                 (base_pixel[channel] as f32 / 255.0) * (1.0 - weight)
@@ -3714,22 +3714,24 @@ fn matte_mix_u8_in_place(base: &mut [u8], graded: &[u8], matte: &[u8]) {
     }
 }
 
-fn combine_mask_coverage(a: f32, b: f32, mask_op: crate::mask::MaskOp) -> f32 {
-    use crate::mask::MaskOp;
+fn combine_mask_coverage(a: f32, b: f32, mask_op: crate::MaskCombineMode) -> f32 {
+    use crate::{mask::MaskOp, MaskCombineMode};
     let a = a.clamp(0.0, 1.0);
     let b = b.clamp(0.0, 1.0);
     match mask_op {
-        MaskOp::Add => a.max(b),
-        MaskOp::Subtract => a * (1.0 - b),
-        MaskOp::Intersect => a.min(b),
-        MaskOp::Difference => (a - b).abs(),
+        MaskCombineMode::Coverage(MaskOp::Add) => a.max(b),
+        MaskCombineMode::Coverage(MaskOp::Subtract) => a * (1.0 - b),
+        MaskCombineMode::Coverage(MaskOp::Intersect) => a.min(b),
+        MaskCombineMode::Coverage(MaskOp::Difference) => (a - b).abs(),
+        MaskCombineMode::Screen => a + (1.0 - a) * b,
+        MaskCombineMode::Multiply => a * b,
     }
 }
 
 pub(crate) fn combine_alpha_masks_f32_in_place(
     left: &mut [[f32; 4]],
     right: &[[f32; 4]],
-    mask_op: crate::mask::MaskOp,
+    mask_op: crate::MaskCombineMode,
 ) {
     for (left_pixel, right_pixel) in left.iter_mut().zip(right) {
         left_pixel[3] = combine_mask_coverage(left_pixel[3], right_pixel[3], mask_op);
@@ -3739,7 +3741,7 @@ pub(crate) fn combine_alpha_masks_f32_in_place(
 pub(crate) fn combine_alpha_masks_f32_controlled<E>(
     left: &mut [[f32; 4]],
     right: &[[f32; 4]],
-    mask_op: crate::mask::MaskOp,
+    mask_op: crate::MaskCombineMode,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
     for (left_chunk, right_chunk) in left.chunks_mut(4_096).zip(right.chunks(4_096)) {
@@ -3754,9 +3756,17 @@ pub(crate) fn matte_mix_f32_in_place(
     base: &mut [[f32; 4]],
     graded: &[[f32; 4]],
     matte: &[[f32; 4]],
+    amount: f32,
 ) {
     for ((base_pixel, graded_pixel), matte_pixel) in base.iter_mut().zip(graded).zip(matte) {
-        let weight = matte_pixel[3].clamp(0.0, 1.0);
+        let weight = matte_pixel[3].clamp(0.0, 1.0) * amount;
+        if weight == 0.0 {
+            continue;
+        }
+        if weight == 1.0 {
+            base_pixel[..3].copy_from_slice(&graded_pixel[..3]);
+            continue;
+        }
         for channel in 0..3 {
             base_pixel[channel] =
                 base_pixel[channel] * (1.0 - weight) + graded_pixel[channel] * weight;
@@ -3770,13 +3780,14 @@ pub(crate) fn matte_mix_f32_controlled<E>(
     base: &mut [[f32; 4]],
     graded: &[[f32; 4]],
     matte: &[[f32; 4]],
+    amount: f32,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
     for ((base_chunk, graded_chunk), matte_chunk) in
         base.chunks_mut(4_096).zip(graded.chunks(4_096)).zip(matte.chunks(4_096))
     {
         checkpoint()?;
-        matte_mix_f32_in_place(base_chunk, graded_chunk, matte_chunk);
+        matte_mix_f32_in_place(base_chunk, graded_chunk, matte_chunk, amount);
     }
     checkpoint()?;
     Ok(())
@@ -5157,7 +5168,7 @@ mod tests {
         assert!((output[0][3] * 255.0 - (output[0][3] * 255.0).round()).abs() > 1.0e-3);
     }
 
-    fn grade_matte_graph(mask_op: crate::mask::MaskOp) -> Arc<CompiledEffectGraph> {
+    fn grade_matte_graph(mask_op: crate::MaskCombineMode, amount: f32) -> Arc<CompiledEffectGraph> {
         let graph = EffectRenderGraph {
             nodes: vec![
                 crate::EffectGraphNode {
@@ -5217,6 +5228,7 @@ mod tests {
                         base: EffectGraphNodeId(0),
                         graded: EffectGraphNodeId(1),
                         matte: EffectGraphNodeId(4),
+                        amount,
                     },
                 },
             ],
@@ -5227,13 +5239,17 @@ mod tests {
 
     #[test]
     fn mask_combine_and_matte_mix_cover_all_ops_on_rgba8_and_float() {
-        for (mask_op, weight) in [
-            (crate::mask::MaskOp::Add, 0.75),
-            (crate::mask::MaskOp::Subtract, 0.5625),
-            (crate::mask::MaskOp::Intersect, 0.25),
-            (crate::mask::MaskOp::Difference, 0.5),
+        for (mask_op, coverage, amount) in [
+            (crate::mask::MaskOp::Add.into(), 0.75, 1.0),
+            (crate::mask::MaskOp::Subtract.into(), 0.5625, 0.5),
+            (crate::mask::MaskOp::Intersect.into(), 0.25, 0.625),
+            (crate::mask::MaskOp::Difference.into(), 0.5, 1.0),
+            (crate::mask::MaskOp::Add.into(), 0.75, 0.0),
+            (crate::MaskCombineMode::Screen, 0.8125, 0.65),
+            (crate::MaskCombineMode::Multiply, 0.1875, 0.65),
         ] {
-            let compiled = grade_matte_graph(mask_op);
+            let compiled = grade_matte_graph(mask_op, amount);
+            let weight = coverage * amount;
             let float_input = [[0.2, 0.3, 0.4, 0.42]];
             let float_output = apply_compiled_effect_graph_rgba_f32(
                 crate::EffectFloatFrameView::new(
@@ -5255,6 +5271,9 @@ mod tests {
                 assert!((float_output[0][channel] - expected).abs() <= 1.0e-6);
             }
             assert_eq!(float_output[0][3], float_input[0][3]);
+            if amount == 0.0 {
+                assert_eq!(float_output.pixels(), &float_input);
+            }
 
             let u8_input = [51, 77, 102, 107];
             let u8_output = apply_compiled_effect_graph(&u8_input, 1, 1, &compiled, 0)

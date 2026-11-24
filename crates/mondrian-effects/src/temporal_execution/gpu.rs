@@ -130,6 +130,33 @@ pub enum TemporalGpuStepOperation {
         /// Frozen noise profile and motion controls.
         grade: crate::grain_temporal::GrainTemporalGrade,
     },
+    /// Generate an AlphaMask from the exact working RGB value at this instant.
+    Qualifier {
+        /// Scene-linear input used to evaluate the selection.
+        input: TemporalGpuValue,
+        /// Frozen selection and feather controls.
+        qualifier: Arc<crate::PreparedQualifier>,
+    },
+    /// Combine two AlphaMask values without leaving the alpha domain.
+    MaskCombine {
+        /// Left matte.
+        left: TemporalGpuValue,
+        /// Right matte.
+        right: TemporalGpuValue,
+        /// Operation used by the scalar mask graph.
+        mask_op: crate::MaskCombineMode,
+    },
+    /// Interpolate working RGB through a matte, retaining base alpha.
+    MatteMix {
+        /// Unprocessed working RGB and its coverage.
+        base: TemporalGpuValue,
+        /// Processed working RGB.
+        graded: TemporalGpuValue,
+        /// Per-pixel contribution of the processed value.
+        matte: TemporalGpuValue,
+        /// Scale applied to the matte.
+        amount: f32,
+    },
     /// Composite one value over another with the graph's own blend policy.
     Blend {
         /// Base value.
@@ -477,6 +504,18 @@ impl PreparedEffectTemporalExecution {
                         .node(node_id)
                         .ok_or(EffectTemporalGpuPlanBlocker::MissingGraphNode { node_id })?;
                     let operation = match &node.kind {
+                        EffectGraphNodeKind::DomainEffect {
+                            input,
+                            op: crate::EffectRenderOp::Qualifier { qualifier },
+                            domain_contract,
+                        } if domain_contract.input == EffectColorDomain::SceneLinearRgb
+                            && domain_contract.output == EffectColorDomain::AlphaMask =>
+                        {
+                            TemporalGpuStepOperation::Qualifier {
+                                input: gpu_value(program, node_input(program, context, *input)?)?,
+                                qualifier: Arc::clone(qualifier),
+                            }
+                        }
                         EffectGraphNodeKind::UnaryEffect { input: graph_input, op }
                         | EffectGraphNodeKind::DomainEffect { input: graph_input, op, .. } => {
                             let input =
@@ -569,6 +608,21 @@ impl PreparedEffectTemporalExecution {
                                 )?,
                                 opacity: *opacity,
                                 blend_mode: *blend_mode,
+                            }
+                        }
+                        EffectGraphNodeKind::MaskCombine { left, right, mask_op } => {
+                            TemporalGpuStepOperation::MaskCombine {
+                                left: gpu_value(program, node_input(program, context, *left)?)?,
+                                right: gpu_value(program, node_input(program, context, *right)?)?,
+                                mask_op: *mask_op,
+                            }
+                        }
+                        EffectGraphNodeKind::MatteMix { base, graded, matte, amount } => {
+                            TemporalGpuStepOperation::MatteMix {
+                                base: gpu_value(program, node_input(program, context, *base)?)?,
+                                graded: gpu_value(program, node_input(program, context, *graded)?)?,
+                                matte: gpu_value(program, node_input(program, context, *matte)?)?,
+                                amount: *amount,
                             }
                         }
                         EffectGraphNodeKind::AuxiliaryEffect {
@@ -733,7 +787,8 @@ mod tests {
     fn step_inputs(operation: &TemporalGpuStepOperation) -> Vec<TemporalGpuValue> {
         match operation {
             TemporalGpuStepOperation::Point { input, .. }
-            | TemporalGpuStepOperation::Spatial { input, .. } => vec![*input],
+            | TemporalGpuStepOperation::Spatial { input, .. }
+            | TemporalGpuStepOperation::Qualifier { input, .. } => vec![*input],
             TemporalGpuStepOperation::TemporalBlend { input, sample, .. } => {
                 vec![*input, *sample]
             }
@@ -741,6 +796,10 @@ mod tests {
                 std::iter::once(*input).chain(neighbors.iter().flatten().copied()).collect()
             }
             TemporalGpuStepOperation::Blend { base, overlay, .. } => vec![*base, *overlay],
+            TemporalGpuStepOperation::MaskCombine { left, right, .. } => vec![*left, *right],
+            TemporalGpuStepOperation::MatteMix { base, graded, matte, .. } => {
+                vec![*base, *graded, *matte]
+            }
             TemporalGpuStepOperation::Auxiliary { input, auxiliary, .. } => {
                 vec![*input, *auxiliary]
             }

@@ -560,6 +560,9 @@ fn rgb_hue_saturation(rgb: [f32; 3]) -> (f32, f32) {
 }
 
 fn range_matte(value: f32, low: f32, high: f32, softness: f32) -> f32 {
+    if softness == 0.0 {
+        return f32::from((low..=high).contains(&value));
+    }
     smoothstep(low - softness, low, value) * (1.0 - smoothstep(high, high + softness, value))
 }
 
@@ -593,6 +596,14 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 mod tests {
     use super::*;
     use mondrian_core::automation::{QualifierSample, QualifierSampleOperation};
+
+    #[test]
+    fn hard_qualifier_range_includes_both_authored_endpoints() {
+        assert_eq!(range_matte(0.0, 0.0, 1.0, 0.0), 1.0);
+        assert_eq!(range_matte(1.0, 0.0, 1.0, 0.0), 1.0);
+        assert_eq!(range_matte(0.5, 0.5, 0.5, 0.0), 1.0);
+        assert_eq!(range_matte(0.75, 0.25, 0.5, 0.0), 0.0);
+    }
 
     fn qualifier(mode: QualifierMode) -> PreparedQualifier {
         let samples = QualifierSampleSet::new(vec![
