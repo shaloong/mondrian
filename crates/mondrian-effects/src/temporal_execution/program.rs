@@ -298,6 +298,13 @@ impl TemporalProgramBuilder<'_> {
                 let input_address = self.visit_graph_value(context, input)?;
                 self.add_use(input_address)?;
                 let reads = match op {
+                    crate::EffectRenderOp::SpatialGrain { grade }
+                        if grade.calibration().is_some() =>
+                    {
+                        return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
+                            reason: "spatial grain requires a bound source calibration",
+                        });
+                    }
                     crate::EffectRenderOp::TemporalFrameBlend { sample_offset, mix } => {
                         validate_temporal_blend(sample_offset, mix)?;
                         let stage = self.temporal_owner_stage(context, node_id, input)?;
@@ -309,6 +316,11 @@ impl TemporalProgramBuilder<'_> {
                         )?))
                     }
                     crate::EffectRenderOp::TemporalGrain { grade } => {
+                        if grade.calibration().is_some() {
+                            return Err(EffectTemporalExecutionError::InvalidTemporalOperation {
+                                reason: "temporal grain requires a bound source calibration",
+                            });
+                        }
                         let stage = self.temporal_owner_stage(context, node_id, input)?;
                         let mut neighbors = [None; 2];
                         for (sample, offset) in neighbors.iter_mut().zip(grade.offsets()) {

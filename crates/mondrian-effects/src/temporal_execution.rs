@@ -1750,12 +1750,36 @@ impl EffectExecutionSession {
         &mut self,
         program: &PreparedEffectProgram,
         request: &EffectTemporalExecutionRequest,
+        sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+    ) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
+        self.prepare_temporal_frame_program_with_binding(
+            program,
+            request,
+            sample_frame_seed,
+            |_, graph| Ok(graph),
+        )
+    }
+
+    /// Bind host-owned values on the root and at each requested exact author
+    /// time, before any sampling edges from that graph are expanded.
+    pub fn prepare_temporal_frame_program_with_binding(
+        &mut self,
+        program: &PreparedEffectProgram,
+        request: &EffectTemporalExecutionRequest,
         mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+        mut bind_graph: impl FnMut(
+            TimelineTime,
+            Arc<CompiledEffectGraph>,
+        ) -> Result<Arc<CompiledEffectGraph>, String>,
     ) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
         self.bind_generation(request.generation());
         let prepared = prepare_exact_frame_program_with_evaluator(
             request,
-            |time| program.evaluate_with_session(time, self).map_err(|error| error.to_string()),
+            |time| {
+                let graph =
+                    program.evaluate_with_session(time, self).map_err(|error| error.to_string())?;
+                bind_graph(time, graph)
+            },
             &mut sample_frame_seed,
         )?;
         ensure_temporal_program(&prepared.program)?;
@@ -4224,6 +4248,104 @@ mod tests {
             GradientProvider::pixel(TimelineTime::ZERO, 1, 0)
         );
         assert_ne!(stationary.cache_identity(), moving.cache_identity());
+    }
+
+    #[test]
+    fn source_grain_calibration_freezes_one_profile_and_only_admitted_taps() {
+        use crate::{
+            grain_calibration::{GrainCalibrationRequest, GrainCalibrationSettings},
+            grain_spatial::{GrainSpatialGrade, GrainSpatialShaping},
+            grain_temporal::GrainTemporalGrade,
+            EffectRenderOp,
+        };
+        let calibration =
+            GrainCalibrationRequest::new(4, GrainCalibrationSettings::DEFAULT).unwrap();
+        let offset = TimelineTime::new(1, 24).unwrap();
+        let temporal = GrainTemporalGrade::awaiting_source_calibration(
+            [Some(past_offset(offset)), Some(offset)],
+            calibration,
+            0.8,
+            0.9,
+        )
+        .unwrap();
+        let spatial = GrainSpatialGrade::awaiting_source_calibration(
+            calibration,
+            [2.0; 3],
+            GrainSpatialShaping::default(),
+        )
+        .unwrap();
+        let graph = bind_linear(
+            [
+                EffectRenderOp::TemporalGrain { grade: temporal },
+                EffectRenderOp::SpatialGrain { grade: spatial },
+            ],
+            EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+                temporal_input: temporal.temporal_extent(),
+                ..temporal_contract(
+                    offset,
+                    EffectRoiPropagation::Expand { horizontal_pixels: 1, vertical_pixels: 1 },
+                )
+            },
+        );
+        let extent = EffectFrameExtent::new(4, 4);
+        let request = EffectTemporalExecutionRequest::new(
+            12,
+            EffectExecutionContinuity::Discontinuous,
+            TimelineTime::ZERO,
+            extent,
+            mondrian_core::ImageSampling::UNIT_SQUARE,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        );
+        assert!(matches!(
+            prepare_temporal_program_inner(Arc::clone(&graph), &request, None),
+            Err(EffectTemporalExecutionError::InvalidTemporalOperation { .. })
+        ));
+        let mut resolved = 0;
+        let sigma = [0.08, 0.09, 0.1];
+        let bound = graph
+            .bind_grain_calibration(
+                |key| {
+                    assert_eq!(key, calibration);
+                    resolved += 1;
+                    Ok(Some(sigma))
+                },
+                |tap| Ok(tap == offset),
+            )
+            .unwrap();
+        assert_eq!(resolved, 1);
+        assert_ne!(bound.semantic_fingerprint(), graph.semantic_fingerprint());
+        assert_eq!(bound.grain_calibration_requests().count(), 0);
+        let execution = prepare_temporal_execution_inner(bound, &request, None).unwrap();
+        assert_eq!(
+            execution
+                .demands()
+                .requests()
+                .iter()
+                .map(|sample| sample.time())
+                .collect::<Vec<_>>(),
+            [TimelineTime::ZERO, offset],
+        );
+        let schedule = execution.plan_gpu_execution().unwrap();
+        assert!(schedule.steps().iter().any(|step| matches!(
+            step.operation(), TemporalGpuStepOperation::TemporalGrain { grade, .. }
+                if grade.gpu_controls()[0][..3] == sigma
+        )));
+        assert!(schedule.steps().iter().any(|step| matches!(
+            step.operation(), TemporalGpuStepOperation::Spatial { plan, .. }
+                if matches!(plan.stages(), [crate::EffectGpuStage::Spatial {
+                    pass: crate::EffectGpuSpatialPass::SpatialGrain { grade }, ..
+                }] if grade.gpu_controls()[0][..3] == sigma)
+        )));
+        let missing = graph
+            .bind_grain_calibration(
+                |_| Ok(None),
+                |_| panic!("a missing profile cannot ask for neighbors"),
+            )
+            .unwrap();
+        let pending = prepare_temporal_program_inner(missing, &request, None).unwrap();
+        assert_eq!(pending.source_times(), [TimelineTime::ZERO]);
     }
 
     #[test]

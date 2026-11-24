@@ -1518,9 +1518,10 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::SmartBlur { grade } => {
             Some(EffectGpuSpatialPass::SmartBlur { grade: *grade })
         }
-        EffectRenderOp::SpatialGrain { grade } => {
-            Some(EffectGpuSpatialPass::SpatialGrain { grade: *grade })
-        }
+        EffectRenderOp::SpatialGrain { grade } => grade
+            .calibration()
+            .is_none()
+            .then_some(EffectGpuSpatialPass::SpatialGrain { grade: *grade }),
         EffectRenderOp::Deinterlace { grade } => {
             Some(EffectGpuSpatialPass::Deinterlace { grade: *grade })
         }

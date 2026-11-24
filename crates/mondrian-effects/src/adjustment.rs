@@ -2327,6 +2327,9 @@ fn apply_render_op_f32_region_impl<E>(
             Ok(true)
         }
         EffectRenderOp::SpatialGrain { grade } => {
+            if grade.calibration().is_some() {
+                return Ok(false);
+            }
             crate::grain_spatial::apply_grain_spatial_controlled(
                 working,
                 [region.width as usize, region.height as usize],

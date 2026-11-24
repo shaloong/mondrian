@@ -28,6 +28,34 @@ impl GrainCalibrationSettings {
     }
 }
 
+/// Exact frame on the original media grid and authored statistics settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GrainCalibrationRequest {
+    frame_index: u32,
+    settings: GrainCalibrationSettings,
+}
+
+impl GrainCalibrationRequest {
+    /// Create a fixed source request. The authoring contract admits frames 0–100,000.
+    pub const fn new(frame_index: u32, settings: GrainCalibrationSettings) -> Option<Self> {
+        if frame_index <= 100_000 {
+            Some(Self { frame_index, settings })
+        } else {
+            None
+        }
+    }
+
+    /// Zero-based frame on the source grid.
+    pub const fn frame_index(self) -> u32 {
+        self.frame_index
+    }
+
+    /// Analysis window settings for this request.
+    pub const fn settings(self) -> GrainCalibrationSettings {
+        self.settings
+    }
+}
+
 /// A chosen half-open statistics window in source-raster pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrainCalibrationWindow {

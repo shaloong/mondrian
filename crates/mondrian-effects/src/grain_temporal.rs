@@ -1,6 +1,6 @@
 //! Finite motion-gated temporal grain reduction on straight Float32 pixels.
 
-use crate::EffectTemporalInputExtent;
+use crate::{grain_calibration::GrainCalibrationRequest, EffectTemporalInputExtent};
 use mondrian_core::TimelineTime;
 
 /// Prepared per-frame operation with frozen calibration and zero to two taps.
@@ -10,6 +10,7 @@ pub struct GrainTemporalGrade {
     sigma: [f32; 3],
     mix: f32,
     motion_sensitivity: f32,
+    calibration: Option<GrainCalibrationRequest>,
 }
 
 /// Rejected temporal input addresses or controls.
@@ -51,7 +52,53 @@ impl GrainTemporalGrade {
         } else {
             [previous, following]
         };
-        Ok(Self { offsets, sigma, mix, motion_sensitivity })
+        Ok(Self {
+            offsets,
+            sigma,
+            mix,
+            motion_sensitivity,
+            calibration: None,
+        })
+    }
+
+    /// Declare host calibration with a conservative window for graph validation.
+    pub fn awaiting_source_calibration(
+        offsets: [Option<TimelineTime>; 2],
+        calibration: GrainCalibrationRequest,
+        mix: f32,
+        motion_sensitivity: f32,
+    ) -> Result<Self, GrainTemporalError> {
+        let mut grade = Self::new(offsets, [0.0; 3], mix, motion_sensitivity)?;
+        grade.calibration = Some(calibration);
+        Ok(grade)
+    }
+
+    pub(crate) const fn calibration(self) -> Option<GrainCalibrationRequest> {
+        self.calibration
+    }
+
+    pub(crate) fn bind_calibration(
+        self,
+        sigma: Option<[f32; 3]>,
+        mut admit_offset: impl FnMut(TimelineTime) -> Result<bool, String>,
+    ) -> Result<Self, String> {
+        let mut offsets = [None; 2];
+        if sigma.is_some() {
+            for (bound, pending) in offsets.iter_mut().zip(self.offsets) {
+                if let Some(offset) = pending
+                    && admit_offset(offset)?
+                {
+                    *bound = Some(offset);
+                }
+            }
+        }
+        Self::new(
+            offsets,
+            sigma.unwrap_or([0.0; 3]),
+            self.mix,
+            self.motion_sensitivity,
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// Exact read offsets in previous/following order.
@@ -88,6 +135,9 @@ impl GrainTemporalGrade {
         self.sigma.map(f32::to_bits).hash(hasher);
         self.mix.to_bits().hash(hasher);
         self.motion_sensitivity.to_bits().hash(hasher);
+        if let Some(request) = self.calibration {
+            request.hash(hasher);
+        }
     }
 
     fn motion_scale(self) -> f32 {

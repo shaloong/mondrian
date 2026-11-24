@@ -1131,12 +1131,82 @@ impl CompiledEffectGraph {
                 _ => {}
             }
         }
-        let mut compiled = self.as_ref().clone();
+        self.with_bound_graph(graph)
+    }
+
+    /// Pending fixed-source analysis on reachable nodes. The host may resolve
+    /// one profile for a request shared by several stages.
+    pub fn grain_calibration_requests(
+        &self,
+    ) -> impl Iterator<Item = crate::grain_calibration::GrainCalibrationRequest> + '_ {
+        self.schedule
+            .ordered_nodes
+            .iter()
+            .filter_map(|id| match &self.graph.node(*id)?.kind {
+                EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. } => match op {
+                    EffectRenderOp::TemporalGrain { grade } => grade.calibration(),
+                    EffectRenderOp::SpatialGrain { grade } => grade.calibration(),
+                    _ => None,
+                },
+                _ => None,
+            })
+    }
+
+    /// Freeze calibration and the admitted signed taps before expanding time.
+    ///
+    /// A missing profile disables both grain filters. Only taps from the
+    /// authored window can survive admission, and the validated graph's stage
+    /// topology and conservative execution envelope remain valid.
+    pub fn bind_grain_calibration(
+        self: &Arc<Self>,
+        mut resolve: impl FnMut(
+            crate::grain_calibration::GrainCalibrationRequest,
+        ) -> Result<Option<[f32; 3]>, String>,
+        mut admit_offset: impl FnMut(mondrian_core::TimelineTime) -> Result<bool, String>,
+    ) -> Result<Arc<Self>, String> {
+        if self.grain_calibration_requests().next().is_none() {
+            return Ok(Arc::clone(self));
+        }
+        let mut profiles = HashMap::new();
+        for request in self.grain_calibration_requests() {
+            if let std::collections::hash_map::Entry::Vacant(entry) = profiles.entry(request) {
+                entry.insert(resolve(request)?);
+            }
+        }
+        let mut graph = self.graph.clone();
+        for node in &mut graph.nodes {
+            let (EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. }) = &mut node.kind
+            else {
+                continue;
+            };
+            match op {
+                EffectRenderOp::TemporalGrain { grade } => {
+                    if let Some(sigma) = grade.calibration().and_then(|key| profiles.get(&key)) {
+                        *grade = grade.bind_calibration(*sigma, &mut admit_offset)?;
+                    }
+                }
+                EffectRenderOp::SpatialGrain { grade } => {
+                    if let Some(sigma) = grade.calibration().and_then(|key| profiles.get(&key)) {
+                        *grade = grade
+                            .bind_calibration(sigma.unwrap_or([0.0; 3]))
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(self.with_bound_graph(graph))
+    }
+
+    fn with_bound_graph(&self, graph: EffectRenderGraph) -> Arc<Self> {
+        let mut compiled = self.clone();
         let identity = graph.semantic_identity();
         compiled.signature_hash = identity.diagnostic_hash();
         compiled.identity = identity;
         compiled.node_profiles = compile_effect_node_profiles(&graph, &self.schedule)
-            .expect("binding Glass values preserves the validated graph schedule");
+            .expect("binding render values preserves the validated graph schedule");
         constrain_cache_profiles_by_execution_envelope(
             &mut compiled.node_profiles,
             &self.execution_envelope,

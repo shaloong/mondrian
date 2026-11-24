@@ -1,5 +1,7 @@
 //! Calibrated, edge-gated spatial grain reduction over straight Float32 RGB.
 
+use crate::grain_calibration::GrainCalibrationRequest;
+
 const DETAIL_GAIN: f32 = 0.800_390_54; // sqrt(41) / 8 for the default 3×3 binomial.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
@@ -31,6 +33,7 @@ impl Default for GrainSpatialShaping {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GrainSpatialGrade {
     controls: [[f32; 4]; 3],
+    calibration: Option<GrainCalibrationRequest>,
 }
 
 /// Invalid calibrated or authored controls.
@@ -76,7 +79,38 @@ impl GrainSpatialGrade {
         if controls.iter().flatten().any(|value| !value.is_finite()) {
             return Err(GrainSpatialError);
         }
-        Ok(Self { controls })
+        Ok(Self { controls, calibration: None })
+    }
+
+    /// Declare host calibration while retaining the maximum halo and shaping.
+    pub fn awaiting_source_calibration(
+        calibration: GrainCalibrationRequest,
+        amount: [f32; 3],
+        shaping: GrainSpatialShaping,
+    ) -> Result<Self, GrainSpatialError> {
+        let mut grade = Self::new([1.0; 3], amount, shaping)?;
+        grade.calibration = Some(calibration);
+        Ok(grade)
+    }
+
+    pub(crate) const fn calibration(self) -> Option<GrainCalibrationRequest> {
+        self.calibration
+    }
+
+    pub(crate) fn bind_calibration(mut self, sigma: [f32; 3]) -> Result<Self, GrainSpatialError> {
+        for (channel, sigma) in sigma.into_iter().enumerate() {
+            let threshold = self.controls[1][channel] * sigma;
+            if sigma < 0.0 || !threshold.is_finite() {
+                return Err(GrainSpatialError);
+            }
+            self.controls[0][channel] = sigma;
+            self.controls[1][channel] = threshold;
+            if threshold == 0.0 {
+                self.controls[2][channel] = 0.0;
+            }
+        }
+        self.calibration = None;
+        Ok(self)
     }
 
     /// Shared three-cell uniform payload.
@@ -104,6 +138,9 @@ impl GrainSpatialGrade {
     pub(crate) fn hash_controls<H: std::hash::Hasher>(self, state: &mut H) {
         use std::hash::Hash;
         self.controls.map(|cell| cell.map(f32::to_bits)).hash(state);
+        if let Some(request) = self.calibration {
+            request.hash(state);
+        }
     }
 
     fn filter_pixel(self, center: [f32; 4], sample: impl Fn(isize, isize) -> [f32; 4]) -> [f32; 4] {
@@ -186,14 +223,14 @@ fn cubic_fade(value: f32) -> f32 {
 }
 
 /// Filter one tightly packed scene-linear straight RGBA Float32 raster.
-/// Returns false if the storage and dimensions disagree.
+/// Returns false if the storage and dimensions disagree or calibration is pending.
 pub fn grain_spatial_frame_f32(
     pixels: &mut [[f32; 4]],
     width: usize,
     height: usize,
     grade: GrainSpatialGrade,
 ) -> bool {
-    if width.checked_mul(height) != Some(pixels.len()) {
+    if grade.calibration().is_some() || width.checked_mul(height) != Some(pixels.len()) {
         return false;
     }
     let Ok(()) = apply_grain_spatial_controlled(pixels, [width, height], grade, &mut || {
