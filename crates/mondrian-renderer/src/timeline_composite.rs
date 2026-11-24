@@ -379,6 +379,25 @@ impl TimelineCompositeScratch {
         program: &crate::PreparedVisualProgram,
         request: crate::TimelineFrameExecutionRequest,
     ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
+        self.prepare_timeline_frame_execution_with_media_binding(
+            program,
+            request,
+            |_, _, graph, _| Ok(graph),
+        )
+    }
+
+    /// Resolve source-owned Effect values before expanding any time addresses.
+    pub fn prepare_timeline_frame_execution_with_media_binding(
+        &mut self,
+        program: &crate::PreparedVisualProgram,
+        request: crate::TimelineFrameExecutionRequest,
+        mut bind: impl FnMut(
+            &crate::TimelineMediaPlan,
+            mondrian_core::TimelineTime,
+            Arc<CompiledEffectGraph>,
+            &mut crate::RenderCpuColorExecutionSession,
+        ) -> Result<Arc<CompiledEffectGraph>, String>,
+    ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
         self.effect_execution.bind_generation(request.generation());
         let plan = crate::timeline_render_plan::evaluate_prepared_visual_program_with_title_assets(
             program,
@@ -392,6 +411,7 @@ impl TimelineCompositeScratch {
             &plan,
             request,
             &mut self.effect_execution,
+            &mut |media, time, graph| bind(media, time, graph, &mut self.color_execution),
         )
         .map_err(crate::TimelineFramePreparationError::Temporal)
     }
@@ -404,6 +424,27 @@ impl TimelineCompositeScratch {
         program: &crate::PreparedVisualProgram,
         request: crate::TimelineFrameExecutionRequest,
         sample: &mondrian_timeline::visual_schedule::PreparedAuxiliaryClipSample,
+    ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
+        self.prepare_auxiliary_clip_frame_execution_with_media_binding(
+            program,
+            request,
+            sample,
+            |_, _, graph, _| Ok(graph),
+        )
+    }
+
+    /// Resolve source-owned Effect values of the admitted auxiliary Clip.
+    pub fn prepare_auxiliary_clip_frame_execution_with_media_binding(
+        &mut self,
+        program: &crate::PreparedVisualProgram,
+        request: crate::TimelineFrameExecutionRequest,
+        sample: &mondrian_timeline::visual_schedule::PreparedAuxiliaryClipSample,
+        mut bind: impl FnMut(
+            &crate::TimelineMediaPlan,
+            mondrian_core::TimelineTime,
+            Arc<CompiledEffectGraph>,
+            &mut crate::RenderCpuColorExecutionSession,
+        ) -> Result<Arc<CompiledEffectGraph>, String>,
     ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
         self.effect_execution.bind_generation(request.generation());
         let element = crate::timeline_render_plan::compile_auxiliary_clip_sample(
@@ -426,6 +467,7 @@ impl TimelineCompositeScratch {
             &plan,
             request.with_auxiliary_clip(sample.placement()),
             &mut self.effect_execution,
+            &mut |media, time, graph| bind(media, time, graph, &mut self.color_execution),
         )
         .map_err(crate::TimelineFramePreparationError::Temporal)
     }

@@ -1049,6 +1049,37 @@ impl PreparedVisualProgram {
             }
         })
     }
+
+    /// Check a neighbor after the same retime and media interpretation used
+    /// to lower its eventual decode. Hidden trim handles remain eligible.
+    pub fn admits_media_grain_neighbor(
+        &self,
+        placement: TimelineClipExecutionRef,
+        time: TimelineTime,
+        available: mondrian_timeline::PictureSourceExtent,
+    ) -> Result<bool, TimelineTemporalPreparationError> {
+        use mondrian_core::SourceSamplingBoundary;
+        use mondrian_timeline::PictureSourceExtent;
+
+        let TimelineTemporalSource::Media { source_sample, .. } =
+            self.temporal_source_at(placement, time)?
+        else {
+            return Ok(false);
+        };
+        let PictureSourceExtent::TimelineRange(range) = available else {
+            return Ok(true);
+        };
+        let end =
+            range.end().map_err(|error| TimelineTemporalPreparationError::SourceSampling {
+                clip_id: placement.clip_id,
+                reason: error.to_string(),
+            })?;
+        let time = source_sample.time();
+        Ok(match source_sample.boundary() {
+            SourceSamplingBoundary::Covering => range.start <= time && time < end,
+            SourceSamplingBoundary::StrictPredecessor => range.start < time && time <= end,
+        })
+    }
 }
 
 struct ClipProcessorInputs<'a, R> {
@@ -1224,16 +1255,31 @@ pub(crate) fn prepare_timeline_temporal_execution(
             cancellation,
         ),
         None,
+        &mut |_, _, graph| Ok(graph),
     )
 }
+
+pub(crate) type MediaEffectGraphBinder<'a> = dyn FnMut(
+        &TimelineMediaPlan,
+        TimelineTime,
+        Arc<CompiledEffectGraph>,
+    ) -> Result<Arc<CompiledEffectGraph>, String>
+    + 'a;
 
 pub(crate) fn prepare_timeline_temporal_execution_with_session(
     program: &PreparedVisualProgram,
     plan: &TimelineRenderPlan,
     request: TimelineFrameExecutionRequest,
     session: &mut EffectExecutionSession,
+    bind_media_graph: &mut MediaEffectGraphBinder<'_>,
 ) -> Result<PreparedTimelineFrameExecution, TimelineTemporalPreparationError> {
-    prepare_timeline_temporal_execution_inner(program, plan, request, Some(session))
+    prepare_timeline_temporal_execution_inner(
+        program,
+        plan,
+        request,
+        Some(session),
+        bind_media_graph,
+    )
 }
 
 fn prepare_timeline_temporal_execution_inner(
@@ -1241,20 +1287,24 @@ fn prepare_timeline_temporal_execution_inner(
     plan: &TimelineRenderPlan,
     request: TimelineFrameExecutionRequest,
     mut session: Option<&mut EffectExecutionSession>,
+    bind_media_graph: &mut MediaEffectGraphBinder<'_>,
 ) -> Result<PreparedTimelineFrameExecution, TimelineTemporalPreparationError> {
     let mut execution_plan = plan.clone();
     let mut media_plans = Vec::new();
+    let needs_preparation = |graph: &CompiledEffectGraph| {
+        graph_requires_temporal(graph) || graph.grain_calibration_requests().next().is_some()
+    };
     for element in &plan.elements {
         match element {
             TimelineRenderPlanElement::Media(media) => {
-                if graph_requires_temporal(&media.effect_graph) {
+                if needs_preparation(&media.effect_graph) {
                     media_plans.push(media.clone());
                 }
             }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 for input in [&transition.left, &transition.right] {
                     if let TimelineTransitionInputPlan::Media(media) = input
-                        && graph_requires_temporal(&media.effect_graph)
+                        && needs_preparation(&media.effect_graph)
                     {
                         media_plans.push(media.clone());
                     }
@@ -1276,6 +1326,26 @@ fn prepare_timeline_temporal_execution_inner(
     let mut temporal_media_inputs = Vec::with_capacity(media_plans.len());
     let mut no_source_media_batches = Vec::new();
     for media in media_plans {
+        let mut bind = |time, graph: Arc<CompiledEffectGraph>| {
+            if graph.grain_calibration_requests().next().is_none() {
+                return Ok(graph);
+            }
+            let bound = bind_media_graph(&media, time, graph)?;
+            if bound.grain_calibration_requests().next().is_some() {
+                return Err("media grain calibration was not bound".to_owned());
+            }
+            Ok(bound)
+        };
+        if !graph_requires_temporal(&media.effect_graph) {
+            let graph = bind(media.placement.clip_time, Arc::clone(&media.effect_graph)).map_err(
+                |reason| TimelineTemporalPreparationError::EffectDemand {
+                    clip_id: media.placement.clip_id,
+                    reason,
+                },
+            )?;
+            replace_effect_graph(&mut execution_plan, media.placement, graph)?;
+            continue;
+        }
         // This is the known output context, consumed for time/seed/authority
         // only. No Media ROI, raster demand or coverage is prepared here.
         let context = EffectTemporalExecutionRequest::new(
@@ -1297,6 +1367,7 @@ fn prepare_timeline_temporal_execution_inner(
                 &context,
                 plan.position.time_base,
                 session.as_deref_mut(),
+                bind,
             )
             .map_err(|error| TimelineTemporalPreparationError::EffectDemand {
                 clip_id: media.placement.clip_id,

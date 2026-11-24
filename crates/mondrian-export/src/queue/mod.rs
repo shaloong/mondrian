@@ -143,6 +143,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 mod auxiliary;
+mod grain_calibration;
 mod processor_sources;
 mod service;
 #[cfg(feature = "validation")]
@@ -7463,6 +7464,7 @@ struct ResolvedExportTitle {
 struct ExportVisualRenderSession {
     title_rasterizer: BasicTitleRasterizer,
     decode_context: PreviewDecodeSessionContext,
+    grain_calibration: grain_calibration::ExportGrainCalibrationCache,
     prepared_visual: PreparedTimelineVisualSnapshot,
     title_assets: Option<Arc<mondrian_core::TitleAssetMetadata>>,
     #[cfg(test)]
@@ -7528,6 +7530,9 @@ impl ExportVisualRenderSession {
             )
             .map_err(|error| format!("failed to load frozen Basic Title font closure: {error}"))?,
             decode_context: PreviewDecodeSessionContext::default(),
+            grain_calibration: grain_calibration::ExportGrainCalibrationCache::new(
+                resource_policy.effect_cache_entries,
+            ),
             prepared_visual: prepared_visual.clone(),
             title_assets: None,
             #[cfg(test)]
@@ -8318,13 +8323,32 @@ fn prepare_export_visual_frame_closure(
                 cancellation.clone(),
             )
             .with_title_assets(Some(Arc::clone(&title_assets)));
-            let scratch = &mut visual_session.composite_scratch;
+            let ExportVisualRenderSession {
+                composite_scratch: scratch,
+                grain_calibration,
+                decode_context,
+                ..
+            } = &mut **visual_session;
+            let mut source = grain_calibration::CalibrationSourceContext {
+                media_dependencies: &timeline.media,
+                color_context: _color_context,
+                decode_context,
+                cancellation,
+            };
+            let bind = |media: &TimelineMediaPlan,
+                        time,
+                        graph,
+                        color_session: &mut mondrian_renderer::RenderCpuColorExecutionSession| {
+                grain_calibration.bind_graph(program, media, time, graph, &mut source, color_session)
+            };
             let prepared_frame = match invocation.target {
                 PreparedVisualFrameTarget::Sequence => {
-                    scratch.prepare_timeline_frame_execution(program, request)
+                    scratch.prepare_timeline_frame_execution_with_media_binding(program, request, bind)
                 }
                 PreparedVisualFrameTarget::AuxiliaryClip(sample) => {
-                    scratch.prepare_auxiliary_clip_frame_execution(program, request, sample)
+                    scratch.prepare_auxiliary_clip_frame_execution_with_media_binding(
+                        program, request, sample, bind,
+                    )
                 }
                 PreparedVisualFrameTarget::ClipEffectInput(input) => {
                     scratch.prepare_clip_effect_input_frame_execution(program, request, input)
@@ -16075,7 +16099,26 @@ mod tests {
 
     #[test]
     fn fixed_media_calibration_uses_the_same_native_decode_across_output_times() {
-        use mondrian_effects::grain_calibration::{calibrate_grain, GrainCalibrationSettings};
+        verify_fixed_media_calibration(false);
+    }
+
+    #[test]
+    #[ignore = "real GPU Export calibration qualification; run independently"]
+    fn fixed_media_calibration_matches_production_gpu_export() {
+        verify_fixed_media_calibration(true);
+    }
+
+    fn verify_fixed_media_calibration(verify_gpu: bool) {
+        use mondrian_effects::{
+            grain_calibration::{
+                calibrate_grain, GrainCalibrationRequest, GrainCalibrationSettings,
+            },
+            grain_spatial::{GrainSpatialGrade, GrainSpatialShaping},
+            grain_temporal::GrainTemporalGrade,
+            register_effect_definition, EffectColorDomainContract, EffectDefinition,
+            EffectExecutionContract, EffectExecutionModes, EffectNode, EffectRenderOp,
+            EffectRoiPropagation, EffectType,
+        };
         use mondrian_renderer::timeline_auxiliary_frame_view;
         use mondrian_timeline::PictureSourceExtent;
 
@@ -16161,8 +16204,27 @@ mod tests {
         let mut cache = HashMap::new();
         let cancellation = ExecutionCancellationToken::new();
         let settings = GrainCalibrationSettings::new(16, 8).unwrap();
+        let fixed_request = GrainCalibrationRequest::new(4, settings).unwrap();
+        let resolve = |session: &mut ExportVisualRenderSession,
+                       dependencies: &HashMap<_, _>,
+                       media: &TimelineMediaPlan,
+                       request| {
+            let mut source = grain_calibration::CalibrationSourceContext {
+                media_dependencies: dependencies,
+                color_context: &context,
+                decode_context: &mut session.decode_context,
+                cancellation: &cancellation,
+            };
+            session.grain_calibration.resolve(
+                media,
+                request,
+                &mut source,
+                session.composite_scratch.color_execution_mut(),
+            )
+        };
         let mut first_decode = None;
         let mut first_profile = None;
+        let mut cached_profile = None;
         for current in [0, 12, 3, 9] {
             media.placement.clip_time = TimelineTime::new(current, 25).unwrap();
             media.frame_seed = current;
@@ -16218,6 +16280,14 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+            let cached =
+                resolve(&mut session, &dependencies, &media, fixed_request).unwrap().unwrap();
+            assert_eq!(cached.as_ref(), &profile);
+            if let Some(first) = &cached_profile {
+                assert!(Arc::ptr_eq(first, &cached));
+            } else {
+                cached_profile = Some(cached);
+            }
             if let Some(first) = &first_profile {
                 assert_eq!(first, &profile);
             } else {
@@ -16226,18 +16296,32 @@ mod tests {
             }
         }
         assert_eq!(cache.len(), 1);
+        let adjusted_request =
+            GrainCalibrationRequest::new(4, GrainCalibrationSettings::new(24, 6).unwrap()).unwrap();
+        let adjusted =
+            resolve(&mut session, &dependencies, &media, adjusted_request).unwrap().unwrap();
+        assert!(!Arc::ptr_eq(cached_profile.as_ref().unwrap(), &adjusted));
+        assert_ne!(cached_profile.as_ref().unwrap().windows, adjusted.windows);
 
         session.release_decode_sessions().unwrap();
-        let old = dependencies.get_mut(&asset_id).unwrap();
+        let old = dependencies.get(&asset_id).unwrap();
+        let old_path = old.path.clone();
         let replacement = root.path().join("replacement.mp4");
         std::fs::write(&replacement, FIXTURE).unwrap();
         // Observe a replacement through the same absolute locator and verify
         // that source revision alone invalidates the decoded calibration key.
         let old_revision = old.source_fingerprint;
-        std::fs::remove_file(&old.path).unwrap();
-        std::fs::rename(&replacement, &old.path).unwrap();
-        old.source_fingerprint = MediaFileFingerprint::capture(&old.path);
-        assert_ne!(old.source_fingerprint, old_revision);
+        std::fs::remove_file(&old_path).unwrap();
+        std::fs::rename(&replacement, &old_path).unwrap();
+        let error = resolve(&mut session, &dependencies, &media, fixed_request).unwrap_err();
+        assert!(error.contains("source revision changed"));
+        let revision = MediaFileFingerprint::capture(&old_path);
+        assert_ne!(revision, old_revision);
+        dependencies.get_mut(&asset_id).unwrap().source_fingerprint = revision;
+        let replaced =
+            resolve(&mut session, &dependencies, &media, fixed_request).unwrap().unwrap();
+        assert!(!Arc::ptr_eq(cached_profile.as_ref().unwrap(), &replaced));
+        assert_eq!(cached_profile.as_ref().unwrap().as_ref(), replaced.as_ref());
         media.source_sample = fixed;
         let (key, _) = prepare_export_media_decode(
             &dependencies,
@@ -16250,6 +16334,131 @@ mod tests {
         )
         .unwrap();
         assert!(!cache.contains_key(&key));
+
+        let step = TimelineTime::new(1, 25).unwrap();
+        let temporal = GrainTemporalGrade::awaiting_source_calibration(
+            [Some(TimelineTime::new(-1, 25).unwrap()), Some(step)],
+            fixed_request,
+            1.0,
+            0.9,
+        )
+        .unwrap();
+        let spatial = GrainSpatialGrade::awaiting_source_calibration(
+            fixed_request,
+            [2.0; 3],
+            GrainSpatialShaping::default(),
+        )
+        .unwrap();
+        let kind =
+            EffectType::External(format!("test.export.source-calibrated-grain.{verify_gpu}"));
+        register_effect_definition(
+            EffectDefinition::new(
+                kind.key(),
+                "Source calibrated grain",
+                Default::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_execution_contract(EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+                temporal_input: temporal.temporal_extent(),
+                roi_propagation: EffectRoiPropagation::Expand {
+                    horizontal_pixels: spatial.halo(),
+                    vertical_pixels: spatial.halo(),
+                },
+                ..EffectExecutionContract::IDENTITY
+            })
+            .with_graph_builder(Arc::new(move |_, _, graph| {
+                graph.append_unary(EffectRenderOp::TemporalGrain { grade: temporal });
+                graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial });
+                Ok(())
+            })),
+        )
+        .unwrap();
+        let mut sequence = sequence;
+        sequence.settings.frame_rate = Rational::new(25, 1);
+        sequence.settings.resolution = resolution;
+        let clip_duration = TimelineTime::new(12, 25).unwrap();
+        let mut forward = Clip::new(asset_id, TimelineTime::ZERO, clip_duration).unwrap();
+        let mut reverse = Clip::new(asset_id, clip_duration, clip_duration).unwrap();
+        reverse
+            .set_constant_source_time_map(end, mondrian_core::TimeScale::new(-1, 1).unwrap())
+            .unwrap();
+        forward.add_effect_node(EffectNode::new(kind.clone()));
+        reverse.add_effect_node(EffectNode::new(kind));
+        sequence.video_tracks[0].add_clip(forward).unwrap();
+        sequence.video_tracks[0].add_clip(reverse).unwrap();
+        let timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: dependencies,
+            color_environment: Default::default(),
+            sound_timecodes: Default::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::EntireSequence,
+        };
+        let render = |session: &mut ExportVisualRenderSession, frame, allow_gpu| {
+            session.resource_policy.opportunistic_gpu_acceleration = allow_gpu;
+            let mut render_context = ExportFrameRenderContext {
+                media: &timeline.media,
+                color_environment: &timeline.color_environment,
+                alpha_mode: ExportAlphaMode::Preserve,
+                delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                    ExportFrameContract::FloatMasterRgba32,
+                ),
+                input_color_counts: None,
+                stage_diagnostics: None,
+                composite_diagnostics: None,
+                export_diagnostics: None,
+                visual_session: session,
+                cancellation: &cancellation,
+            };
+            let mut working = None;
+            render_sequence_frame_into(
+                &timeline,
+                &mut render_context,
+                &timeline.sequence,
+                frame,
+                resolution,
+                context.clone(),
+                SequenceRenderTarget::Working(&mut working),
+            )
+            .unwrap();
+            working.unwrap()
+        };
+        let gpu = verify_gpu.then(GpuVisualExecutionGuard::activate);
+        for frame in [0, 8, 12, 3, 19] {
+            let rendered = render(&mut session, frame, false);
+            assert_eq!(rendered.rgba_f32().data.len(), 64 * 64);
+            assert!(rendered.rgba_f32().data.iter().flatten().all(|sample| sample.is_finite()));
+            if gpu.is_some() {
+                let before = session.visual_diagnostics();
+                let device = render(&mut session, frame, true);
+                let after = session.visual_diagnostics();
+                assert_eq!(
+                    after.temporal_gpu_schedules - before.temporal_gpu_schedules,
+                    1
+                );
+                assert_eq!(
+                    after.temporal_gpu_readbacks - before.temporal_gpu_readbacks,
+                    1
+                );
+                assert_eq!(
+                    after.temporal_gpu_cpu_fallbacks,
+                    before.temporal_gpu_cpu_fallbacks
+                );
+                let actual = device.rgba_f32();
+                let reference = rendered.rgba_f32();
+                assert_eq!(actual.data.len(), reference.data.len());
+                let mut maximum = 0.0_f32;
+                for (a, b) in actual.data.iter().flatten().zip(reference.data.iter().flatten()) {
+                    let error = (a - b).abs();
+                    assert!(error.is_finite());
+                    maximum = maximum.max(error);
+                }
+                eprintln!("Asset grain Export frame {frame}: one GPU schedule and readback, max Float32 error {maximum:.9e}");
+                assert!(maximum <= 1.0e-4);
+            }
+        }
     }
 
     #[test]

@@ -1206,11 +1206,23 @@ impl PreparedVisualProgram {
         request: &EffectTemporalExecutionRequest,
         grid: Rational,
         session: Option<&mut EffectExecutionSession>,
+        bind_graph: impl FnMut(
+            TimelineTime,
+            Arc<mondrian_effects::CompiledEffectGraph>,
+        ) -> std::result::Result<
+            Arc<mondrian_effects::CompiledEffectGraph>,
+            String,
+        >,
     ) -> Result<mondrian_effects::PreparedEffectTemporalProgram> {
         let effect_program = self.temporal_effect_program(placement, request)?;
         let seed = |clip_time| self.temporal_frame_seed_on_grid(placement, clip_time, grid);
         let prepared = match session {
-            Some(session) => session.prepare_temporal_frame_program(effect_program, request, seed),
+            Some(session) => session.prepare_temporal_frame_program_with_binding(
+                effect_program,
+                request,
+                seed,
+                bind_graph,
+            ),
             None => mondrian_effects::prepare_temporal_frame_program(effect_program, request, seed),
         };
         prepared.map_err(|error| self.temporal_preparation_error(placement.clip_id, error))
