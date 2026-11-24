@@ -127,10 +127,12 @@ pub enum TemporalGpuExecutionError {
     MissingStepInput(TemporalGpuValue),
     /// A step has no frozen frame seed for its producing context.
     MissingFrameSeed(TemporalGpuValue),
-    /// The renderer cannot record this step shape yet.
-    UnsupportedStep {
-        /// Stable operation name.
-        operation: &'static str,
+    /// The spatial steps would exceed the shared scratch allocation budget.
+    SpatialScratchBudgetExceeded {
+        /// Peak pooled bytes plus all step-local scratch in this submission.
+        required_bytes: u64,
+        /// Shared spatial admission limit.
+        budget_bytes: u64,
     },
     /// The root value was never materialized.
     RootNotMaterialized(TemporalGpuValue),
@@ -192,12 +194,10 @@ impl fmt::Display for TemporalGpuExecutionError {
                     "temporal step {value:?} has no frozen frame seed"
                 )
             }
-            Self::UnsupportedStep { operation } => {
-                write!(
-                    formatter,
-                    "the renderer cannot record the {operation} temporal step"
-                )
-            }
+            Self::SpatialScratchBudgetExceeded { required_bytes, budget_bytes } => write!(
+                formatter,
+                "temporal spatial steps need {required_bytes} scratch bytes, budget is {budget_bytes}",
+            ),
             Self::RootNotMaterialized(value) => {
                 write!(formatter, "temporal root {value:?} was never materialized")
             }
@@ -269,6 +269,59 @@ pub fn execute_temporal_schedule(
     let extent_pixels = extent.width().saturating_mul(extent.height()) as usize;
     if extent_pixels == 0 {
         return Err(TemporalGpuExecutionError::ReadbackCoverage { expected: 0, actual: 0 });
+    }
+    let mut pooled_spatial_scratch = 0u64;
+    let mut per_stage_spatial_scratch = 0u64;
+    let mut spatial_chains = Vec::with_capacity(schedule.steps().len());
+    for step in schedule.steps() {
+        if cancellation.is_canceled() {
+            return Err(TemporalGpuExecutionError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(TemporalGpuExecutionError::DeadlineExceeded);
+        }
+        let chain = if let TemporalGpuStepOperation::Spatial { plan, .. } = step.operation() {
+            let chain = crate::spatial_driver::gpu_spatial_chain_plan(
+                plan,
+                extent.width(),
+                extent.height(),
+            )
+            .map_err(|blocker| {
+                TemporalGpuExecutionError::Composite(GpuCompositeError::SpatialChainFailed {
+                    pass: crate::gpu_compositor::spatial_chain_blocker_pass(&blocker),
+                    detail: blocker.to_string(),
+                })
+            })?;
+            for layout in chain.mask_path_strokes.values() {
+                crate::mask_path_stroke_gpu::check_limits(layout, &device.limits()).map_err(
+                    |error| {
+                        TemporalGpuExecutionError::Composite(
+                            GpuCompositeError::SpatialChainFailed {
+                                pass: "mask_path_stroke",
+                                detail: error.to_string(),
+                            },
+                        )
+                    },
+                )?;
+            }
+            let pooled_bytes =
+                extent_pixels as u64 * 16 * u64::from(chain.scratch_texture_request());
+            pooled_spatial_scratch = pooled_spatial_scratch.max(pooled_bytes);
+            per_stage_spatial_scratch = per_stage_spatial_scratch
+                .saturating_add(chain.scratch_bytes.saturating_sub(pooled_bytes));
+            let required_bytes = pooled_spatial_scratch.saturating_add(per_stage_spatial_scratch);
+            let budget_bytes = crate::spatial_driver::GPU_SPATIAL_SCRATCH_BUDGET_BYTES;
+            if required_bytes > budget_bytes {
+                return Err(TemporalGpuExecutionError::SpatialScratchBudgetExceeded {
+                    required_bytes,
+                    budget_bytes,
+                });
+            }
+            Some(chain)
+        } else {
+            None
+        };
+        spatial_chains.push(chain);
     }
     let mut values: HashMap<TemporalGpuValue, GpuColorFrameHandle> = HashMap::new();
     let mut peak_resident = 0usize;
@@ -355,7 +408,7 @@ pub fn execute_temporal_schedule(
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("temporal-gpu-schedule"),
         });
-        for step in schedule.steps() {
+        for (step, spatial_chain) in schedule.steps().iter().zip(&spatial_chains) {
             let value = step.value();
             let seed = schedule
                 .frame_seed(value)
@@ -440,10 +493,23 @@ pub fn execute_temporal_schedule(
                         )
                         .map_err(TemporalGpuExecutionError::Composite)?
                 }
-                TemporalGpuStepOperation::Spatial { .. } => {
-                    return Err(TemporalGpuExecutionError::UnsupportedStep {
-                        operation: "spatial",
-                    });
+                TemporalGpuStepOperation::Spatial { input, .. } => {
+                    let input = input_handle(*input)?;
+                    compositor
+                        .record_prepared_spatial_effect_input(
+                            device,
+                            queue,
+                            &mut encoder,
+                            ids,
+                            table,
+                            Some(resource_pool.as_ref()),
+                            &input,
+                            spatial_chain.as_ref().expect("admitted spatial step"),
+                            seed,
+                            &[],
+                        )
+                        .map_err(TemporalGpuExecutionError::Composite)?
+                        .output
                 }
             };
             values.insert(value, output);
@@ -549,7 +615,13 @@ pub fn execute_temporal_schedule(
         let _ = table.take(&handle);
     }
     let (tile, peak_resident) = executed?;
-    let peak_working_bytes = extent_pixels.saturating_mul(16).saturating_mul(peak_resident.max(1));
+    let peak_working_bytes = extent_pixels
+        .saturating_mul(16)
+        .saturating_mul(peak_resident.max(1))
+        .saturating_add(
+            usize::try_from(pooled_spatial_scratch.saturating_add(per_stage_spatial_scratch))
+                .unwrap_or(usize::MAX),
+        );
     Ok(TemporalGpuExecution {
         output: EffectTemporalExecutionOutput::from_device_tile(
             tile,
@@ -581,7 +653,7 @@ mod tests {
 
     const PARITY_TOLERANCE: f32 = 1.0e-4;
 
-    fn echo_over_set_matte() -> PreparedEffectProgram {
+    fn echo_over_set_matte(spatial_prefix: bool) -> PreparedEffectProgram {
         let mut matte = mondrian_effects::instantiate_effect_node(EffectType::SetMatte)
             .expect("set matte definition");
         matte
@@ -608,8 +680,25 @@ mod tests {
             )
             .expect("echo value is admissible");
         }
-        PreparedEffectProgram::prepare(&[matte, echo], &[], WorkingColorSpace::LinearRec709)
-            .expect("echo over set matte is a valid program")
+        let mut effects = vec![matte];
+        if spatial_prefix {
+            let mut blur =
+                mondrian_effects::instantiate_effect_node(EffectType::SmartBlur).unwrap();
+            for (key, value) in [
+                ("radius", PropertyValue::Float(3.0)),
+                ("threshold", PropertyValue::Float(100.0)),
+            ] {
+                blur.set_static_value_by_parameter(
+                    &EffectType::SmartBlur.parameter_id(key).unwrap(),
+                    value,
+                )
+                .unwrap();
+            }
+            effects.push(blur);
+        }
+        effects.push(echo);
+        PreparedEffectProgram::prepare(&effects, &[], WorkingColorSpace::LinearRec709)
+            .expect("echo prefix is a valid program")
     }
 
     fn current_source_pixel(x: usize, y: usize, width: usize, height: usize) -> [f32; 4] {
@@ -733,7 +822,7 @@ mod tests {
         extent: EffectFrameExtent,
         now: TimelineTime,
     ) -> mondrian_effects::PreparedEffectTemporalGpuExecution {
-        let program = echo_over_set_matte();
+        let program = echo_over_set_matte(true);
         let request = EffectTemporalExecutionRequest::new(
             1,
             EffectExecutionContinuity::Discontinuous,
@@ -781,6 +870,21 @@ mod tests {
             )),
             "the schedule must combine two instants"
         );
+        assert_eq!(
+            schedule
+                .steps()
+                .iter()
+                .filter(|step| matches!(
+                    step.operation(),
+                    TemporalGpuStepOperation::Spatial { plan, .. }
+                        if matches!(plan.stages(), [mondrian_effects::EffectGpuStage::Spatial {
+                            pass: mondrian_effects::EffectGpuSpatialPass::SmartBlur { .. }, ..
+                        }])
+                ))
+                .count(),
+            2,
+            "both instants require the same multipass spatial prefix",
+        );
 
         let mut session = EffectExecutionSession::default();
         let mut cpu_frames = GradientFrames { extent, historical, copies: 0 };
@@ -822,6 +926,7 @@ mod tests {
         let gpu_pixels = device.output().tile().pixels();
         assert_eq!(cpu_pixels.len(), gpu_pixels.len());
         let difference = max_channel_difference(cpu_pixels, gpu_pixels);
+        eprintln!("Temporal spatial prefix CPU/GPU maximum Float32 error: {difference:.9e}");
         assert!(
             difference <= PARITY_TOLERANCE,
             "device schedule diverged from the scalar executor by {difference}"
@@ -829,6 +934,29 @@ mod tests {
         assert!(
             cpu_pixels.iter().any(|pixel| pixel[3] > 0.02 && pixel[3] < 0.98),
             "the fixture must produce a visible second-input mix"
+        );
+        let unfiltered = prepare_temporal_frame_execution(
+            &echo_over_set_matte(false),
+            schedule.request(),
+            |_| Ok(1),
+        )
+        .unwrap();
+        let unfiltered = session
+            .execute_prepared_temporal_f32_with_auxiliary(
+                &unfiltered,
+                &mut cpu_frames,
+                &mut cpu_matte,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .unwrap();
+        assert!(
+            max_channel_difference(unfiltered.tile().pixels(), cpu_pixels) > 0.01,
+            "the spatial prefix must change published pixels",
+        );
+        assert!(
+            device.output().peak_working_bytes()
+                > (schedule.steps().len() + schedule.leaves().len()) * 9 * 7 * 16,
+            "the reported GPU working set must include spatial scratch",
         );
         assert_ne!(
             cpu_pixels.iter().map(|pixel| pixel[0].to_bits()).collect::<Vec<_>>(),
@@ -845,12 +973,48 @@ mod tests {
     fn schedule_execution(
         schedule: &mondrian_effects::PreparedEffectTemporalGpuExecution,
     ) -> mondrian_effects::PreparedEffectTemporalExecution {
-        let program = echo_over_set_matte();
+        let program = echo_over_set_matte(true);
         let execution = prepare_temporal_frame_execution(&program, schedule.request(), |_| Ok(1))
             .expect("finite temporal execution");
         let again = execution.plan_gpu_execution().expect("device schedule");
         assert_eq!(again.cache_identity(), schedule.cache_identity());
         execution
+    }
+
+    #[test]
+    fn device_temporal_spatial_schedule_rejects_over_budget_prefix_before_upload() {
+        let Ok(context) = pollster::block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU temporal scratch test: no GPU adapter available");
+            return;
+        };
+        let extent = EffectFrameExtent::new(8192, 8192);
+        let now = TimelineTime::new(1, 2).unwrap();
+        let historical = TimelineTime::new(1, 4).unwrap();
+        let schedule = frozen_schedule(extent, now);
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .unwrap();
+        let mut frames = GradientFrames { extent, historical, copies: 0 };
+        let mut matte = GradientMatte { extent, historical, copies: 0 };
+        let result = runtime.execute_temporal_schedule(
+            &schedule,
+            &mut frames,
+            &mut matte,
+            WorkingColorSpace::LinearRec709,
+            Instant::now() + Duration::from_secs(120),
+            &ExecutionCancellationToken::new(),
+        );
+        let error = result.err().expect("spatial prefix exceeds scratch budget");
+        assert!(
+            matches!(error, TemporalGpuExecutionError::Composite(
+                GpuCompositeError::SpatialChainFailed { ref detail, .. }
+            ) if detail.contains("scratch bytes, budget")),
+            "{error}",
+        );
+        assert_eq!(frames.copies, 0);
+        assert_eq!(matte.copies, 0);
     }
 
     #[test]

@@ -6156,6 +6156,36 @@ impl GpuFrameCompositor {
             pass: "effect_input",
             detail: "historical Effect input has no prepared spatial chain".into(),
         })?;
+        self.record_prepared_spatial_effect_input(
+            device,
+            queue,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            input,
+            chain,
+            frame_seed,
+            auxiliary,
+        )
+    }
+
+    /// Record an admitted spatial chain over a resident working texture.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_prepared_spatial_effect_input(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        chain: &GpuSpatialChainPlan,
+        frame_seed: i64,
+        auxiliary: &[GpuSpatialAuxiliaryRaster<'_>],
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        require_straight_compatible_alpha(input.descriptor().alpha)?;
         let resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?.resource();
         let texture = resource.texture.clone();
         let view = resource.texture_view.clone();
@@ -6169,7 +6199,7 @@ impl GpuFrameCompositor {
                 resource_pool,
                 &texture,
                 &view,
-                descriptor,
+                input.descriptor(),
                 chain,
                 frame_seed,
                 auxiliary,
@@ -10009,7 +10039,7 @@ fn layer_source_descriptor(source: GpuCompositeLayerSource<'_>) -> Option<ColorF
     }
 }
 
-fn spatial_chain_blocker_pass(
+pub(crate) fn spatial_chain_blocker_pass(
     blocker: &crate::spatial_driver::GpuSpatialChainBlocker,
 ) -> &'static str {
     match blocker {

@@ -1408,6 +1408,23 @@ mod tests {
         timeline.sequences.push(child);
         let clip = &mut timeline.sequence.video_tracks[1].clips[0];
         clip.set_solid_color(Color::WHITE).unwrap();
+        let mut gradient = instantiate_effect_node(EffectType::Ramp).unwrap();
+        for (key, point) in [("start", [0.0, 0.0]), ("end", [9.0, 11.0])] {
+            gradient
+                .set_static_value_by_parameter(
+                    &EffectType::Ramp.parameter_id(key).unwrap(),
+                    PropertyValue::Vec2(point.into()),
+                )
+                .unwrap();
+        }
+        clip.effects.insert(0, gradient);
+        let mut blur = instantiate_effect_node(EffectType::SmartBlur).unwrap();
+        blur.set_static_value_by_parameter(
+            &EffectType::SmartBlur.parameter_id("radius").unwrap(),
+            PropertyValue::Float(2.0),
+        )
+        .unwrap();
+        clip.add_effect_node(blur);
         clip.add_effect_node(echo);
 
         let _gpu = GpuVisualExecutionGuard::activate();
@@ -1416,13 +1433,14 @@ mod tests {
         let cpu_diagnostics = session.visual_diagnostics();
         assert_eq!(cpu_diagnostics.temporal_gpu_schedules, 0);
         assert_eq!(cpu_diagnostics.temporal_gpu_cpu_fallbacks, 0);
-        // The historical instant is opaque white, the current instant is empty,
+        // The historical instant is opaque, the current instant is empty,
         // so a schedule that reuses one auxiliary raster cannot reach this mix.
         assert!(
             cpu.chunks_exact(4).all(|pixel| (pixel[3] - 0.5).abs() < 1.0e-6),
             "CPU mixed alpha {}",
             cpu[3]
         );
+        assert!(cpu.chunks_exact(4).any(|pixel| (pixel[0] - cpu[0]).abs() > 0.1));
 
         let gpu = render_float_auxiliary_delivery(&timeline, 4, &mut session, true);
         let diagnostics = session.visual_diagnostics();
