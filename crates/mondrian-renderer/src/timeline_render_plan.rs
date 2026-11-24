@@ -231,6 +231,45 @@ pub struct TimelineMediaPlan {
     pub auto_tone_map: bool,
 }
 
+impl TimelineMediaPlan {
+    /// Select a fixed frame on the source's interpretation grid, independently
+    /// of the current Clip placement, source target, or retime direction.
+    ///
+    /// The caller supplies the already-admitted video stream and availability
+    /// from the same source revision. The decoder still owns PTS selection,
+    /// so a variable-rate source uses the grid as a time coordinate rather than
+    /// as an ordinal into decoded packets. Out-of-range or unproven samples
+    /// return `None`; they do not read another frame as a calibration substitute.
+    pub fn fixed_source_frame(
+        &self,
+        frame_index: u32,
+        stream: &mondrian_media::VideoStreamInfo,
+        available: mondrian_timeline::PictureSourceExtent,
+    ) -> std::result::Result<
+        Option<mondrian_core::SourceSampleTarget>,
+        mondrian_core::TimelineTimeError,
+    > {
+        use mondrian_core::SourceSampleTarget;
+        use mondrian_timeline::PictureSourceExtent;
+
+        let at_zero = SourceSampleTarget::covering(TimelineTime::ZERO);
+        let PictureSourceExtent::TimelineRange(range) = available else {
+            return Ok((frame_index == 0).then_some(at_zero));
+        };
+        if frame_index == 0 {
+            return Ok(range.contains(TimelineTime::ZERO)?.then_some(at_zero));
+        }
+        let inferred = stream.frame_rate_proven.then_some(stream.frame_rate);
+        let Some(rate) = self.frame_rate_override.or(inferred) else {
+            return Ok(None);
+        };
+        let position =
+            FramePosition::new(i64::from(frame_index), Rational::new(rate.den, rate.num));
+        let time = TimelineTime::from_frame_position(position)?;
+        Ok(range.contains(time)?.then_some(SourceSampleTarget::covering(time)))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TimelineAdjustmentPlan {
     /// Exact prepared placement identity. Temporal Adjustment execution is

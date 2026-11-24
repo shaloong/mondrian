@@ -16074,6 +16074,185 @@ mod tests {
     }
 
     #[test]
+    fn fixed_media_calibration_uses_the_same_native_decode_across_output_times() {
+        use mondrian_effects::grain_calibration::{calibrate_grain, GrainCalibrationSettings};
+        use mondrian_renderer::timeline_auxiliary_frame_view;
+        use mondrian_timeline::PictureSourceExtent;
+
+        const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("calibration.mp4");
+        std::fs::write(&path, FIXTURE).unwrap();
+        let probe = mondrian_media::probe_media_info(&path).unwrap();
+        let stream = probe.primary_video().unwrap();
+        assert!(stream.frame_rate_proven);
+        let duration = stream.duration.unwrap();
+        let end =
+            TimelineTime::new(i64::try_from(duration.as_nanos()).unwrap(), 1_000_000_000).unwrap();
+        let available = PictureSourceExtent::TimelineRange(
+            mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, end).unwrap(),
+        );
+        let resolution = Resolution { width: stream.width, height: stream.height };
+        let mut dependency = test_media_dependency(
+            path,
+            Some(ColorSpace::Rec709),
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        dependency.source_video_stream = Some(stream.clone());
+        dependency.video_stream_index = Some(stream.index);
+        dependency.source_resolution = Some(resolution);
+        dependency.picture = Some(stream.picture);
+        dependency.picture_source_extent = Some(available);
+
+        let sequence = Sequence::new("fixed source calibration");
+        let context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let asset_id = AssetId::new();
+        let mut media = TimelineMediaPlan {
+            placement: TimelineClipExecutionRef {
+                sequence_id: sequence.id,
+                sequence_revision: mondrian_core::SequenceRevision::INITIAL,
+                clip_id: mondrian_core::ClipId::new(),
+                clip_time: TimelineTime::ZERO,
+                endpoint: mondrian_core::timeline_data::TimelineClipEndpointContext::Ordinary,
+            },
+            asset_id,
+            color_space_override: None,
+            pixel_aspect_ratio_override: None,
+            field_order_override: None,
+            alpha_interpretation: AlphaInterpretation::Straight,
+            frame_rate_override: None,
+            source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1., 0., 0., 0., 1., 0.],
+            effect_graph: identity_compiled_effect_graph().unwrap(),
+            frame_seed: 0,
+            auto_tone_map: false,
+        };
+        let fixed = media.fixed_source_frame(4, stream, available).unwrap().unwrap();
+        assert_eq!(fixed.time(), TimelineTime::new(4, 25).unwrap());
+        assert_eq!(
+            media.fixed_source_frame(30, stream, available).unwrap(),
+            None
+        );
+        assert_eq!(
+            media.fixed_source_frame(1, stream, PictureSourceExtent::Still).unwrap(),
+            None
+        );
+        let mut unproven = stream.clone();
+        unproven.frame_rate_proven = false;
+        assert_eq!(
+            media.fixed_source_frame(4, &unproven, available).unwrap(),
+            None
+        );
+        media.frame_rate_override = Some(Rational::new(30_000, 1_001));
+        assert_eq!(
+            media.fixed_source_frame(4, &unproven, available).unwrap().unwrap().time(),
+            TimelineTime::new(1001, 7500).unwrap()
+        );
+        media.frame_rate_override = None;
+
+        let mut dependencies = HashMap::from([(asset_id, dependency)]);
+        let mut session = ExportVisualRenderSession::default();
+        let mut cache = HashMap::new();
+        let cancellation = ExecutionCancellationToken::new();
+        let settings = GrainCalibrationSettings::new(16, 8).unwrap();
+        let mut first_decode = None;
+        let mut first_profile = None;
+        for current in [0, 12, 3, 9] {
+            media.placement.clip_time = TimelineTime::new(current, 25).unwrap();
+            media.frame_seed = current;
+            media.source_sample = if current == 3 {
+                mondrian_core::SourceSampleTarget::strict_predecessor(media.placement.clip_time)
+            } else {
+                mondrian_core::SourceSampleTarget::covering(media.placement.clip_time)
+            };
+            let mut sample = media.clone();
+            sample.source_sample = media.fixed_source_frame(4, stream, available).unwrap().unwrap();
+            assert_eq!(sample.source_sample, fixed);
+            let (key, request) = prepare_export_media_decode(
+                &dependencies,
+                &sample,
+                resolution.width,
+                resolution.height,
+                &context,
+                None,
+                ExportDecodedSourceRoute::CpuWorking,
+            )
+            .unwrap();
+            let decoded = decode_export_picture(
+                key,
+                request,
+                &mut cache,
+                None,
+                &mut session,
+                &cancellation,
+                ExportDecodedSourceRoute::CpuWorking,
+            )
+            .unwrap();
+            if let Some(first) = &first_decode {
+                assert!(Arc::ptr_eq(first, &decoded));
+            } else {
+                first_decode = Some(decoded.clone());
+            }
+            let frame = decoded.cpu_frame().unwrap();
+            assert_eq!(
+                (frame.descriptor().width, frame.descriptor().height),
+                (64, 64)
+            );
+            assert_eq!(
+                frame.rgba_f32().sampling,
+                mondrian_core::ImageSampling::UNIT_SQUARE
+            );
+            let diagnostics = decoded.decode_diagnostics.as_ref().unwrap();
+            assert!(diagnostics.selected_pts.is_some_and(|pts| pts > 0));
+            assert_eq!(diagnostics.selected_pts, diagnostics.requested_pts);
+            let profile = calibrate_grain(
+                timeline_auxiliary_frame_view(frame),
+                settings,
+                &cancellation,
+            )
+            .unwrap()
+            .unwrap();
+            if let Some(first) = &first_profile {
+                assert_eq!(first, &profile);
+            } else {
+                eprintln!("Fixed source sample {:?}, PTS {:?}, actual grid 64×64, calibration sigma {:?}, usable blocks {}", fixed.time(), diagnostics.selected_pts, profile.sigma, profile.valid_blocks);
+                first_profile = Some(profile);
+            }
+        }
+        assert_eq!(cache.len(), 1);
+
+        session.release_decode_sessions().unwrap();
+        let old = dependencies.get_mut(&asset_id).unwrap();
+        let replacement = root.path().join("replacement.mp4");
+        std::fs::write(&replacement, FIXTURE).unwrap();
+        // Observe a replacement through the same absolute locator and verify
+        // that source revision alone invalidates the decoded calibration key.
+        let old_revision = old.source_fingerprint;
+        std::fs::remove_file(&old.path).unwrap();
+        std::fs::rename(&replacement, &old.path).unwrap();
+        old.source_fingerprint = MediaFileFingerprint::capture(&old.path);
+        assert_ne!(old.source_fingerprint, old_revision);
+        media.source_sample = fixed;
+        let (key, _) = prepare_export_media_decode(
+            &dependencies,
+            &media,
+            resolution.width,
+            resolution.height,
+            &context,
+            None,
+            ExportDecodedSourceRoute::CpuWorking,
+        )
+        .unwrap();
+        assert!(!cache.contains_key(&key));
+    }
+
+    #[test]
     fn export_decode_context_reuses_across_frames_and_retires_at_job_boundary() {
         const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
         let root =
