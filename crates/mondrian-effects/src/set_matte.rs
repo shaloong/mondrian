@@ -138,11 +138,17 @@ impl SetMatteGrade {
         )
     }
 
-    fn apply(self, mut primary: [f32; 4], sample: [f32; 4]) -> [f32; 4] {
-        let mut coverage = self.channel.coverage(sample);
+    fn coverage(self, sample: [f32; 4]) -> f32 {
+        let coverage = self.channel.coverage(sample);
         if self.invert {
-            coverage = 1.0 - coverage;
+            1.0 - coverage
+        } else {
+            coverage
         }
+    }
+
+    fn apply(self, mut primary: [f32; 4], sample: [f32; 4]) -> [f32; 4] {
+        let mut coverage = self.coverage(sample);
         if self.combine {
             coverage *= primary[3].clamp(0.0, 1.0);
         }
@@ -220,6 +226,7 @@ pub(crate) fn apply_set_matte_auxiliary_controlled<E>(
         matte,
         grade,
         sampling,
+        false,
         checkpoint,
     )
 }
@@ -234,6 +241,7 @@ pub(crate) fn apply_set_matte_auxiliary_region_controlled<E>(
     matte: AuxiliaryFloatFrame<'_>,
     grade: SetMatteGrade,
     sampling: AuxiliarySampling,
+    output_matte: bool,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<bool, E> {
     if !region.is_valid_for(primary.len()) {
@@ -283,7 +291,11 @@ pub(crate) fn apply_set_matte_auxiliary_region_controlled<E>(
                 };
             grade.associate(straight)
         };
-        *pixel = grade.apply(*pixel, sample);
+        if output_matte {
+            *pixel = [0.0, 0.0, 0.0, grade.coverage(sample)];
+        } else {
+            *pixel = grade.apply(*pixel, sample);
+        }
     }
     Ok(true)
 }
@@ -483,6 +495,69 @@ mod tests {
             assert!(set_matte_frame_f32(&mut frame, 2, 1, Some(raster), grade));
             for pixel in frame {
                 assert!((pixel[3] - expected).abs() < 1.0e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn layer_matte_projects_the_actual_grid_without_inheriting_primary_alpha() {
+        use crate::{
+            EffectColorDomain, EffectColorDomainContract, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let primary = [[4.0, -1.0, 0.5, 0.0]; 4];
+        let texel = [[1.0, 0.0, 0.0, 0.5]];
+        let picture = view(4, 1, &primary);
+        let layer = view(1, 1, &texel);
+        let binding = [crate::AuxiliaryFloatInput {
+            slot: 0,
+            raster: AuxiliaryFloatFrame::new(
+                layer,
+                crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
+            ),
+        }];
+        for (channel, coverage) in [
+            (SetMatteChannel::Alpha, 0.5),
+            (SetMatteChannel::Luminance, 0.1495),
+        ] {
+            for invert in [false, true] {
+                for (stretch, weights) in [
+                    (false, [0.0, 0.0, 1.0, 0.0]),
+                    (true, [0.625, 0.875, 0.875, 0.625]),
+                ] {
+                    let mut builder = EffectGraphBuilderState::new();
+                    let input = builder.source();
+                    let auxiliary = builder.append_external_input(
+                        0,
+                        layer.format(),
+                        EffectColorDomainContract::SCENE_LINEAR,
+                    );
+                    let matte = builder.add_layer_matte(input, auxiliary, channel, invert, stretch);
+                    builder.set_current_output(matte);
+                    builder.append_unary_in_domain(
+                        EffectRenderOp::MattePreview { invert: false },
+                        EffectColorDomainContract {
+                            input: EffectColorDomain::AlphaMask,
+                            output: EffectColorDomain::SceneLinearRgb,
+                        },
+                    );
+                    let compiled = crate::compile_reference_render_graph(builder.finish()).unwrap();
+                    let result = EffectExecutionSession::default()
+                        .apply_compiled_rgba_f32_with_auxiliary(
+                            picture,
+                            &compiled,
+                            0,
+                            &binding,
+                            &mut EffectProcessorControl::uncancelled(),
+                        )
+                        .unwrap();
+                    for (pixel, weight) in result.pixels().iter().zip(weights) {
+                        let mask = weight * coverage;
+                        let expected = if invert { 1.0 - mask } else { mask };
+                        assert_eq!(pixel[3], 1.0);
+                        assert!(pixel[..3].iter().all(|value| (value - expected).abs() < 1.0e-6));
+                    }
+                }
             }
         }
     }

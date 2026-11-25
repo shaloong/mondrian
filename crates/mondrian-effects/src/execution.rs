@@ -1702,6 +1702,7 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 auxiliary: auxiliary_id,
                 op,
                 sampling,
+                output_matte,
                 ..
             } => {
                 let mut source = take_float_graph_input(
@@ -1783,7 +1784,28 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                     );
                 }
                 let source_extent = source.extent();
-                let source = if let EffectRenderOp::Glass { grade, lighting, projection } = op {
+                let source = if *output_matte && let EffectRenderOp::SetMatte { grade } = op {
+                    let width = source_extent.width();
+                    let height = source_extent.height();
+                    let produced = crate::set_matte::apply_set_matte_auxiliary_region_controlled(
+                        source.allocation_mut(),
+                        crate::adjustment::EffectRasterRegion::new(
+                            width, height, 0, 0, width, height,
+                        ),
+                        raster,
+                        *grade,
+                        *sampling,
+                        true,
+                        &mut || scalar_checkpoint(control),
+                    )?;
+                    if !produced {
+                        return Err(unsupported_float_graph_node(node.id, "layer_matte"));
+                    }
+                    source.set_format_after_write(
+                        source.format().with_domain(crate::EffectColorDomain::AlphaMask),
+                    );
+                    source
+                } else if let EffectRenderOp::Glass { grade, lighting, projection } = op {
                     crate::glass::execute_glass_node(
                         source,
                         *grade,

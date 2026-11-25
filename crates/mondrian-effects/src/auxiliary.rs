@@ -492,7 +492,7 @@ pub(crate) fn apply_auxiliary_effect_f32_region<E>(
     let frame_height = region.frame_height();
     if let EffectRenderOp::SetMatte { grade } = op {
         return crate::set_matte::apply_set_matte_auxiliary_region_controlled(
-            primary, region, frame, *grade, sampling, checkpoint,
+            primary, region, frame, *grade, sampling, false, checkpoint,
         );
     }
     if matches!(

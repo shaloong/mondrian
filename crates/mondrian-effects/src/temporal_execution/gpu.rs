@@ -631,9 +631,14 @@ impl PreparedEffectTemporalExecution {
                             op,
                             role,
                             sampling,
+                            output_matte,
                         } => {
                             let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
-                                op, *role, *sampling, None,
+                                op,
+                                *role,
+                                *sampling,
+                                None,
+                                *output_matte,
                             )
                             .ok_or(
                                 EffectTemporalGpuPlanBlocker::UnsupportedOperation {

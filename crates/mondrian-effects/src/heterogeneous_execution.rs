@@ -2802,23 +2802,26 @@ fn hash_effect_operation_shape(
             op: op @ EffectRenderOp::Fill { .. },
             role: crate::AuxiliaryRole::Matte,
             sampling,
+            output_matte,
             ..
         }
         | EffectGraphNodeKind::AuxiliaryEffect {
             op: op @ (EffectRenderOp::ChannelCombiner { .. } | EffectRenderOp::SetMatte { .. }),
             role: crate::AuxiliaryRole::Layer,
             sampling,
+            output_matte,
             ..
         }
         | EffectGraphNodeKind::AuxiliaryEffect {
             op: op @ (EffectRenderOp::DisplacementMap { .. } | EffectRenderOp::Glass { .. }),
             role: crate::AuxiliaryRole::Map,
             sampling,
+            output_matte,
             ..
         } => {
             let (mapping, filter, out_of_bounds) = sampling.identity_codes();
             hasher.update([
-                9,
+                if *output_matte { 10 } else { 9 },
                 effect_operation_shape_tag(op),
                 mapping,
                 filter,
@@ -4130,6 +4133,7 @@ fn execute_cpu_dag_prefix(
                 op: op @ EffectRenderOp::Fill { .. },
                 role: crate::AuxiliaryRole::Matte,
                 sampling,
+                output_matte,
                 ..
             }
             | EffectGraphNodeKind::AuxiliaryEffect {
@@ -4141,6 +4145,7 @@ fn execute_cpu_dag_prefix(
                     | EffectRenderOp::CompoundArithmetic { .. }),
                 role: crate::AuxiliaryRole::Layer,
                 sampling,
+                output_matte,
                 ..
             }
             | EffectGraphNodeKind::AuxiliaryEffect {
@@ -4150,6 +4155,7 @@ fn execute_cpu_dag_prefix(
                     | EffectRenderOp::Texturize { .. }),
                 role: crate::AuxiliaryRole::Map,
                 sampling,
+                output_matte,
                 ..
             } => {
                 let [primary, auxiliary]: [crate::EffectFloatFrame; 2] = inputs
@@ -4157,7 +4163,9 @@ fn execute_cpu_dag_prefix(
                     .map_err(|_| PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
                         node: dispatch.node,
                     })?;
-                primary.ensure_same_grid(auxiliary.view())?;
+                if !output_matte {
+                    primary.ensure_same_grid(auxiliary.view())?;
+                }
                 let mut primary = crate::materialize_finite_coverage_controlled(
                     primary,
                     crate::EffectAlphaConsumer::StraightCoverageOperation,
@@ -4167,15 +4175,36 @@ fn execute_cpu_dag_prefix(
                     auxiliary.view(),
                     crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
                 );
-                let supported = crate::auxiliary::apply_auxiliary_effect_f32(
-                    primary.allocation_mut(),
-                    extent.width(),
-                    extent.height(),
-                    &op,
-                    raster,
-                    sampling,
-                    &mut || heterogeneous_processor_checkpoint(control, generation),
-                )?;
+                let mut checkpoint = || heterogeneous_processor_checkpoint(control, generation);
+                let supported = if output_matte && let EffectRenderOp::SetMatte { grade } = op {
+                    let width = extent.width();
+                    let height = extent.height();
+                    let produced = crate::set_matte::apply_set_matte_auxiliary_region_controlled(
+                        primary.allocation_mut(),
+                        crate::adjustment::EffectRasterRegion::new(
+                            width, height, 0, 0, width, height,
+                        ),
+                        raster,
+                        grade,
+                        sampling,
+                        true,
+                        &mut checkpoint,
+                    )?;
+                    primary.set_format_after_write(
+                        primary.format().with_domain(EffectColorDomain::AlphaMask),
+                    );
+                    produced
+                } else {
+                    crate::auxiliary::apply_auxiliary_effect_f32(
+                        primary.allocation_mut(),
+                        extent.width(),
+                        extent.height(),
+                        &op,
+                        raster,
+                        sampling,
+                        &mut checkpoint,
+                    )?
+                };
                 if !supported {
                     return Err(
                         PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation {
@@ -4591,15 +4620,16 @@ fn prepare_gpu_suffix(
                 | EffectGpuPlanBlocker::NonPreservingColorDomain { .. }
                 | EffectGpuPlanBlocker::UnsupportedColorDomainPlan { .. }
                 | EffectGpuPlanBlocker::UnsupportedOperation { .. },
-            ) => gpu_dispatches
-                .iter()
-                .map(|(node_id, inputs, output, waits, signal)| {
-                    let node = compiled.graph().node(*node_id).ok_or(
-                        PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
-                            reason: "gpu_partition_node_missing",
-                        },
-                    )?;
-                    match &node.kind {
+            ) => {
+                gpu_dispatches
+                    .iter()
+                    .map(|(node_id, inputs, output, waits, signal)| {
+                        let node = compiled.graph().node(*node_id).ok_or(
+                            PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                reason: "gpu_partition_node_missing",
+                            },
+                        )?;
+                        match &node.kind {
                         EffectGraphNodeKind::DomainEffect {
                             op: EffectRenderOp::Qualifier { qualifier },
                             domain_contract,
@@ -4745,9 +4775,11 @@ fn prepare_gpu_suffix(
                                 blend_mode: *blend_mode,
                             })
                         }
-                        EffectGraphNodeKind::AuxiliaryEffect { op, role, sampling, .. } => {
+                        EffectGraphNodeKind::AuxiliaryEffect {
+                            op, role, sampling, output_matte, ..
+                        } => {
                             let pass = crate::gpu_pipeline::lower_auxiliary_spatial_pass(
-                                op, *role, *sampling, None,
+                                op, *role, *sampling, None, *output_matte,
                             )
                             .ok_or(
                                 PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
@@ -4773,6 +4805,11 @@ fn prepare_gpu_suffix(
                                 )
                             };
                             let scene_linear = exact(EffectColorDomain::SceneLinearRgb);
+                            let output_format = if *output_matte {
+                                exact(EffectColorDomain::AlphaMask)
+                            } else {
+                                scene_linear
+                            };
                             let auxiliary_format = match role {
                                 crate::AuxiliaryRole::Matte => exact(EffectColorDomain::AlphaMask),
                                 crate::AuxiliaryRole::Layer | crate::AuxiliaryRole::Map => {
@@ -4781,7 +4818,7 @@ fn prepare_gpu_suffix(
                             };
                             if format(*input) != Some(scene_linear)
                                 || format(*auxiliary) != Some(auxiliary_format)
-                                || format(*output) != Some(scene_linear)
+                                || format(*output) != Some(output_format)
                             {
                                 return Err(
                                     PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
@@ -5085,8 +5122,9 @@ fn prepare_gpu_suffix(
                             },
                         ),
                     }
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
             Err(error) => return Err(error.into()),
         }
     };

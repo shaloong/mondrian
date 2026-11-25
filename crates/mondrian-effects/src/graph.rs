@@ -301,6 +301,12 @@ pub enum EffectGraphError {
         /// Offending node.
         node: EffectGraphNodeId,
     },
+    /// A layer matte must use a picture and extract coverage independently of the primary alpha.
+    #[error("graph node {node:?} uses an invalid layer matte kernel")]
+    InvalidLayerMatte {
+        /// Offending node.
+        node: EffectGraphNodeId,
+    },
     /// Two ExternalInput nodes declare the same slot.
     #[error("auxiliary input slot {slot} is declared more than once")]
     DuplicateAuxiliarySlot {
@@ -447,6 +453,8 @@ pub enum EffectGraphNodeKind {
         role: AuxiliaryRole,
         /// Declared sampling of the auxiliary branch.
         sampling: AuxiliarySampling,
+        /// Emit a separate AlphaMask on the primary grid using the Set Matte kernel.
+        output_matte: bool,
     },
     /// One spatial output with a canvas input and an optional external image per cell.
     VideoCollage {
@@ -611,8 +619,15 @@ impl EffectGraphIdentity {
                     time_offset.numerator().hash(&mut writer);
                     time_offset.denominator().hash(&mut writer);
                 }
-                EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
-                    14u8.hash(&mut writer);
+                EffectGraphNodeKind::AuxiliaryEffect {
+                    input,
+                    auxiliary,
+                    op,
+                    role,
+                    sampling,
+                    output_matte,
+                } => {
+                    (if *output_matte { 16u8 } else { 14u8 }).hash(&mut writer);
                     input.hash(&mut writer);
                     auxiliary.hash(&mut writer);
                     hash_render_op(op, &mut writer);
@@ -1751,6 +1766,11 @@ enum EffectGraphNodeShape {
         input: EffectGraphNodeId,
         sources: Arc<[Option<EffectGraphNodeId>]>,
     },
+    LayerMatte {
+        id: EffectGraphNodeId,
+        input: EffectGraphNodeId,
+        auxiliary: EffectGraphNodeId,
+    },
 }
 
 impl PreparedEffectGraphTopology {
@@ -2097,11 +2117,11 @@ fn derive_implementation_requirements<'a>(
             EffectGraphNodeKind::ExternalInput { format, time_offset, .. } => {
                 external_input_node_requirements(*format, *time_offset)
             }
-            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
-                requirement_for(*input, &requirements)
-                    .merge_branches(requirement_for(*auxiliary, &requirements))
-                    .compose_node(auxiliary_effect_node_requirements(op, *role, *sampling))
-            }
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input, auxiliary, op, role, sampling, ..
+            } => requirement_for(*input, &requirements)
+                .merge_branches(requirement_for(*auxiliary, &requirements))
+                .compose_node(auxiliary_effect_node_requirements(op, *role, *sampling)),
             EffectGraphNodeKind::VideoCollage { input, sources, grade } => sources
                 .iter()
                 .flatten()
@@ -2952,7 +2972,48 @@ impl EffectGraphBuilderState {
         let id = self.alloc_id();
         self.graph.nodes.push(EffectGraphNode {
             id,
-            kind: EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling },
+            kind: EffectGraphNodeKind::AuxiliaryEffect {
+                input,
+                auxiliary,
+                op,
+                role,
+                sampling,
+                output_matte: false,
+            },
+        });
+        id
+    }
+
+    /// Project an auxiliary picture onto the primary grid and extract a separate matte.
+    ///
+    /// The primary alpha does not influence this mask. Luminance is derived
+    /// from associated RGB so hidden colors outside coverage stay black.
+    pub fn add_layer_matte(
+        &mut self,
+        input: EffectGraphNodeId,
+        auxiliary: EffectGraphNodeId,
+        channel: crate::SetMatteChannel,
+        invert: bool,
+        stretch: bool,
+    ) -> EffectGraphNodeId {
+        let grade = crate::SetMatteGrade {
+            channel,
+            invert,
+            stretch,
+            combine: false,
+            premultiply: true,
+        };
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::AuxiliaryEffect {
+                input,
+                auxiliary,
+                op: EffectRenderOp::SetMatte { grade },
+                role: AuxiliaryRole::Layer,
+                sampling: grade.sampling(),
+                output_matte: true,
+            },
         });
         id
     }
@@ -3803,7 +3864,8 @@ fn auxiliary_effect_node_requirements(
     if crate::auxiliary::supports_auxiliary_f32(op) {
         modes = modes.union(EffectExecutionModes::CPU_F32);
     }
-    if crate::gpu_pipeline::lower_auxiliary_spatial_pass(op, role, sampling, None).is_some() {
+    if crate::gpu_pipeline::lower_auxiliary_spatial_pass(op, role, sampling, None, false).is_some()
+    {
         modes = modes.union(EffectExecutionModes::GPU_F32);
     }
     let requirements = render_op_requirements(op);
@@ -4064,7 +4126,9 @@ pub(crate) fn compile_effect_domain_plan(
                 target_domain
             }
             EffectGraphNodeKind::ExternalInput { domain, .. } => domain.output,
-            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, role, .. } => {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input, auxiliary, role, output_matte, ..
+            } => {
                 let input_domain = *plan.node_output_domains.get(input)?;
                 let auxiliary_domain = *plan.node_output_domains.get(auxiliary)?;
                 // Native auxiliary kernels have the same scene-linear contract
@@ -4090,7 +4154,11 @@ pub(crate) fn compile_effect_domain_plan(
                         EffectDomainBlockerKind::NonRgbDomainTransition,
                     );
                 }
-                target_domain
+                if *output_matte {
+                    EffectColorDomain::AlphaMask
+                } else {
+                    target_domain
+                }
             }
             EffectGraphNodeKind::VideoCollage { input, sources, .. } => {
                 let target = EffectColorDomain::SceneLinearRgb;
@@ -4325,9 +4393,22 @@ fn auxiliary_slot_declarations(
     };
     for node in &graph.nodes {
         match &node.kind {
-            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, role, sampling, .. } => {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input,
+                auxiliary,
+                role,
+                sampling,
+                op,
+                output_matte,
+            } => {
                 if *auxiliary == *input || *auxiliary == node.id {
                     return Err(EffectGraphError::SelfAuxiliaryInput { node: node.id });
+                }
+                if *output_matte
+                    && !matches!(op, EffectRenderOp::SetMatte { grade }
+                    if !grade.combine && *role == AuxiliaryRole::Layer)
+                {
+                    return Err(EffectGraphError::InvalidLayerMatte { node: node.id });
                 }
                 let auxiliary = graph
                     .node(*auxiliary)
@@ -4541,6 +4622,13 @@ fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
             EffectGraphNodeKind::ExternalInput { .. } => {
                 EffectGraphNodeShape::ExternalInput { id: node.id }
             }
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input, auxiliary, output_matte: true, ..
+            } => EffectGraphNodeShape::LayerMatte {
+                id: node.id,
+                input: *input,
+                auxiliary: *auxiliary,
+            },
             EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
                 EffectGraphNodeShape::Auxiliary {
                     id: node.id,
@@ -4895,11 +4983,18 @@ pub(crate) fn compile_effect_node_profiles(
                     output_cache_enabled: false,
                 }
             }
-            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input,
+                auxiliary,
+                op,
+                role,
+                sampling,
+                output_matte,
+            } => {
                 let input_profile = profiles.get(input)?;
                 let auxiliary_profile = profiles.get(auxiliary)?;
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                14u8.hash(&mut hasher);
+                (if *output_matte { 16u8 } else { 14u8 }).hash(&mut hasher);
                 input_profile.subtree_signature.hash(&mut hasher);
                 auxiliary_profile.subtree_signature.hash(&mut hasher);
                 op.hash_signature(&mut hasher);

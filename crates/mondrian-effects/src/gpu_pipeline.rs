@@ -372,6 +372,8 @@ pub enum EffectGpuSpatialPass {
         sampling: Option<crate::AuxiliarySampling>,
         /// Host slot for a bound matte, or none for a graph-local value.
         external_slot: Option<u32>,
+        /// Write a separate AlphaMask on the primary grid.
+        output_matte: bool,
     },
     /// Remap the primary raster from a separately sampled picture.
     DisplacementMap {
@@ -889,6 +891,7 @@ pub(crate) fn lower_auxiliary_spatial_pass(
     role: crate::AuxiliaryRole,
     sampling: crate::AuxiliarySampling,
     external_slot: Option<u32>,
+    output_matte: bool,
 ) -> Option<EffectGpuSpatialPass> {
     match (op, role) {
         (EffectRenderOp::Fill { grade }, crate::AuxiliaryRole::Matte) => {
@@ -906,6 +909,7 @@ pub(crate) fn lower_auxiliary_spatial_pass(
                 grade: *grade,
                 sampling: Some(sampling),
                 external_slot,
+                output_matte,
             })
         }
         (EffectRenderOp::DisplacementMap { grade }, crate::AuxiliaryRole::Map) => {
@@ -1234,7 +1238,21 @@ pub fn lower_effect_graph_to_gpu_pipeline(
                     spatial_pass_for(op),
                 )
             }
-            EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
+            EffectGraphNodeKind::AuxiliaryEffect {
+                input,
+                auxiliary,
+                op,
+                role,
+                sampling,
+                output_matte,
+            } => {
+                if *output_matte {
+                    return Err(EffectGpuPlanBlocker::NonPreservingColorDomain {
+                        node_id,
+                        input: EffectColorDomain::SceneLinearRgb,
+                        output: EffectColorDomain::AlphaMask,
+                    });
+                }
                 let Some(EffectGraphNodeKind::ExternalInput { slot, .. }) =
                     compiled.graph().node(*auxiliary).map(|node| &node.kind)
                 else {
@@ -1254,9 +1272,11 @@ pub fn lower_effect_graph_to_gpu_pipeline(
                         admitted,
                     });
                 }
-                let pass = lower_auxiliary_spatial_pass(op, *role, *sampling, Some(*slot)).ok_or(
-                    EffectGpuPlanBlocker::UnsupportedTopology { node_id, kind: "auxiliary_kernel" },
-                )?;
+                let pass = lower_auxiliary_spatial_pass(op, *role, *sampling, Some(*slot), false)
+                    .ok_or(EffectGpuPlanBlocker::UnsupportedTopology {
+                    node_id,
+                    kind: "auxiliary_kernel",
+                })?;
                 (
                     *input,
                     Some(op),
@@ -1589,6 +1609,7 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
             grade: *grade,
             sampling: None,
             external_slot: None,
+            output_matte: false,
         }),
         EffectRenderOp::DisplacementMap { .. } => None,
         // A difference matte always reads a second raster, so a unary node has

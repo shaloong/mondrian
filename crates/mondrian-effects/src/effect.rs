@@ -50038,6 +50038,7 @@ mod tests {
             crate::AuxiliaryRole::Layer,
             crate::AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP,
             Some(crate::DEFAULT_LAYER),
+            false,
         )
         .expect("the auxiliary lowering carries the difference kernel");
         assert_eq!(pass.name(), "difference_matte");
@@ -50276,6 +50277,7 @@ mod tests {
             crate::AuxiliaryRole::Layer,
             sampling,
             Some(12),
+            false,
         )
         .expect("the authored grade reaches the auxiliary lowering");
         assert_eq!((pass.horizontal_halo(), pass.vertical_halo()), (11, 11));
@@ -50414,6 +50416,7 @@ mod tests {
             crate::AuxiliaryRole::Layer,
             sampling,
             Some(6),
+            false,
         )
         .expect("the auxiliary lowering carries the blend kernel");
         assert_eq!(pass.name(), "blend");
@@ -50708,6 +50711,7 @@ mod tests {
             crate::AuxiliaryRole::Layer,
             sampling,
             Some(6),
+            false,
         )
         .expect("the auxiliary lowering carries the compound kernel");
         assert_eq!(pass.name(), "compound_arithmetic");
@@ -51046,6 +51050,7 @@ mod tests {
             crate::AuxiliaryRole::Map,
             sampling,
             Some(6),
+            false,
         )
         .expect("the auxiliary lowering carries the compound blur kernel");
         assert_eq!(pass.name(), "compound_blur");
@@ -51364,6 +51369,7 @@ mod tests {
             crate::AuxiliaryRole::Map,
             sampling,
             Some(1),
+            false,
         )
         .expect("the auxiliary lowering carries the texturize kernel");
         assert_eq!(pass.name(), "texturize");

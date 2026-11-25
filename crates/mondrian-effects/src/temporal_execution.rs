@@ -2690,6 +2690,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                             auxiliary: auxiliary_id,
                             op,
                             sampling,
+                            output_matte,
                             ..
                         } => {
                             let input =
@@ -2706,19 +2707,34 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                 image_sampling,
                                 &raster,
                             );
-                            let applied = crate::auxiliary::apply_auxiliary_effect_f32_region(
-                                &mut output,
-                                self.raster_region,
-                                &op,
-                                crate::AuxiliaryFloatFrame::new(
-                                    frame,
-                                    crate::AuxiliaryPolicy::new(
-                                        crate::AuxiliaryResolution::Authored,
-                                    ),
-                                ),
-                                sampling,
-                                &mut || processor_input_checkpoint(self.request, control),
-                            )?;
+                            let raster = crate::AuxiliaryFloatFrame::new(
+                                frame,
+                                crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
+                            );
+                            let mut checkpoint =
+                                || processor_input_checkpoint(self.request, control);
+                            let applied = if output_matte
+                                && let crate::EffectRenderOp::SetMatte { grade } = op
+                            {
+                                crate::set_matte::apply_set_matte_auxiliary_region_controlled(
+                                    &mut output,
+                                    self.raster_region,
+                                    raster,
+                                    grade,
+                                    sampling,
+                                    true,
+                                    &mut checkpoint,
+                                )?
+                            } else {
+                                crate::auxiliary::apply_auxiliary_effect_f32_region(
+                                    &mut output,
+                                    self.raster_region,
+                                    &op,
+                                    raster,
+                                    sampling,
+                                    &mut checkpoint,
+                                )?
+                            };
                             if !applied {
                                 return Err(
                                     EffectTemporalExecutionError::UnsupportedRenderOperation {

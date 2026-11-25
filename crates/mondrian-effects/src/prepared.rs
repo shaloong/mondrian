@@ -2451,15 +2451,21 @@ fn remap_graph_node_kind(
                 time_offset: *time_offset,
             }
         }
-        EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, op, role, sampling } => {
-            EffectGraphNodeKind::AuxiliaryEffect {
-                input: remap(*input)?,
-                auxiliary: remap(*auxiliary)?,
-                op: op.clone(),
-                role: *role,
-                sampling: *sampling,
-            }
-        }
+        EffectGraphNodeKind::AuxiliaryEffect {
+            input,
+            auxiliary,
+            op,
+            role,
+            sampling,
+            output_matte,
+        } => EffectGraphNodeKind::AuxiliaryEffect {
+            input: remap(*input)?,
+            auxiliary: remap(*auxiliary)?,
+            op: op.clone(),
+            role: *role,
+            sampling: *sampling,
+            output_matte: *output_matte,
+        },
         EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
             EffectGraphNodeKind::VideoCollage {
                 input: remap(*input)?,
