@@ -1389,7 +1389,15 @@ pub(crate) fn render_op_tile_scratch_bytes(op: &EffectRenderOp, width: u32, heig
 
 /// Peak same-sized scratch images owned by the current CPU Float32 kernel in
 /// addition to its caller-owned mutable output.
-pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
+pub(crate) fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
+    if let EffectRenderOp::Qualifier { qualifier } = op {
+        return usize::from(qualifier.mode() != crate::QualifierMode::ColorMatch);
+    }
+    render_op_f32_scratch_frame_upper_bound(op)
+}
+
+/// Scratch budget by operation kind, without inspecting shared prepared state.
+pub(crate) const fn render_op_f32_scratch_frame_upper_bound(op: &EffectRenderOp) -> usize {
     match op {
         EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
         EffectRenderOp::BoxBlur { .. } => 1,

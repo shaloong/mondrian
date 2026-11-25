@@ -24,6 +24,8 @@ pub enum QualifierMode {
     Hsl,
     /// Union/subtraction of sampled volumes in normalized RGB cube space.
     ThreeDimensional,
+    /// Pointwise color matching used by the grain effects.
+    ColorMatch,
 }
 
 /// Borrowed authoring values prepared into immutable execution state.
@@ -59,6 +61,7 @@ struct PreparedQualifierSample {
 #[derive(Debug, Clone)]
 pub struct PreparedQualifier {
     mode: QualifierMode,
+    color_match: Option<crate::grain_color_match::GrainColorMatch>,
     hue_center: f32,
     hue_half_width: f32,
     hue_softness: f32,
@@ -83,6 +86,7 @@ impl PartialEq for PreparedQualifier {
     fn eq(&self, other: &Self) -> bool {
         self.semantic_fingerprint == other.semantic_fingerprint
             && self.mode == other.mode
+            && self.color_match == other.color_match
             && self.hue_center.to_bits() == other.hue_center.to_bits()
             && self.hue_half_width.to_bits() == other.hue_half_width.to_bits()
             && self.hue_softness.to_bits() == other.hue_softness.to_bits()
@@ -160,6 +164,7 @@ impl PreparedQualifier {
             .unwrap_or_default();
         let mut prepared = Self {
             mode: authored.mode,
+            color_match: None,
             hue_center: positive_mod(authored.hue_center_degrees / 360.0, 1.0),
             hue_half_width: (authored.hue_width_degrees / 720.0).clamp(0.0, 0.5),
             hue_softness: (authored.hue_softness_degrees / 360.0).clamp(0.0, 0.5),
@@ -181,6 +186,52 @@ impl PreparedQualifier {
         };
         prepared.semantic_fingerprint = prepared.compute_semantic_fingerprint();
         Ok(prepared)
+    }
+
+    /// Prepare a grain color mask. Off omits this branch entirely.
+    pub fn new_color_match(
+        mode: crate::GrainColorMatchMode,
+        reference: [f32; 3],
+        tolerance: f32,
+        softness: f32,
+        invert: bool,
+        space: WorkingColorSpace,
+    ) -> Result<Option<Self>, QualifierError> {
+        let Some(selection) = crate::grain_color_match::GrainColorMatch::new(
+            mode, reference, tolerance, softness, invert, space,
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut prepared = Self {
+            mode: QualifierMode::ColorMatch,
+            color_match: Some(selection),
+            hue_center: 0.0,
+            hue_half_width: 0.0,
+            hue_softness: 0.0,
+            saturation_low: 0.0,
+            saturation_high: 0.0,
+            saturation_softness: 0.0,
+            luminance_low: 0.0,
+            luminance_high: 0.0,
+            luminance_softness: 0.0,
+            luminance_coefficients: space.luminance_coefficients(),
+            samples: Arc::from([]),
+            three_d_tolerance: 0.0,
+            three_d_softness: 0.0,
+            denoise_radius: 0,
+            blur_radius: 0.0,
+            clean_black: 0.0,
+            clean_white: 0.0,
+            semantic_fingerprint: [0; 32],
+        };
+        prepared.semantic_fingerprint = prepared.compute_semantic_fingerprint();
+        Ok(Some(prepared))
+    }
+
+    /// Criterion and inversion, projected reference and threshold, and softness.
+    pub fn color_match_controls(&self) -> Option<([u32; 2], [f32; 4], f32)> {
+        self.color_match.map(|selection| selection.gpu_controls())
     }
 
     /// Complete semantic fingerprint used by graph and GPU cache identities.
@@ -266,6 +317,9 @@ impl PreparedQualifier {
         match self.mode {
             QualifierMode::Hsl => self.raw_hsl_matte(rgb),
             QualifierMode::ThreeDimensional => self.raw_three_dimensional_matte(rgb),
+            QualifierMode::ColorMatch => {
+                self.color_match.expect("prepared color match").coverage(rgb)
+            }
         }
     }
 
@@ -329,6 +383,7 @@ impl PreparedQualifier {
         hasher.update([match self.mode {
             QualifierMode::Hsl => 0,
             QualifierMode::ThreeDimensional => 1,
+            QualifierMode::ColorMatch => 2,
         }]);
         for value in [
             self.hue_center,
@@ -362,6 +417,13 @@ impl PreparedQualifier {
                 hasher.update(channel.to_bits().to_le_bytes());
             }
         }
+        if let Some(([mode, invert], reference, softness)) = self.color_match_controls() {
+            hasher.update(mode.to_le_bytes());
+            hasher.update(invert.to_le_bytes());
+            for value in reference.into_iter().chain([softness]) {
+                hasher.update(value.to_bits().to_le_bytes());
+            }
+        }
         hasher.finalize().into()
     }
 }
@@ -369,6 +431,8 @@ impl PreparedQualifier {
 /// Invalid qualifier preparation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum QualifierError {
+    #[error("color matching requires finite RGB and unit tolerance and softness")]
+    InvalidColorMatch,
     #[error("qualifier contains a non-finite parameter")]
     NonFiniteParameter,
     #[error("qualifier sample set is invalid")]
@@ -391,6 +455,16 @@ pub(crate) fn apply_qualifier_rgba_f32_controlled<E>(
 ) -> Result<(), E> {
     let count = width.saturating_mul(height);
     if count == 0 || pixels.len() != count {
+        return Ok(());
+    }
+    if let Some(selection) = qualifier.color_match {
+        for chunk in pixels.chunks_mut(4096) {
+            checkpoint()?;
+            for pixel in chunk {
+                let coverage = selection.coverage([pixel[0], pixel[1], pixel[2]]);
+                *pixel = [0.0, 0.0, 0.0, coverage];
+            }
+        }
         return Ok(());
     }
     let mut matte = vec![0.0_f32; count];

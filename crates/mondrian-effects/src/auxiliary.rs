@@ -393,7 +393,7 @@ pub const fn render_op_auxiliary_scratch_frames(op: &EffectRenderOp) -> usize {
         // `render_op_f32_scratch_frames`, so no extra auxiliary frame is added.
         return 0;
     }
-    if crate::adjustment::render_op_f32_scratch_frames(op) == 0 {
+    if crate::adjustment::render_op_f32_scratch_frame_upper_bound(op) == 0 {
         0
     } else {
         1

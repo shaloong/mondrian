@@ -72,6 +72,8 @@ pub use blend::{
     BLEND_MAX_LAYER, BLEND_MIN_LAYER, DEFAULT_BLEND_WITH_ORIGINAL,
 };
 pub mod box_blur;
+mod grain_color_match;
+pub use grain_color_match::GrainColorMatchMode;
 pub mod brightness_contrast;
 pub mod bulge;
 pub mod camera_view;
