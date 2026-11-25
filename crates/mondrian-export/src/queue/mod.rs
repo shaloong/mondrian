@@ -16116,6 +16116,7 @@ mod tests {
             Some(GrainTestProtection {
                 combination: mondrian_effects::MaskCombineMode::Screen,
                 layer_matte: None,
+                color_match: None,
                 feather_radius: 0.0,
                 view_matte: false,
             }),
@@ -16130,6 +16131,7 @@ mod tests {
             Some(GrainTestProtection {
                 combination: mondrian_effects::MaskCombineMode::Multiply,
                 layer_matte: None,
+                color_match: None,
                 feather_radius: 0.0,
                 view_matte: false,
             }),
@@ -16148,6 +16150,7 @@ mod tests {
                     invert: false,
                     stretch: false,
                 }),
+                color_match: None,
                 feather_radius: 0.0,
                 view_matte: false,
             }),
@@ -16166,6 +16169,7 @@ mod tests {
                     invert: true,
                     stretch: true,
                 }),
+                color_match: None,
                 feather_radius: 0.0,
                 view_matte: false,
             }),
@@ -16174,7 +16178,7 @@ mod tests {
 
     #[test]
     #[ignore = "real GPU Export post-combination feather qualification"]
-    fn fixed_media_calibration_feathers_the_combined_matte_before_mixing() {
+    fn fixed_media_calibration_combines_and_feathers_native_rgb_color_match() {
         verify_fixed_media_calibration(
             true,
             Some(GrainTestProtection {
@@ -16184,6 +16188,7 @@ mod tests {
                     invert: false,
                     stretch: false,
                 }),
+                color_match: Some(mondrian_effects::GrainColorMatchMode::Rgb),
                 feather_radius: 3.0,
                 view_matte: false,
             }),
@@ -16202,6 +16207,7 @@ mod tests {
                     invert: true,
                     stretch: true,
                 }),
+                color_match: Some(mondrian_effects::GrainColorMatchMode::Luminance),
                 feather_radius: 100.0,
                 view_matte: true,
             }),
@@ -16219,6 +16225,7 @@ mod tests {
     struct GrainTestProtection {
         combination: mondrian_effects::MaskCombineMode,
         layer_matte: Option<GrainTestLayerMatte>,
+        color_match: Option<mondrian_effects::GrainColorMatchMode>,
         feather_radius: f32,
         view_matte: bool,
     }
@@ -16468,7 +16475,7 @@ mod tests {
         )
         .unwrap();
         let qualifiers = protection.map(|protection| {
-            let grades = [(0.02, 0.26, 0.8), (0.04, 0.35, 0.0)].map(|(low, high, blur)| {
+            let mut grades = [(0.02, 0.26, 0.8), (0.04, 0.35, 0.0)].map(|(low, high, blur)| {
                 Arc::new(
                     PreparedQualifier::new(
                         QualifierAuthoring {
@@ -16495,6 +16502,20 @@ mod tests {
                     .unwrap(),
                 )
             });
+            if let Some(mode) = protection.color_match {
+                grades[0] = Arc::new(
+                    PreparedQualifier::new_color_match(
+                        mode,
+                        [0.15, 0.22, 0.31],
+                        0.09,
+                        0.18,
+                        false,
+                        WorkingColorSpace::LinearRec709,
+                    )
+                    .unwrap()
+                    .unwrap(),
+                );
+            }
             (grades, protection)
         });
         let halo = spatial.halo().max(qualifiers.as_ref().map_or(0, |(grades, _)| {

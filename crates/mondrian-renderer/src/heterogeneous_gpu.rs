@@ -4778,6 +4778,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_wgpu_grain_color_match_agrees_with_cpu_for_every_criterion() {
+        use mondrian_effects::{
+            EffectColorDomainContract, EffectFloatFrameView, EffectGraphBuilderState,
+            EffectRenderOp, GrainColorMatchMode, PreparedQualifier,
+        };
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping grain color match test: no GPU adapter available");
+            return;
+        };
+        let input = test_input();
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .expect("heterogeneous GPU runtime");
+        let mut max_error = 0.0_f32;
+        let mut intermediate = 0;
+        for mode in GrainColorMatchMode::ALL {
+            for invert in [false, true] {
+                let Some(qualifier) = PreparedQualifier::new_color_match(
+                    mode,
+                    [0.35, 0.65, 0.48],
+                    0.04,
+                    0.35,
+                    invert,
+                    WORKING_SPACE,
+                )
+                .unwrap() else {
+                    continue;
+                };
+                let mut builder = EffectGraphBuilderState::new();
+                builder.append_unary(EffectRenderOp::GaussianBlur { radius: 1.0 });
+                builder.append_unary_in_domain(
+                    EffectRenderOp::Qualifier { qualifier: Arc::new(qualifier) },
+                    EffectColorDomainContract {
+                        input: EffectColorDomain::SceneLinearRgb,
+                        output: EffectColorDomain::AlphaMask,
+                    },
+                );
+                builder.append_unary_in_domain(
+                    EffectRenderOp::MattePreview { invert: false },
+                    EffectColorDomainContract {
+                        input: EffectColorDomain::AlphaMask,
+                        output: EffectColorDomain::SceneLinearRgb,
+                    },
+                );
+                let graph =
+                    mondrian_effects::compile_reference_render_graph(builder.finish()).unwrap();
+                let source = EffectFloatFrameView::new(
+                    EXTENT,
+                    EffectValueFormat::new(
+                        EffectWorkingPrecision::Float32,
+                        EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    mondrian_core::ImageSampling::UNIT_SQUARE,
+                    &input,
+                );
+                let expected =
+                    apply_compiled_effect_graph_rgba_f32(source, &graph, FRAME_SEED).unwrap();
+                let completed = runtime
+                    .execute_to_cpu(
+                        request(&graph, generous_gpu_grant()),
+                        cpu_completion(Arc::clone(&graph), &input),
+                        &ExecutionCancellationToken::new(),
+                        gpu_test_deadline(),
+                        mondrian_core::ImageSampling::UNIT_SQUARE,
+                    )
+                    .unwrap();
+                for (actual, expected) in
+                    completed.frame().rgba_f32().data.iter().zip(expected.pixels())
+                {
+                    intermediate += usize::from(expected[0] > 0.0 && expected[0] < 1.0);
+                    for (x, y) in actual.iter().zip(expected) {
+                        let error = (x - y).abs();
+                        assert!(error <= 1.0e-4, "{mode:?} {invert}: {x} != {y}");
+                        max_error = max_error.max(error);
+                    }
+                }
+            }
+        }
+        assert!(intermediate > 0);
+        eprintln!(
+            "All grain color match projections and inversions: maximum error {max_error:.9e}"
+        );
+    }
+
+    #[tokio::test]
     async fn real_wgpu_qualifier_matches_cpu_for_hsl_3d_refinement_mask_and_preview() {
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping heterogeneous GPU Qualifier test: no GPU adapter available");

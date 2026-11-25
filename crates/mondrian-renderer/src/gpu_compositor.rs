@@ -380,8 +380,47 @@ fn qualifier_sample(index: u32) -> vec4<f32> {
     return vec4<f32>(coordinate, select(0.0, 1.0, excluded));
 }
 
+fn grain_match_distance(rgb: vec3<f32>, reference: vec3<f32>, criterion: u32) -> f32 {
+    let positive = max(rgb, vec3<f32>(0.0));
+    if (criterion == 3u) {
+        let delta = min(abs(positive - reference), vec3<f32>(2.0));
+        return sqrt(dot(delta, delta) / 3.0);
+    }
+    let peak = max(positive.r, max(positive.g, positive.b));
+    let chroma = peak - min(positive.r, min(positive.g, positive.b));
+    if (criterion == 4u) {
+        let chromatic = chroma > 1.1920929e-7;
+        if (chromatic != (reference.y != 0.0)) { return 1.0; }
+        let difference = abs(qualifier_hue_saturation(positive).x - reference.x);
+        return 2.0 * min(difference, 1.0 - difference);
+    }
+    if (criterion == 5u) { return abs(chroma - reference.x); }
+    if (criterion == 6u) {
+        var luminance = 0.0;
+        if (peak > 0.0) {
+            luminance = min(dot(positive / peak, uniforms.effects[1].params.xyz), 1.0) * peak;
+        }
+        return abs(luminance - reference.x);
+    }
+    return abs(positive[criterion - 7u] - reference.x);
+}
+
 fn raw_qualifier_matte(rgb: vec3<f32>) -> f32 {
     let controls = uniforms.effects[0];
+    if (controls.header.x == 2u) {
+        let distance = min(grain_match_distance(rgb, controls.extra2.xyz, controls.header.y), 1.0);
+        let tolerance = controls.extra2.w;
+        let softness = controls.extra3.x;
+        var weight = 1.0;
+        if (distance > tolerance) {
+            weight = 0.0;
+            if (softness > 0.0) {
+                let t = min((distance - tolerance) / softness, 1.0);
+                weight = 1.0 - t * t * (3.0 - 2.0 * t);
+            }
+        }
+        return select(weight, 1.0 - weight, controls.header.w != 0u);
+    }
     if (controls.header.x == 0u) {
         let positive = max(rgb, vec3<f32>(0.0));
         let hue_saturation = qualifier_hue_saturation(positive);
@@ -8795,6 +8834,7 @@ fn qualifier_uniforms(
             match qualifier.mode() {
                 QualifierMode::Hsl => 0,
                 QualifierMode::ThreeDimensional => 1,
+                QualifierMode::ColorMatch => 2,
             },
             sample_count as u32,
             qualifier.denoise_radius(),
@@ -8807,6 +8847,12 @@ fn qualifier_uniforms(
         extra2: [0.0; 4],
         extra3: [0.0; 4],
     };
+    if let Some(([mode, invert], reference, softness)) = qualifier.color_match_controls() {
+        effects[0].header[1] = mode;
+        effects[0].header[3] = invert;
+        effects[0].extra2 = reference;
+        effects[0].extra3[0] = softness;
+    }
     let coefficients = qualifier.luminance_coefficients();
     effects[1].params = [
         coefficients[0],
@@ -8837,7 +8883,8 @@ fn qualifier_uniforms(
         frame_seed_hi: 0,
         mask_controls: [
             filter_kind,
-            u32::from(vertical) | (u32::from(final_stage) << 1),
+            u32::from(vertical)
+                | (u32::from(final_stage && qualifier.mode() != QualifierMode::ColorMatch) << 1),
         ],
         solid_color: [0.0; 4],
         inv_transform0: [1.0, 0.0, 0.0, 0.0],
