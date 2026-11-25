@@ -563,6 +563,105 @@ mod tests {
     }
 
     #[test]
+    fn final_matte_feather_filters_the_combination_and_keeps_constant_coverage() {
+        use crate::{
+            EffectColorDomain, EffectColorDomainContract, EffectGraphBuilderState, EffectRenderOp,
+            MaskCombineMode,
+        };
+
+        const WIDTH: u32 = 7;
+        let picture = [[0.2, 0.4, 0.5, 0.25]; WIDTH as usize];
+        let evaluate = |left: [f32; WIDTH as usize], right: [f32; WIDTH as usize], op, radius| {
+            let mut graph = EffectGraphBuilderState::new();
+            let input = graph.source();
+            let width = WIDTH;
+            let source = view(width, 1, &picture);
+            let [left, right] = [left, right].map(|values| values.map(|a| [0.0, 0.0, 0.0, a]));
+            let mut add_mask = |slot| {
+                let external = graph.append_external_input(
+                    slot,
+                    source.format(),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                );
+                graph.add_layer_matte(input, external, SetMatteChannel::Alpha, false, false)
+            };
+            let left_mask = add_mask(0);
+            let right_mask = add_mask(1);
+            let combined = graph.add_mask_combine_with_mode(left_mask, right_mask, op);
+            graph.set_current_output(combined);
+            assert_eq!(graph.append_matte_feather(0.0).unwrap(), combined);
+            assert!(graph.append_matte_feather(f32::NAN).is_err());
+            assert!(graph.append_matte_feather(101.0).is_err());
+            graph.append_matte_feather(radius).unwrap();
+            graph.append_unary_in_domain(
+                EffectRenderOp::MattePreview { invert: false },
+                EffectColorDomainContract {
+                    input: EffectColorDomain::AlphaMask,
+                    output: EffectColorDomain::SceneLinearRgb,
+                },
+            );
+            let compiled = crate::compile_reference_render_graph(graph.finish()).unwrap();
+            let bindings = [left.as_slice(), right.as_slice()].map(|pixels| {
+                AuxiliaryFloatFrame::new(
+                    view(width, 1, pixels),
+                    crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
+                )
+            });
+            EffectExecutionSession::default()
+                .apply_compiled_rgba_f32_with_auxiliary(
+                    source,
+                    &compiled,
+                    0,
+                    &[
+                        crate::AuxiliaryFloatInput { slot: 0, raster: bindings[0] },
+                        crate::AuxiliaryFloatInput { slot: 1, raster: bindings[1] },
+                    ],
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .unwrap()
+        };
+
+        // Radius 3 gives three rounds of [1/6, 2/3, 1/6]. The vertical axes
+        // leave this one-row fixture unchanged. Compute the screen before filtering.
+        let mut left = [0.0; WIDTH as usize];
+        let mut right = left;
+        left[2] = 0.5;
+        right[2] = 0.5;
+        right[4] = 1.0;
+        let mut expected = [0.0_f64; WIDTH as usize];
+        expected[2] = 0.75;
+        expected[4] = 1.0;
+        for _ in 0..3 {
+            expected = std::array::from_fn(|x| {
+                (expected[x.saturating_sub(1)]
+                    + 4.0 * expected[x]
+                    + expected[(x + 1).min(WIDTH as usize - 1)])
+                    / 6.0
+            });
+        }
+        let result = evaluate(left, right, MaskCombineMode::Screen, 3.0);
+        for (pixel, expected) in result.pixels().iter().zip(expected) {
+            assert_eq!(pixel[3], 1.0);
+            assert!(pixel[..3].iter().all(|value| (f64::from(*value) - expected).abs() < 1.0e-6));
+        }
+
+        right[2] = 0.0;
+        let disjoint = evaluate(left, right, MaskCombineMode::Multiply, 3.0);
+        assert!(disjoint.pixels().iter().all(|pixel| *pixel == [0.0, 0.0, 0.0, 1.0]));
+
+        let constant = evaluate(
+            [0.25; WIDTH as usize],
+            [0.75; WIDTH as usize],
+            MaskCombineMode::Multiply,
+            100.0,
+        );
+        for pixel in constant.pixels() {
+            assert_eq!(pixel[3], 1.0);
+            assert!(pixel[..3].iter().all(|value| (*value - 0.1875).abs() < 1.0e-6));
+        }
+    }
+
+    #[test]
     fn set_matte_replays_the_ten_host_channel_values() {
         let texel = [50.0 / 255.0, 115.0 / 255.0, 195.0 / 255.0, 95.0 / 255.0];
         let expected = [

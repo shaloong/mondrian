@@ -5670,6 +5670,74 @@ mod tests {
     }
 
     #[test]
+    fn final_matte_feather_matches_full_frame_at_non_origin_roi() {
+        let mut builder = crate::EffectGraphBuilderState::new();
+        let source = builder.source();
+        let graded =
+            builder.append_unary(crate::EffectRenderOp::Vignette { intensity: 0.8, feather: 0.5 });
+        let mask = builder.add_mask_source(
+            crate::mask::MaskShape::Ellipse {
+                center: glam::Vec2::new(0.41, 0.52),
+                radii: glam::Vec2::new(0.21, 0.24),
+            },
+            0.0,
+            0.0,
+            0.85,
+        );
+        builder.set_current_output(mask);
+        let feathered = builder.append_matte_feather(3.0).unwrap();
+        let mix = builder.add_matte_mix(graded, source, feathered);
+        builder.set_current_output(mix);
+        let mut contract = dag_contract(EffectTemporalSpan::None);
+        contract.roi_propagation =
+            EffectRoiPropagation::Expand { horizontal_pixels: 3, vertical_pixels: 3 };
+        let graph = bind_graph(builder.finish(), contract);
+        let extent = EffectFrameExtent::new(29, 23);
+        let roi = EffectPixelRoi::new(11, 8, 7, 5);
+        let request = |output_roi| {
+            EffectTemporalExecutionRequest::new(
+                1,
+                EffectExecutionContinuity::Continuous,
+                TimelineTime::ONE,
+                extent,
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                output_roi,
+                ExecutionCancellationToken::new(),
+            )
+        };
+        let mut tile_provider = GradientProvider::new(extent);
+        let tiled = EffectExecutionSession::default()
+            .execute_temporal_roi_f32(&graph, &request(roi), &mut tile_provider)
+            .unwrap();
+        let full = EffectExecutionSession::default()
+            .execute_temporal_roi_f32(
+                &graph,
+                &request(extent.full_frame_roi()),
+                &mut GradientProvider::new(extent),
+            )
+            .unwrap();
+        let expected = crop_frame(
+            full.tile().pixels(),
+            extent,
+            roi,
+            &ExecutionCancellationToken::new(),
+        )
+        .unwrap();
+        for (actual, expected) in
+            tiled.tile().pixels().iter().flatten().zip(expected.iter().flatten())
+        {
+            assert!(
+                (actual - expected).abs() <= 1.0e-6,
+                "{actual} != {expected}"
+            );
+        }
+        assert_eq!(
+            tile_provider.requests[0].input_roi().region(),
+            EffectPixelRoi::new(8, 5, 13, 11)
+        );
+    }
+
+    #[test]
     fn pixel_local_coordinate_effects_match_full_frame_crop() {
         let mut contract = temporal_contract(TimelineTime::ZERO, EffectRoiPropagation::PixelLocal);
         contract.determinism = EffectDeterminism::FrameSeeded;

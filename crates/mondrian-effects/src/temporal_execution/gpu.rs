@@ -137,6 +137,20 @@ pub enum TemporalGpuStepOperation {
         /// Frozen selection and feather controls.
         qualifier: Arc<crate::PreparedQualifier>,
     },
+    /// Soften the final combined AlphaMask without leaving the alpha domain.
+    MatteFeather {
+        /// Mask value to soften.
+        input: TemporalGpuValue,
+        /// Shared fractional box controls.
+        kernel: crate::box_blur::MatteFeatherKernel,
+    },
+    /// Display the graph's exact AlphaMask as opaque working RGB.
+    MattePreview {
+        /// Mask value to observe.
+        input: TemporalGpuValue,
+        /// Reverse the displayed coverage.
+        invert: bool,
+    },
     /// Combine two AlphaMask values without leaving the alpha domain.
     MaskCombine {
         /// Left matte.
@@ -506,6 +520,18 @@ impl PreparedEffectTemporalExecution {
                     let operation = match &node.kind {
                         EffectGraphNodeKind::DomainEffect {
                             input,
+                            op: crate::EffectRenderOp::MattePreview { invert },
+                            domain_contract,
+                        } if domain_contract.input == EffectColorDomain::AlphaMask
+                            && domain_contract.output == EffectColorDomain::SceneLinearRgb =>
+                        {
+                            TemporalGpuStepOperation::MattePreview {
+                                input: gpu_value(program, node_input(program, context, *input)?)?,
+                                invert: *invert,
+                            }
+                        }
+                        EffectGraphNodeKind::DomainEffect {
+                            input,
                             op: crate::EffectRenderOp::Qualifier { qualifier },
                             domain_contract,
                         } if domain_contract.input == EffectColorDomain::SceneLinearRgb
@@ -520,7 +546,19 @@ impl PreparedEffectTemporalExecution {
                         | EffectGraphNodeKind::DomainEffect { input: graph_input, op, .. } => {
                             let input =
                                 gpu_value(program, node_input(program, context, *graph_input)?)?;
-                            if let crate::EffectRenderOp::TemporalFrameBlend { mix, .. } = op {
+                            if let EffectGraphNodeKind::DomainEffect { domain_contract, .. } =
+                                &node.kind
+                                && let Some(kernel) =
+                                    crate::box_blur::MatteFeatherKernel::for_graph_op(
+                                        op,
+                                        *domain_contract,
+                                    )
+                            {
+                                TemporalGpuStepOperation::MatteFeather { input, kernel }
+                            } else if let crate::EffectRenderOp::TemporalFrameBlend {
+                                mix, ..
+                            } = op
+                            {
                                 let sample = program.temporal_sample(*address).ok_or(
                                     EffectTemporalGpuPlanBlocker::MissingSampleEdge { node_id },
                                 )?;
@@ -793,7 +831,9 @@ mod tests {
         match operation {
             TemporalGpuStepOperation::Point { input, .. }
             | TemporalGpuStepOperation::Spatial { input, .. }
-            | TemporalGpuStepOperation::Qualifier { input, .. } => vec![*input],
+            | TemporalGpuStepOperation::Qualifier { input, .. }
+            | TemporalGpuStepOperation::MatteFeather { input, .. }
+            | TemporalGpuStepOperation::MattePreview { input, .. } => vec![*input],
             TemporalGpuStepOperation::TemporalBlend { input, sample, .. } => {
                 vec![*input, *sample]
             }

@@ -1991,6 +1991,21 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Immutable shared qualifier semantics.
         qualifier: Arc<crate::PreparedQualifier>,
     },
+    /// Separable feather within the AlphaMask domain.
+    MatteFeather {
+        /// Exact semantic DomainEffect node.
+        node: EffectGraphNodeId,
+        /// AlphaMask input materialization.
+        input: EffectMaterializationId,
+        /// AlphaMask output materialization.
+        output: EffectMaterializationId,
+        /// Producer-completion dependency.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token proved by the feather dispatch.
+        signal: EffectCompletionToken,
+        /// Shared fractional box controls.
+        kernel: crate::box_blur::MatteFeatherKernel,
+    },
     /// AlphaMask to opaque black/white working-RGB observation transform.
     MattePreview {
         /// Exact semantic DomainEffect node.
@@ -2176,6 +2191,7 @@ impl PreparedHeterogeneousGpuDispatch {
         match self {
             Self::PointChain { output, .. }
             | Self::Qualifier { output, .. }
+            | Self::MatteFeather { output, .. }
             | Self::MattePreview { output, .. }
             | Self::Copy { output, .. }
             | Self::Blend { output, .. }
@@ -2196,6 +2212,7 @@ impl PreparedHeterogeneousGpuDispatch {
         match self {
             Self::PointChain { waits, .. }
             | Self::Qualifier { waits, .. }
+            | Self::MatteFeather { waits, .. }
             | Self::MattePreview { waits, .. }
             | Self::Copy { waits, .. }
             | Self::Blend { waits, .. }
@@ -2216,6 +2233,7 @@ impl PreparedHeterogeneousGpuDispatch {
         match self {
             Self::PointChain { signal, .. }
             | Self::Qualifier { signal, .. }
+            | Self::MatteFeather { signal, .. }
             | Self::MattePreview { signal, .. }
             | Self::Copy { signal, .. }
             | Self::Blend { signal, .. }
@@ -2235,6 +2253,7 @@ impl PreparedHeterogeneousGpuDispatch {
         match self {
             Self::PointChain { nodes, .. } => output.extend(nodes.iter().copied()),
             Self::Qualifier { node, .. }
+            | Self::MatteFeather { node, .. }
             | Self::MattePreview { node, .. }
             | Self::Copy { node, .. }
             | Self::Blend { node, .. }
@@ -2257,6 +2276,7 @@ impl PreparedHeterogeneousGpuDispatch {
         match self {
             Self::PointChain { input, .. }
             | Self::Qualifier { input, .. }
+            | Self::MatteFeather { input, .. }
             | Self::MattePreview { input, .. }
             | Self::Copy { input, .. } => visit(*input)?,
             Self::Blend { base, overlay, .. } => {
@@ -4681,6 +4701,39 @@ fn prepare_gpu_suffix(
                                 waits: Arc::clone(waits),
                                 signal: *signal,
                                 qualifier: Arc::clone(qualifier),
+                            })
+                        }
+                        EffectGraphNodeKind::DomainEffect {
+                            op: op @ EffectRenderOp::BoxBlur { .. },
+                            domain_contract,
+                            ..
+                        } if *domain_contract == crate::box_blur::MATTE_FEATHER_DOMAIN => {
+                            let kernel = crate::box_blur::MatteFeatherKernel::for_graph_op(op, *domain_contract)
+                                .ok_or(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_matte_feather_kernel_unavailable",
+                                })?;
+                            let [input] = inputs.as_ref() else {
+                                return Err(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_matte_feather_dispatch_input_arity",
+                                });
+                            };
+                            let alpha_mask = EffectValueFormat::new(
+                                EffectWorkingPrecision::Float32,
+                                EffectColorDomain::AlphaMask,
+                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                            );
+                            if [input, output].into_iter().any(|id|
+                                plan.materialization(*id)
+                                    .and_then(|value| value.residency().format().exact_format())
+                                    != Some(alpha_mask)
+                            ) {
+                                return Err(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_matte_feather_dispatch_domain_mismatch",
+                                });
+                            }
+                            Ok(PreparedHeterogeneousGpuDispatch::MatteFeather {
+                                node: *node_id, input: *input, output: *output, waits: Arc::clone(waits),
+                                signal: *signal, kernel,
                             })
                         }
                         EffectGraphNodeKind::DomainEffect {

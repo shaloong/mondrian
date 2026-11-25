@@ -2084,8 +2084,11 @@ fn derive_implementation_requirements<'a>(
         let derived = match &node.kind {
             EffectGraphNodeKind::Source => EffectImplementationRequirements::IDENTITY,
             EffectGraphNodeKind::CustomSource { op, .. } => render_op_requirements(op),
-            EffectGraphNodeKind::UnaryEffect { input, op }
-            | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
+            EffectGraphNodeKind::DomainEffect { input, op, domain_contract } => {
+                requirement_for(*input, &requirements)
+                    .compose_node(domain_render_op_requirements(op, *domain_contract))
+            }
+            EffectGraphNodeKind::UnaryEffect { input, op } => {
                 requirement_for(*input, &requirements).compose_node(render_op_requirements(op))
             }
             EffectGraphNodeKind::Blend { base, overlay, .. } => {
@@ -2194,8 +2197,10 @@ fn raw_node_implementation_requirements(
 ) -> Option<EffectImplementationRequirements> {
     match &node.kind {
         EffectGraphNodeKind::Source => None,
+        EffectGraphNodeKind::DomainEffect { op, domain_contract, .. } => {
+            Some(domain_render_op_requirements(op, *domain_contract))
+        }
         EffectGraphNodeKind::UnaryEffect { op, .. }
-        | EffectGraphNodeKind::DomainEffect { op, .. }
         | EffectGraphNodeKind::CustomSource { op, .. } => {
             Some(raw_render_op_execution_requirements(op))
         }
@@ -2640,6 +2645,22 @@ impl EffectGraphBuilderState {
         let node_id = self.append_unary(op);
         self.active_domain_contract = previous;
         node_id
+    }
+
+    /// Feather the current AlphaMask with clamped edges and unchanged raster geometry.
+    ///
+    /// Radius is in output pixels. A zero radius retains the original value and identity.
+    pub fn append_matte_feather(
+        &mut self,
+        radius: f32,
+    ) -> Result<EffectGraphNodeId, crate::EffectGraphBuildError> {
+        use crate::box_blur::{MatteFeatherKernel, MATTE_FEATHER_DOMAIN};
+        let kernel = MatteFeatherKernel::from_authored_radius(radius)
+            .ok_or(crate::EffectGraphBuildError::InvalidGraph)?;
+        if kernel.box_radius() <= f32::EPSILON {
+            return Ok(self.current_output);
+        }
+        Ok(self.append_unary_in_domain(kernel.render_op(), MATTE_FEATHER_DOMAIN))
     }
 
     pub fn add_unary_from(
@@ -3849,6 +3870,18 @@ fn external_input_execution_modes(format: crate::EffectValueFormat) -> EffectExe
         }
         crate::EffectWorkingPrecision::Float16 => EffectExecutionModes::NONE,
     }
+}
+
+fn domain_render_op_requirements(
+    op: &EffectRenderOp,
+    domain: EffectColorDomainContract,
+) -> EffectImplementationRequirements {
+    let mut requirements = render_op_requirements(op);
+    if crate::box_blur::MatteFeatherKernel::for_graph_op(op, domain).is_some() {
+        requirements.execution_modes =
+            requirements.execution_modes.union(EffectExecutionModes::GPU_F32);
+    }
+    requirements
 }
 
 /// Requirements of one operation that reads a second input.

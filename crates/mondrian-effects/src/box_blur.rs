@@ -21,6 +21,68 @@ pub const BOX_BLUR_AUTHOR_MIN_ITERATIONS: i64 = 1;
 /// Largest authored iteration count.
 pub const BOX_BLUR_AUTHOR_MAX_ITERATIONS: i64 = 50;
 
+/// Maximum authored radius of a final-mask feather.
+pub const MATTE_FEATHER_MAX_RADIUS: f32 = 100.0;
+
+pub(crate) const MATTE_FEATHER_DOMAIN: crate::EffectColorDomainContract =
+    crate::EffectColorDomainContract {
+        input: crate::EffectColorDomain::AlphaMask,
+        output: crate::EffectColorDomain::AlphaMask,
+    };
+
+/// Fractional box controls shared by the scalar and device matte feather.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatteFeatherKernel {
+    box_radius: f32,
+}
+
+impl MatteFeatherKernel {
+    /// The existing Gaussian approximation uses three separable box rounds.
+    pub const ITERATIONS: u32 = crate::adjustment::GAUSSIAN_BOX_PASS_COUNT as u32;
+
+    pub(crate) fn from_authored_radius(radius: f32) -> Option<Self> {
+        if !(0.0..=MATTE_FEATHER_MAX_RADIUS).contains(&radius) {
+            return None;
+        }
+        let kernel = crate::adjustment::gaussian_fractional_box_kernel(radius);
+        Some(Self {
+            box_radius: kernel.whole_radius as f32 + kernel.edge_weight,
+        })
+    }
+
+    pub(crate) fn render_op(self) -> crate::EffectRenderOp {
+        crate::EffectRenderOp::BoxBlur {
+            radius: self.box_radius,
+            iterations: Self::ITERATIONS,
+            direction: BoxBlurDirection::HorizontalAndVertical,
+            repeat_edge_pixels: true,
+        }
+    }
+
+    pub(crate) fn for_graph_op(
+        op: &crate::EffectRenderOp,
+        domain: crate::EffectColorDomainContract,
+    ) -> Option<Self> {
+        let crate::EffectRenderOp::BoxBlur {
+            radius,
+            iterations: Self::ITERATIONS,
+            direction: BoxBlurDirection::HorizontalAndVertical,
+            repeat_edge_pixels: true,
+        } = *op
+        else {
+            return None;
+        };
+        let max = Self::from_authored_radius(MATTE_FEATHER_MAX_RADIUS)?.box_radius;
+        (domain == MATTE_FEATHER_DOMAIN && radius > f32::EPSILON && radius <= max)
+            .then_some(Self { box_radius: radius })
+    }
+
+    /// The canonical box radius already includes the fractional outer pair of taps.
+    pub fn box_radius(self) -> f32 {
+        self.box_radius
+    }
+}
+
 /// Largest input halo the planner is asked to materialize as an explicit ROI
 /// expansion. Wider kernels are expressed as a full-frame input instead.
 const MAX_BOX_BLUR_INPUT_HALO_PIXELS: u64 = 4_096;
