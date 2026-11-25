@@ -1078,6 +1078,32 @@ fn record_gpu_suffix(
                     }
                 }
                 PreparedHeterogeneousGpuStep::Dispatch(
+                    PreparedHeterogeneousGpuDispatch::MatteFeather {
+                        input, output, kernel, ..
+                    },
+                ) => {
+                    let input_handle = handles.get(input).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_matte_feather_input_not_materialized",
+                        },
+                    )?;
+                    let record = resources.compositor.record_matte_feather_pass(
+                        resources.device,
+                        resources.encoder,
+                        resources.ids,
+                        resources.table,
+                        resources.resource_pool.map(Arc::as_ref),
+                        input_handle,
+                        *kernel,
+                    )?;
+                    retained.extend(record.scratch);
+                    if handles.insert(*output, record.output).is_some() {
+                        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_dispatch_replaced_materialization",
+                        });
+                    }
+                }
+                PreparedHeterogeneousGpuStep::Dispatch(
                     PreparedHeterogeneousGpuDispatch::MattePreview {
                         input, output, invert, ..
                     },
@@ -2076,6 +2102,7 @@ fn gpu_recording_device_demand(
             PreparedHeterogeneousGpuDispatch::Qualifier { qualifier, .. } => {
                 u64::from(qualifier.gpu_pass_count())
             }
+            PreparedHeterogeneousGpuDispatch::MatteFeather { .. } => 2,
             PreparedHeterogeneousGpuDispatch::PointChain { .. }
             | PreparedHeterogeneousGpuDispatch::MattePreview { .. }
             | PreparedHeterogeneousGpuDispatch::Copy { .. }
@@ -2385,21 +2412,29 @@ fn validate_gpu_suffix_schedule(
                     waits,
                     signal,
                     ..
+                }
+                | PreparedHeterogeneousGpuDispatch::MatteFeather {
+                    node,
+                    input,
+                    output,
+                    waits,
+                    signal,
+                    ..
                 },
             ) => {
-                require_plan(live.contains(input), "gpu_matte_preview_input_not_live")?;
+                require_plan(live.contains(input), "gpu_matte_input_not_live")?;
                 require_plan(
                     waits.len() == 1 && completed.contains(&waits[0]),
-                    "gpu_matte_preview_wait_not_completed",
+                    "gpu_matte_wait_not_completed",
                 )?;
                 let input_value = plan.materialization(*input).ok_or(
                     HeterogeneousGpuContinuationError::InvalidPlan {
-                        reason: "gpu_matte_preview_input_materialization_missing",
+                        reason: "gpu_matte_input_materialization_missing",
                     },
                 )?;
                 let output_value = plan.materialization(*output).ok_or(
                     HeterogeneousGpuContinuationError::InvalidPlan {
-                        reason: "gpu_matte_preview_output_materialization_missing",
+                        reason: "gpu_matte_output_materialization_missing",
                     },
                 )?;
                 let scene_linear = EffectValueFormat::new(
@@ -2412,19 +2447,26 @@ fn validate_gpu_suffix_schedule(
                     EffectColorDomain::AlphaMask,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
+                let output_format = if matches!(
+                    step,
+                    PreparedHeterogeneousGpuStep::Dispatch(
+                        PreparedHeterogeneousGpuDispatch::MatteFeather { .. }
+                    )
+                ) {
+                    alpha_mask
+                } else {
+                    scene_linear
+                };
                 require_plan(
                     input_value.completion() == waits[0]
                         && output_value.completion() == *signal
                         && output_value.value() == *node
                         && input_value.residency().format().exact_format() == Some(alpha_mask)
-                        && output_value.residency().format().exact_format() == Some(scene_linear),
-                    "gpu_matte_preview_value_domain_or_token_mismatch",
+                        && output_value.residency().format().exact_format() == Some(output_format),
+                    "gpu_matte_value_domain_or_token_mismatch",
                 )?;
-                require_plan(
-                    live.insert(*output),
-                    "gpu_matte_preview_output_already_live",
-                )?;
-                require_plan(completed.insert(*signal), "gpu_matte_preview_signal_reused")?;
+                require_plan(live.insert(*output), "gpu_matte_output_already_live")?;
+                require_plan(completed.insert(*signal), "gpu_matte_signal_reused")?;
                 nodes.push(*node);
             }
             PreparedHeterogeneousGpuStep::Dispatch(PreparedHeterogeneousGpuDispatch::Copy {
@@ -4748,13 +4790,57 @@ mod tests {
         )
         .expect("heterogeneous GPU runtime");
         let cases = [
-            ("hsl", false, false, 0, 0.0, 1_u64),
-            ("three_dimensional", false, true, 1, 1.0, 4_u64),
-            ("three_dimensional", true, true, 1, 1.0, 4_u64),
+            ("hsl", false, false, 0, 0.0, 1_u64, 0.0),
+            ("three_dimensional", false, true, 1, 1.0, 4_u64, 0.0),
+            ("three_dimensional", true, true, 1, 1.0, 4_u64, 0.0),
+            ("three_dimensional", true, false, 0, 0.0, 1_u64, 100.0),
         ];
 
-        for (mode, matte_preview, invert, denoise_radius, blur_radius, qualifier_passes) in cases {
+        for (
+            mode,
+            matte_preview,
+            invert,
+            denoise_radius,
+            blur_radius,
+            qualifier_passes,
+            feather_radius,
+        ) in cases
+        {
             let graph = qualifier_graph(mode, matte_preview, invert, denoise_radius, blur_radius);
+            let graph = if feather_radius > 0.0 {
+                use mondrian_effects::{
+                    EffectColorDomainContract, EffectGraphBuilderState, EffectGraphNodeKind,
+                    EffectRenderOp,
+                };
+                let qualifier = graph
+                    .graph()
+                    .nodes
+                    .iter()
+                    .find_map(|node| match &node.kind {
+                        EffectGraphNodeKind::DomainEffect {
+                            op: op @ EffectRenderOp::Qualifier { .. },
+                            domain_contract,
+                            ..
+                        } => Some((op.clone(), *domain_contract)),
+                        _ => None,
+                    })
+                    .expect("authored qualifier");
+                let mut builder = EffectGraphBuilderState::new();
+                builder.append_unary(EffectRenderOp::GaussianBlur { radius: 2.0 });
+                builder.append_unary_in_domain(qualifier.0, qualifier.1);
+                builder.append_matte_feather(feather_radius).unwrap();
+                builder.append_unary_in_domain(
+                    EffectRenderOp::MattePreview { invert },
+                    EffectColorDomainContract {
+                        input: EffectColorDomain::AlphaMask,
+                        output: EffectColorDomain::SceneLinearRgb,
+                    },
+                );
+                mondrian_effects::compile_reference_render_graph(builder.finish())
+                    .expect("feathered qualifier graph")
+            } else {
+                graph
+            };
             let expected = apply_compiled_effect_graph_rgba_f32(
                 mondrian_effects::EffectFloatFrameView::new(
                     mondrian_effects::EffectFrameExtent::new(EXTENT.width(), EXTENT.height()),
@@ -4779,7 +4865,10 @@ mod tests {
             )
             .expect("prepare GPU Qualifier route");
             assert_eq!(prepared.cpu_nodes().len(), 1);
-            assert_eq!(prepared.gpu_suffix().node_ids().len(), 2);
+            assert_eq!(
+                prepared.gpu_suffix().node_ids().len(),
+                2 + usize::from(feather_radius > 0.0)
+            );
             let qualifier_dispatch = prepared
                 .gpu_suffix()
                 .steps()
@@ -4812,15 +4901,37 @@ mod tests {
                 prepared.gpu_suffix(),
             )
             .expect("Qualifier recording requirements");
+            let physical_outputs = qualifier_passes + 2 + 2 * u64::from(feather_radius > 0.0);
             assert_eq!(
                 requirements.device_materializations(),
-                qualifier_passes + 2,
-                "physical admission must include upload, every private Qualifier pass texture, and final Mask/preview output"
+                physical_outputs,
+                "admission must include upload, qualifier, feather output and scratch, and final mask or preview output"
             );
-            assert_eq!(
-                requirements.device_bytes(),
-                frame_bytes * (qualifier_passes + 2)
-            );
+            assert_eq!(requirements.device_bytes(), frame_bytes * physical_outputs);
+            if feather_radius > 0.0 {
+                let extent = EffectFrameExtent::new(4096, 2160);
+                let dci = PreparedHeterogeneousEffectWork::prepare(
+                    Arc::clone(&graph),
+                    capability.environment(),
+                    capability.request(
+                        extent,
+                        EffectGraphExecutionBudget::new(2 << 30, 2 << 30, 2 << 30, 32, 64),
+                    ),
+                )
+                .expect("DCI 4K footprint plan");
+                let footprint = HeterogeneousGpuRecordingRequirements::from_prepared(
+                    dci.plan(),
+                    dci.gpu_suffix(),
+                )
+                .expect("DCI 4K footprint evidence");
+                assert_eq!(footprint.device_materializations(), physical_outputs);
+                let frame_bytes = 4096 * 2160 * 16;
+                let feather_bytes = footprint.device_bytes() - frame_bytes * (qualifier_passes + 2);
+                assert_eq!(feather_bytes, 283_115_520);
+                eprintln!(
+                    "Final matte feather DCI 4K output plus private scratch: {feather_bytes} bytes"
+                );
+            }
             assert!(matches!(
                 requirements.validate(HeterogeneousGpuResourceGrant::new(
                     requirements.upload_bytes(),

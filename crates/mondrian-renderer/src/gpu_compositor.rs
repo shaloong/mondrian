@@ -517,7 +517,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0, 0.0, 0.0, matte);
     }
     if (uniforms.source_kind == 9u) {
-        let sampled = textureSample(layer_tex, linear_sampler, in.uv).a;
+        let coordinate = vec2<i32>(floor(in.position.xy));
+        let sampled = textureLoad(layer_tex, coordinate, 0).a;
         let matte = select(sampled, 1.0 - sampled, uniforms.mask_invert != 0u);
         return vec4<f32>(matte, matte, matte, 1.0);
     }
@@ -5464,8 +5465,8 @@ pub struct GpuPointEffectRecord {
     pub processed_pixels: u64,
 }
 
-/// Result of recording one refined GPU qualifier dispatch.
-pub(crate) struct GpuQualifierRecord {
+/// AlphaMask recording and the private targets retained until submission.
+pub(crate) struct GpuAlphaMaskRecord {
     /// AlphaMask-domain output retained in the shared resource table.
     pub output: GpuColorFrameHandle,
     /// Internal pass targets that must live until command submission.
@@ -7997,7 +7998,7 @@ impl GpuFrameCompositor {
         input: &GpuColorFrameHandle,
         qualifier: &PreparedQualifier,
         working_color_space: mondrian_core::WorkingColorSpace,
-    ) -> Result<GpuQualifierRecord, GpuCompositeError> {
+    ) -> Result<GpuAlphaMaskRecord, GpuCompositeError> {
         validate_qualifier_input(input, working_color_space)?;
         let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
         let input_descriptor = input.descriptor();
@@ -8063,7 +8064,49 @@ impl GpuFrameCompositor {
         };
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
-        Ok(GpuQualifierRecord { output, scratch })
+        Ok(GpuAlphaMaskRecord { output, scratch })
+    }
+
+    /// Feather a typed matte using one private working texture and its output.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_matte_feather_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        kernel: mondrian_effects::box_blur::MatteFeatherKernel,
+    ) -> Result<GpuAlphaMaskRecord, GpuCompositeError> {
+        validate_alpha_mask_input(input)?;
+        let source = table.get(input).map_err(GpuCompositeError::ResourceTable)?.resource();
+        let descriptor = input.descriptor();
+        let scratch = create_working_resource(
+            device,
+            ids,
+            descriptor,
+            "gpu-matte-feather-scratch",
+            resource_pool,
+        )?;
+        let destination = create_working_resource(
+            device,
+            ids,
+            descriptor,
+            "gpu-matte-feather-output",
+            resource_pool,
+        )?;
+        self.spatial.record_matte_feather(
+            device,
+            encoder,
+            &source.texture,
+            &scratch.resource().texture,
+            &destination.resource().texture,
+            kernel,
+        );
+        let output = destination.handle().clone();
+        table.insert(destination).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuAlphaMaskRecord { output, scratch: vec![scratch] })
     }
 
     /// Observe one AlphaMask as opaque black/white scene-linear RGB.
@@ -8080,7 +8123,7 @@ impl GpuFrameCompositor {
         invert: bool,
         working_color_space: mondrian_core::WorkingColorSpace,
     ) -> Result<GpuPointEffectRecord, GpuCompositeError> {
-        validate_matte_preview_input(input)?;
+        validate_alpha_mask_input(input)?;
         let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
         let input_descriptor = input.descriptor();
         let output_descriptor = ColorFrameDescriptor {
@@ -8708,7 +8751,7 @@ fn validate_qualifier_input(
     Ok(())
 }
 
-fn validate_matte_preview_input(input: &GpuColorFrameHandle) -> Result<(), GpuCompositeError> {
+fn validate_alpha_mask_input(input: &GpuColorFrameHandle) -> Result<(), GpuCompositeError> {
     let actual = input.descriptor();
     let expected = ColorFrameDescriptor {
         width: actual.width,

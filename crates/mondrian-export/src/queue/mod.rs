@@ -16116,6 +16116,8 @@ mod tests {
             Some(GrainTestProtection {
                 combination: mondrian_effects::MaskCombineMode::Screen,
                 layer_matte: None,
+                feather_radius: 0.0,
+                view_matte: false,
             }),
         );
     }
@@ -16128,6 +16130,8 @@ mod tests {
             Some(GrainTestProtection {
                 combination: mondrian_effects::MaskCombineMode::Multiply,
                 layer_matte: None,
+                feather_radius: 0.0,
+                view_matte: false,
             }),
         );
     }
@@ -16144,6 +16148,8 @@ mod tests {
                     invert: false,
                     stretch: false,
                 }),
+                feather_radius: 0.0,
+                view_matte: false,
             }),
         );
     }
@@ -16160,6 +16166,44 @@ mod tests {
                     invert: true,
                     stretch: true,
                 }),
+                feather_radius: 0.0,
+                view_matte: false,
+            }),
+        );
+    }
+
+    #[test]
+    #[ignore = "real GPU Export post-combination feather qualification"]
+    fn fixed_media_calibration_feathers_the_combined_matte_before_mixing() {
+        verify_fixed_media_calibration(
+            true,
+            Some(GrainTestProtection {
+                combination: mondrian_effects::MaskCombineMode::Screen,
+                layer_matte: Some(GrainTestLayerMatte {
+                    channel: mondrian_effects::SetMatteChannel::Alpha,
+                    invert: false,
+                    stretch: false,
+                }),
+                feather_radius: 3.0,
+                view_matte: false,
+            }),
+        );
+    }
+
+    #[test]
+    #[ignore = "real GPU Export observation of the feathered matte"]
+    fn fixed_media_calibration_observes_the_feathered_temporal_matte() {
+        verify_fixed_media_calibration(
+            true,
+            Some(GrainTestProtection {
+                combination: mondrian_effects::MaskCombineMode::Multiply,
+                layer_matte: Some(GrainTestLayerMatte {
+                    channel: mondrian_effects::SetMatteChannel::Luminance,
+                    invert: true,
+                    stretch: true,
+                }),
+                feather_radius: 100.0,
+                view_matte: true,
             }),
         );
     }
@@ -16175,6 +16219,8 @@ mod tests {
     struct GrainTestProtection {
         combination: mondrian_effects::MaskCombineMode,
         layer_matte: Option<GrainTestLayerMatte>,
+        feather_radius: f32,
+        view_matte: bool,
     }
 
     fn verify_fixed_media_calibration(verify_gpu: bool, protection: Option<GrainTestProtection>) {
@@ -16468,9 +16514,10 @@ mod tests {
         .with_execution_contract(EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             temporal_input: temporal.temporal_extent(),
-            roi_propagation: EffectRoiPropagation::Expand {
-                horizontal_pixels: halo,
-                vertical_pixels: halo,
+            roi_propagation: if protection.is_some_and(|settings| settings.feather_radius > 0.0) {
+                EffectRoiPropagation::FullFrame
+            } else {
+                EffectRoiPropagation::Expand { horizontal_pixels: halo, vertical_pixels: halo }
             },
             ..EffectExecutionContract::IDENTITY
         });
@@ -16499,9 +16546,17 @@ mod tests {
         }
         register_effect_definition(definition.with_branching_graph_builder(Arc::new(
             move |effect, _, graph| {
-                let original = graph.current_output();
-                graph.append_unary(EffectRenderOp::TemporalGrain { grade: temporal });
-                let filtered = graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial });
+                let entering = graph.current_output();
+                let current = graph.append_unary(EffectRenderOp::TemporalGrain { grade: temporal });
+                let view_matte = protection.is_some_and(|controls| controls.view_matte);
+                let (original, filtered) = if view_matte {
+                    (current, None)
+                } else {
+                    (
+                        entering,
+                        Some(graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial })),
+                    )
+                };
                 if let Some(([color, secondary], protection)) = &qualifiers {
                     let mut qualify = |qualifier: &Arc<PreparedQualifier>| {
                         graph.set_current_output(original);
@@ -16537,8 +16592,20 @@ mod tests {
                     };
                     let matte =
                         graph.add_mask_combine_with_mode(left, right, protection.combination);
-                    let mix = graph.add_matte_mix_with_amount(filtered, original, matte, 0.65);
-                    graph.set_current_output(mix);
+                    graph.set_current_output(matte);
+                    let matte = graph.append_matte_feather(protection.feather_radius)?;
+                    if let Some(filtered) = filtered {
+                        let mix = graph.add_matte_mix_with_amount(filtered, original, matte, 0.65);
+                        graph.set_current_output(mix);
+                    } else {
+                        graph.append_unary_in_domain(
+                            EffectRenderOp::MattePreview { invert: false },
+                            EffectColorDomainContract {
+                                input: EffectColorDomain::AlphaMask,
+                                output: EffectColorDomain::SceneLinearRgb,
+                            },
+                        );
+                    }
                 }
                 Ok(())
             },
@@ -16608,10 +16675,10 @@ mod tests {
                     after.temporal_gpu_schedules - before.temporal_gpu_schedules,
                     1
                 );
-                if protection.is_some() {
+                if let Some(protection) = protection {
                     assert_eq!(
                         after.temporal_gpu_dispatches - before.temporal_gpu_dispatches,
-                        6
+                        6 + u64::from(protection.feather_radius > 0.0 && !protection.view_matte)
                     );
                 }
                 assert_eq!(

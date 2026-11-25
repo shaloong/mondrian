@@ -6938,9 +6938,7 @@ impl EffectSpatialGpu {
         scratch: &[wgpu::Texture],
         controls: [f32; 3],
     ) -> Result<wgpu::Texture, EffectSpatialGpuError> {
-        use mondrian_effects::unsharp_mask::{
-            unsharp_mask_blur_controls, UNSHARP_MASK_BLUR_ITERATIONS,
-        };
+        use mondrian_effects::unsharp_mask::unsharp_mask_blur_controls;
         let [gain, radius, threshold] = controls;
         let size = [source.width() as f32, source.height() as f32, 0.0, 0.0];
         let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
@@ -6969,8 +6967,66 @@ impl EffectSpatialGpu {
             "unsharp_mask_scratch_geometry",
         ))?;
         let alternate_view = alternate.create_view(&Default::default());
-        let [whole, edge_weight, normalization] = unsharp_mask_blur_controls(radius);
-        for iteration in 0..UNSHARP_MASK_BLUR_ITERATIONS {
+        self.record_fractional_gaussian(
+            device,
+            encoder,
+            size,
+            [&source_view, &destination_view, &alternate_view],
+            unsharp_mask_blur_controls(radius),
+            false,
+        );
+        self.record_composite_pass(
+            device,
+            encoder,
+            &self.unsharp_mask,
+            &source_view,
+            &alternate_view,
+            &destination_view,
+            &uniforms,
+        );
+        Ok(destination.clone())
+    }
+
+    /// Soften an AlphaMask with two destinations reused across the six draws.
+    pub(crate) fn record_matte_feather(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source: &wgpu::Texture,
+        scratch: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        kernel: mondrian_effects::box_blur::MatteFeatherKernel,
+    ) {
+        let kernel = BoxKernel::new(kernel.box_radius());
+        self.record_fractional_gaussian(
+            device,
+            encoder,
+            [source.width() as f32, source.height() as f32, 0.0, 0.0],
+            [
+                &source.create_view(&Default::default()),
+                &scratch.create_view(&Default::default()),
+                &destination.create_view(&Default::default()),
+            ],
+            [
+                kernel.whole_radius as f32,
+                kernel.fraction,
+                kernel.normalization(),
+            ],
+            true,
+        );
+    }
+
+    fn record_fractional_gaussian(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        size: [f32; 4],
+        [source, horizontal_target, vertical_target]: [&wgpu::TextureView; 3],
+        [whole, edge_weight, normalization]: [f32; 3],
+        straight_output: bool,
+    ) {
+        let iterations = mondrian_effects::box_blur::MatteFeatherKernel::ITERATIONS;
+        for iteration in 0..iterations {
             let first = iteration == 0;
             let horizontal = SpatialPassUniform {
                 size,
@@ -6983,34 +7039,29 @@ impl EffectSpatialGpu {
                 device,
                 encoder,
                 &self.box_blur,
-                if first { &source_view } else { &alternate_view },
-                &destination_view,
+                if first { source } else { vertical_target },
+                horizontal_target,
                 &horizontal,
             );
             let vertical = SpatialPassUniform {
                 params: [0.0, 1.0, whole, edge_weight],
-                extra: [normalization, 1.0, 0.0, 0.0],
+                extra: [
+                    normalization,
+                    1.0,
+                    0.0,
+                    f32::from(u8::from(straight_output && iteration + 1 == iterations)),
+                ],
                 ..horizontal
             };
             self.record_pass(
                 device,
                 encoder,
                 &self.box_blur,
-                &destination_view,
-                &alternate_view,
+                horizontal_target,
+                vertical_target,
                 &vertical,
             );
         }
-        self.record_composite_pass(
-            device,
-            encoder,
-            &self.unsharp_mask,
-            &source_view,
-            &alternate_view,
-            &destination_view,
-            &uniforms,
-        );
-        Ok(destination.clone())
     }
 
     /// Records the three-pass deband chain.

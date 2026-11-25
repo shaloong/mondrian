@@ -311,12 +311,16 @@ pub fn execute_temporal_schedule(
                 .saturating_add(chain.scratch_bytes.saturating_sub(pooled_bytes));
             Some(chain)
         } else {
-            if let TemporalGpuStepOperation::Qualifier { qualifier, .. } = step.operation() {
-                let scratch = u64::from(qualifier.gpu_pass_count().saturating_sub(1));
-                per_stage_spatial_scratch = per_stage_spatial_scratch.saturating_add(
-                    (extent_pixels as u64).saturating_mul(16).saturating_mul(scratch),
-                );
-            }
+            let private_textures = match step.operation() {
+                TemporalGpuStepOperation::Qualifier { qualifier, .. } => {
+                    u64::from(qualifier.gpu_pass_count().saturating_sub(1))
+                }
+                TemporalGpuStepOperation::MatteFeather { .. } => 1,
+                _ => 0,
+            };
+            per_stage_spatial_scratch = per_stage_spatial_scratch.saturating_add(
+                (extent_pixels as u64).saturating_mul(16).saturating_mul(private_textures),
+            );
             None
         };
         let required_bytes = pooled_spatial_scratch.saturating_add(per_stage_spatial_scratch);
@@ -417,7 +421,7 @@ pub fn execute_temporal_schedule(
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("temporal-gpu-schedule"),
         });
-        let mut qualifier_scratch = Vec::new();
+        let mut matte_scratch = Vec::new();
         for (step, spatial_chain) in schedule.steps().iter().zip(&spatial_chains) {
             let value = step.value();
             let seed = schedule
@@ -496,8 +500,39 @@ pub fn execute_temporal_schedule(
                             working_color_space,
                         )
                         .map_err(TemporalGpuExecutionError::Composite)?;
-                    qualifier_scratch.extend(record.scratch);
+                    matte_scratch.extend(record.scratch);
                     record.output
+                }
+                TemporalGpuStepOperation::MatteFeather { input, kernel } => {
+                    let record = compositor
+                        .record_matte_feather_pass(
+                            device,
+                            &mut encoder,
+                            ids,
+                            table,
+                            Some(resource_pool.as_ref()),
+                            &input_handle(*input)?,
+                            *kernel,
+                        )
+                        .map_err(TemporalGpuExecutionError::Composite)?;
+                    matte_scratch.extend(record.scratch);
+                    record.output
+                }
+                TemporalGpuStepOperation::MattePreview { input, invert } => {
+                    compositor
+                        .record_matte_preview_pass(
+                            device,
+                            queue,
+                            &mut encoder,
+                            ids,
+                            table,
+                            Some(resource_pool.as_ref()),
+                            &input_handle(*input)?,
+                            *invert,
+                            working_color_space,
+                        )
+                        .map_err(TemporalGpuExecutionError::Composite)?
+                        .output
                 }
                 TemporalGpuStepOperation::MaskCombine { left, right, mask_op } => {
                     compositor
