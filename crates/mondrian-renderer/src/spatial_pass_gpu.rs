@@ -4614,9 +4614,10 @@ impl EffectSpatialGpu {
                     controls,
                 )
             }
-            EffectGpuSpatialPass::SetMatte { grade, sampling, .. } => {
+            EffectGpuSpatialPass::SetMatte { grade, sampling, output_matte, .. } => {
                 let (params, mut extra) = grade.gpu_controls();
                 extra[2] = f32::from(u8::from(sampling.is_none()));
+                extra[3] = f32::from(u8::from(output_matte));
                 (
                     &self.set_matte,
                     sampling.unwrap_or_else(|| grade.sampling()),
@@ -12325,7 +12326,11 @@ fn set_matte_channel(pixel: vec4<f32>, channel: u32) -> f32 {
 @fragment
 fn fs_set_matte(input: VsOut) -> @location(0) vec4<f32> {
     let index = vec2<i32>(floor(input.position.xy));
-    let primary = textureLoad(original_texture, index, 0);
+    let output_matte = uniforms.extra.w != 0.0;
+    var primary = vec4<f32>(0.0);
+    if (!output_matte) {
+        primary = textureLoad(original_texture, index, 0);
+    }
     let associated = uniforms.extra.y != 0.0;
     var matte: vec4<f32>;
     if (uniforms.extra.z != 0.0) {
@@ -12342,6 +12347,7 @@ fn fs_set_matte(input: VsOut) -> @location(0) vec4<f32> {
     }
     var coverage = clamp(set_matte_channel(matte, u32(uniforms.params.x)), 0.0, 1.0);
     if (uniforms.params.y != 0.0) { coverage = 1.0 - coverage; }
+    if (output_matte) { return vec4<f32>(0.0, 0.0, 0.0, coverage); }
     if (uniforms.params.z != 0.0) { coverage *= clamp(primary.a, 0.0, 1.0); }
     return vec4<f32>(primary.rgb, coverage);
 }
@@ -16231,6 +16237,7 @@ fn cs_main(@builtin(local_invocation_id) lid: vec3<u32>) {
             grade,
             sampling: Some(grade.sampling()),
             external_slot: Some(0),
+            output_matte: false,
         };
         let texture = executor
             .record_auxiliary(

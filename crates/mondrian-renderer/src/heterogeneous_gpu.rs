@@ -2603,6 +2603,26 @@ fn validate_gpu_suffix_schedule(
                     auxiliary_domain,
                     mondrian_core::ColorFrameAlpha::StraightCoverage,
                 );
+                let output_format = if matches!(
+                    step,
+                    PreparedHeterogeneousGpuStep::Dispatch(
+                        PreparedHeterogeneousGpuDispatch::SetMatte {
+                            pass: mondrian_effects::EffectGpuSpatialPass::SetMatte {
+                                output_matte: true,
+                                ..
+                            },
+                            ..
+                        }
+                    )
+                ) {
+                    EffectValueFormat::new(
+                        EffectWorkingPrecision::Float32,
+                        EffectColorDomain::AlphaMask,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    )
+                } else {
+                    scene_linear
+                };
                 require_plan(
                     input_value.completion() == waits[0]
                         && mask_value.completion() == waits[1]
@@ -2610,7 +2630,7 @@ fn validate_gpu_suffix_schedule(
                         && output_value.value() == *node
                         && input_value.residency().format().exact_format() == Some(scene_linear)
                         && mask_value.residency().format().exact_format() == Some(auxiliary_format)
-                        && output_value.residency().format().exact_format() == Some(scene_linear),
+                        && output_value.residency().format().exact_format() == Some(output_format),
                     "gpu_mask_value_domain_or_token_mismatch",
                 )?;
                 require_plan(live.insert(*output), "gpu_mask_output_already_live")?;

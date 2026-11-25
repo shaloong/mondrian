@@ -330,7 +330,7 @@ pub fn execute_temporal_schedule(
         spatial_chains.push(chain);
     }
     let mut values: HashMap<TemporalGpuValue, GpuColorFrameHandle> = HashMap::new();
-    let mut peak_resident = 0usize;
+    let mut resident_bytes = 0usize;
     let mut uploads = 0usize;
     let mut dispatches = 0usize;
 
@@ -369,25 +369,28 @@ pub fn execute_temporal_schedule(
                     (leaf_extent, sampling, format.alpha(), pixels)
                 }
             };
-            if leaf_extent != extent {
+            if matches!(leaf.request(), TemporalGpuLeafRequest::Source(_)) && leaf_extent != extent
+            {
                 return Err(TemporalGpuExecutionError::LeafExtentMismatch {
                     value,
                     expected: extent,
                     actual: leaf_extent,
                 });
             }
-            if pixels.len() != extent_pixels {
+            let leaf_pixels =
+                (leaf_extent.width() as usize).saturating_mul(leaf_extent.height() as usize);
+            if pixels.len() != leaf_pixels {
                 return Err(TemporalGpuExecutionError::LeafCoverageMismatch {
                     value,
-                    expected: extent_pixels,
+                    expected: leaf_pixels,
                     actual: pixels.len(),
                 });
             }
             let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
                 sampling,
                 alpha,
-                width: extent.width(),
-                height: extent.height(),
+                width: leaf_extent.width(),
+                height: leaf_extent.height(),
                 color_space: working_color_space,
                 data: pixels,
             });
@@ -408,7 +411,7 @@ pub fn execute_temporal_schedule(
                 .map_err(|error| TemporalGpuExecutionError::ResourceTable(format!("{error:?}")))?;
             values.insert(value, handle);
             uploads = uploads.saturating_add(1);
-            peak_resident = peak_resident.max(values.len());
+            resident_bytes = resident_bytes.saturating_add(leaf_pixels.saturating_mul(16));
         }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -589,7 +592,7 @@ pub fn execute_temporal_schedule(
             };
             values.insert(value, output);
             dispatches = dispatches.saturating_add(1);
-            peak_resident = peak_resident.max(values.len());
+            resident_bytes = resident_bytes.saturating_add(extent_pixels.saturating_mul(16));
         }
 
         let root = schedule.root();
@@ -683,20 +686,17 @@ pub fn execute_temporal_schedule(
             pixels,
         )
         .map_err(TemporalGpuExecutionError::FrameProvider)?;
-        Ok((tile, peak_resident))
+        Ok((tile, resident_bytes))
     })();
 
     for handle in values.into_values() {
         let _ = table.take(&handle);
     }
-    let (tile, peak_resident) = executed?;
-    let peak_working_bytes = extent_pixels
-        .saturating_mul(16)
-        .saturating_mul(peak_resident.max(1))
-        .saturating_add(
-            usize::try_from(pooled_spatial_scratch.saturating_add(per_stage_spatial_scratch))
-                .unwrap_or(usize::MAX),
-        );
+    let (tile, resident_bytes) = executed?;
+    let peak_working_bytes = resident_bytes.saturating_add(
+        usize::try_from(pooled_spatial_scratch.saturating_add(per_stage_spatial_scratch))
+            .unwrap_or(usize::MAX),
+    );
     Ok(TemporalGpuExecution {
         output: EffectTemporalExecutionOutput::from_device_tile(
             tile,

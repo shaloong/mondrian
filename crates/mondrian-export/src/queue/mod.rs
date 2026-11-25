@@ -16111,29 +16111,85 @@ mod tests {
     #[test]
     #[ignore = "real GPU Export grain output matte qualification"]
     fn fixed_media_calibration_mixes_original_through_screen_mattes_on_gpu() {
-        verify_fixed_media_calibration(true, Some(mondrian_effects::MaskCombineMode::Screen));
+        verify_fixed_media_calibration(
+            true,
+            Some(GrainTestProtection {
+                combination: mondrian_effects::MaskCombineMode::Screen,
+                layer_matte: None,
+            }),
+        );
     }
 
     #[test]
     #[ignore = "real GPU Export grain output matte qualification"]
     fn fixed_media_calibration_mixes_original_through_multiply_mattes_on_gpu() {
-        verify_fixed_media_calibration(true, Some(mondrian_effects::MaskCombineMode::Multiply));
+        verify_fixed_media_calibration(
+            true,
+            Some(GrainTestProtection {
+                combination: mondrian_effects::MaskCombineMode::Multiply,
+                layer_matte: None,
+            }),
+        );
     }
 
-    fn verify_fixed_media_calibration(
-        verify_gpu: bool,
-        protection: Option<mondrian_effects::MaskCombineMode>,
-    ) {
+    #[test]
+    #[ignore = "real GPU Export centered external alpha matte qualification"]
+    fn fixed_media_calibration_mixes_a_centered_external_alpha_matte() {
+        verify_fixed_media_calibration(
+            true,
+            Some(GrainTestProtection {
+                combination: mondrian_effects::MaskCombineMode::Screen,
+                layer_matte: Some(GrainTestLayerMatte {
+                    channel: mondrian_effects::SetMatteChannel::Alpha,
+                    invert: false,
+                    stretch: false,
+                }),
+            }),
+        );
+    }
+
+    #[test]
+    #[ignore = "real GPU Export stretched external luminance matte qualification"]
+    fn fixed_media_calibration_mixes_a_stretched_inverted_external_luminance_matte() {
+        verify_fixed_media_calibration(
+            true,
+            Some(GrainTestProtection {
+                combination: mondrian_effects::MaskCombineMode::Multiply,
+                layer_matte: Some(GrainTestLayerMatte {
+                    channel: mondrian_effects::SetMatteChannel::Luminance,
+                    invert: true,
+                    stretch: true,
+                }),
+            }),
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct GrainTestLayerMatte {
+        channel: mondrian_effects::SetMatteChannel,
+        invert: bool,
+        stretch: bool,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct GrainTestProtection {
+        combination: mondrian_effects::MaskCombineMode,
+        layer_matte: Option<GrainTestLayerMatte>,
+    }
+
+    fn verify_fixed_media_calibration(verify_gpu: bool, protection: Option<GrainTestProtection>) {
+        use mondrian_core::VisualSourceReference;
         use mondrian_effects::{
             grain_calibration::{
                 calibrate_grain, GrainCalibrationRequest, GrainCalibrationSettings,
             },
             grain_spatial::{GrainSpatialGrade, GrainSpatialShaping},
             grain_temporal::GrainTemporalGrade,
-            register_effect_definition, EffectColorDomain, EffectColorDomainContract,
-            EffectDefinition, EffectExecutionContract, EffectExecutionModes, EffectNode,
-            EffectRenderOp, EffectRoiPropagation, EffectType, PreparedQualifier,
-            QualifierAuthoring, QualifierMode,
+            instantiate_effect_node, register_effect_definition, EffectColorDomain,
+            EffectColorDomainContract, EffectDefinition, EffectExecutionContract,
+            EffectExecutionModes, EffectRenderOp, EffectRoiPropagation, EffectType,
+            EffectValueFormat, EffectWorkingPrecision, PreparedQualifier, QualifierAuthoring,
+            QualifierMode,
         };
         use mondrian_renderer::timeline_auxiliary_frame_view;
         use mondrian_timeline::PictureSourceExtent;
@@ -16365,7 +16421,7 @@ mod tests {
             GrainSpatialShaping::default(),
         )
         .unwrap();
-        let qualifiers = protection.map(|mode| {
+        let qualifiers = protection.map(|protection| {
             let grades = [(0.02, 0.26, 0.8), (0.04, 0.35, 0.0)].map(|(low, high, blur)| {
                 Arc::new(
                     PreparedQualifier::new(
@@ -16393,7 +16449,7 @@ mod tests {
                     .unwrap(),
                 )
             });
-            (grades, mode)
+            (grades, protection)
         });
         let halo = spatial.halo().max(qualifiers.as_ref().map_or(0, |(grades, _)| {
             grades.iter().map(|grade| grade.input_halo()).max().unwrap_or(0)
@@ -16401,28 +16457,53 @@ mod tests {
         let kind = EffectType::External(format!(
             "test.export.source-calibrated-grain.{verify_gpu}.{protection:?}"
         ));
-        register_effect_definition(
-            EffectDefinition::new(
-                kind.key(),
-                "Source calibrated grain",
-                Default::default(),
-                EffectColorDomainContract::SCENE_LINEAR,
-            )
-            .with_execution_contract(EffectExecutionContract {
-                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-                temporal_input: temporal.temporal_extent(),
-                roi_propagation: EffectRoiPropagation::Expand {
-                    horizontal_pixels: halo,
-                    vertical_pixels: halo,
-                },
-                ..EffectExecutionContract::IDENTITY
-            })
-            .with_branching_graph_builder(Arc::new(move |_, _, graph| {
+        let parameter =
+            mondrian_core::ParameterId::new("mondrian.test.res01.matte_source").unwrap();
+        let mut definition = EffectDefinition::new(
+            kind.key(),
+            "Source calibrated grain",
+            Default::default(),
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            temporal_input: temporal.temporal_extent(),
+            roi_propagation: EffectRoiPropagation::Expand {
+                horizontal_pixels: halo,
+                vertical_pixels: halo,
+            },
+            ..EffectExecutionContract::IDENTITY
+        });
+        if protection.and_then(|controls| controls.layer_matte).is_some() {
+            let matte_id = AssetId::new();
+            let matte_path = root.path().join("denoise-matte.ppm");
+            let mut bytes = b"P6\n3 2\n255\n".to_vec();
+            bytes.extend([
+                255, 0, 0, 0, 255, 0, 0, 0, 255, 24, 24, 24, 160, 32, 80, 240, 240, 240,
+            ]);
+            std::fs::write(&matte_path, bytes).unwrap();
+            let mut dependency = test_media_dependency(matte_path, None, Default::default(), None);
+            dependency.source_resolution = Some(Resolution { width: 3, height: 2 });
+            dependencies.insert(matte_id, dependency);
+            definition = definition.with_property(
+                mondrian_core::PropertyDescriptor::new(
+                    "matte_source",
+                    "Layer matte",
+                    mondrian_core::PropertyValue::VisualSource(VisualSourceReference::Asset {
+                        asset_id: matte_id,
+                        retime: Default::default(),
+                    }),
+                )
+                .with_parameter_id(parameter.clone()),
+            );
+        }
+        register_effect_definition(definition.with_branching_graph_builder(Arc::new(
+            move |effect, _, graph| {
                 let original = graph.current_output();
                 graph.append_unary(EffectRenderOp::TemporalGrain { grade: temporal });
                 let filtered = graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial });
-                if let Some((qualifiers, mode)) = &qualifiers {
-                    let [left, right] = qualifiers.each_ref().map(|qualifier| {
+                if let Some(([color, secondary], protection)) = &qualifiers {
+                    let mut qualify = |qualifier: &Arc<PreparedQualifier>| {
                         graph.set_current_output(original);
                         graph.append_unary_in_domain(
                             EffectRenderOp::Qualifier { qualifier: Arc::clone(qualifier) },
@@ -16431,14 +16512,37 @@ mod tests {
                                 output: EffectColorDomain::AlphaMask,
                             },
                         )
-                    });
-                    let matte = graph.add_mask_combine_with_mode(left, right, *mode);
+                    };
+                    let left = qualify(color);
+                    let right = if let Some(layer) = protection.layer_matte {
+                        let source = graph.append_visual_source_input(
+                            effect,
+                            &parameter,
+                            EffectValueFormat::new(
+                                EffectWorkingPrecision::Float32,
+                                EffectColorDomain::SceneLinearRgb,
+                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                            ),
+                            EffectColorDomainContract::SCENE_LINEAR,
+                        )?;
+                        graph.add_layer_matte(
+                            original,
+                            source,
+                            layer.channel,
+                            layer.invert,
+                            layer.stretch,
+                        )
+                    } else {
+                        qualify(secondary)
+                    };
+                    let matte =
+                        graph.add_mask_combine_with_mode(left, right, protection.combination);
                     let mix = graph.add_matte_mix_with_amount(filtered, original, matte, 0.65);
                     graph.set_current_output(mix);
                 }
                 Ok(())
-            })),
-        )
+            },
+        )))
         .unwrap();
         let mut sequence = sequence;
         sequence.settings.frame_rate = Rational::new(25, 1);
@@ -16449,8 +16553,8 @@ mod tests {
         reverse
             .set_constant_source_time_map(end, mondrian_core::TimeScale::new(-1, 1).unwrap())
             .unwrap();
-        forward.add_effect_node(EffectNode::new(kind.clone()));
-        reverse.add_effect_node(EffectNode::new(kind));
+        forward.add_effect_node(instantiate_effect_node(kind.clone()).unwrap());
+        reverse.add_effect_node(instantiate_effect_node(kind).unwrap());
         sequence.video_tracks[0].add_clip(forward).unwrap();
         sequence.video_tracks[0].add_clip(reverse).unwrap();
         let timeline = TimelineExportSnapshot {

@@ -7464,6 +7464,10 @@ impl GpuFrameCompositor {
                 detail: "expected a graph-local auxiliary pass".to_owned(),
             });
         }
+        let output_matte = matches!(
+            pass,
+            EffectGpuSpatialPass::SetMatte { output_matte: true, .. }
+        );
         if matches!(pass, EffectGpuSpatialPass::FillMatte { .. }) {
             validate_alpha_mask_inputs(input, auxiliary, working_color_space)?;
         } else {
@@ -7475,8 +7479,17 @@ impl GpuFrameCompositor {
                 alpha: crate::ColorFrameAlpha::StraightCoverage,
                 ..input.descriptor()
             };
-            for frame in [input, auxiliary] {
+            for (frame, may_differ_in_extent) in [(input, false), (auxiliary, output_matte)] {
                 let actual = frame.descriptor();
+                let expected = if may_differ_in_extent {
+                    ColorFrameDescriptor {
+                        width: actual.width,
+                        height: actual.height,
+                        ..expected
+                    }
+                } else {
+                    expected
+                };
                 if actual != expected {
                     return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
                 }
@@ -7490,10 +7503,19 @@ impl GpuFrameCompositor {
         }
         let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
         let auxiliary_resource = table.get(auxiliary).map_err(GpuCompositeError::ResourceTable)?;
+        let output_descriptor = if output_matte {
+            ColorFrameDescriptor {
+                color_space: crate::ColorFrameSpace::NonColorData,
+                domain: ColorFrameDomain::AlphaMask,
+                ..input.descriptor()
+            }
+        } else {
+            input.descriptor()
+        };
         let output = create_working_resource(
             device,
             ids,
-            input.descriptor(),
+            output_descriptor,
             "gpu-graph-auxiliary-output",
             resource_pool,
         )?;
