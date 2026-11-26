@@ -80,6 +80,8 @@ pub enum PreparedVisualAuxiliaryAddress {
     Authored(VisualSourceReference),
     /// The owning Effect stage's entering value at an exact time offset.
     InputHistory(TimelineTime),
+    /// The owning Clip's original media sample used to measure grain.
+    GrainSample(mondrian_effects::grain_calibration::GrainSamplePicture),
 }
 
 /// Exact consumer of an auxiliary source within one frame node.
@@ -102,6 +104,14 @@ impl PreparedVisualAuxiliaryKey {
         placement: Option<TimelineClipExecutionRef>,
         slot: u32,
     ) -> Option<Self> {
+        if let Some((stage_index, picture)) = graph.grain_sample_picture(slot) {
+            return Some(Self {
+                placement,
+                stage_index,
+                slot,
+                address: PreparedVisualAuxiliaryAddress::GrainSample(picture),
+            });
+        }
         if let Some((stage, binding)) = graph.input_history_binding(slot) {
             return Some(Self {
                 placement,
@@ -1039,7 +1049,7 @@ where
                         key.address,
                         PreparedVisualAuxiliaryAddress::Authored(
                             VisualSourceReference::Asset { .. }
-                        )
+                        ) | PreparedVisualAuxiliaryAddress::GrainSample(_)
                     ) && temporal_times.insert(key, sample_time).is_none()
                         && !auxiliary_keys.iter().any(|(candidate, _)| *candidate == key)
                     {
@@ -1177,7 +1187,7 @@ where
                 node.bindings.push(binding);
             }
             for (key, graph) in auxiliary_keys {
-                use PreparedVisualAuxiliaryAddress::{Authored, InputHistory};
+                use PreparedVisualAuxiliaryAddress::{Authored, GrainSample, InputHistory};
                 let source = match key.address {
                     Authored(VisualSourceReference::Sequence { .. }) => self
                         .prepare_auxiliary_sequence(
@@ -1194,7 +1204,8 @@ where
                     InputHistory(offset) => {
                         self.prepare_clip_effect_input(id, key, &graph, offset, sequence, depth)?
                     }
-                    Authored(
+                    GrainSample(_)
+                    | Authored(
                         VisualSourceReference::Unbound | VisualSourceReference::Asset { .. },
                     ) => {
                         unreachable!("only visual sources enter recursive preparation")

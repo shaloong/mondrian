@@ -6,10 +6,10 @@ use super::*;
 use crate::app::preview_timeline_execution::auxiliary_projection::PreviewAuxiliaryProjectionContext;
 use crate::app::preview_timeline_execution::{
     resolve_preview_timeline_with_programs_and_observer, PreparedPreviewTimelineWork,
-    PreviewTimelineExecutionBinding, PreviewTimelineExecutionFact, PreviewTimelineFrameRequest,
-    PreviewTimelineMediaRequest, PreviewTimelinePendingDependency, PreviewTimelinePreparation,
-    PreviewTimelineResolution, PreviewTimelineSourceAdapters, PreviewTimelineTitleRequest,
-    PreviewTimelineWorkPoll,
+    PreviewGrainGraphBinding, PreviewTimelineExecutionBinding, PreviewTimelineExecutionFact,
+    PreviewTimelineFrameRequest, PreviewTimelineMediaRequest, PreviewTimelinePendingDependency,
+    PreviewTimelinePreparation, PreviewTimelineResolution, PreviewTimelineSourceAdapters,
+    PreviewTimelineTitleRequest, PreviewTimelineWorkPoll,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,11 +31,9 @@ pub(super) struct CurrentAuxiliaryAdvisory {
 fn media_pending_dependency_from_wait(
     dependencies: &[EvaluationDependency],
 ) -> Option<PreviewTimelinePendingDependency> {
-    dependencies.first().map(|dependency| match dependency {
-        EvaluationDependency::MediaProducer(key) => PreviewTimelinePendingDependency::Media {
-            asset_id: key.asset_id,
-            wait: crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer,
-        },
+    dependencies.first().map(|dependency| PreviewTimelinePendingDependency::Media {
+        asset_id: dependency.media_key().asset_id,
+        wait: crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer,
     })
 }
 
@@ -113,7 +111,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let clock = self.evaluation_working_set_clock.get();
         let cached = self.evaluation_working_set.borrow_mut().get(evaluation_key, clock);
         if let Some(evaluation) = cached {
-            if self.auxiliary_evaluation_sources_are_current(snapshot, &evaluation) {
+            if self.auxiliary_evaluation_sources_are_current(snapshot, &evaluation)
+                && evaluation.dependencies.iter().all(|dependency| match dependency {
+                    EvaluationDependency::GrainSource(key) => {
+                        super::grain_calibration::grain_source_is_current(snapshot, key)
+                    }
+                    EvaluationDependency::MediaProducer(_) => true,
+                })
+            {
                 bump(&self.metrics.timeline_evaluation_hits);
                 self.request_timeline_render_cache_lookup(&evaluation);
                 self.publish_auxiliary_advisory(advisory_scope, &evaluation);
@@ -243,16 +248,25 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     | PreviewTimelinePendingDependency::Execution { .. }
                     | PreviewTimelinePendingDependency::Temporal { .. } => false,
                 };
-                self.evaluation_working_set.borrow_mut().insert_preparing(
-                    evaluation_key,
-                    request_priority,
-                    dependencies.into(),
-                    pending_dependencies.into(),
-                    memoized,
-                    preparation,
-                    clock,
-                );
-                self.evaluation_working_set_clock.set(clock.saturating_add(1));
+                let mut working_set = self.evaluation_working_set.borrow_mut();
+                if let Some(preparation) = preparation {
+                    working_set.insert_preparing(
+                        evaluation_key,
+                        request_priority,
+                        dependencies.into(),
+                        pending_dependencies.into(),
+                        memoized,
+                        preparation,
+                        clock,
+                    );
+                    self.evaluation_working_set_clock.set(clock.saturating_add(1));
+                } else if memoized && !pending_dependencies.is_empty() {
+                    working_set.insert_waiting(
+                        evaluation_key,
+                        request_priority,
+                        pending_dependencies.into(),
+                    );
+                }
                 FrameResolutionOutcome::Pending(dependency)
             }
             PreviewTimelineResolution::Unavailable { reason } => {
@@ -493,16 +507,25 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let media_dependencies = RefCell::new(prior_dependencies.to_vec());
         let pending_dependencies = RefCell::new(Vec::new());
         let observed_keys = RefCell::new(Vec::new());
+        let observe = |dependency: EvaluationDependency, pending: bool| {
+            let mut dependencies = media_dependencies.borrow_mut();
+            if !dependencies.contains(&dependency) {
+                dependencies.push(dependency.clone());
+            }
+            if pending {
+                let mut pending = pending_dependencies.borrow_mut();
+                if !pending.contains(&dependency) {
+                    pending.push(dependency);
+                }
+            }
+        };
         let mut media_frame = |request: PreviewTimelineMediaRequest| {
             observed_keys.borrow_mut().clear();
             let result =
                 self.media_frame_for_plan_observing_key(snapshot, proxy_demands, request, |key| {
                     let dependency = EvaluationDependency::MediaProducer(key.clone());
-                    observed_keys.borrow_mut().push(dependency.clone());
-                    let mut dependencies = media_dependencies.borrow_mut();
-                    if !dependencies.contains(&dependency) {
-                        dependencies.push(dependency);
-                    }
+                    observe(dependency.clone(), false);
+                    observed_keys.borrow_mut().push(dependency);
                 });
             if matches!(
                 &result,
@@ -547,16 +570,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let heterogeneous_graph_budget =
             self.heterogeneous_effect_decision.get().cpu_prefix_grant().graph_execution();
         let mut execute = |work| self.execute_prepared_timeline_work(snapshot, work);
+        let mut grain_binding = |binding: PreviewGrainGraphBinding<'_>, graph| {
+            self.bind_preview_grain_graph(
+                snapshot,
+                binding,
+                graph,
+                super::grain_calibration::PreviewGrainBindingUse::Materialize(&cancellation),
+                |key, pending| observe(EvaluationDependency::GrainSource(key.clone()), pending),
+            )
+        };
         let resolution = resolve_preview_timeline_with_programs_and_observer(
             request.with_title_assets(self.title_assets.borrow().names()),
             PreviewTimelineSourceAdapters::new(&mut media_frame, &mut title_frame)
                 .with_auxiliary_assets(&mut auxiliary_asset)
+                .with_grain_binding(&mut grain_binding)
                 .with_execution(&mut execute),
             PreviewTimelineExecutionBinding::new(
                 &self.visual_programs,
                 &self.scratch,
                 generation,
-                cancellation,
+                cancellation.clone(),
                 author_snapshot,
                 &self.visual_dependencies,
                 heterogeneous_graph_budget,
@@ -728,6 +761,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let grant = self.heterogeneous_effect_decision.get().cpu_prefix_grant();
         if let Err(reason) = work.admit_auxiliary_working_set(&mut self.frame_store.borrow_mut()) {
             return unavailable(reason);
+        }
+        if !self.viewer_cpu_fallback_active.get() {
+            work.admit_temporal_gpu_inputs(&mut self.frame_store.borrow_mut());
         }
         let sequence_id = work.sequence_id();
         let payload = VisualExecutionTaskPayload::prepared_timeline(

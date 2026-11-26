@@ -4,7 +4,8 @@ use std::{collections::VecDeque, sync::Arc};
 
 use mondrian_effects::{
     grain_calibration::{
-        calibrate_grain, GrainCalibrationRequest, GrainCalibrationSettings, GrainNoiseProfile,
+        calibrate_grain, GrainCalibrationObservation, GrainCalibrationRequest,
+        GrainCalibrationSettings, GrainSamplePicture,
     },
     CompiledEffectGraph,
 };
@@ -21,7 +22,7 @@ type Dependencies = HashMap<AssetId, crate::preset::ExportMediaDependency>;
 struct Entry {
     decode: ExportDecodeCacheKey,
     settings: GrainCalibrationSettings,
-    profile: Option<Arc<GrainNoiseProfile>>,
+    observation: GrainCalibrationObservation,
 }
 
 pub(super) struct ExportGrainCalibrationCache {
@@ -58,11 +59,8 @@ impl ExportGrainCalibrationCache {
             .get(&media.asset_id)
             .and_then(|dependency| dependency.picture_source_extent)
             .ok_or_else(|| format!("asset={} has no frozen grain source extent", media.asset_id))?;
-        graph.bind_grain_calibration(
-            |request| {
-                self.resolve(media, request, source, color_session)
-                    .map(|profile| profile.map(|profile| profile.sigma))
-            },
+        graph.bind_grain_calibration_from_media(
+            |request| self.resolve(media, request, source, color_session),
             |offset| {
                 let neighbor = time.checked_add(offset).map_err(|err| err.to_string())?;
                 program
@@ -78,7 +76,7 @@ impl ExportGrainCalibrationCache {
         request: GrainCalibrationRequest,
         source: &mut CalibrationSourceContext<'_>,
         color_session: &mut mondrian_renderer::RenderCpuColorExecutionSession,
-    ) -> Result<Option<Arc<GrainNoiseProfile>>, String> {
+    ) -> Result<Option<GrainCalibrationObservation>, String> {
         if source.cancellation.is_canceled() {
             return Err("grain calibration canceled".to_owned());
         }
@@ -135,9 +133,9 @@ impl ExportGrainCalibrationCache {
                 ));
             }
             let entry = self.entries.remove(index).expect("known calibration index");
-            let profile = entry.profile.clone();
+            let observation = entry.observation.clone();
             self.entries.push_back(entry);
-            return Ok(profile);
+            return Ok(Some(observation));
         }
 
         let decoded = decode_video_layer_scaled(
@@ -158,21 +156,36 @@ impl ExportGrainCalibrationCache {
                 media.asset_id
             ));
         }
-        let frame = decoded.cpu_frame()?;
-        let profile = calibrate_grain(
-            mondrian_renderer::timeline_auxiliary_frame_view(frame),
-            settings,
-            source.cancellation,
-        )
-        .map_err(|error| error.to_string())?
-        .map(Arc::new);
+        let view = mondrian_renderer::timeline_auxiliary_frame_view(decoded.cpu_frame()?);
+        if (view.extent().width(), view.extent().height()) != (resolution.width, resolution.height)
+        {
+            return Err(format!(
+                "asset={} fixed grain decode changed the source grid",
+                media.asset_id
+            ));
+        }
+        let observation = GrainCalibrationObservation {
+            picture: GrainSamplePicture {
+                target: source_sample,
+                fingerprint: decoded.source_fingerprint,
+                video_stream_index: decoded.video_stream_index,
+                extent: view.extent(),
+                sampling: view.sampling(),
+            },
+            profile: calibrate_grain(view, settings, source.cancellation)
+                .map_err(|error| error.to_string())?
+                .map(Arc::new),
+        };
         if self.capacity > 0 {
             if self.entries.len() == self.capacity {
                 self.entries.pop_front();
             }
-            self.entries
-                .push_back(Entry { decode: key, settings, profile: profile.clone() });
+            self.entries.push_back(Entry {
+                decode: key,
+                settings,
+                observation: observation.clone(),
+            });
         }
-        Ok(profile)
+        Ok(Some(observation))
     }
 }

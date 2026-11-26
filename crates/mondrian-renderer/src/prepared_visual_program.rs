@@ -446,6 +446,36 @@ impl PreparedClipEffectInputSample {
         self.input.origin()
     }
 
+    pub(crate) fn prepare_temporal_program(
+        &self,
+        program: &PreparedVisualProgram,
+        request: &EffectTemporalExecutionRequest,
+        grid: Rational,
+        mut bind: impl FnMut(
+            TimelineTime,
+            Arc<CompiledEffectGraph>,
+        ) -> std::result::Result<Arc<CompiledEffectGraph>, String>,
+    ) -> Result<mondrian_effects::PreparedEffectTemporalProgram> {
+        let placement = self.sample.placement();
+        let mut lighting = crate::timeline_render_plan::FrameSceneLighting::default();
+        self.input
+            .prepare_frame_program_with_binding(
+                request,
+                |time| program.temporal_frame_seed_on_grid(placement, time, grid),
+                |time, graph| {
+                    let sequence_time = program
+                        .schedule()
+                        .clip_to_sequence_time(placement, time)
+                        .map_err(|error| error.to_string())?;
+                    let graph = lighting
+                        .bind(program, &graph, sequence_time)
+                        .map_err(|error| error.to_string())?;
+                    bind(time, graph)
+                },
+            )
+            .map_err(|error| program.temporal_preparation_error(placement.clip_id, error))
+    }
+
     /// Evaluate the same historical prefix in the source view used by this node.
     pub fn with_program(&self, program: &PreparedVisualProgram) -> Result<Self> {
         let placement = self.sample.placement();
@@ -1200,12 +1230,13 @@ impl PreparedVisualProgram {
     }
 
     /// Freeze time dependencies before a Media pixel domain is available.
-    pub(crate) fn prepare_clip_temporal_program(
+    pub(crate) fn prepare_clip_media_frame_program(
         &self,
         placement: TimelineClipExecutionRef,
         request: &EffectTemporalExecutionRequest,
         grid: Rational,
         session: Option<&mut EffectExecutionSession>,
+        observes_source_grid: bool,
         bind_graph: impl FnMut(
             TimelineTime,
             Arc<mondrian_effects::CompiledEffectGraph>,
@@ -1217,12 +1248,26 @@ impl PreparedVisualProgram {
         let effect_program = self.temporal_effect_program(placement, request)?;
         let seed = |clip_time| self.temporal_frame_seed_on_grid(placement, clip_time, grid);
         let prepared = match session {
+            Some(session) if observes_source_grid => session
+                .prepare_source_frame_program_with_binding(
+                    effect_program,
+                    request,
+                    seed,
+                    bind_graph,
+                ),
             Some(session) => session.prepare_temporal_frame_program_with_binding(
                 effect_program,
                 request,
                 seed,
                 bind_graph,
             ),
+            None if observes_source_grid => EffectExecutionSession::default()
+                .prepare_source_frame_program_with_binding(
+                    effect_program,
+                    request,
+                    seed,
+                    bind_graph,
+                ),
             None => mondrian_effects::prepare_temporal_frame_program(effect_program, request, seed),
         };
         prepared.map_err(|error| self.temporal_preparation_error(placement.clip_id, error))

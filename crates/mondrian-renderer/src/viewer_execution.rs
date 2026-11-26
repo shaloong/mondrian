@@ -92,6 +92,8 @@ pub enum ViewerGpuSourceLayer {
         /// Timeline seed for temporal effects.
         frame_seed: i64,
     },
+    /// Frozen temporal effects recorded into the Viewer-owned command stream.
+    Temporal(Box<ViewerGpuTemporalLayer>),
     /// Full-frame solid color.
     SolidColor {
         /// Solid layer contract.
@@ -101,6 +103,20 @@ pub enum ViewerGpuSourceLayer {
         /// Source-local spatial chain with an identity point plan.
         spatial_plan: Option<GpuVisualSpatialPlan>,
     },
+}
+
+/// Placement of one prepared temporal picture in the working composite.
+pub struct ViewerGpuTemporalLayer {
+    /// Exact source frames and ordered device passes.
+    pub picture: Arc<crate::temporal_gpu::ViewerTemporalPicture>,
+    /// Layer opacity.
+    pub opacity: f32,
+    /// Canonical Timeline blend mode.
+    pub blend_mode: BlendMode,
+    /// Timeline affine transform.
+    pub transform: [f32; 6],
+    /// Seed used by compositing blend modes.
+    pub frame_seed: i64,
 }
 
 /// One input to a typed two-input Viewer visual Transition.

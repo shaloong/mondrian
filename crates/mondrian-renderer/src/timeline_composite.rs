@@ -480,14 +480,45 @@ impl TimelineCompositeScratch {
         request: crate::TimelineFrameExecutionRequest,
         input: &crate::PreparedClipEffectInputSample,
     ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
+        self.prepare_clip_effect_input_frame_execution_with_media_binding(
+            program,
+            request,
+            input,
+            |_, _, graph, _| Ok(graph),
+        )
+    }
+
+    /// Bind fixed media on the selected prefix, including its historical sample times.
+    pub fn prepare_clip_effect_input_frame_execution_with_media_binding(
+        &mut self,
+        program: &crate::PreparedVisualProgram,
+        request: crate::TimelineFrameExecutionRequest,
+        input: &crate::PreparedClipEffectInputSample,
+        mut bind: impl FnMut(
+            &crate::TimelineMediaPlan,
+            mondrian_core::TimelineTime,
+            Arc<CompiledEffectGraph>,
+            &mut crate::RenderCpuColorExecutionSession,
+        ) -> Result<Arc<CompiledEffectGraph>, String>,
+    ) -> Result<crate::PreparedTimelineFrameExecution, crate::TimelineFramePreparationError> {
         self.effect_execution.bind_generation(request.generation());
-        if input.graph().requires_primary_temporal_execution() {
-            return Err(crate::TimelineFramePreparationError::Evaluation(
-                mondrian_core::MondrianError::EffectGraphEvaluationFailed {
-                    reason: "historical Clip input prefix requires expanded primary history".into(),
-                },
-            ));
-        }
+        let plan = Self::plan_clip_effect_input_sources(program, &request, input)?;
+        crate::timeline_temporal::prepare_clip_effect_input_execution(
+            program,
+            plan,
+            request.with_auxiliary_clip(input.sample().placement()),
+            input,
+            &mut |media, time, graph| bind(media, time, graph, &mut self.color_execution),
+        )
+        .map_err(crate::TimelineFramePreparationError::Temporal)
+    }
+
+    /// Recover the original source references of a Clip prefix for source projection.
+    pub fn plan_clip_effect_input_sources(
+        program: &crate::PreparedVisualProgram,
+        request: &crate::TimelineFrameExecutionRequest,
+        input: &crate::PreparedClipEffectInputSample,
+    ) -> Result<crate::TimelineRenderPlan, crate::TimelineFramePreparationError> {
         let element = crate::timeline_render_plan::compile_clip_effect_input_sample(
             program,
             input,
@@ -495,19 +526,13 @@ impl TimelineCompositeScratch {
         )
         .map_err(crate::TimelineFramePreparationError::Evaluation)?;
         let evaluation = request.evaluation();
-        let plan = crate::TimelineRenderPlan {
+        Ok(crate::TimelineRenderPlan {
             position: evaluation.position,
             intent: evaluation.intent,
             settings: evaluation.settings,
             elements: vec![element],
             diagnostics: Default::default(),
-        };
-        Ok(
-            crate::PreparedTimelineFrameExecution::for_clip_effect_input(
-                request.with_auxiliary_clip(input.sample().placement()),
-                plan,
-            ),
-        )
+        })
     }
 
     /// Execute a source-local historical prefix on the source's own Float32 grid.

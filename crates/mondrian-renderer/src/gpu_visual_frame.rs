@@ -467,6 +467,47 @@ impl GpuVisualFrameExecutor {
         }
     }
 
+    /// Record a temporal picture in the visual owner's resource table. The
+    /// returned root can be sampled by a later node on the same queue.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_temporal_picture(
+        &self,
+        session: &mut crate::color::GpuColorExecutionSession,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        schedule: &mondrian_effects::PreparedEffectTemporalGpuExecution,
+        frames: &mut dyn mondrian_effects::EffectTemporalFrameProvider,
+        auxiliary: &mut dyn mondrian_effects::EffectTemporalAuxiliaryProvider,
+        working_color_space: WorkingColorSpace,
+        deadline: std::time::Instant,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+        resident_auxiliary: &[crate::temporal_gpu::TemporalGpuResidentAuxiliary],
+    ) -> Result<(GpuColorFrameHandle, usize), crate::temporal_gpu::TemporalGpuExecutionError> {
+        let runtime = session.runtime_mut();
+        let pool = runtime.resource_pool();
+        let (table, ids) = runtime.frame_table_and_ids_mut();
+        crate::temporal_gpu::record_resident_temporal_root(
+            crate::temporal_gpu::TemporalGpuDevice {
+                device,
+                queue,
+                compositor: &self.compositor,
+                ids,
+                table,
+                resource_pool: &pool,
+            },
+            encoder,
+            schedule,
+            frames,
+            auxiliary,
+            working_color_space,
+            deadline,
+            cancellation,
+            self.resource_grant,
+            resident_auxiliary,
+        )
+    }
+
     /// Record a complete working-space visual graph without readback.
     pub fn record(
         &self,

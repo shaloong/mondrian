@@ -216,6 +216,7 @@ pub(crate) fn canonical_resolved_node_materialization(
                                 match source.address {
                                     mondrian_renderer::PreparedVisualAuxiliaryAddress::Authored(reference) => bytes.json(&reference)?,
                                     mondrian_renderer::PreparedVisualAuxiliaryAddress::InputHistory(offset) => bytes.json(&("effect_input_history", offset))?,
+                                    mondrian_renderer::PreparedVisualAuxiliaryAddress::GrainSample(picture) => encode_fixed_grain_picture(&mut bytes, picture)?,
                                 }
                                 bytes.json(&source.sequence_id)?;
                                 bytes.u64(source.revision.get());
@@ -356,6 +357,9 @@ fn canonical_auxiliary_instance_path(
                     mondrian_renderer::PreparedVisualAuxiliaryAddress::InputHistory(offset) => {
                         bytes.json(&("effect_input_history", offset))?;
                     }
+                    mondrian_renderer::PreparedVisualAuxiliaryAddress::GrainSample(picture) => {
+                        encode_fixed_grain_picture(bytes, picture)?;
+                    }
                 }
             }
         }
@@ -437,6 +441,17 @@ fn encode_effect(
         bytes.i64(frame_seed);
     }
     Ok(())
+}
+
+fn encode_fixed_grain_picture(
+    bytes: &mut CanonicalBytes,
+    picture: mondrian_effects::grain_calibration::GrainSamplePicture,
+) -> Result<(), PreviewRenderCacheIdentityError> {
+    bytes.json(&("fixed_grain_picture", picture.target, picture.fingerprint))?;
+    bytes.u32(picture.video_stream_index);
+    bytes.u32(picture.extent.width());
+    bytes.u32(picture.extent.height());
+    bytes.json(&picture.sampling)
 }
 
 struct CanonicalBytes(Vec<u8>);

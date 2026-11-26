@@ -173,6 +173,9 @@ impl DeclaredViewerLayerCounts {
                     self.native_media_layers = self.native_media_layers.saturating_add(1);
                 }
             }
+            ViewerGpuSourceLayer::Temporal(_) => {
+                self.media_layers = self.media_layers.saturating_add(1);
+            }
             ViewerGpuSourceLayer::SolidColor { .. } => {
                 self.procedural_layers = self.procedural_layers.saturating_add(1);
             }
@@ -183,6 +186,7 @@ impl DeclaredViewerLayerCounts {
 fn source_has_contribution(source: &ViewerGpuSourceLayer) -> bool {
     let opacity = match source {
         ViewerGpuSourceLayer::Media { opacity, .. } => *opacity,
+        ViewerGpuSourceLayer::Temporal(layer) => layer.opacity,
         ViewerGpuSourceLayer::SolidColor { layer, .. } => layer.opacity,
     };
     opacity.clamp(0.0, 1.0) > 0.0

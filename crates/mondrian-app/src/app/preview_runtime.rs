@@ -399,6 +399,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     visual_terminal_candidates: RefCell<Vec<mondrian_playback::FrameDeliveryCandidate>>,
     visual_program_authoring_session: Cell<Option<AuthoringSessionId>>,
     visual_programs: RefCell<mondrian_renderer::PreparedVisualProgramCache>,
+    grain_calibration: RefCell<grain_calibration::PreviewGrainCalibrationCache>,
     title_assets: RefCell<title_assets::PreviewTitleAssets>,
     future_media_window: RefCell<request_scheduler::FutureMediaWindowCache>,
     visual_dependencies: PreviewVisualDependencyObserver,
@@ -3598,6 +3599,7 @@ pub(crate) use frame_evaluation::*;
 mod diagnostics;
 pub use diagnostics::*;
 mod evidence;
+mod grain_calibration;
 mod hardware_admission;
 mod media_adapter;
 mod presentation;

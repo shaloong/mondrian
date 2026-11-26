@@ -206,6 +206,32 @@ impl TimelineRenderPlan {
     pub fn len(&self) -> usize {
         self.elements.len()
     }
+
+    /// Recover a file-backed placement's interpretation for any of its sample instants.
+    pub fn media_for_placement(
+        &self,
+        placement: TimelineClipExecutionRef,
+    ) -> Option<&TimelineMediaPlan> {
+        let matches_placement = |candidate: &TimelineMediaPlan| {
+            candidate.placement
+                == TimelineClipExecutionRef {
+                    clip_time: candidate.placement.clip_time,
+                    ..placement
+                }
+        };
+        self.elements.iter().find_map(|element| match element {
+            TimelineRenderPlanElement::Media(media) if matches_placement(media) => Some(media),
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                [&transition.left, &transition.right].into_iter().find_map(|input| match input {
+                    TimelineTransitionInputPlan::Media(media) if matches_placement(media) => {
+                        Some(media)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]

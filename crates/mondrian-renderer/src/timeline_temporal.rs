@@ -1266,6 +1266,149 @@ pub(crate) type MediaEffectGraphBinder<'a> = dyn FnMut(
     ) -> Result<Arc<CompiledEffectGraph>, String>
     + 'a;
 
+pub(crate) fn prepare_clip_effect_input_execution(
+    program: &PreparedVisualProgram,
+    plan: TimelineRenderPlan,
+    request: TimelineFrameExecutionRequest,
+    input: &crate::PreparedClipEffectInputSample,
+    bind_media_graph: &mut MediaEffectGraphBinder<'_>,
+) -> Result<PreparedTimelineFrameExecution, TimelineTemporalPreparationError> {
+    let placement = input.sample().placement();
+    let effect_error = |reason| TimelineTemporalPreparationError::EffectDemand {
+        clip_id: placement.clip_id,
+        reason,
+    };
+    let mut prepared = PreparedTimelineFrameExecution::for_clip_effect_input(request, plan);
+    let [TimelineRenderPlanElement::Media(media)] = prepared.execution_plan.elements.as_mut_slice()
+    else {
+        if graph_requires_temporal(input.graph()) {
+            return Err(effect_error(
+                "historical Clip input with primary history requires a file-backed picture".into(),
+            ));
+        }
+        return Ok(prepared);
+    };
+    let bind = |time, graph| bind_media_grain_graph(media, time, graph, bind_media_graph);
+    if !graph_requires_temporal(&media.effect_graph)
+        && !media.effect_graph.uses_source_grid_observation()
+    {
+        let mut bind = bind;
+        media.effect_graph =
+            bind(placement.clip_time, Arc::clone(&media.effect_graph)).map_err(effect_error)?;
+        return Ok(prepared);
+    }
+    let context = media_temporal_context(program, &prepared.request, media)?;
+    let frozen = input
+        .prepare_temporal_program(
+            program,
+            &context,
+            prepared.execution_plan.position.time_base,
+            bind,
+        )
+        .map_err(|error| effect_error(error.to_string()))?;
+    let sources = frozen
+        .source_times()
+        .iter()
+        .map(|&time| program.temporal_source_at(placement, time))
+        .collect::<Result<Vec<_>, _>>()?;
+    if sources.is_empty() {
+        let domain = fixed_grain_image_domain(&frozen)
+            .map_err(effect_error)?
+            .ok_or_else(|| effect_error("historical Media prefix has no source picture".into()))?;
+        let execution = frozen
+            .bind_image_domain(&context_for_fixed_grain(&context, domain))
+            .map_err(|error| effect_error(error.to_string()))?;
+        prepared.batches.push(program.bind_temporal_sources(placement, execution)?);
+        media.effect_graph = identity_compiled_effect_graph()
+            .ok_or(TimelineTemporalPreparationError::IdentityGraphUnavailable)?;
+        return Ok(prepared);
+    }
+    let identity = identity_compiled_effect_graph()
+        .ok_or(TimelineTemporalPreparationError::IdentityGraphUnavailable)?;
+    prepared.temporal_media_inputs.push(PreparedTimelineTemporalMediaInput {
+        media: media.clone(),
+        program: frozen,
+        sources: sources.into(),
+    });
+    media.effect_graph = identity;
+    Ok(prepared)
+}
+
+fn bind_media_grain_graph(
+    media: &TimelineMediaPlan,
+    time: TimelineTime,
+    graph: Arc<CompiledEffectGraph>,
+    bind: &mut MediaEffectGraphBinder<'_>,
+) -> Result<Arc<CompiledEffectGraph>, String> {
+    if graph.grain_calibration_requests().next().is_none() {
+        return Ok(graph);
+    }
+    let bound = bind(media, time, graph)?;
+    if bound.grain_calibration_requests().next().is_some() {
+        return Err("media grain calibration was not bound".to_owned());
+    }
+    Ok(bound)
+}
+
+fn fixed_grain_image_domain(
+    program: &mondrian_effects::PreparedEffectTemporalProgram,
+) -> Result<Option<(EffectFrameExtent, mondrian_core::ImageSampling)>, String> {
+    let mut domain = None;
+    for demand in program.auxiliary_demands().demands() {
+        let Some((_, picture)) = program
+            .graph_at(demand.context_time())
+            .and_then(|graph| graph.grain_sample_picture(demand.slot()))
+        else {
+            continue;
+        };
+        if domain
+            .replace((picture.extent, picture.sampling))
+            .is_some_and(|previous| previous != (picture.extent, picture.sampling))
+        {
+            return Err("fixed grain samples require one original decoded grid".to_owned());
+        }
+    }
+    Ok(domain)
+}
+
+fn context_for_fixed_grain(
+    context: &EffectTemporalExecutionRequest,
+    (extent, sampling): (EffectFrameExtent, mondrian_core::ImageSampling),
+) -> EffectTemporalExecutionRequest {
+    EffectTemporalExecutionRequest::new(
+        context.generation(),
+        context.continuity(),
+        context.output_time(),
+        extent,
+        sampling,
+        extent.full_frame_roi(),
+        context.cancellation().clone(),
+    )
+    .with_output_frame_seed(context.output_frame_seed())
+}
+
+// The output context only supplies time, seed and authority here. Media extent
+// and ROI depend on the actual decoded plane and are bound separately.
+fn media_temporal_context(
+    program: &PreparedVisualProgram,
+    request: &TimelineFrameExecutionRequest,
+    media: &TimelineMediaPlan,
+) -> Result<EffectTemporalExecutionRequest, TimelineTemporalPreparationError> {
+    Ok(EffectTemporalExecutionRequest::new(
+        request.generation(),
+        request.continuity(),
+        media.placement.clip_time,
+        request.frame_extent(),
+        program.materialization_contract().image_sampling(mondrian_core::Resolution {
+            width: request.frame_extent().width(),
+            height: request.frame_extent().height(),
+        })?,
+        request.output_roi(),
+        request.cancellation().clone(),
+    )
+    .with_output_frame_seed(media.frame_seed))
+}
+
 pub(crate) fn prepare_timeline_temporal_execution_with_session(
     program: &PreparedVisualProgram,
     plan: &TimelineRenderPlan,
@@ -1292,7 +1435,9 @@ fn prepare_timeline_temporal_execution_inner(
     let mut execution_plan = plan.clone();
     let mut media_plans = Vec::new();
     let needs_preparation = |graph: &CompiledEffectGraph| {
-        graph_requires_temporal(graph) || graph.grain_calibration_requests().next().is_some()
+        graph_requires_temporal(graph)
+            || graph.uses_source_grid_observation()
+            || graph.grain_calibration_requests().next().is_some()
     };
     for element in &plan.elements {
         match element {
@@ -1326,17 +1471,9 @@ fn prepare_timeline_temporal_execution_inner(
     let mut temporal_media_inputs = Vec::with_capacity(media_plans.len());
     let mut no_source_media_batches = Vec::new();
     for media in media_plans {
-        let mut bind = |time, graph: Arc<CompiledEffectGraph>| {
-            if graph.grain_calibration_requests().next().is_none() {
-                return Ok(graph);
-            }
-            let bound = bind_media_graph(&media, time, graph)?;
-            if bound.grain_calibration_requests().next().is_some() {
-                return Err("media grain calibration was not bound".to_owned());
-            }
-            Ok(bound)
-        };
-        if !graph_requires_temporal(&media.effect_graph) {
+        let mut bind = |time, graph| bind_media_grain_graph(&media, time, graph, bind_media_graph);
+        let observes_source_grid = media.effect_graph.uses_source_grid_observation();
+        if !graph_requires_temporal(&media.effect_graph) && !observes_source_grid {
             let graph = bind(media.placement.clip_time, Arc::clone(&media.effect_graph)).map_err(
                 |reason| TimelineTemporalPreparationError::EffectDemand {
                     clip_id: media.placement.clip_id,
@@ -1346,27 +1483,14 @@ fn prepare_timeline_temporal_execution_inner(
             replace_effect_graph(&mut execution_plan, media.placement, graph)?;
             continue;
         }
-        // This is the known output context, consumed for time/seed/authority
-        // only. No Media ROI, raster demand or coverage is prepared here.
-        let context = EffectTemporalExecutionRequest::new(
-            request.generation(),
-            request.continuity(),
-            media.placement.clip_time,
-            request.frame_extent(),
-            program.materialization_contract().image_sampling(mondrian_core::Resolution {
-                width: request.frame_extent().width(),
-                height: request.frame_extent().height(),
-            })?,
-            request.output_roi(),
-            request.cancellation().clone(),
-        )
-        .with_output_frame_seed(media.frame_seed);
+        let context = media_temporal_context(program, &request, &media)?;
         let frozen = program
-            .prepare_clip_temporal_program(
+            .prepare_clip_media_frame_program(
                 media.placement,
                 &context,
                 plan.position.time_base,
                 session.as_deref_mut(),
+                observes_source_grid,
                 bind,
             )
             .map_err(|error| TimelineTemporalPreparationError::EffectDemand {
@@ -1379,8 +1503,15 @@ fn prepare_timeline_temporal_execution_inner(
             .map(|&time| program.temporal_source_at(media.placement, time))
             .collect::<Result<Vec<_>, _>>()?;
         if sources.is_empty() {
-            // Proven NoImage programs have no producer-selected input domain.
-            // Their explicit owner output target remains the canonical domain.
+            let fixed_domain = fixed_grain_image_domain(&frozen).map_err(|reason| {
+                TimelineTemporalPreparationError::EffectDemand {
+                    clip_id: media.placement.clip_id,
+                    reason,
+                }
+            })?;
+            let context = fixed_domain.map_or(context.clone(), |domain| {
+                context_for_fixed_grain(&context, domain)
+            });
             let execution = frozen.bind_image_domain(&context).map_err(|error| {
                 TimelineTemporalPreparationError::EffectDemand {
                     clip_id: media.placement.clip_id,

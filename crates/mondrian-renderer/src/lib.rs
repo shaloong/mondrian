@@ -450,7 +450,7 @@ pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
     NativeVideoImportRuntime, ViewerGpuCpuYuvSource, ViewerGpuCrossDissolveLayer,
     ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerGpuSourceLayer,
-    ViewerGpuTransitionInput, ViewerHeterogeneousGpuInput,
+    ViewerGpuTemporalLayer, ViewerGpuTransitionInput, ViewerHeterogeneousGpuInput,
 };
 pub use viewer_retirement::{
     ViewerCpuYuvUploadWorkerExit, ViewerGpuExecutionRetirement, ViewerGpuRetirementReceipt,

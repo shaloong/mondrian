@@ -804,6 +804,16 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
             });
         }
 
+        if let Some(source) = temporal_gpu_media_source(
+            frame,
+            effect_graph,
+            opacity,
+            blend_mode,
+            transform,
+            frame_seed,
+        ) {
+            return Ok(source);
+        }
         if let Ok(effect_plan) = self.scratch.get_or_lower_effect_gpu_plan(effect_graph) {
             let (native_source, transform) =
                 native_source_for_projected_transform(frame, transform);
@@ -1034,6 +1044,18 @@ fn gpu_media_source(
     {
         return Err(GpuCompositingBlockerReason::UnsupportedTransform);
     }
+    if auxiliary.is_none()
+        && let Some(source) = temporal_gpu_media_source(
+            frame,
+            effect_graph,
+            opacity,
+            blend_mode,
+            transform,
+            frame_seed,
+        )
+    {
+        return Ok(source);
+    }
     let route = scratch
         .get_or_lower_effect_gpu_route(effect_graph)
         .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
@@ -1091,6 +1113,29 @@ fn gpu_media_source(
         spatial_plan,
         frame_seed,
     })
+}
+
+fn temporal_gpu_media_source(
+    frame: &MediaPreviewFrame,
+    graph: &CompiledEffectGraph,
+    opacity: f32,
+    blend_mode: BlendMode,
+    transform: [f32; 6],
+    frame_seed: i64,
+) -> Option<ViewerGpuSourceLayer> {
+    let picture = frame.temporal_picture()?;
+    if !graph.graph().is_identity() {
+        return None;
+    }
+    Some(ViewerGpuSourceLayer::Temporal(Box::new(
+        mondrian_renderer::ViewerGpuTemporalLayer {
+            picture: Arc::clone(&picture.device),
+            opacity,
+            blend_mode,
+            transform,
+            frame_seed,
+        },
+    )))
 }
 
 fn gpu_spatial_source_plan(

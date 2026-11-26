@@ -281,6 +281,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             visual_programs: RefCell::new(
                 mondrian_renderer::PreparedVisualProgramCache::for_auxiliary_preview(),
             ),
+            grain_calibration: RefCell::default(),
             title_assets: RefCell::default(),
             future_media_window: RefCell::new(request_scheduler::FutureMediaWindowCache::default()),
             visual_dependencies: PreviewVisualDependencyObserver::prepare(

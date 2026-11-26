@@ -4,8 +4,9 @@ use super::*;
 use mondrian_core::timeline_data::TimelineClipEndpointContext;
 use mondrian_core::{ImageSampling, SourceSampleTarget, VisualSourceReference, VisualSourceRetime};
 use mondrian_effects::{
-    AuxiliaryFloatFrame, AuxiliaryFloatInput, AuxiliaryPolicy, AuxiliaryResolution, AuxiliaryRole,
-    CompiledEffectGraph, EffectProcessorControl,
+    grain_calibration::GrainSamplePicture, AuxiliaryFloatFrame, AuxiliaryFloatInput,
+    AuxiliaryPolicy, AuxiliaryResolution, AuxiliaryRole, CompiledEffectGraph,
+    EffectProcessorControl,
 };
 use mondrian_renderer::{
     register_timeline_auxiliary_raster, timeline_auxiliary_frame_view,
@@ -114,7 +115,7 @@ pub(super) fn prepare_gpu_rasters(
 ) -> Result<Vec<GpuVisualAuxiliaryInput>, String> {
     graph.auxiliary_inputs().iter().map(|spec| {
         let key = auxiliary_key_for_slot(graph, Some(placement), spec.slot())?;
-        use PreparedVisualAuxiliaryAddress::{Authored, InputHistory};
+        use PreparedVisualAuxiliaryAddress::{Authored, GrainSample, InputHistory};
         let (picture, (extent, sampling)) = match key.address {
             Authored(VisualSourceReference::Asset { asset_id, retime }) => {
                 let (source, domain) = plan_asset(inputs.node(), context.media, asset_id, retime, inputs.node().time())?;
@@ -159,6 +160,7 @@ pub(super) fn prepare_gpu_rasters(
                 }
             }
             Authored(VisualSourceReference::Unbound) => return Err(format!("required export auxiliary slot {} is unbound", key.slot)),
+            GrainSample(_) => return Err(format!("fixed grain slot {} requires a source-grid batch", key.slot)),
         };
         // Coverage-only mattes can reconstruct their alpha directly. Layers
         // keep the authored grid so the kernel reconstructs each channel once.
@@ -212,11 +214,12 @@ pub(super) fn prepare_rasters(
             let mut extents = Vec::new();
             for spec in graph.auxiliary_inputs() {
                 let key = auxiliary_key_for_slot(graph, placement, spec.slot())?;
-                use PreparedVisualAuxiliaryAddress::{Authored, InputHistory};
+                use PreparedVisualAuxiliaryAddress::{Authored, GrainSample, InputHistory};
                 let (source, source_domain) = match key.address {
                     Authored(VisualSourceReference::Clip { .. } | VisualSourceReference::Sequence { .. }) | InputHistory(_) => visual_source(inputs, key)?,
                     Authored(VisualSourceReference::Asset { asset_id, retime }) => plan_asset(node, context.media, asset_id, retime, node.time())?,
                     Authored(VisualSourceReference::Unbound) => return Err(format!("required export auxiliary slot {} is unbound", key.slot)),
+                    GrainSample(_) => return Err(format!("fixed grain slot {} requires a source-grid batch", key.slot)),
                 };
                 let (domain, policy) = timeline_auxiliary_registration_geometry(spec.role(), primary, source_domain);
                 // Source decodes and every possible newly registered plane are
@@ -496,6 +499,10 @@ pub(super) fn prepare_temporal_rasters(
     context: &mut ExportFrameRenderContext<'_>,
     cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
     control: &mut EffectProcessorControl<'_>,
+    mut observe_fixed_picture: impl FnMut(&DecodedVideoLayer),
+    mut resident_sources: Option<
+        &mut Vec<mondrian_renderer::temporal_gpu::TemporalGpuResidentAuxiliary>,
+    >,
 ) -> Result<Option<mondrian_effects::PreparedTemporalAuxiliarySet>, String> {
     let demands = batch.auxiliary_demands();
     if demands.is_empty() {
@@ -511,7 +518,60 @@ pub(super) fn prepare_temporal_rasters(
         .map_err(|error| error.to_string())?;
     batch.visit_auxiliary_demands(
         |key, graph, demand| {
+            if let Some(resident) = resident_sources.as_deref_mut()
+                && matches!(key.address, PreparedVisualAuxiliaryAddress::InputHistory(_))
+                && let Some(PreparedExportVisualOutput::EffectInputGpu(frame, sampling)) =
+                    inputs.auxiliary_output(key)
+            {
+                let descriptor = frame.descriptor();
+                let domain = (
+                    EffectFrameExtent::new(descriptor.width, descriptor.height),
+                    *sampling,
+                );
+                let role = graph
+                    .auxiliary_inputs()
+                    .iter()
+                    .find(|spec| spec.slot() == key.slot)
+                    .ok_or_else(|| format!("resident auxiliary lost slot: {key:?}"))?
+                    .role();
+                if timeline_auxiliary_registration_geometry(role, primary, domain).0 != domain {
+                    return Err(format!(
+                        "resident auxiliary needs a different registration grid: {key:?}"
+                    ));
+                }
+                resident.push(
+                    mondrian_renderer::temporal_gpu::TemporalGpuResidentAuxiliary {
+                        context_time: demand.context_time(),
+                        slot: demand.slot(),
+                        frame: frame.clone(),
+                        sampling: *sampling,
+                    },
+                );
+                return Ok(());
+            }
+            let mut fixed_picture = None;
             let (source, domain) = match key.address {
+                PreparedVisualAuxiliaryAddress::GrainSample(picture) => {
+                    let media = key
+                        .placement
+                        .and_then(|placement| {
+                            node.evaluation().plan().media_for_placement(placement)
+                        })
+                        .ok_or_else(|| {
+                            format!(
+                                "fixed grain slot {} lost its owning media placement",
+                                key.slot
+                            )
+                        })?;
+                    let source = plan_fixed_grain_picture(
+                        media,
+                        picture,
+                        context.media,
+                        node.color_context(),
+                    )?;
+                    fixed_picture = Some(picture);
+                    (source, (picture.extent, picture.sampling))
+                }
                 PreparedVisualAuxiliaryAddress::Authored(VisualSourceReference::Asset {
                     asset_id,
                     retime,
@@ -538,7 +598,7 @@ pub(super) fn prepare_temporal_rasters(
             if matches!(source, Source::Asset(_)) {
                 bytes = add_bytes(bytes, frame_bytes(domain.0)?)?;
             }
-            planned.push((demand, source, registered));
+            planned.push((demand, source, registered, fixed_picture));
             Ok(())
         },
         |demand| {
@@ -555,7 +615,7 @@ pub(super) fn prepare_temporal_rasters(
         .admit_cpu_active_working_set(bytes, TimelineCpuCompositePrecision::Float32)
         .map_err(|error| error.to_string())?;
     let mut resolved = Vec::with_capacity(planned.len());
-    for (demand, source, (extent, sampling)) in planned {
+    for (demand, source, (extent, sampling), fixed_picture) in planned {
         control.check().map_err(|error| error.to_string())?;
         let decoded;
         let frame = match source {
@@ -571,7 +631,20 @@ pub(super) fn prepare_temporal_rasters(
                     context.cancellation,
                     ExportDecodedSourceRoute::CpuWorking,
                 )?;
-                Some(decoded.cpu_frame()?)
+                let frame = decoded.cpu_frame()?;
+                if let Some(picture) = fixed_picture {
+                    if decoded.source_fingerprint != picture.fingerprint
+                        || decoded.video_stream_index != picture.video_stream_index
+                        || frame_domain(frame) != (picture.extent, picture.sampling)
+                    {
+                        return Err(format!(
+                            "fixed grain slot {} changed after calibration",
+                            demand.slot()
+                        ));
+                    }
+                    observe_fixed_picture(&decoded);
+                }
+                Some(frame)
             }
         };
         let registered = register_timeline_auxiliary_raster(
@@ -602,6 +675,43 @@ pub(super) fn prepare_temporal_rasters(
     )
     .map(Some)
     .map_err(|error| error.to_string())
+}
+
+fn plan_fixed_grain_picture<'a>(
+    media: &TimelineMediaPlan,
+    picture: GrainSamplePicture,
+    dependencies: &'a Media,
+    color_context: &ProgramColorContext,
+) -> Result<Source<'a>, String> {
+    let (key, decode) = prepare_export_picture_decode(
+        dependencies,
+        ExportPictureDecodeSource {
+            asset_id: media.asset_id,
+            source_sample: picture.target,
+            color_space_override: media.color_space_override,
+            alpha_interpretation: media.alpha_interpretation,
+            auto_tone_map: media.auto_tone_map,
+            pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
+            field_order_override: media.field_order_override,
+            unit: true,
+        },
+        Resolution {
+            width: picture.extent.width(),
+            height: picture.extent.height(),
+        },
+        color_context,
+        None,
+        ExportDecodedSourceRoute::CpuWorking,
+    )?;
+    if key.source_fingerprint != picture.fingerprint
+        || key.video_stream_index != picture.video_stream_index
+    {
+        return Err(format!(
+            "asset={} fixed grain sample source changed after calibration",
+            media.asset_id
+        ));
+    }
+    Ok(Source::Asset(Box::new((key, decode))))
 }
 
 #[cfg(test)]
@@ -1038,6 +1148,174 @@ mod tests {
             }
         }
         assert_auxiliary_float32_parity(&cpu, &gpu);
+    }
+
+    #[test]
+    #[ignore = "real GPU history with source-calibrated temporal Denoise"]
+    fn export_historical_video_collage_freezes_the_calibrated_denoise_prefix() {
+        assert_export_calibrated_denoise_collage(false);
+    }
+
+    #[test]
+    #[ignore = "real GPU Export of two source-calibrated temporal Denoise prefixes"]
+    fn export_historical_video_collage_keeps_two_temporal_prefixes_resident() {
+        assert_export_calibrated_denoise_collage(true);
+    }
+
+    fn assert_export_calibrated_denoise_collage(both_temporal: bool) {
+        use mondrian_core::{ColorSpace, Keyframe};
+        use mondrian_effects::{
+            video_collage_frame_f32, AuxiliaryFloatFrame, AuxiliaryPolicy, VideoCollageGrade,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.mp4");
+        std::fs::write(
+            &path,
+            include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4"),
+        )
+        .unwrap();
+        let probe = mondrian_media::probe_media_info(&path).unwrap();
+        let stream = probe.primary_video().unwrap();
+        let resolution = Resolution { width: stream.width, height: stream.height };
+        let end = TimelineTime::new(
+            i64::try_from(stream.duration.unwrap().as_nanos()).unwrap(),
+            1_000_000_000,
+        )
+        .unwrap();
+        let mut dependency = super::super::tests::test_media_dependency(
+            path,
+            Some(ColorSpace::Rec709),
+            Default::default(),
+            None,
+        );
+        dependency.source_video_stream = Some(stream.clone());
+        dependency.video_stream_index = Some(stream.index);
+        dependency.source_resolution = Some(resolution);
+        dependency.picture = Some(stream.picture);
+        dependency.picture_source_extent =
+            Some(mondrian_timeline::PictureSourceExtent::TimelineRange(
+                mondrian_core::TimelineTimeRange::new(TimelineTime::ZERO, end).unwrap(),
+            ));
+
+        let asset_id = AssetId::new();
+        let mut clip = Clip::new(asset_id, TimelineTime::ZERO, end).unwrap();
+        let mut denoise = instantiate_effect_node(EffectType::Denoise).unwrap();
+        for (key, value) in [
+            ("sample_frame", PropertyValue::Int(4)),
+            ("temporal_enabled", PropertyValue::Bool(true)),
+            ("detail_amount", PropertyValue::Float(0.5)),
+        ] {
+            denoise
+                .set_static_value_by_parameter(
+                    &EffectType::Denoise.parameter_id(key).unwrap(),
+                    value,
+                )
+                .unwrap();
+        }
+        for (frame, value) in [(4, 100.0), (8, if both_temporal { 100.0 } else { 0.0 })] {
+            denoise
+                .properties
+                .set_keyframe(
+                    &EffectType::Denoise.property_path("temporal_amount"),
+                    Keyframe::linear(
+                        TimelineTime::new(frame, 25).unwrap(),
+                        PropertyValue::Float(value),
+                    ),
+                )
+                .unwrap();
+        }
+        clip.add_effect_node(denoise);
+        let mut sequence = Sequence::new("calibrated entering value");
+        sequence.settings.frame_rate = Rational::new(25, 1);
+        sequence.settings.resolution = resolution;
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::from([(asset_id, dependency)]),
+            color_environment: Default::default(),
+            sound_timecodes: Default::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::EntireSequence,
+        };
+
+        let mut session = ExportVisualRenderSession::default();
+        let prefix = [8, 4].map(|frame| {
+            let pixels = render_float_auxiliary_delivery(&timeline, frame, &mut session, false);
+            pixels
+                .chunks_exact(4)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+                .collect::<Vec<_>>()
+        });
+        assert_ne!(prefix[0], prefix[1]);
+        let views = prefix.each_ref().map(|pixels| {
+            mondrian_effects::EffectFloatFrameView::new(
+                EffectFrameExtent::new(resolution.width, resolution.height),
+                EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    ColorFrameAlpha::StraightCoverage,
+                ),
+                mondrian_core::ImageSampling::UNIT_SQUARE,
+                pixels,
+            )
+        });
+        let expected = video_collage_frame_f32(
+            views[0],
+            &[
+                None,
+                Some(AuxiliaryFloatFrame::new(
+                    views[1],
+                    AuxiliaryPolicy::MATCH_PRIMARY,
+                )),
+            ],
+            VideoCollageGrade::new(2, 1, 0.0, 0.0, 0.0, [0.0; 4]).unwrap(),
+        )
+        .unwrap();
+        let mut collage = instantiate_effect_node(EffectType::VideoCollage).unwrap();
+        for (key, value) in [
+            ("columns", PropertyValue::Int(2)),
+            ("rows", PropertyValue::Int(1)),
+            ("spacing", PropertyValue::Float(0.0)),
+            ("tile_delay", PropertyValue::Float(4.0 / 25.0)),
+        ] {
+            collage
+                .set_static_value_by_parameter(
+                    &EffectType::VideoCollage.parameter_id(key).unwrap(),
+                    value,
+                )
+                .unwrap();
+        }
+        timeline.sequence.video_tracks[0].clips[0].add_effect_node(collage);
+        let cpu = render_float_auxiliary_delivery(&timeline, 8, &mut session, false);
+        let expected = expected.into_iter().flatten().collect::<Vec<_>>();
+        assert_auxiliary_float32_parity(&expected, &cpu);
+
+        let _gpu = GpuVisualExecutionGuard::activate();
+        let mut session = ExportVisualRenderSession::default();
+        let device = render_float_auxiliary_delivery(&timeline, 8, &mut session, true);
+        let diagnostics = session.visual_diagnostics();
+        assert_eq!(
+            diagnostics.temporal_gpu_schedules,
+            if both_temporal { 2 } else { 1 }
+        );
+        assert_eq!(diagnostics.temporal_gpu_cpu_fallbacks, 0);
+        assert_eq!(diagnostics.temporal_gpu_readbacks, 0);
+        assert_eq!(diagnostics.gpu_visual_output_readbacks, 1);
+        let mut tile_errors = [0.0_f32; 2];
+        for (index, (cpu, gpu)) in cpu.chunks_exact(4).zip(device.chunks_exact(4)).enumerate() {
+            let column = index % resolution.width as usize;
+            let tile = usize::from(column >= resolution.width as usize / 2);
+            for (a, b) in cpu.iter().zip(gpu) {
+                tile_errors[tile] = tile_errors[tile].max((a - b).abs());
+            }
+        }
+        eprintln!(
+            "Resident history GPU Float32 errors, current tile {:.9e}, delayed tile {:.9e}",
+            tile_errors[0], tile_errors[1]
+        );
+        assert_auxiliary_float32_parity(&cpu, &device);
     }
 
     #[test]

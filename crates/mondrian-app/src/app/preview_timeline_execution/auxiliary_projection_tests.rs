@@ -909,7 +909,7 @@ fn a_restored_source_rejoins_the_same_frozen_pending_attempt_before_dsp() {
         intent.target_resolution = media.target_resolution;
         ready(&planned(asset, &intent), 13)
     };
-    let PreviewTimelineResolution::Pending { preparation, .. } = resolve(
+    let PreviewTimelineResolution::Pending { preparation: Some(preparation), .. } = resolve(
         &sequence,
         &[],
         &programs,
@@ -957,7 +957,7 @@ fn a_restored_source_rejoins_the_same_frozen_pending_attempt_before_dsp() {
     );
     let (preparation, _) = working.take_preparation(key).unwrap();
     wave.set(1);
-    let PreviewTimelineResolution::Pending { preparation, .. } = resolve(
+    let PreviewTimelineResolution::Pending { preparation: Some(preparation), .. } = resolve(
         &sequence,
         &[],
         &programs,
@@ -1068,6 +1068,7 @@ fn skipping_a_definition_removes_its_other_pending_auxiliary_demand() {
             }
             _ => Err(missing()),
         }),
+        None,
     )
     .expect("prefetch shares the live demand projection");
     assert!(

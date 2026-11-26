@@ -204,21 +204,25 @@ fn original_queries(
 ) -> Result<Vec<PreparedPreviewSourceDemand>, PreviewTimelineAbort> {
     let mut requests = Vec::new();
     let mut seen = HashSet::new();
+    let originals = prepared
+        .original_closure
+        .nodes()
+        .iter()
+        .map(|node| (node.instance_path(), node))
+        .collect::<HashMap<_, _>>();
     for node in prepared.closure.nodes() {
         let program = prepared
             .frozen_programs
             .get(&node.sequence_id())
             .ok_or_else(|| invalid("active node lost its original frozen program"))?;
         let request = node.evaluation().execution_request();
-        let plan = if let Some(input) = node.clip_effect_input() {
+        let plan = if let Some(&original) = originals.get(node.instance_path()) {
+            push_temporal_asset_queries(original, original.evaluation(), &mut seen, &mut requests)?;
+            original.evaluation().plan().clone()
+        } else if let Some(input) = node.clip_effect_input() {
             let input = input.with_program(program).map_err(|error| invalid(error.to_string()))?;
-            graph
-                .scratch
-                .borrow_mut()
-                .prepare_clip_effect_input_frame_execution(program, request.clone(), &input)
+            TimelineCompositeScratch::plan_clip_effect_input_sources(program, request, &input)
                 .map_err(|error| invalid(error.to_string()))?
-                .execution_plan()
-                .clone()
         } else if let Some(target) = request.auxiliary_clip() {
             let Some((PreparedVisualInstanceStep::Auxiliary(key), parent_path)) =
                 node.instance_path().split_last()
@@ -264,27 +268,9 @@ fn original_queries(
                 .borrow_mut()
                 .prepare_timeline_frame_execution(program, request.clone())
                 .map_err(|error| invalid(error.to_string()))?;
-            mondrian_renderer::PreparedVisualFrameEvaluation::new(frame.clone(), ())
-                .visit_temporal_auxiliary_demands(
-                    |key, _, _| {
-                        if let Some(query) = temporal_preview_asset_request(node, key)
-                            .map_err(PreviewTimelineAbort::Unavailable)?
-                        {
-                            if seen.insert(query.clone()) {
-                                requests.push(PreparedPreviewSourceDemand::Auxiliary(query));
-                            }
-                        }
-                        Ok(())
-                    },
-                    |demand| {
-                        invalid(format!(
-                            "temporal auxiliary slot {} at {:?} has no original binding",
-                            demand.slot(),
-                            demand.context_time()
-                        ))
-                    },
-                )?;
-            frame.execution_plan().clone()
+            let evaluation = PreparedVisualFrameEvaluation::new(frame, ());
+            push_temporal_asset_queries(node, &evaluation, &mut seen, &mut requests)?;
+            evaluation.plan().clone()
         };
         visit_graphs(&plan, |_, graph| {
             for source in graph.auxiliary_source_bindings() {
@@ -305,6 +291,32 @@ fn original_queries(
         })?;
     }
     Ok(requests)
+}
+
+fn push_temporal_asset_queries<T>(
+    node: &PreparedVisualFrameNode<PreparedTimelinePreviewEffectRoutes>,
+    evaluation: &PreparedVisualFrameEvaluation<T>,
+    seen: &mut HashSet<PreviewAuxiliaryAssetRequest>,
+    requests: &mut Vec<PreparedPreviewSourceDemand>,
+) -> Result<(), PreviewTimelineAbort> {
+    evaluation.visit_temporal_auxiliary_demands(
+        |key, _, _| {
+            if let Some(query) = temporal_preview_asset_request(node, key)
+                .map_err(PreviewTimelineAbort::Unavailable)?
+                && seen.insert(query.clone())
+            {
+                requests.push(PreparedPreviewSourceDemand::Auxiliary(query));
+            }
+            Ok(())
+        },
+        |demand| {
+            invalid(format!(
+                "temporal auxiliary slot {} at {:?} has no original binding",
+                demand.slot(),
+                demand.context_time()
+            ))
+        },
+    )
 }
 
 fn invalid(detail: impl Into<String>) -> PreviewTimelineAbort {
@@ -358,6 +370,7 @@ pub(super) fn prepare_sources(
     graph: PreviewTimelineGraph<'_>,
     request: &PreviewTimelineFrameRequest<'_>,
     resolver: &mut Option<&mut PreviewAuxiliaryAssetResolver<'_>>,
+    grain_binding: &mut Option<&mut PreviewGrainGraphBinder<'_>>,
 ) -> Result<Vec<PreparedPreviewSourceDemand>, PreviewTimelineAbort> {
     let preview = prepared
         .original_closure
@@ -393,9 +406,12 @@ pub(super) fn prepare_sources(
         if missing != prepared.unavailable_auxiliary || visual_changed {
             let projection =
                 SourceProjection::new(prepared, graph, missing.clone(), unavailable_visual.clone());
-            let closure =
-                prepare_preview_frame_closure_with_projection(graph, request, Some(&projection))
-                    .map_err(PreviewTimelineAbort::Unavailable)?;
+            let closure = prepare_preview_frame_closure_with_projection(
+                graph,
+                request,
+                Some(&projection),
+                grain_binding,
+            )?;
             prepared.frozen_programs = projection.programs.into_inner();
             prepared.closure = Arc::new(closure);
             prepared.unavailable_auxiliary = missing;

@@ -387,7 +387,7 @@ fn processor_source_preplanned_retired_failures_release_original_observation() {
                 runtime.pump_visual_execution_results(None);
             } else {
                 assert!(matches!(
-                    runtime.resolve_timeline_for_test(&snapshot, &state, sequence, 72, 1, 1, color.clone(), Some(preparation)),
+                    runtime.resolve_timeline_for_test(&snapshot, &state, sequence, 72, 1, 1, color.clone(), preparation),
                     PreviewTimelineResolution::Unavailable { reason }
                         if reason.disposition() == PreviewUnavailabilityDisposition::Blocked
                 ));
@@ -579,7 +579,7 @@ fn preplanned_real_media(source_width: u32, source_height: u32, modes: &[u8]) {
                         dependency,
                         PreviewTimelinePendingDependency::Execution { .. }
                     );
-                    preparation = Some(pending);
+                    preparation = pending;
                     if executing {
                         break;
                     }
@@ -699,7 +699,7 @@ fn preplanned_real_media(source_width: u32, source_height: u32, modes: &[u8]) {
                 ) {
                     PreviewTimelineResolution::Ready(ready) => break ready,
                     PreviewTimelineResolution::Pending { preparation: pending, .. } => {
-                        preparation = Some(pending)
+                        preparation = pending
                     }
                     other => panic!("prepared result failed: {other:?}"),
                 }

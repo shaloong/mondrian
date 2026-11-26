@@ -548,7 +548,7 @@ fn resolve_export_media_dependencies(
     Ok(media)
 }
 
-fn export_picture_source_extent(
+pub(super) fn export_picture_source_extent(
     asset_kind: &AssetKind,
     stream_duration: Option<std::time::Duration>,
     _total_frames: Option<u64>,

@@ -179,7 +179,7 @@ fn media_protection() -> PreviewMediaResidencyGuard {
         .expect("test media protection admitted")
         .expect("test media frame resident");
     drop(store);
-    PreviewMediaResidencyGuard::from_leases(Some(resource), Some(protection))
+    PreviewMediaResidencyGuard::from_leases(Some(resource), Some(protection), None)
 }
 
 fn admission(

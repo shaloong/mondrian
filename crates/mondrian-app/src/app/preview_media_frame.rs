@@ -28,8 +28,15 @@ use super::preview_execution::{PreviewDecodeExecutionSummary, PreviewSemanticIde
 use super::preview_media_residency::PreviewMediaResidencyGuard;
 
 #[derive(Debug, Clone)]
+pub(crate) struct PreviewTemporalPicture {
+    pub(crate) device: Arc<mondrian_renderer::temporal_gpu::ViewerTemporalPicture>,
+    pub(crate) lease: Arc<mondrian_playback::ViewerFrameWorkLease>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
     payload: MediaPreviewPayload,
+    temporal_picture: Option<PreviewTemporalPicture>,
     /// Complete key admitted with this allocation; no later Asset lookup may
     /// replace its file/stream, RAW, picture or input-color interpretation.
     source_key: Option<Arc<super::preview_access_mode::MediaPreviewKey>>,
@@ -54,6 +61,15 @@ enum MediaPreviewPayload {
 }
 
 impl MediaPreviewFrame {
+    pub(crate) fn temporal_picture(&self) -> Option<&PreviewTemporalPicture> {
+        self.temporal_picture.as_ref()
+    }
+
+    pub(crate) fn with_temporal_picture(mut self, picture: Option<PreviewTemporalPicture>) -> Self {
+        self.temporal_picture = picture;
+        self
+    }
+
     pub(crate) fn with_source_key(
         mut self,
         key: super::preview_access_mode::MediaPreviewKey,
@@ -76,6 +92,7 @@ impl MediaPreviewFrame {
         let descriptor = frame.descriptor();
         Self {
             payload: MediaPreviewPayload::Working(frame),
+            temporal_picture: None,
             source_key: None,
             sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
             logical_resolution,
@@ -100,6 +117,7 @@ impl MediaPreviewFrame {
         let (width, height) = source.prepared_source.extent();
         Self {
             payload: MediaPreviewPayload::Source(Box::new(source)),
+            temporal_picture: None,
             source_key: None,
             sampled_resolution: Resolution { width, height },
             logical_resolution,
@@ -124,6 +142,7 @@ impl MediaPreviewFrame {
     ) -> Self {
         Self {
             payload: MediaPreviewPayload::Native(source),
+            temporal_picture: None,
             source_key: None,
             sampled_resolution,
             logical_resolution,
@@ -148,6 +167,7 @@ impl MediaPreviewFrame {
     ) -> Self {
         Self {
             payload: MediaPreviewPayload::CpuYuv(source),
+            temporal_picture: None,
             source_key: None,
             sampled_resolution,
             logical_resolution,
@@ -250,6 +270,7 @@ impl MediaPreviewFrame {
     pub(crate) fn retains_media_residency(&self) -> bool {
         self.residency_resource.is_some()
             || self.residency_protection.is_some()
+            || self.temporal_picture.is_some()
             || self.decoder_resource_units() != 0
     }
 
@@ -298,12 +319,18 @@ impl MediaPreviewFrame {
 
     /// Retain physical residency without granting speculation Current protection.
     pub(crate) fn residency_guard(&self) -> Option<PreviewMediaResidencyGuard> {
-        if self.residency_resource.is_none() && self.residency_protection.is_none() {
+        let temporal_lease =
+            self.temporal_picture.as_ref().map(|picture| Arc::clone(&picture.lease));
+        if self.residency_resource.is_none()
+            && self.residency_protection.is_none()
+            && temporal_lease.is_none()
+        {
             return None;
         }
         Some(PreviewMediaResidencyGuard::from_leases(
             self.residency_resource.clone(),
             self.residency_protection.clone(),
+            temporal_lease,
         ))
     }
 
@@ -349,6 +376,21 @@ impl MediaPreviewFrame {
             return Some(sampling);
         }
         self.source_key()?.picture_geometry.image_sampling(self.sampled_resolution).ok()
+    }
+
+    /// Actual sample geometry for spatial and auxiliary planning, including native inputs.
+    pub(crate) fn spatial_image_domain(
+        &self,
+    ) -> Option<(
+        mondrian_effects::EffectFrameExtent,
+        mondrian_core::ImageSampling,
+    )> {
+        self.cpu_image_domain().or_else(|| {
+            Some((
+                mondrian_effects::EffectFrameExtent::new(self.width(), self.height()),
+                self.spatial_image_sampling()?,
+            ))
+        })
     }
 
     /// Complete semantic identity of the decoded or generated source frame.

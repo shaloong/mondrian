@@ -178,6 +178,16 @@ pub(crate) enum EvaluationDependency {
     /// Exact media work has an admitted queued/in-flight producer. Transient
     /// admission deferrals are deliberately never represented here.
     MediaProducer(MediaPreviewKey),
+    /// A fixed original-media sample whose profile affects the frame.
+    GrainSource(MediaPreviewKey),
+}
+
+impl EvaluationDependency {
+    pub(super) const fn media_key(&self) -> &MediaPreviewKey {
+        match self {
+            Self::MediaProducer(key) | Self::GrainSource(key) => key,
+        }
+    }
 }
 
 /// Typed reason why evaluation could not produce a plan.
@@ -644,37 +654,40 @@ impl EvaluationWorkingSet {
     /// Drop exact dependents and report whether a waiting candidate became actionable.
     pub(crate) fn invalidate_for_media_key(&mut self, media_key: &MediaPreviewKey) -> bool {
         if self.completed.as_ref().is_some_and(|proof| {
-            proof.dependencies.iter().any(|dependency| {
-                matches!(dependency, EvaluationDependency::MediaProducer(key) if key == media_key)
-            })
+            proof.dependencies.iter().any(|dependency| dependency.media_key() == media_key)
         }) {
             self.completed = None;
         }
         let mut released = false;
         self.waiting.retain_mut(|entry| {
-            let matches = entry.pending_dependencies.iter().any(|dependency| {
-                matches!(
-                    dependency,
-                    EvaluationDependency::MediaProducer(key) if key == media_key
-                )
-            });
-            if !matches { return true; }
+            let matches = entry
+                .pending_dependencies
+                .iter()
+                .any(|dependency| dependency.media_key() == media_key);
+            if !matches {
+                return true;
+            }
             released = true;
             if entry.preparation.is_some() {
                 entry.memoized = false;
-                entry.pending_dependencies = entry.pending_dependencies.iter().filter(|dependency| {
-                    !matches!(dependency, EvaluationDependency::MediaProducer(key) if key == media_key)
-                }).cloned().collect::<Vec<_>>().into();
+                entry.pending_dependencies = entry
+                    .pending_dependencies
+                    .iter()
+                    .filter(|dependency| dependency.media_key() != media_key)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into();
                 true
-            } else { false }
+            } else {
+                false
+            }
         });
         self.entries.retain(|entry| {
-            !entry.evaluation.dependencies.iter().any(|dependency| {
-                matches!(
-                    dependency,
-                    EvaluationDependency::MediaProducer(key) if key == media_key
-                )
-            })
+            !entry
+                .evaluation
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.media_key() == media_key)
         });
         released
     }

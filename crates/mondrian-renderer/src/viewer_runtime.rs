@@ -2023,6 +2023,8 @@ pub struct ViewerGpuExecutionResidency {
     pub gpu_input_layers: u32,
     /// Media layers uploaded from CPU working frames.
     pub cpu_upload_layers: u32,
+    /// Source-local temporal schedules recorded in this submission.
+    pub temporal_gpu_schedules: u32,
     /// Native/GPU-input attempts that fell back.
     pub gpu_input_failures: u32,
     /// Sampling and residency facts for native-video admission evidence.
@@ -2593,6 +2595,41 @@ fn prepare_source_layer<'a>(
                 frame_seed: *frame_seed,
             })
         }
+        crate::ViewerGpuSourceLayer::Temporal(layer) => {
+            let (table, ids) = runtime.frame_table_and_ids_mut();
+            let (frame, schedules) = layer
+                .picture
+                .record(
+                    &mut crate::temporal_gpu::TemporalGpuDevice {
+                        device,
+                        queue,
+                        compositor,
+                        ids,
+                        table,
+                        resource_pool,
+                    },
+                    encoder,
+                    request.working_color_space,
+                )
+                .map_err(|error| ViewerGpuExecutionError::InputPreparation(error.to_string()))?;
+            let index = prepared.gpu_input_handles.len();
+            prepared.gpu_input_handles.push(frame);
+            prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
+            prepared.residency.cpu_upload_layers =
+                prepared.residency.cpu_upload_layers.saturating_add(1);
+            prepared.residency.temporal_gpu_schedules =
+                prepared.residency.temporal_gpu_schedules.saturating_add(schedules);
+            Ok(PreparedCompositeLayer {
+                source: PreparedCompositeLayerSource::GpuFrame(index),
+                opacity: layer.opacity,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(layer.blend_mode),
+                transform: layer.transform,
+                effect_plan: None,
+                spatial_plan: None,
+                auxiliary: Vec::new(),
+                frame_seed: layer.frame_seed,
+            })
+        }
         crate::ViewerGpuSourceLayer::SolidColor { layer, effect_plan, spatial_plan } => {
             prepared.residency.procedural_layers =
                 prepared.residency.procedural_layers.saturating_add(1);
@@ -2667,6 +2704,7 @@ fn prepare_source_layer<'a>(
 fn source_layer_has_zero_contribution(layer: &crate::ViewerGpuSourceLayer) -> bool {
     let opacity = match layer {
         crate::ViewerGpuSourceLayer::Media { opacity, .. } => *opacity,
+        crate::ViewerGpuSourceLayer::Temporal(layer) => layer.opacity,
         crate::ViewerGpuSourceLayer::SolidColor { layer, .. } => layer.opacity,
     };
     opacity.clamp(0.0, 1.0) == 0.0

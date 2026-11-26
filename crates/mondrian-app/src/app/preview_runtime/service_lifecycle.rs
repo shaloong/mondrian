@@ -26,6 +26,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if previous != current {
             self.future_media_window.borrow_mut().clear();
             self.last_gallery_capture.borrow_mut().take();
+            *self.grain_calibration.borrow_mut() = Default::default();
             *self.title_assets.borrow_mut() = Default::default();
             self.visual_program_authoring_session.set(current);
         }

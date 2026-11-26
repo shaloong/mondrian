@@ -2,6 +2,8 @@ use super::request_scheduler::{FutureMediaWindowCache, MediaPreviewRequestAdmiss
 use super::*;
 #[path = "auxiliary_tests.rs"]
 mod auxiliary_tests;
+#[path = "grain_calibration_tests.rs"]
+mod grain_calibration_tests;
 #[path = "temporal_plugin_tests.rs"]
 mod temporal_plugin_tests;
 use crate::app::preview_access_mode::{
@@ -81,16 +83,20 @@ fn pending_preparation_fixture(
         .settings
         .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
         .unwrap();
-    let PreviewTimelineResolution::Pending { preparation, .. } = resolve_preview_timeline(
-        &sequence,
-        &[],
-        frame,
-        sequence.settings.resolution,
-        key.runtime_scale,
-        color,
-        &mut |_| PreviewTimelineMediaFrame::Pending { wait: PreviewTimelineMediaWait::Producer },
-        &mut |_| panic!("media only"),
-    ) else {
+    let PreviewTimelineResolution::Pending { preparation: Some(preparation), .. } =
+        resolve_preview_timeline(
+            &sequence,
+            &[],
+            frame,
+            sequence.settings.resolution,
+            key.runtime_scale,
+            color,
+            &mut |_| PreviewTimelineMediaFrame::Pending {
+                wait: PreviewTimelineMediaWait::Producer,
+            },
+            &mut |_| panic!("media only"),
+        )
+    else {
         panic!("pending original preparation")
     };
     (key, preparation)
@@ -20394,7 +20400,7 @@ fn canonical_program_raster_preserves_nested_canvases_with_equal_root_extent() {
             ) {
                 PreviewTimelineResolution::Ready(ready) => break ready,
                 PreviewTimelineResolution::Pending { preparation: pending, .. } => {
-                    preparation = Some(pending)
+                    preparation = pending
                 }
                 other => panic!("nested raster preparation failed: {other:?}"),
             }

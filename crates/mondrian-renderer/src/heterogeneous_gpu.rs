@@ -1398,6 +1398,32 @@ fn record_gpu_suffix(
                         });
                     }
                 }
+                PreparedHeterogeneousGpuStep::Dispatch(
+                    PreparedHeterogeneousGpuDispatch::GrainSampleBoxes {
+                        input, boxes, output, ..
+                    },
+                ) => {
+                    let input = handles.get(input).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_grain_sample_source_not_materialized",
+                        },
+                    )?;
+                    let record = resources.compositor.record_grain_sample_boxes_pass(
+                        resources.device,
+                        resources.encoder,
+                        resources.ids,
+                        resources.table,
+                        resources.resource_pool.map(Arc::as_ref),
+                        input,
+                        boxes,
+                        working_color_space,
+                    )?;
+                    if handles.insert(*output, record.output).is_some() {
+                        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_dispatch_replaced_materialization",
+                        });
+                    }
+                }
                 PreparedHeterogeneousGpuStep::Release { materialization, .. } => {
                     let handle = handles.remove(materialization).ok_or(
                         HeterogeneousGpuContinuationError::InvalidPlan {
@@ -1409,6 +1435,38 @@ fn record_gpu_suffix(
                         .take(&handle)
                         .map_err(HeterogeneousGpuContinuationError::ResourceTable)?;
                     retained.push(resource);
+                }
+                PreparedHeterogeneousGpuStep::Dispatch(
+                    PreparedHeterogeneousGpuDispatch::PreviewWindow {
+                        original,
+                        processed,
+                        window,
+                        output,
+                        ..
+                    },
+                ) => {
+                    let get = |id| {
+                        handles.get(id).ok_or(HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_preview_window_source_not_materialized",
+                        })
+                    };
+                    let record = resources.compositor.record_preview_window_pass(
+                        resources.device,
+                        resources.encoder,
+                        resources.ids,
+                        resources.table,
+                        resources.resource_pool.map(Arc::as_ref),
+                        get(original)?,
+                        get(processed)?,
+                        *window,
+                        sampling,
+                        working_color_space,
+                    )?;
+                    if handles.insert(*output, record.output).is_some() {
+                        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_dispatch_replaced_materialization",
+                        });
+                    }
                 }
             }
         }
@@ -2114,7 +2172,9 @@ fn gpu_recording_device_demand(
             | PreparedHeterogeneousGpuDispatch::DisplacementMap { .. }
             | PreparedHeterogeneousGpuDispatch::GlassMap { .. }
             | PreparedHeterogeneousGpuDispatch::MaskCombine { .. }
-            | PreparedHeterogeneousGpuDispatch::MatteMix { .. } => 1,
+            | PreparedHeterogeneousGpuDispatch::MatteMix { .. }
+            | PreparedHeterogeneousGpuDispatch::PreviewWindow { .. }
+            | PreparedHeterogeneousGpuDispatch::GrainSampleBoxes { .. } => 1,
         };
         let physical_bytes = materialization.bytes().checked_mul(physical_outputs).ok_or(
             HeterogeneousGpuContinuationError::InvalidPlan {
@@ -2794,6 +2854,106 @@ fn validate_gpu_suffix_schedule(
                 )?;
                 require_plan(live.insert(*output), "gpu_matte_mix_output_already_live")?;
                 require_plan(completed.insert(*signal), "gpu_matte_mix_signal_reused")?;
+                nodes.push(*node);
+            }
+            PreparedHeterogeneousGpuStep::Dispatch(
+                PreparedHeterogeneousGpuDispatch::PreviewWindow {
+                    node,
+                    original,
+                    processed,
+                    output,
+                    waits,
+                    signal,
+                    ..
+                },
+            ) => {
+                require_plan(
+                    live.contains(original) && live.contains(processed),
+                    "gpu_preview_window_input_not_live",
+                )?;
+                require_plan(
+                    waits.len() == if original == processed { 1 } else { 2 }
+                        && waits.iter().all(|wait| completed.contains(wait)),
+                    "gpu_preview_window_wait_not_completed",
+                )?;
+                let scene_linear = EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                );
+                for input in [original, processed] {
+                    let value = plan.materialization(*input).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_preview_window_input_materialization_missing",
+                        },
+                    )?;
+                    require_plan(
+                        waits.contains(&value.completion())
+                            && value.residency().format().exact_format() == Some(scene_linear),
+                        "gpu_preview_window_input_domain_or_token_mismatch",
+                    )?;
+                }
+                let value = plan.materialization(*output).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_preview_window_output_materialization_missing",
+                    },
+                )?;
+                require_plan(
+                    value.value() == *node
+                        && value.completion() == *signal
+                        && value.residency().format().exact_format() == Some(scene_linear),
+                    "gpu_preview_window_output_domain_or_token_mismatch",
+                )?;
+                require_plan(
+                    live.insert(*output),
+                    "gpu_preview_window_output_already_live",
+                )?;
+                require_plan(
+                    completed.insert(*signal),
+                    "gpu_preview_window_signal_reused",
+                )?;
+                nodes.push(*node);
+            }
+            PreparedHeterogeneousGpuStep::Dispatch(
+                PreparedHeterogeneousGpuDispatch::GrainSampleBoxes {
+                    node,
+                    input,
+                    output,
+                    waits,
+                    signal,
+                    ..
+                },
+            ) => {
+                require_plan(live.contains(input), "gpu_grain_sample_input_not_live")?;
+                let scene_linear = EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                );
+                let source = plan.materialization(*input).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_grain_sample_input_materialization_missing",
+                    },
+                )?;
+                require_plan(
+                    waits.as_ref() == [source.completion()]
+                        && completed.contains(&source.completion())
+                        && source.residency().format().exact_format() == Some(scene_linear),
+                    "gpu_grain_sample_input_domain_or_token_mismatch",
+                )?;
+                let value = plan.materialization(*output).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_grain_sample_output_materialization_missing",
+                    },
+                )?;
+                require_plan(
+                    value.value() == *node
+                        && value.completion() == *signal
+                        && value.residency().format().exact_format() == Some(scene_linear),
+                    "gpu_grain_sample_output_domain_or_token_mismatch",
+                )?;
+                require_plan(live.insert(*output), "gpu_grain_sample_output_already_live")?;
+                require_plan(completed.insert(*signal), "gpu_grain_sample_signal_reused")?;
                 nodes.push(*node);
             }
             PreparedHeterogeneousGpuStep::Dispatch(

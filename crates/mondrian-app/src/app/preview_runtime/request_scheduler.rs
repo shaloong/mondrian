@@ -4,6 +4,7 @@ use super::*;
 use crate::app::preview_access_mode::MediaPreviewRequestIntent;
 use crate::app::preview_timeline_execution::{
     collect_preview_timeline_picture_demands_with_programs, resolve_preview_picture_media_demands,
+    PreviewGrainGraphBinding,
 };
 use mondrian_media::PreviewPlaybackDirection;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -127,6 +128,7 @@ struct FutureMediaWindowIdentity {
     target_resolution: Resolution,
     color_context: ProgramColorContext,
     asset_library_revision: u64,
+    grain_calibration_revision: u64,
     proxy_config: mondrian_media::ProxyConfig,
     hardware_admission: Option<PlaybackHardwareDecodeAdmission>,
 }
@@ -830,6 +832,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             target_resolution,
             color_context,
             asset_library_revision,
+            grain_calibration_revision: self.grain_calibration.borrow().revision(),
             proxy_config: authoring.proxy().config().clone(),
             hardware_admission: self.hardware_decode_admission.get().observation(),
         })
@@ -854,6 +857,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .map(PreviewAuthoringSnapshot::visual_author_snapshot_identity);
         let heterogeneous_graph_budget =
             self.heterogeneous_effect_decision.get().cpu_prefix_grant().graph_execution();
+        let mut calibration_keys = Vec::new();
+        let mut grain_binding = |binding: PreviewGrainGraphBinding<'_>, graph| {
+            self.bind_preview_grain_graph(
+                snapshot,
+                binding,
+                graph,
+                super::grain_calibration::PreviewGrainBindingUse::PrefetchPlan,
+                |key, _| calibration_keys.push(key.clone()),
+            )
+        };
         let demands = match collect_preview_timeline_picture_demands_with_programs(
             sequence,
             sequences,
@@ -867,6 +880,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             author_snapshot,
             heterogeneous_graph_budget,
             Some(&mut |request| self.resolve_auxiliary_asset(snapshot, request)),
+            Some(&mut grain_binding),
         )
         .and_then(|demands| {
             resolve_preview_picture_media_demands(demands, &mut |request| {
@@ -874,15 +888,37 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             })
         }) {
             Ok(demands) => demands,
+            // A sample display cannot freeze before its native picture is
+            // decoded. The exact calibration key can still be warmed.
+            Err(_) if !calibration_keys.is_empty() => Vec::new(),
             Err(_) => {
                 self.future_media_window.borrow_mut().record_evaluation(0);
                 return CachedFutureMediaFrame::Unavailable;
             }
         };
-        let request_capacity = demands.len();
-        let mut lowering_count = 0usize;
+        let request_capacity = demands.len() + calibration_keys.len();
+        let mut lowering_count = calibration_keys.len();
         let mut frame_keys = HashSet::new();
         let mut requests = Vec::with_capacity(request_capacity);
+        let mut push_key = |key: MediaPreviewKey| {
+            if !frame_keys.insert(key.clone()) {
+                return;
+            }
+            let hardware_decode_request =
+                self.hardware_decode_request_for_key(PreviewDecodeAccessMode::PlaybackCursor, &key);
+            requests.push(PlannedFutureMediaRequest {
+                reservation: media_preview_residency_reservation(&key, hardware_decode_request),
+                key,
+                hardware_decode_request,
+                hardware_decode_device_selector: self
+                    .hardware_decode_device_selector_for_access_mode(
+                        PreviewDecodeAccessMode::PlaybackCursor,
+                    ),
+            });
+        };
+        for key in calibration_keys {
+            push_key(key);
+        }
         for demand in demands {
             lowering_count = lowering_count.saturating_add(1);
             let key = match self.media_preview_key_for_timeline_request(
@@ -901,20 +937,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     return CachedFutureMediaFrame::Unavailable;
                 }
             };
-            if !frame_keys.insert(key.clone()) {
-                continue;
-            }
-            let hardware_decode_request =
-                self.hardware_decode_request_for_key(PreviewDecodeAccessMode::PlaybackCursor, &key);
-            requests.push(PlannedFutureMediaRequest {
-                reservation: media_preview_residency_reservation(&key, hardware_decode_request),
-                key,
-                hardware_decode_request,
-                hardware_decode_device_selector: self
-                    .hardware_decode_device_selector_for_access_mode(
-                        PreviewDecodeAccessMode::PlaybackCursor,
-                    ),
-            });
+            push_key(key);
         }
         self.future_media_window.borrow_mut().record_evaluation(lowering_count);
         CachedFutureMediaFrame::Complete(requests.into())

@@ -630,6 +630,53 @@ impl ExportGpuExecutionRuntime {
         self.record_prepared_gpu_node(request, cancellation, false)
     }
 
+    fn record_temporal_picture(
+        &mut self,
+        schedule: &mondrian_effects::PreparedEffectTemporalGpuExecution,
+        frames: &mut PreparedTemporalFrameSet,
+        auxiliary: &mut mondrian_effects::PreparedTemporalAuxiliarySet,
+        working: WorkingColorSpace,
+        cancellation: &ExecutionCancellationToken,
+        resident_auxiliary: &[mondrian_renderer::temporal_gpu::TemporalGpuResidentAuxiliary],
+    ) -> Result<(GpuColorFrameHandle, usize), String> {
+        if cancellation.is_canceled() {
+            return Err("export GPU temporal execution canceled".to_owned());
+        }
+        self.ensure_ready()
+            .map_err(|reason| format!("export visual backend unavailable: {reason:?}"))?;
+        let ExportGpuExecutionRuntimeState::Ready { backend, .. } = &mut self.state else {
+            return Err("export visual backend is unavailable".to_owned());
+        };
+        let visual = backend
+            .visual
+            .as_ref()
+            .ok_or_else(|| "export visual executor was not prepared".to_owned())?;
+        let mut encoder =
+            backend.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mondrian-export-gpu-temporal-picture"),
+            });
+        let recorded = visual
+            .record_temporal_picture(
+                &mut backend.runtime,
+                &backend.context.device,
+                &backend.context.queue,
+                &mut encoder,
+                schedule,
+                frames,
+                auxiliary,
+                working,
+                Instant::now() + EXPORT_GPU_READBACK_TIMEOUT,
+                cancellation,
+                resident_auxiliary,
+            )
+            .map_err(|error| error.to_string())?;
+        if cancellation.is_canceled() {
+            return Err("export GPU temporal execution canceled".to_owned());
+        }
+        backend.context.queue.submit(std::iter::once(encoder.finish()));
+        Ok(recorded)
+    }
+
     fn record_prepared_gpu_node(
         &mut self,
         request: GpuVisualFrameRequest<'_>,
@@ -8059,6 +8106,8 @@ enum ExportPreparedVisualMode {
 enum ExportPreparedVisualError {
     #[error("{0}")]
     Execution(String),
+    #[error("Export GPU temporal picture refused: {0}")]
+    TemporalPictureRefused(String),
     #[error("Export GPU spatial chain refused at {width}x{height}: {reason:?}")]
     SpatialChainRefused {
         width: u32,
@@ -8351,7 +8400,9 @@ fn prepare_export_visual_frame_closure(
                     )
                 }
                 PreparedVisualFrameTarget::ClipEffectInput(input) => {
-                    scratch.prepare_clip_effect_input_frame_execution(program, request, input)
+                    scratch.prepare_clip_effect_input_frame_execution_with_media_binding(
+                        program, request, input, bind,
+                    )
                 }
             }
             .map_err(|error| error.to_string())?;
@@ -8570,7 +8621,8 @@ fn render_sequence_sample_into(
                 ));
             }
             Err(PreparedVisualExecutionError::Adapter(
-                error @ ExportPreparedVisualError::SpatialChainRefused { .. },
+                error @ (ExportPreparedVisualError::SpatialChainRefused { .. }
+                | ExportPreparedVisualError::TemporalPictureRefused(_)),
             )) if mode == ExportPreparedVisualMode::Gpu
                 && !resident_required
                 && cpu_float_supported =>
@@ -8580,9 +8632,21 @@ fn render_sequence_sample_into(
                 }
                 tracing::debug!(%error, "Retrying Export visual frame on CPU");
                 context.visual_session.gpu_output.discard_visual_frame();
-                let retries =
-                    &mut context.visual_session.visual_diagnostics.gpu_visual_spatial_cpu_retries;
-                *retries = retries.saturating_add(1);
+                match error {
+                    ExportPreparedVisualError::SpatialChainRefused { .. } => {
+                        let retries = &mut context
+                            .visual_session
+                            .visual_diagnostics
+                            .gpu_visual_spatial_cpu_retries;
+                        *retries = retries.saturating_add(1);
+                    }
+                    ExportPreparedVisualError::TemporalPictureRefused(_) => {
+                        record_temporal_cpu_fallback(context)
+                    }
+                    ExportPreparedVisualError::Execution(_) => {
+                        unreachable!("only a device refusal retries the visual closure")
+                    }
+                }
                 mode = ExportPreparedVisualMode::Cpu;
             }
             Err(PreparedVisualExecutionError::Adapter(error)) => return Err(error.to_string()),
@@ -8664,14 +8728,69 @@ fn prepared_export_visual_closure_supports_gpu(
 ) -> bool {
     closure.nodes().iter().all(|node| {
         node.evaluation().payload().is_empty()
-            && node.evaluation().temporal_batches().is_empty()
-            && node
-                .evaluation()
-                .plan()
-                .elements
-                .iter()
-                .all(|element| prepared_export_element_supports_gpu(element, scratch))
+            && (resident_historical_temporal_batch(node).is_some()
+                || (resident_media_temporal_batches(node)
+                    && node
+                        .evaluation()
+                        .plan()
+                        .elements
+                        .iter()
+                        .all(|element| prepared_export_element_supports_gpu(element, scratch))))
     })
+}
+
+fn resident_historical_temporal_batch(
+    node: &PreparedVisualFrameNode<Vec<PreparedExportHeterogeneousElement>>,
+) -> Option<&TimelineTemporalDemandBatch> {
+    node.clip_effect_input()?;
+    let [TimelineRenderPlanElement::Media(media)] = node.evaluation().plan().elements.as_slice()
+    else {
+        return None;
+    };
+    let [batch] = node.evaluation().temporal_batches() else {
+        return None;
+    };
+    (media.placement == batch.placement() && resident_media_temporal_batches(node)).then_some(batch)
+}
+
+fn resident_media_temporal_batches(
+    node: &PreparedVisualFrameNode<Vec<PreparedExportHeterogeneousElement>>,
+) -> bool {
+    node.evaluation().temporal_batches().iter().all(|batch| {
+        node.evaluation().plan().elements.iter().any(|element| {
+            matches!(element,
+            TimelineRenderPlanElement::Media(media) if media.placement == batch.placement())
+        }) && resident_media_temporal_batch(batch)
+    })
+}
+
+fn resident_media_temporal_batch(batch: &TimelineTemporalDemandBatch) -> bool {
+    use mondrian_renderer::PreparedVisualAuxiliaryAddress;
+
+    if batch.graph().requires_processor_input_service()
+        || !batch
+            .source_demands()
+            .iter()
+            .all(|demand| matches!(demand.source, TimelineTemporalSource::Media { .. }))
+    {
+        return false;
+    }
+    // These sources already materialize to exact CPU Float32 leaves. Child
+    // visuals need a resident-leaf binding rather than a readback here.
+    batch
+        .visit_auxiliary_demands(
+            |key, _, _| match key.address {
+                PreparedVisualAuxiliaryAddress::Authored(
+                    mondrian_core::VisualSourceReference::Asset { .. },
+                )
+                | PreparedVisualAuxiliaryAddress::GrainSample(_)
+                | PreparedVisualAuxiliaryAddress::InputHistory(_) => Ok(()),
+                _ => Err(()),
+            },
+            |_| (),
+        )
+        .is_ok()
+        && batch.execution().plan_gpu_execution().is_ok()
 }
 
 fn prepared_export_element_supports_gpu(
@@ -8783,13 +8902,17 @@ fn render_prepared_visual_node_gpu(
         return Err("export GPU visual execution canceled".to_owned().into());
     }
     let node = inputs.node();
+    if let Some(batch) = resident_historical_temporal_batch(node) {
+        return render_export_resident_temporal_input(context, inputs, batch)
+            .map(|layer| (layer.frame, Some(layer.sampling)));
+    }
     let materialization = node.materialization_contract();
     let author_resolution = materialization.author_resolution();
     let resolution = node.execution_resolution();
     let Resolution { width, height } = resolution;
     let color_context = node.color_context().clone();
     let render_plan = node.evaluation().plan();
-    if !node.evaluation().payload().is_empty() || !node.evaluation().temporal_batches().is_empty() {
+    if !node.evaluation().payload().is_empty() || !resident_media_temporal_batches(node) {
         return Err(
             "heterogeneous or temporal work escaped Export GPU visual preflight"
                 .to_owned()
@@ -8797,6 +8920,11 @@ fn render_prepared_visual_node_gpu(
         );
     }
 
+    let mut temporal_layers = HashMap::new();
+    for batch in node.evaluation().temporal_batches() {
+        let layer = render_export_resident_temporal_input(context, inputs, batch)?;
+        temporal_layers.insert(batch.placement(), layer);
+    }
     let mut decode_cache = HashMap::<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>::with_capacity(
         render_plan.len().saturating_mul(2),
     );
@@ -8812,6 +8940,9 @@ fn render_prepared_visual_node_gpu(
     for (index, element) in render_plan.elements.iter().enumerate() {
         match element {
             TimelineRenderPlanElement::Media(media) => {
+                if temporal_layers.contains_key(&media.placement) {
+                    continue;
+                }
                 decoded_media[index] = Some(decode_export_media_plan(
                     context.media,
                     media,
@@ -8823,7 +8954,7 @@ fn render_prepared_visual_node_gpu(
                     context.stage_diagnostics.as_deref_mut(),
                     context.visual_session,
                     context.cancellation,
-                    ExportDecodedSourceRoute::GpuInput,
+                    export_gpu_source_decode_route(&media.effect_graph),
                 )?);
             }
             TimelineRenderPlanElement::BasicTitle(title) => {
@@ -8874,26 +9005,42 @@ fn render_prepared_visual_node_gpu(
     for (index, element) in render_plan.elements.iter().enumerate() {
         let gpu_element = match element {
             TimelineRenderPlanElement::Media(media) => {
-                let decoded = decoded_media[index].as_ref().ok_or_else(|| {
-                    "GPU media plan was not resolved before compositing".to_owned()
-                })?;
+                let (source, source_resolution, source_affine, sampling) =
+                    if let Some(layer) = temporal_layers.get(&media.placement) {
+                        (
+                            GpuVisualFrameSource::GpuWorking(layer.frame.clone()),
+                            layer.source_resolution,
+                            layer.source_to_display_affine,
+                            Some(layer.sampling),
+                        )
+                    } else {
+                        let decoded = decoded_media[index].as_ref().ok_or_else(|| {
+                            "GPU media plan was not resolved before compositing".to_owned()
+                        })?;
+                        (
+                            decoded.gpu_source()?,
+                            decoded.source_resolution,
+                            decoded.picture_geometry.source_to_display_affine(),
+                            decoded.image_sampling(),
+                        )
+                    };
+                let (source_width, source_height) = source.extent(width, height);
                 let transform = project_export_picture_affine(
                     media.transform,
-                    decoded.picture_geometry.source_to_display_affine(),
-                    decoded.source_resolution,
-                    decoded.extent(),
+                    source_affine,
+                    source_resolution,
+                    Resolution { width: source_width, height: source_height },
                     author_resolution,
                     resolution,
                     "GPU media",
                 )?;
-                let source = decoded.gpu_source()?;
                 let effect = lower_export_gpu_source_effect(
                     context,
                     inputs,
                     &media.effect_graph,
                     media.placement,
                     &source,
-                    decoded.image_sampling(),
+                    sampling,
                     transform,
                     resolution,
                     &mut decode_cache,
@@ -9291,6 +9438,22 @@ fn lower_export_gpu_source_effect(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn export_gpu_source_decode_route(
+    graph: &mondrian_effects::CompiledEffectGraph,
+) -> ExportDecodedSourceRoute {
+    if graph
+        .auxiliary_inputs()
+        .iter()
+        .any(|input| graph.input_history_binding(input.slot()).is_some())
+    {
+        // The historical entering value uses the temporal decoder's working
+        // conversion. The current cell must interpret the same stream the same way.
+        ExportDecodedSourceRoute::CpuWorking
+    } else {
+        ExportDecodedSourceRoute::GpuInput
+    }
+}
+
 fn lower_export_gpu_transition_input(
     context: &mut ExportFrameRenderContext<'_>,
     inputs: &ExportNodeInputs<'_>,
@@ -9316,7 +9479,7 @@ fn lower_export_gpu_transition_input(
                 context.stage_diagnostics.as_deref_mut(),
                 context.visual_session,
                 context.cancellation,
-                ExportDecodedSourceRoute::GpuInput,
+                export_gpu_source_decode_route(&media.effect_graph),
             )?;
             let transform = project_export_picture_affine(
                 media.transform,
@@ -10278,6 +10441,19 @@ fn render_export_clip_effect_input(
         return Err("historical Clip input requires one source layer".into());
     };
     let mut cache = HashMap::new();
+    let batches = node.evaluation().temporal_batches();
+    if let [batch] = batches
+        && let TimelineRenderPlanElement::Media(media) = element
+        && batch.placement() == media.placement
+    {
+        return resolve_export_temporal_batches(context, inputs, batches, &mut cache)?
+            .remove(&media.placement)
+            .map(|layer| layer.frame)
+            .ok_or_else(|| "historical Clip input did not produce its temporal source".into());
+    }
+    if !batches.is_empty() {
+        return Err("historical Clip input has inconsistent temporal ownership".into());
+    }
     let mut checkpoint = || {
         context
             .cancellation
@@ -10928,6 +11104,154 @@ fn record_temporal_cpu_fallback(context: &mut ExportFrameRenderContext<'_>) {
         diagnostics.temporal_gpu_cpu_fallbacks.saturating_add(1);
 }
 
+struct PreparedExportTemporalSources {
+    frames: PreparedTemporalFrameSet,
+    source_resolution: Option<Resolution>,
+    source_to_display_affine: Option<[f32; 6]>,
+}
+
+struct PreparedExportResidentTemporalLayer {
+    frame: GpuColorFrameHandle,
+    sampling: mondrian_core::ImageSampling,
+    source_resolution: Resolution,
+    source_to_display_affine: [f32; 6],
+}
+
+fn render_export_resident_temporal_input(
+    context: &mut ExportFrameRenderContext<'_>,
+    inputs: &ExportNodeInputs<'_>,
+    batch: &TimelineTemporalDemandBatch,
+) -> Result<PreparedExportResidentTemporalLayer, ExportPreparedVisualError> {
+    use mondrian_effects::{EffectTemporalFrameProvider, PreparedTemporalAuxiliarySet};
+
+    let schedule = batch
+        .execution()
+        .plan_gpu_execution()
+        .map_err(|error| ExportPreparedVisualError::TemporalPictureRefused(error.to_string()))?;
+    let cancellation = context.cancellation;
+    let mut cache = HashMap::new();
+    let mut sources = prepare_export_temporal_sources(context, inputs, batch, &mut cache)?;
+    let mut checkpoint = || {
+        cancellation
+            .is_canceled()
+            .then_some(mondrian_effects::EffectProcessorStopReason::Canceled)
+    };
+    let mut control = EffectProcessorControl::new(&mut checkpoint);
+    let mut resident_auxiliary = Vec::new();
+    let mut auxiliary = match auxiliary::prepare_temporal_rasters(
+        inputs,
+        batch,
+        context,
+        &mut cache,
+        &mut control,
+        |picture| {
+            if batch.source_demands().is_empty() {
+                sources.source_resolution = Some(picture.source_resolution);
+                sources.source_to_display_affine =
+                    Some(picture.picture_geometry.source_to_display_affine());
+            }
+        },
+        Some(&mut resident_auxiliary),
+    )? {
+        Some(auxiliary) => auxiliary,
+        None => PreparedTemporalAuxiliarySet::prepare(
+            sources.frames.source_identity(),
+            schedule.request().generation(),
+            std::iter::empty(),
+        )
+        .map_err(|error| error.to_string())?,
+    };
+    let (frame, dispatches) = context
+        .visual_session
+        .gpu_output
+        .record_temporal_picture(
+            &schedule,
+            &mut sources.frames,
+            &mut auxiliary,
+            inputs.node().color_context().working_color_space(),
+            cancellation,
+            &resident_auxiliary,
+        )
+        .map_err(ExportPreparedVisualError::TemporalPictureRefused)?;
+    let diagnostics = &mut context.visual_session.visual_diagnostics;
+    diagnostics.temporal_gpu_schedules = diagnostics.temporal_gpu_schedules.saturating_add(1);
+    diagnostics.temporal_gpu_dispatches =
+        diagnostics.temporal_gpu_dispatches.saturating_add(dispatches as u64);
+    Ok(PreparedExportResidentTemporalLayer {
+        frame,
+        sampling: batch.execution_request().sampling(),
+        source_resolution: sources
+            .source_resolution
+            .unwrap_or(inputs.node().execution_resolution()),
+        source_to_display_affine: sources
+            .source_to_display_affine
+            .unwrap_or(mondrian_effects::IDENTITY_AFFINE),
+    })
+}
+
+fn prepare_export_temporal_sources(
+    context: &mut ExportFrameRenderContext<'_>,
+    inputs: &ExportNodeInputs<'_>,
+    batch: &TimelineTemporalDemandBatch,
+    decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+) -> Result<PreparedExportTemporalSources, String> {
+    let node = inputs.node();
+    let materialization = node.materialization_contract();
+    let color_context = node.color_context();
+    let resolution = node.execution_resolution();
+    let mut source_resolution = None;
+    let mut source_to_display_affine = None;
+    let mut resolved = Vec::with_capacity(batch.source_demands().len());
+    for demand in batch.source_demands() {
+        let (frame, current_source_resolution, current_source_to_display_affine) =
+            resolve_export_temporal_source(
+                context,
+                inputs,
+                materialization,
+                color_context,
+                resolution,
+                batch,
+                demand,
+                decode_cache,
+            )?;
+        if source_resolution
+            .replace(current_source_resolution)
+            .is_some_and(|previous| previous != current_source_resolution)
+        {
+            return Err(format!(
+                "Clip {} temporal requests resolved with inconsistent authoring extents",
+                batch.placement().clip_id
+            ));
+        }
+        if source_to_display_affine
+            .replace(current_source_to_display_affine)
+            .is_some_and(|previous| previous != current_source_to_display_affine)
+        {
+            return Err(format!(
+                "Clip {} temporal requests resolved with inconsistent picture geometry",
+                batch.placement().clip_id
+            ));
+        }
+        resolved.push((
+            demand.effect_request,
+            export_temporal_tile(&frame, demand.effect_request)?,
+        ));
+    }
+    let source_identity =
+        export_temporal_source_identity(context, inputs.closure(), batch, color_context)?;
+    let frames = PreparedTemporalFrameSet::prepare(
+        source_identity,
+        batch.effect_demands().clone(),
+        resolved,
+    )
+    .map_err(|error| format!("export temporal frame set is invalid: {error}"))?;
+    Ok(PreparedExportTemporalSources {
+        frames,
+        source_resolution,
+        source_to_display_affine,
+    })
+}
+
 fn resolve_export_temporal_batches(
     context: &mut ExportFrameRenderContext<'_>,
     inputs: &ExportNodeInputs<'_>,
@@ -10937,7 +11261,6 @@ fn resolve_export_temporal_batches(
     use mondrian_effects::{EffectProcessorControl, EffectTemporalExecutionError};
 
     let node = inputs.node();
-    let materialization = node.materialization_contract();
     let color_context = node.color_context().clone();
     let resolution = node.execution_resolution();
     let mut layers = HashMap::with_capacity(batches.len());
@@ -10945,52 +11268,11 @@ fn resolve_export_temporal_batches(
         if context.cancellation.is_canceled() {
             return Err("export temporal dependency preparation was canceled".to_owned());
         }
-        let mut source_resolution = None;
-        let mut source_to_display_affine = None;
-        let mut resolved = Vec::with_capacity(batch.source_demands().len());
-        for demand in batch.source_demands() {
-            let (frame, current_source_resolution, current_source_to_display_affine) =
-                resolve_export_temporal_source(
-                    context,
-                    inputs,
-                    materialization,
-                    &color_context,
-                    resolution,
-                    batch,
-                    demand,
-                    decode_cache,
-                )?;
-            if source_resolution
-                .replace(current_source_resolution)
-                .is_some_and(|previous| previous != current_source_resolution)
-            {
-                return Err(format!(
-                    "Clip {} temporal requests resolved with inconsistent authoring extents",
-                    batch.placement().clip_id
-                ));
-            }
-            if source_to_display_affine
-                .replace(current_source_to_display_affine)
-                .is_some_and(|previous| previous != current_source_to_display_affine)
-            {
-                return Err(format!(
-                    "Clip {} temporal requests resolved with inconsistent picture geometry",
-                    batch.placement().clip_id
-                ));
-            }
-            resolved.push((
-                demand.effect_request,
-                export_temporal_tile(&frame, demand.effect_request)?,
-            ));
-        }
-        let source_identity =
-            export_temporal_source_identity(context, inputs.closure(), batch, &color_context)?;
-        let mut prepared = PreparedTemporalFrameSet::prepare(
-            source_identity,
-            batch.effect_demands().clone(),
-            resolved,
-        )
-        .map_err(|error| format!("export temporal frame set is invalid: {error}"))?;
+        let PreparedExportTemporalSources {
+            frames: mut prepared,
+            mut source_resolution,
+            mut source_to_display_affine,
+        } = prepare_export_temporal_sources(context, inputs, batch, decode_cache)?;
         let owner = node.evaluation().execution_request();
         let plan = processor_sources::clip_input_plan(
             node.program(),
@@ -11011,6 +11293,14 @@ fn resolve_export_temporal_batches(
             context,
             decode_cache,
             &mut control,
+            |picture| {
+                if batch.source_demands().is_empty() {
+                    source_resolution = Some(picture.source_resolution);
+                    source_to_display_affine =
+                        Some(picture.picture_geometry.source_to_display_affine());
+                }
+            },
+            None,
         )?;
         control.bind_observation(context.visual_session.composite_scratch.processor_observation());
         let working_color_space = color_context.working_color_space();
@@ -11091,7 +11381,7 @@ fn resolve_export_temporal_batches(
                     .to_owned(),
             );
         }
-        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        let frame = CpuColorFrame::working_with_bilinear_projection(WorkingRgbaF32Frame {
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             sampling: tile.sampling(),
             width: tile.frame_extent().width(),
@@ -16099,13 +16389,13 @@ mod tests {
 
     #[test]
     fn fixed_media_calibration_uses_the_same_native_decode_across_output_times() {
-        verify_fixed_media_calibration(false, None);
+        verify_fixed_media_calibration(false, None, false);
     }
 
     #[test]
     #[ignore = "real GPU Export calibration qualification; run independently"]
     fn fixed_media_calibration_matches_production_gpu_export() {
-        verify_fixed_media_calibration(true, None);
+        verify_fixed_media_calibration(true, None, false);
     }
 
     #[test]
@@ -16120,6 +16410,7 @@ mod tests {
                 feather_radius: 0.0,
                 view_matte: false,
             }),
+            false,
         );
     }
 
@@ -16135,6 +16426,7 @@ mod tests {
                 feather_radius: 0.0,
                 view_matte: false,
             }),
+            false,
         );
     }
 
@@ -16154,6 +16446,7 @@ mod tests {
                 feather_radius: 0.0,
                 view_matte: false,
             }),
+            false,
         );
     }
 
@@ -16173,26 +16466,50 @@ mod tests {
                 feather_radius: 0.0,
                 view_matte: false,
             }),
+            false,
         );
     }
 
     #[test]
     #[ignore = "real GPU Export post-combination feather qualification"]
-    fn fixed_media_calibration_combines_and_feathers_native_rgb_color_match() {
-        verify_fixed_media_calibration(
+    fn fixed_media_calibration_renders_authored_denoise_with_rgb_and_layer_mattes() {
+        verify_fixed_media_calibration(true, Some(authored_denoise_protection()), true);
+    }
+
+    #[test]
+    #[ignore = "real GPU Export of the source-pixel Denoise preview window"]
+    fn fixed_media_calibration_renders_authored_denoise_preview_window() {
+        verify_grain_export(
             true,
-            Some(GrainTestProtection {
-                combination: mondrian_effects::MaskCombineMode::Screen,
-                layer_matte: Some(GrainTestLayerMatte {
-                    channel: mondrian_effects::SetMatteChannel::Alpha,
-                    invert: false,
-                    stretch: false,
-                }),
-                color_match: Some(mondrian_effects::GrainColorMatchMode::Rgb),
-                feather_radius: 3.0,
-                view_matte: false,
-            }),
+            Some(authored_denoise_protection()),
+            true,
+            GrainTestView::Preview,
         );
+    }
+
+    #[test]
+    #[ignore = "real GPU Export of the fixed-source Denoise sample display"]
+    fn fixed_media_calibration_renders_the_fixed_sample_picture() {
+        verify_grain_export(
+            true,
+            Some(authored_denoise_protection()),
+            true,
+            GrainTestView::Samples,
+        );
+    }
+
+    fn authored_denoise_protection() -> GrainTestProtection {
+        GrainTestProtection {
+            combination: mondrian_effects::MaskCombineMode::Screen,
+            layer_matte: Some(GrainTestLayerMatte {
+                channel: mondrian_effects::SetMatteChannel::Alpha,
+                invert: false,
+                stretch: false,
+            }),
+            color_match: Some(mondrian_effects::GrainColorMatchMode::Rgb),
+            feather_radius: 3.0,
+            view_matte: false,
+        }
     }
 
     #[test]
@@ -16211,6 +16528,7 @@ mod tests {
                 feather_radius: 100.0,
                 view_matte: true,
             }),
+            false,
         );
     }
 
@@ -16230,7 +16548,34 @@ mod tests {
         view_matte: bool,
     }
 
-    fn verify_fixed_media_calibration(verify_gpu: bool, protection: Option<GrainTestProtection>) {
+    fn verify_fixed_media_calibration(
+        verify_gpu: bool,
+        protection: Option<GrainTestProtection>,
+        authored_denoise: bool,
+    ) {
+        verify_grain_export(
+            verify_gpu,
+            protection,
+            authored_denoise,
+            GrainTestView::Final,
+        );
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum GrainTestView {
+        Final,
+        Preview,
+        Samples,
+    }
+
+    fn verify_grain_export(
+        verify_gpu: bool,
+        protection: Option<GrainTestProtection>,
+        authored_denoise: bool,
+        view: GrainTestView,
+    ) {
+        let preview_window = view == GrainTestView::Preview;
+        let samples = view == GrainTestView::Samples;
         use mondrian_core::VisualSourceReference;
         use mondrian_effects::{
             grain_calibration::{
@@ -16340,12 +16685,30 @@ mod tests {
                 decode_context: &mut session.decode_context,
                 cancellation: &cancellation,
             };
-            session.grain_calibration.resolve(
-                media,
-                request,
-                &mut source,
-                session.composite_scratch.color_execution_mut(),
-            )
+            session
+                .grain_calibration
+                .resolve(
+                    media,
+                    request,
+                    &mut source,
+                    session.composite_scratch.color_execution_mut(),
+                )
+                .map(|observation| {
+                    observation.and_then(|observation| {
+                        assert_eq!(observation.picture.target, fixed);
+                        assert_eq!(observation.picture.extent, EffectFrameExtent::new(64, 64));
+                        assert_eq!(
+                            observation.picture.sampling,
+                            mondrian_core::ImageSampling::UNIT_SQUARE
+                        );
+                        assert_eq!(
+                            observation.picture.fingerprint,
+                            dependencies[&asset_id].source_fingerprint
+                        );
+                        assert_eq!(observation.picture.video_stream_index, stream.index);
+                        observation.profile
+                    })
+                })
         };
         let mut first_decode = None;
         let mut first_profile = None;
@@ -16427,6 +16790,28 @@ mod tests {
             resolve(&mut session, &dependencies, &media, adjusted_request).unwrap().unwrap();
         assert!(!Arc::ptr_eq(cached_profile.as_ref().unwrap(), &adjusted));
         assert_ne!(cached_profile.as_ref().unwrap().windows, adjusted.windows);
+
+        let automatic = cached_profile.as_ref().unwrap();
+        let manual_request =
+            |window: mondrian_effects::grain_calibration::GrainCalibrationWindow| {
+                let [x, y] = window.origin;
+                let [width, height] = window.size;
+                let center = [x + width / 2, y + height / 2];
+                let settings = GrainCalibrationSettings::manual(16, &[center]).unwrap();
+                GrainCalibrationRequest::new(4, settings).unwrap()
+            };
+        let manual_a = manual_request(automatic.windows[0]);
+        let manual_b = manual_request(automatic.windows[1]);
+        let resolve_manual = |session: &mut ExportVisualRenderSession, request| {
+            resolve(session, &dependencies, &media, request).unwrap().unwrap()
+        };
+        let first_window = resolve_manual(&mut session, manual_a);
+        let moved_window = resolve_manual(&mut session, manual_b);
+        let first_again = resolve_manual(&mut session, manual_a);
+        assert_eq!(&*first_window.windows, &automatic.windows[..1]);
+        assert_eq!(&*moved_window.windows, &automatic.windows[1..2]);
+        assert!(!Arc::ptr_eq(&first_window, &moved_window));
+        assert!(Arc::ptr_eq(&first_window, &first_again));
 
         session.release_decode_sessions().unwrap();
         let old = dependencies.get(&asset_id).unwrap();
@@ -16521,9 +16906,13 @@ mod tests {
         let halo = spatial.halo().max(qualifiers.as_ref().map_or(0, |(grades, _)| {
             grades.iter().map(|grade| grade.input_halo()).max().unwrap_or(0)
         }));
-        let kind = EffectType::External(format!(
-            "test.export.source-calibrated-grain.{verify_gpu}.{protection:?}"
-        ));
+        let kind = if authored_denoise {
+            EffectType::Denoise
+        } else {
+            EffectType::External(format!(
+                "test.export.source-calibrated-grain.{verify_gpu}.{protection:?}"
+            ))
+        };
         let parameter =
             mondrian_core::ParameterId::new("mondrian.test.res01.matte_source").unwrap();
         let mut definition = EffectDefinition::new(
@@ -16542,7 +16931,7 @@ mod tests {
             },
             ..EffectExecutionContract::IDENTITY
         });
-        if protection.and_then(|controls| controls.layer_matte).is_some() {
+        let layer_reference = protection.and_then(|controls| controls.layer_matte).map(|_| {
             let matte_id = AssetId::new();
             let matte_path = root.path().join("denoise-matte.ppm");
             let mut bytes = b"P6\n3 2\n255\n".to_vec();
@@ -16553,85 +16942,91 @@ mod tests {
             let mut dependency = test_media_dependency(matte_path, None, Default::default(), None);
             dependency.source_resolution = Some(Resolution { width: 3, height: 2 });
             dependencies.insert(matte_id, dependency);
+            VisualSourceReference::Asset { asset_id: matte_id, retime: Default::default() }
+        });
+        if let Some(reference) = layer_reference {
             definition = definition.with_property(
                 mondrian_core::PropertyDescriptor::new(
                     "matte_source",
                     "Layer matte",
-                    mondrian_core::PropertyValue::VisualSource(VisualSourceReference::Asset {
-                        asset_id: matte_id,
-                        retime: Default::default(),
-                    }),
+                    mondrian_core::PropertyValue::VisualSource(reference),
                 )
                 .with_parameter_id(parameter.clone()),
             );
         }
-        register_effect_definition(definition.with_branching_graph_builder(Arc::new(
-            move |effect, _, graph| {
-                let entering = graph.current_output();
-                let current = graph.append_unary(EffectRenderOp::TemporalGrain { grade: temporal });
-                let view_matte = protection.is_some_and(|controls| controls.view_matte);
-                let (original, filtered) = if view_matte {
-                    (current, None)
-                } else {
-                    (
-                        entering,
-                        Some(graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial })),
-                    )
-                };
-                if let Some(([color, secondary], protection)) = &qualifiers {
-                    let mut qualify = |qualifier: &Arc<PreparedQualifier>| {
-                        graph.set_current_output(original);
-                        graph.append_unary_in_domain(
-                            EffectRenderOp::Qualifier { qualifier: Arc::clone(qualifier) },
-                            EffectColorDomainContract {
-                                input: EffectColorDomain::SceneLinearRgb,
-                                output: EffectColorDomain::AlphaMask,
-                            },
-                        )
-                    };
-                    let left = qualify(color);
-                    let right = if let Some(layer) = protection.layer_matte {
-                        let source = graph.append_visual_source_input(
-                            effect,
-                            &parameter,
-                            EffectValueFormat::new(
-                                EffectWorkingPrecision::Float32,
-                                EffectColorDomain::SceneLinearRgb,
-                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+        if !authored_denoise {
+            register_effect_definition(definition.with_branching_graph_builder(Arc::new(
+                move |effect, _, graph| {
+                    let entering = graph.current_output();
+                    let current =
+                        graph.append_unary(EffectRenderOp::TemporalGrain { grade: temporal });
+                    let view_matte = protection.is_some_and(|controls| controls.view_matte);
+                    let (original, filtered) = if view_matte {
+                        (current, None)
+                    } else {
+                        (
+                            entering,
+                            Some(
+                                graph.append_unary(EffectRenderOp::SpatialGrain { grade: spatial }),
                             ),
-                            EffectColorDomainContract::SCENE_LINEAR,
-                        )?;
-                        graph.add_layer_matte(
-                            original,
-                            source,
-                            layer.channel,
-                            layer.invert,
-                            layer.stretch,
                         )
-                    } else {
-                        qualify(secondary)
                     };
-                    let matte =
-                        graph.add_mask_combine_with_mode(left, right, protection.combination);
-                    graph.set_current_output(matte);
-                    let matte = graph.append_matte_feather(protection.feather_radius)?;
-                    if let Some(filtered) = filtered {
-                        let mix = graph.add_matte_mix_with_amount(filtered, original, matte, 0.65);
-                        graph.set_current_output(mix);
-                    } else {
-                        graph.append_unary_in_domain(
-                            EffectRenderOp::MattePreview { invert: false },
-                            EffectColorDomainContract {
-                                input: EffectColorDomain::AlphaMask,
-                                output: EffectColorDomain::SceneLinearRgb,
-                            },
-                        );
+                    if let Some(([color, secondary], protection)) = &qualifiers {
+                        let mut qualify = |qualifier: &Arc<PreparedQualifier>| {
+                            graph.set_current_output(original);
+                            graph.append_unary_in_domain(
+                                EffectRenderOp::Qualifier { qualifier: Arc::clone(qualifier) },
+                                EffectColorDomainContract {
+                                    input: EffectColorDomain::SceneLinearRgb,
+                                    output: EffectColorDomain::AlphaMask,
+                                },
+                            )
+                        };
+                        let left = qualify(color);
+                        let right = if let Some(layer) = protection.layer_matte {
+                            let source = graph.append_visual_source_input(
+                                effect,
+                                &parameter,
+                                EffectValueFormat::new(
+                                    EffectWorkingPrecision::Float32,
+                                    EffectColorDomain::SceneLinearRgb,
+                                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                                ),
+                                EffectColorDomainContract::SCENE_LINEAR,
+                            )?;
+                            graph.add_layer_matte(
+                                original,
+                                source,
+                                layer.channel,
+                                layer.invert,
+                                layer.stretch,
+                            )
+                        } else {
+                            qualify(secondary)
+                        };
+                        let matte =
+                            graph.add_mask_combine_with_mode(left, right, protection.combination);
+                        graph.set_current_output(matte);
+                        let matte = graph.append_matte_feather(protection.feather_radius)?;
+                        if let Some(filtered) = filtered {
+                            let mix =
+                                graph.add_matte_mix_with_amount(filtered, original, matte, 0.65);
+                            graph.set_current_output(mix);
+                        } else {
+                            graph.append_unary_in_domain(
+                                EffectRenderOp::MattePreview { invert: false },
+                                EffectColorDomainContract {
+                                    input: EffectColorDomain::AlphaMask,
+                                    output: EffectColorDomain::SceneLinearRgb,
+                                },
+                            );
+                        }
                     }
-                }
-                Ok(())
-            },
-        )))
-        .unwrap();
+                    Ok(())
+                },
+            )))
+            .unwrap();
+        }
         let mut sequence = sequence;
         sequence.settings.frame_rate = Rational::new(25, 1);
         sequence.settings.resolution = resolution;
@@ -16641,8 +17036,73 @@ mod tests {
         reverse
             .set_constant_source_time_map(end, mondrian_core::TimeScale::new(-1, 1).unwrap())
             .unwrap();
-        forward.add_effect_node(instantiate_effect_node(kind.clone()).unwrap());
-        reverse.add_effect_node(instantiate_effect_node(kind).unwrap());
+        for (clip, detail_radius, reverse) in
+            [(&mut forward, 3.0, false), (&mut reverse, 0.05, true)]
+        {
+            let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+            if authored_denoise {
+                use mondrian_core::{Color, PropertyValue};
+                let options = protection.expect("authored fixture covers output protection");
+                let window = automatic.windows[0];
+                let center = [
+                    (window.origin[0] + window.size[0] / 2) as f32,
+                    (window.origin[1] + window.size[1] / 2) as f32,
+                ];
+                for (name, value) in [
+                    ("sample_frame", PropertyValue::Int(4)),
+                    ("sample_selection", PropertyValue::Enum("manual".into())),
+                    ("sample_count", PropertyValue::Int(1)),
+                    ("sample_size", PropertyValue::Int(16)),
+                    ("sample_1", PropertyValue::Vec2(center.into())),
+                    (
+                        "temporal_enabled",
+                        PropertyValue::Bool(!preview_window || !reverse),
+                    ),
+                    ("temporal_amount", PropertyValue::Float(90.0)),
+                    ("detail_amount", PropertyValue::Float(0.5)),
+                    ("detail_radius", PropertyValue::Float(detail_radius)),
+                    ("blend_amount", PropertyValue::Float(65.0)),
+                    ("matte_combination", PropertyValue::Enum("screen".into())),
+                    ("matte_channel", PropertyValue::Enum("alpha".into())),
+                    ("matte_blur", PropertyValue::Float(options.feather_radius)),
+                    (
+                        "match_color",
+                        PropertyValue::Color(Color { r: 0.15, g: 0.22, b: 0.31, a: 1.0 }),
+                    ),
+                    ("match_tolerance", PropertyValue::Float(0.09)),
+                    ("match_softness", PropertyValue::Float(0.18)),
+                    (
+                        "matte_source",
+                        PropertyValue::VisualSource(layer_reference.unwrap()),
+                    ),
+                ] {
+                    effect
+                        .set_static_value_by_parameter(&kind.parameter_id(name).unwrap(), value)
+                        .unwrap();
+                }
+                if preview_window {
+                    for (name, value) in [
+                        ("view", PropertyValue::Enum("preview".into())),
+                        ("preview_center", PropertyValue::Vec2([27.25, 32.0].into())),
+                        ("preview_width", PropertyValue::Float(50.0)),
+                        ("preview_height", PropertyValue::Float(50.0)),
+                    ] {
+                        effect
+                            .set_static_value_by_parameter(&kind.parameter_id(name).unwrap(), value)
+                            .unwrap();
+                    }
+                }
+                if samples {
+                    effect
+                        .set_static_value_by_parameter(
+                            &kind.parameter_id("view").unwrap(),
+                            PropertyValue::Enum("samples".into()),
+                        )
+                        .unwrap();
+                }
+            }
+            clip.add_effect_node(effect);
+        }
         sequence.video_tracks[0].add_clip(forward).unwrap();
         sequence.video_tracks[0].add_clip(reverse).unwrap();
         let timeline = TimelineExportSnapshot {
@@ -16684,10 +17144,30 @@ mod tests {
             working.unwrap()
         };
         let gpu = verify_gpu.then(GpuVisualExecutionGuard::activate);
+        let mut fixed_sample_pixels = None;
         for frame in [0, 8, 12, 3, 19] {
             let rendered = render(&mut session, frame, false);
             assert_eq!(rendered.rgba_f32().data.len(), 64 * 64);
             assert!(rendered.rgba_f32().data.iter().flatten().all(|sample| sample.is_finite()));
+            if preview_window {
+                assert_eq!(rendered.rgba_f32().data[7 * 64 + 30], [1.0; 4]);
+            }
+            if samples {
+                let window = automatic.windows[0];
+                let [x, y] = window.origin;
+                assert_eq!(rendered.rgba_f32().data[(y * 64 + x) as usize], [1.0; 4]);
+                if let Some(reference) = &fixed_sample_pixels {
+                    assert_eq!(&rendered.rgba_f32().data, reference);
+                } else {
+                    let original = first_decode.as_ref().unwrap().cpu_frame().unwrap();
+                    let interior = ((y + 1) * 64 + x + 1) as usize;
+                    assert_eq!(
+                        rendered.rgba_f32().data[interior],
+                        original.rgba_f32().data[interior]
+                    );
+                    fixed_sample_pixels = Some(rendered.rgba_f32().data.clone());
+                }
+            }
             if gpu.is_some() {
                 let before = session.visual_diagnostics();
                 let device = render(&mut session, frame, true);
@@ -16696,10 +17176,17 @@ mod tests {
                     after.temporal_gpu_schedules - before.temporal_gpu_schedules,
                     1
                 );
-                if let Some(protection) = protection {
+                if samples {
+                    assert_eq!(
+                        after.temporal_gpu_dispatches - before.temporal_gpu_dispatches,
+                        1
+                    );
+                } else if let Some(protection) = protection {
                     assert_eq!(
                         after.temporal_gpu_dispatches - before.temporal_gpu_dispatches,
                         6 + u64::from(protection.feather_radius > 0.0 && !protection.view_matte)
+                            + u64::from(authored_denoise)
+                            + u64::from(preview_window && frame < 12)
                     );
                 }
                 assert_eq!(

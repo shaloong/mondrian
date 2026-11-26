@@ -5168,10 +5168,18 @@ struct VsOut {
     @builtin(position) position: vec4<f32>,
 };
 
+struct MixControls {
+    mode: vec4<f32>,
+    outer_bounds: vec4<f32>,
+    inner_bounds: vec4<f32>,
+    border: vec4<f32>,
+    sample_boxes: array<vec4<f32>, 10>,
+};
+
 @group(0) @binding(0) var base_tex: texture_2d<f32>;
 @group(0) @binding(1) var graded_tex: texture_2d<f32>;
 @group(0) @binding(2) var matte_tex: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> controls: vec4<f32>;
+@group(0) @binding(3) var<uniform> controls: MixControls;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
@@ -5186,11 +5194,51 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
     return out;
 }
 
+fn rectangle_coverage(bounds: vec4<f32>, texel: vec2<f32>) -> f32 {
+    let coverage = clamp(min(texel + vec2<f32>(1.0), bounds.zw) - max(texel, bounds.xy), vec2<f32>(0.0), vec2<f32>(1.0));
+    return coverage.x * coverage.y;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let coordinate = vec2<i32>(floor(in.position.xy));
     let base = textureLoad(base_tex, coordinate, 0);
-    let weight = clamp(textureLoad(matte_tex, coordinate, 0).a, 0.0, 1.0) * controls.x;
+    if (controls.mode.y == 2.0) {
+        if (controls.border.a == 0.0) {
+            return base;
+        }
+        let texel = vec2<f32>(coordinate);
+        for (var index = 0u; index < u32(controls.mode.x); index += 1u) {
+            let bounds = controls.sample_boxes[index];
+            let last = bounds.zw - vec2<f32>(1.0);
+            if (all(texel >= bounds.xy) && all(texel <= last) &&
+                (any(texel == bounds.xy) || any(texel == last))) {
+                if (controls.border.a == 1.0) {
+                    return vec4<f32>(controls.border.rgb, base.a);
+                }
+                return vec4<f32>(mix(base.rgb, controls.border.rgb, controls.border.a), base.a);
+            }
+        }
+        return base;
+    }
+    if (controls.mode.y != 0.0) {
+        let texel = vec2<f32>(coordinate);
+        let weight = rectangle_coverage(controls.outer_bounds, texel);
+        if (weight == 0.0) {
+            return base;
+        }
+        let graded = textureLoad(graded_tex, coordinate, 0);
+        var picture = graded.rgb;
+        if (weight < 1.0) {
+            picture = mix(base.rgb, graded.rgb, weight);
+        }
+        let border_weight = (weight - rectangle_coverage(controls.inner_bounds, texel)) * controls.border.a;
+        if (border_weight == 0.0) {
+            return vec4<f32>(picture, base.a);
+        }
+        return vec4<f32>(mix(picture, controls.border.rgb, border_weight), base.a);
+    }
+    let weight = clamp(textureLoad(matte_tex, coordinate, 0).a, 0.0, 1.0) * controls.mode.x;
     if (weight == 0.0) {
         return base;
     }
@@ -5929,7 +5977,7 @@ impl GpuFrameCompositor {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(16),
+                            min_binding_size: wgpu::BufferSize::new(224),
                         },
                         count: None,
                     },
@@ -6507,11 +6555,17 @@ impl GpuFrameCompositor {
                 ),
             };
             let mut transform = layer.transform;
-            let mut sample_bilinear = matches!(
-                layer.source,
-                GpuCompositeLayerSource::CpuFrame(frame)
-                    if frame.uses_bilinear_composite_projection()
-            );
+            let mut sample_bilinear = match layer.source {
+                GpuCompositeLayerSource::CpuFrame(frame) => {
+                    frame.uses_bilinear_composite_projection()
+                }
+                GpuCompositeLayerSource::GpuFrame(frame) => {
+                    frame.uses_bilinear_composite_projection()
+                }
+                GpuCompositeLayerSource::CpuDataTexture(_)
+                | GpuCompositeLayerSource::SolidColor(_)
+                | GpuCompositeLayerSource::Adjustment => false,
+            };
             let layer_binding = if let Some(chain) = spatial_chain_at(index) {
                 let source_descriptor = layer_source_descriptor(layer.source).ok_or(
                     GpuCompositeError::SpatialPlanOnUnsupportedSource {
@@ -7743,6 +7797,57 @@ impl GpuFrameCompositor {
         Ok(handle)
     }
 
+    /// Record Collage on the already evaluated temporal grid.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_temporal_video_collage(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: &GpuColorFrameWgpuResourcePool,
+        input: &GpuColorFrameHandle,
+        pass: &EffectGpuSpatialPass,
+        auxiliary: &[GpuSpatialAuxiliaryRaster<'_>],
+    ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
+        require_straight_compatible_alpha(input.descriptor().alpha)?;
+        let source = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
+        let output = create_working_resource(
+            device,
+            ids,
+            ColorFrameDescriptor {
+                alpha: ColorFrameAlpha::StraightCoverage,
+                ..input.descriptor()
+            },
+            "gpu-temporal-video-collage-output",
+            Some(resource_pool),
+        )?;
+        self.spatial
+            .record_video_collage(
+                device,
+                encoder,
+                pass,
+                &source.resource().texture,
+                &output.resource().texture,
+                |slot| {
+                    let binding = auxiliary.iter().find(|binding| binding.slot == slot)?;
+                    let frame = table.get(binding.frame).ok()?;
+                    Some((
+                        &frame.resource().texture,
+                        binding.sampling,
+                        binding.transform,
+                    ))
+                },
+            )
+            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                pass: spatial_failure_pass(&error),
+                detail: error.to_string(),
+            })?;
+        let handle = output.handle().clone();
+        table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(handle)
+    }
+
     /// Apply one frozen temporal grain step to straight working frames.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_temporal_grain_pass(
@@ -7942,13 +8047,114 @@ impl GpuFrameCompositor {
         amount: f32,
         working_color_space: mondrian_core::WorkingColorSpace,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let mut uniform = [[0.0; 4]; 14];
+        uniform[0][0] = amount;
+        self.record_picture_mix_pass(
+            device,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            base,
+            graded,
+            Some(matte),
+            uniform,
+            working_color_space,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_preview_window_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        original: &GpuColorFrameHandle,
+        processed: &GpuColorFrameHandle,
+        window: mondrian_effects::EffectPreviewWindow,
+        sampling: mondrian_core::ImageSampling,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let [outer, inner, border] = window.gpu_controls(sampling);
+        let mut uniform = [[0.0; 4]; 14];
+        uniform[..4].copy_from_slice(&[[0.0, 1.0, 0.0, 0.0], outer, inner, border]);
+        self.record_picture_mix_pass(
+            device,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            original,
+            processed,
+            None,
+            uniform,
+            working_color_space,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_grain_sample_boxes_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        boxes: &mondrian_effects::grain_calibration::GrainSampleBoxes,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let actual = input.descriptor();
+        let width = boxes.extent().width();
+        let height = boxes.extent().height();
+        if (actual.width, actual.height) != (width, height) {
+            return Err(GpuCompositeError::SourceDescriptorMismatch {
+                expected: ColorFrameDescriptor { width, height, ..actual },
+                actual,
+            });
+        }
+        let cells = boxes.gpu_controls();
+        let mut uniform = [[0.0; 4]; 14];
+        uniform[0] = [cells[0][0], 2.0, 0.0, 0.0];
+        uniform[3..].copy_from_slice(&cells[1..]);
+        self.record_picture_mix_pass(
+            device,
+            encoder,
+            ids,
+            table,
+            resource_pool,
+            input,
+            input,
+            None,
+            uniform,
+            working_color_space,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_picture_mix_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        base: &GpuColorFrameHandle,
+        graded: &GpuColorFrameHandle,
+        matte: Option<&GpuColorFrameHandle>,
+        uniform: [[f32; 4]; 14],
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         use wgpu::util::DeviceExt;
 
         validate_matte_mix_inputs(base, graded, matte, working_color_space)?;
         let descriptor = base.descriptor();
         let base_resource = table.get(base).map_err(GpuCompositeError::ResourceTable)?;
         let graded_resource = table.get(graded).map_err(GpuCompositeError::ResourceTable)?;
-        let matte_resource = table.get(matte).map_err(GpuCompositeError::ResourceTable)?;
+        let matte_resource =
+            table.get(matte.unwrap_or(base)).map_err(GpuCompositeError::ResourceTable)?;
         let output_resource = create_working_resource(
             device,
             ids,
@@ -7958,7 +8164,7 @@ impl GpuFrameCompositor {
         )?;
         let controls = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("gpu-matte-mix-controls"),
-            contents: bytemuck::cast_slice(&[amount, 0.0, 0.0, 0.0]),
+            contents: bytemuck::cast_slice(&uniform),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -8713,7 +8919,7 @@ fn validate_alpha_mask_pair(
 fn validate_matte_mix_inputs(
     base: &GpuColorFrameHandle,
     graded: &GpuColorFrameHandle,
-    matte: &GpuColorFrameHandle,
+    matte: Option<&GpuColorFrameHandle>,
     working_color_space: mondrian_core::WorkingColorSpace,
 ) -> Result<(), GpuCompositeError> {
     let base_actual = base.descriptor();
@@ -8735,28 +8941,28 @@ fn validate_matte_mix_inputs(
             });
         }
     }
-    let matte_expected = ColorFrameDescriptor {
-        width: base_actual.width,
-        height: base_actual.height,
-        color_space: crate::ColorFrameSpace::NonColorData,
-        domain: ColorFrameDomain::AlphaMask,
-        encoding: ColorFrameEncoding::LinearFloat,
-        residency: ColorFrameResidency::Gpu,
-        alpha: crate::ColorFrameAlpha::StraightCoverage,
-    };
-    let matte_actual = matte.descriptor();
-    require_straight_compatible_alpha(matte_actual.alpha)?;
-    if matte_actual != matte_expected {
-        return Err(GpuCompositeError::SourceDescriptorMismatch {
-            expected: matte_expected,
-            actual: matte_actual,
-        });
+    if let Some(matte) = matte {
+        let matte_expected = ColorFrameDescriptor {
+            width: base_actual.width,
+            height: base_actual.height,
+            color_space: crate::ColorFrameSpace::NonColorData,
+            domain: ColorFrameDomain::AlphaMask,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        };
+        let matte_actual = matte.descriptor();
+        require_straight_compatible_alpha(matte_actual.alpha)?;
+        if matte_actual != matte_expected {
+            return Err(GpuCompositeError::SourceDescriptorMismatch {
+                expected: matte_expected,
+                actual: matte_actual,
+            });
+        }
     }
-    for texture_format in [
-        base.texture_format(),
-        graded.texture_format(),
-        matte.texture_format(),
-    ] {
+    for texture_format in
+        [base, graded].into_iter().chain(matte).map(GpuColorFrameHandle::texture_format)
+    {
         if texture_format != product_gpu_working_texture_format() {
             return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported { texture_format });
         }

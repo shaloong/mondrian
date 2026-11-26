@@ -308,6 +308,7 @@ pub struct GpuColorFrameHandle {
     descriptor: ColorFrameDescriptor,
     texture_format: GpuColorFrameTextureFormat,
     label: String,
+    bilinear_composite_projection: bool,
 }
 
 impl GpuColorFrameHandle {
@@ -339,6 +340,7 @@ impl GpuColorFrameHandle {
             descriptor,
             texture_format,
             label: label.into(),
+            bilinear_composite_projection: false,
         })
     }
 
@@ -368,6 +370,16 @@ impl GpuColorFrameHandle {
     /// Human-readable resource label for diagnostics/profiling.
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Request bilinear canvas projection when this handle is used as a layer.
+    pub(crate) fn with_bilinear_composite_projection(mut self) -> Self {
+        self.bilinear_composite_projection = true;
+        self
+    }
+
+    pub(crate) const fn uses_bilinear_composite_projection(&self) -> bool {
+        self.bilinear_composite_projection
     }
 }
 
@@ -3382,6 +3394,11 @@ impl CpuColorFrame {
         Self::working_with_composite_projection(frame, false)
     }
 
+    /// Wrap a working frame whose canvas projection uses bilinear sampling.
+    pub fn working_with_bilinear_projection(frame: WorkingRgbaF32Frame) -> Self {
+        Self::working_with_composite_projection(frame, true)
+    }
+
     pub(crate) fn working_with_composite_projection(
         frame: WorkingRgbaF32Frame,
         bilinear: bool,
@@ -3402,7 +3419,7 @@ impl CpuColorFrame {
         }
     }
 
-    /// Generated decoration coverage uses the same bilinear taps as the CPU projection.
+    /// This working picture requires the same bilinear taps as the CPU projection.
     pub(crate) const fn uses_bilinear_composite_projection(&self) -> bool {
         self.bilinear_composite_projection
     }

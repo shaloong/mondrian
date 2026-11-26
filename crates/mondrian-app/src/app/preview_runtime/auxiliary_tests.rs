@@ -48,9 +48,7 @@ fn an_asset_backed_image_matte_renders_in_preview() {
             preparation.take(),
         ) {
             PreviewTimelineResolution::Ready(output) => break output,
-            PreviewTimelineResolution::Pending { preparation: next, .. } => {
-                preparation = Some(next)
-            }
+            PreviewTimelineResolution::Pending { preparation: next, .. } => preparation = next,
             PreviewTimelineResolution::Unavailable { reason } => {
                 panic!("real auxiliary preview failed: {}", reason.detail())
             }

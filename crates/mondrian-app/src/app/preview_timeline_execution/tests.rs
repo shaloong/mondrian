@@ -930,7 +930,9 @@ fn preparation_keeps_ready_media_after_producer_cache_eviction() {
                 saved.take(),
             );
             if step == 0 {
-                let PreviewTimelineResolution::Pending { preparation, .. } = result else {
+                let PreviewTimelineResolution::Pending { preparation: Some(preparation), .. } =
+                    result
+                else {
                     panic!("B has not arrived")
                 };
                 assert_eq!(preparation.request().generation(), 77);
@@ -1059,7 +1061,8 @@ fn preparation_keeps_title_pixels_after_producer_cache_eviction() {
             saved.take(),
         );
         if step < 2 {
-            let PreviewTimelineResolution::Pending { preparation, .. } = result else {
+            let PreviewTimelineResolution::Pending { preparation: Some(preparation), .. } = result
+            else {
                 panic!("one title remains pending")
             };
             if step == 1 {
@@ -1137,7 +1140,8 @@ fn preparation_cannot_renew_cancellation_or_absolute_deadline() {
             graph,
             None,
         );
-        let PreviewTimelineResolution::Pending { preparation, .. } = result else {
+        let PreviewTimelineResolution::Pending { preparation: Some(preparation), .. } = result
+        else {
             panic!("pending source")
         };
         if !renew_deadline {
@@ -1213,7 +1217,8 @@ fn preparation_queries_shared_pending_sources_once_per_retry() {
             graph,
             prepared.take(),
         );
-        let PreviewTimelineResolution::Pending { preparation, .. } = result else {
+        let PreviewTimelineResolution::Pending { preparation: Some(preparation), .. } = result
+        else {
             panic!("pending")
         };
         prepared = Some(preparation);

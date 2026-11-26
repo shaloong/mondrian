@@ -856,6 +856,10 @@ fn estimate_source(
                 )?;
             }
         }
+        ViewerGpuSourceLayer::Temporal(layer) => estimate.effects.checked_add(
+            layer.picture.demand(),
+            ViewerGpuActiveWorkingSetStage::Effects,
+        )?,
         ViewerGpuSourceLayer::SolidColor { effect_plan, spatial_plan, .. } => {
             if let Some(plan) = spatial_plan {
                 if !effect_plan.is_identity() {
@@ -929,6 +933,7 @@ fn estimate_transition_input(
 fn source_opacity(source: &ViewerGpuSourceLayer) -> f32 {
     match source {
         ViewerGpuSourceLayer::Media { opacity, .. } => *opacity,
+        ViewerGpuSourceLayer::Temporal(layer) => layer.opacity,
         ViewerGpuSourceLayer::SolidColor { layer, .. } => layer.opacity,
     }
 }

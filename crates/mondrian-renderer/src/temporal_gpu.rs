@@ -3,18 +3,20 @@
 //! [`PreparedEffectTemporalGpuExecution`] states which host rasters a
 //! time-expanded graph reads and which ordered passes combine them. This module
 //! is the only place that turns that schedule into real work: it uploads one
-//! working texture per leaf, records every step in schedule order into a single
-//! command encoder, and reads the root back exactly once.
+//! working texture per leaf and records every step into the owner's command
+//! encoder. The standalone executor reads the recorded root back once.
 //!
 //! Nothing here invents a pass for a shape the renderer cannot record. An
 //! unsupported step fails the whole execution, so the caller keeps the scalar
 //! CPU executor instead of publishing a silently different image.
 
+use crate::gpu_visual_frame::GpuVisualFrameExecutionResourceGrant;
 use crate::{
     CpuColorFrame, GpuColorFrameHandle, GpuColorFrameIdAllocator, GpuColorFrameReadback,
-    GpuColorFrameReadbackPlan, GpuColorFrameResourceTable, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
-    GpuColorFrameWgpuResourcePool, GpuCompositeError, GpuFrameCompositor,
+    GpuColorFrameReadbackPlan, GpuColorFrameResource, GpuColorFrameResourceTable,
+    GpuColorFrameTextureFormat, GpuColorFrameUploadPlan, GpuColorFrameUploader,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuCompositeError,
+    GpuFrameCompositor,
 };
 use mondrian_core::{
     ColorFrameAlpha, ExecutionCancellationToken, WorkingColorSpace, WorkingRgbaF32Frame,
@@ -22,7 +24,8 @@ use mondrian_core::{
 use mondrian_effects::{
     EffectFrameExtent, EffectFrameTileF32, EffectPassBlendPolicy, EffectTemporalAuxiliaryProvider,
     EffectTemporalExecutionOutput, EffectTemporalFrameProvider, PreparedEffectTemporalGpuExecution,
-    TemporalGpuLeafRequest, TemporalGpuStepOperation, TemporalGpuValue,
+    PreparedTemporalAuxiliarySet, PreparedTemporalFrameSet, TemporalGpuLeafRequest,
+    TemporalGpuStepOperation, TemporalGpuValue,
 };
 use std::{
     collections::HashMap,
@@ -51,6 +54,145 @@ pub struct TemporalGpuDevice<'a> {
     pub table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     /// Pool the working textures are allocated from.
     pub resource_pool: &'a Arc<GpuColorFrameWgpuResourcePool>,
+}
+
+/// One exact auxiliary leaf already owned by the visual frame's resource table.
+pub struct TemporalGpuResidentAuxiliary {
+    /// Consumer's exact Clip time.
+    pub context_time: mondrian_core::TimelineTime,
+    /// Compiled auxiliary slot in that context.
+    pub slot: u32,
+    /// Working Float32 texture handle from this same visual frame.
+    pub frame: GpuColorFrameHandle,
+    /// Actual source-grid sampling.
+    pub sampling: mondrian_core::ImageSampling,
+}
+
+/// A frozen source-local temporal picture for the Viewer GPU compositor.
+#[derive(Debug)]
+pub struct ViewerTemporalPicture {
+    schedule: PreparedEffectTemporalGpuExecution,
+    frames: PreparedTemporalFrameSet,
+    auxiliary: PreparedTemporalAuxiliarySet,
+    history: HashMap<TemporalGpuValue, Arc<Self>>,
+    demand: crate::ViewerGpuActiveTextureDemand,
+}
+
+/// A source-local historical picture addressed by the exact consumer context.
+#[derive(Debug)]
+pub struct ViewerTemporalHistory {
+    /// Consumer Clip time.
+    pub context_time: mondrian_core::TimelineTime,
+    /// Consumer auxiliary slot.
+    pub slot: u32,
+    /// Prepared device schedule for this historical picture.
+    pub picture: Arc<ViewerTemporalPicture>,
+}
+
+impl ViewerTemporalPicture {
+    /// Freeze the raster providers and account for all device work in the closure.
+    pub fn prepare(
+        schedule: PreparedEffectTemporalGpuExecution,
+        frames: PreparedTemporalFrameSet,
+        auxiliary: Option<PreparedTemporalAuxiliarySet>,
+        history: Vec<ViewerTemporalHistory>,
+    ) -> Result<Self, TemporalGpuExecutionError> {
+        if schedule.is_empty() {
+            return Err(TemporalGpuExecutionError::EmptySchedule);
+        }
+        let auxiliary = match auxiliary {
+            Some(auxiliary) => auxiliary,
+            None => PreparedTemporalAuxiliarySet::prepare(
+                frames.source_identity(),
+                schedule.request().generation(),
+                [],
+            )
+            .map_err(|error| TemporalGpuExecutionError::ResourceTable(error.to_string()))?,
+        };
+        let mut history_by_value = HashMap::new();
+        let mut demand = crate::ViewerGpuActiveTextureDemand::default();
+        for ViewerTemporalHistory { context_time, slot, picture } in history {
+            let value = TemporalGpuValue::Auxiliary { context_time, slot };
+            if !schedule.leaves().iter().any(|leaf| leaf.value() == value) {
+                return Err(TemporalGpuExecutionError::MissingAuxiliaryRaster {
+                    time: context_time,
+                    slot,
+                });
+            }
+            demand.bytes = demand.bytes.saturating_add(picture.demand.bytes);
+            demand.textures = demand.textures.saturating_add(picture.demand.textures);
+            if history_by_value.insert(value, picture).is_some() {
+                return Err(TemporalGpuExecutionError::DuplicateLeaf(value));
+            }
+        }
+        let spatial_chains = schedule
+            .steps()
+            .iter()
+            .map(|step| temporal_spatial_chain(schedule.frame_extent(), step.operation()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let own = estimate_temporal_demand(&schedule, &auxiliary, &spatial_chains, |value| {
+            history_by_value.contains_key(&value)
+        })?;
+        demand.bytes = demand.bytes.saturating_add(own.bytes);
+        demand.textures = demand.textures.saturating_add(own.textures);
+        Ok(Self {
+            schedule,
+            frames,
+            auxiliary,
+            history: history_by_value,
+            demand,
+        })
+    }
+
+    pub(crate) const fn demand(&self) -> crate::ViewerGpuActiveTextureDemand {
+        self.demand
+    }
+
+    pub(crate) fn record(
+        &self,
+        gpu: &mut TemporalGpuDevice<'_>,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        working_color_space: WorkingColorSpace,
+    ) -> Result<(GpuColorFrameHandle, u32), TemporalGpuExecutionError> {
+        let cancellation = self.schedule.request().cancellation();
+        let deadline = cancellation
+            .deadline()
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+        if cancellation.is_canceled() {
+            return Err(TemporalGpuExecutionError::Cancelled);
+        }
+        let mut schedules = 1u32;
+        let mut resident = Vec::with_capacity(self.history.len());
+        for leaf in self.schedule.leaves() {
+            let TemporalGpuValue::Auxiliary { context_time, slot } = leaf.value() else {
+                continue;
+            };
+            if let Some(picture) = self.history.get(&leaf.value()) {
+                let (frame, count) = picture.record(gpu, encoder, working_color_space)?;
+                schedules = schedules.saturating_add(count);
+                resident.push(TemporalGpuResidentAuxiliary {
+                    context_time,
+                    slot,
+                    frame,
+                    sampling: picture.schedule.sampling(),
+                });
+            }
+        }
+        let recorded = record_temporal_schedule(
+            gpu,
+            encoder,
+            &self.schedule,
+            &mut self.frames.clone(),
+            &mut self.auxiliary.clone(),
+            working_color_space,
+            deadline,
+            cancellation,
+            None,
+            &resident,
+        )?;
+        let root = retain_recorded_temporal_root(gpu, recorded)?;
+        Ok((root, schedules))
+    }
 }
 
 /// Evidence of one completed device schedule.
@@ -123,6 +265,8 @@ pub enum TemporalGpuExecutionError {
         /// Declared external slot.
         slot: u32,
     },
+    /// A sample picture has different geometry from its annotation grid.
+    InvalidSamplePicture,
     /// A step reads a value no earlier step or leaf produced.
     MissingStepInput(TemporalGpuValue),
     /// A step has no frozen frame seed for its producing context.
@@ -133,6 +277,15 @@ pub enum TemporalGpuExecutionError {
         required_bytes: u64,
         /// Shared spatial admission limit.
         budget_bytes: u64,
+    },
+    /// Existing visual resources plus the temporal schedule exceed the owner's grant.
+    VisualWorkingSetExceeded {
+        /// Conservative bytes retained during this recording.
+        bytes: u64,
+        /// Conservative texture count during this recording.
+        textures: u64,
+        /// Grant shared with the rest of the visual closure.
+        grant: GpuVisualFrameExecutionResourceGrant,
     },
     /// The root value was never materialized.
     RootNotMaterialized(TemporalGpuValue),
@@ -185,6 +338,7 @@ impl fmt::Display for TemporalGpuExecutionError {
             Self::MissingAuxiliaryRaster { time, slot } => {
                 write!(formatter, "no auxiliary raster for slot {slot} at {time}")
             }
+            Self::InvalidSamplePicture => formatter.write_str("grain sample picture does not match the frozen calibration grid"),
             Self::MissingStepInput(value) => {
                 write!(formatter, "temporal step reads {value:?} before it exists")
             }
@@ -197,6 +351,11 @@ impl fmt::Display for TemporalGpuExecutionError {
             Self::SpatialScratchBudgetExceeded { required_bytes, budget_bytes } => write!(
                 formatter,
                 "temporal spatial steps need {required_bytes} scratch bytes, budget is {budget_bytes}",
+            ),
+            Self::VisualWorkingSetExceeded { bytes, textures, grant } => write!(
+                formatter,
+                "temporal recording requires {bytes} bytes and {textures} textures, granted {} bytes and {} textures",
+                grant.max_active_bytes(), grant.max_active_textures(),
             ),
             Self::RootNotMaterialized(value) => {
                 write!(formatter, "temporal root {value:?} was never materialized")
@@ -240,13 +399,23 @@ impl Drop for ReadbackMapLease<'_> {
     }
 }
 
+struct RecordedTemporalGpuSchedule {
+    root: GpuColorFrameHandle,
+    frames: HashMap<TemporalGpuValue, GpuColorFrameHandle>,
+    // The pooled matte intermediates must live through submission and readback.
+    matte_scratch: Vec<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
+    uploads: usize,
+    dispatches: usize,
+    peak_working_bytes: usize,
+}
+
 /// Execute one frozen schedule and read its root back exactly once.
 ///
 /// The schedule's leaves are uploaded as working Float32 textures, every step is
 /// recorded into one encoder in schedule order, and the root is the only value
 /// read back. Intermediate values never leave the device.
 pub fn execute_temporal_schedule(
-    device: TemporalGpuDevice<'_>,
+    mut gpu: TemporalGpuDevice<'_>,
     schedule: &PreparedEffectTemporalGpuExecution,
     frames: &mut dyn EffectTemporalFrameProvider,
     auxiliary: &mut dyn EffectTemporalAuxiliaryProvider,
@@ -254,6 +423,121 @@ pub fn execute_temporal_schedule(
     deadline: Instant,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<TemporalGpuExecution, TemporalGpuExecutionError> {
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("temporal-gpu-schedule"),
+    });
+    let recorded = record_temporal_schedule(
+        &mut gpu,
+        &mut encoder,
+        schedule,
+        frames,
+        auxiliary,
+        working_color_space,
+        deadline,
+        cancellation,
+        None,
+        &[],
+    )?;
+    let result = read_temporal_root(
+        &gpu,
+        encoder,
+        &recorded.root,
+        schedule,
+        deadline,
+        cancellation,
+    );
+    for handle in recorded.frames.into_values() {
+        let _ = gpu.table.take(&handle);
+    }
+    drop(recorded.matte_scratch);
+    Ok(TemporalGpuExecution {
+        output: EffectTemporalExecutionOutput::from_device_tile(
+            result?,
+            schedule.cache_identity(),
+            recorded.uploads,
+            recorded.peak_working_bytes,
+        ),
+        uploads: recorded.uploads,
+        dispatches: recorded.dispatches,
+        readbacks: 1,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_resident_temporal_root(
+    mut gpu: TemporalGpuDevice<'_>,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+    schedule: &PreparedEffectTemporalGpuExecution,
+    frames: &mut dyn EffectTemporalFrameProvider,
+    auxiliary: &mut dyn EffectTemporalAuxiliaryProvider,
+    working_color_space: WorkingColorSpace,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
+    grant: GpuVisualFrameExecutionResourceGrant,
+    resident_auxiliary: &[TemporalGpuResidentAuxiliary],
+) -> Result<(GpuColorFrameHandle, usize), TemporalGpuExecutionError> {
+    let recorded = record_temporal_schedule(
+        &mut gpu,
+        encoder,
+        schedule,
+        frames,
+        auxiliary,
+        working_color_space,
+        deadline,
+        cancellation,
+        Some(grant),
+        resident_auxiliary,
+    )?;
+    let dispatches = recorded.dispatches;
+    Ok((
+        retain_recorded_temporal_root(&mut gpu, recorded)?,
+        dispatches,
+    ))
+}
+
+fn retain_recorded_temporal_root(
+    gpu: &mut TemporalGpuDevice<'_>,
+    recorded: RecordedTemporalGpuSchedule,
+) -> Result<GpuColorFrameHandle, TemporalGpuExecutionError> {
+    // Keep pooled textures with the visual owner until the closure retires.
+    for resource in recorded.matte_scratch {
+        gpu.table
+            .insert(resource)
+            .map_err(|error| TemporalGpuExecutionError::ResourceTable(format!("{error:?}")))?;
+    }
+    Ok(recorded.root.with_bilinear_composite_projection())
+}
+
+fn temporal_spatial_chain(
+    extent: EffectFrameExtent,
+    operation: &TemporalGpuStepOperation,
+) -> Result<Option<crate::GpuSpatialChainPlan>, TemporalGpuExecutionError> {
+    let TemporalGpuStepOperation::Spatial { plan, .. } = operation else {
+        return Ok(None);
+    };
+    crate::spatial_driver::gpu_spatial_chain_plan(plan, extent.width(), extent.height())
+        .map(Some)
+        .map_err(|blocker| {
+            TemporalGpuExecutionError::Composite(GpuCompositeError::SpatialChainFailed {
+                pass: crate::gpu_compositor::spatial_chain_blocker_pass(&blocker),
+                detail: blocker.to_string(),
+            })
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_temporal_schedule(
+    gpu: &mut TemporalGpuDevice<'_>,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+    schedule: &PreparedEffectTemporalGpuExecution,
+    frames: &mut dyn EffectTemporalFrameProvider,
+    auxiliary: &mut dyn EffectTemporalAuxiliaryProvider,
+    working_color_space: WorkingColorSpace,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
+    visual_grant: Option<GpuVisualFrameExecutionResourceGrant>,
+    resident_auxiliary: &[TemporalGpuResidentAuxiliary],
+) -> Result<RecordedTemporalGpuSchedule, TemporalGpuExecutionError> {
     if schedule.is_empty() {
         return Err(TemporalGpuExecutionError::EmptySchedule);
     }
@@ -264,7 +548,15 @@ pub fn execute_temporal_schedule(
         ids,
         table,
         resource_pool,
-    } = device;
+    } = gpu;
+    let ids = &mut **ids;
+    let table = &mut **table;
+    let from_resident = |value| match value {
+        TemporalGpuValue::Auxiliary { context_time, slot } => resident_auxiliary
+            .iter()
+            .find(|frame| frame.context_time == context_time && frame.slot == slot),
+        _ => None,
+    };
     let extent = schedule.frame_extent();
     let extent_pixels = extent.width().saturating_mul(extent.height()) as usize;
     if extent_pixels == 0 {
@@ -280,18 +572,8 @@ pub fn execute_temporal_schedule(
         if Instant::now() >= deadline {
             return Err(TemporalGpuExecutionError::DeadlineExceeded);
         }
-        let chain = if let TemporalGpuStepOperation::Spatial { plan, .. } = step.operation() {
-            let chain = crate::spatial_driver::gpu_spatial_chain_plan(
-                plan,
-                extent.width(),
-                extent.height(),
-            )
-            .map_err(|blocker| {
-                TemporalGpuExecutionError::Composite(GpuCompositeError::SpatialChainFailed {
-                    pass: crate::gpu_compositor::spatial_chain_blocker_pass(&blocker),
-                    detail: blocker.to_string(),
-                })
-            })?;
+        let chain = temporal_spatial_chain(extent, step.operation())?;
+        if let Some(chain) = &chain {
             for layout in chain.mask_path_strokes.values() {
                 crate::mask_path_stroke_gpu::check_limits(layout, &device.limits()).map_err(
                     |error| {
@@ -309,7 +591,6 @@ pub fn execute_temporal_schedule(
             pooled_spatial_scratch = pooled_spatial_scratch.max(pooled_bytes);
             per_stage_spatial_scratch = per_stage_spatial_scratch
                 .saturating_add(chain.scratch_bytes.saturating_sub(pooled_bytes));
-            Some(chain)
         } else {
             let private_textures = match step.operation() {
                 TemporalGpuStepOperation::Qualifier { qualifier, .. } => {
@@ -321,8 +602,7 @@ pub fn execute_temporal_schedule(
             per_stage_spatial_scratch = per_stage_spatial_scratch.saturating_add(
                 (extent_pixels as u64).saturating_mul(16).saturating_mul(private_textures),
             );
-            None
-        };
+        }
         let required_bytes = pooled_spatial_scratch.saturating_add(per_stage_spatial_scratch);
         let budget_bytes = crate::spatial_driver::GPU_SPATIAL_SCRATCH_BUDGET_BYTES;
         if required_bytes > budget_bytes {
@@ -333,16 +613,59 @@ pub fn execute_temporal_schedule(
         }
         spatial_chains.push(chain);
     }
+    if let Some(grant) = visual_grant {
+        let additional = estimate_temporal_demand(schedule, auxiliary, &spatial_chains, |value| {
+            from_resident(value).is_some()
+        })?;
+        let bytes = table
+            .logical_texture_bytes()
+            .unwrap_or(u64::MAX)
+            .saturating_add(additional.bytes);
+        let textures = (table.len() as u64).saturating_add(additional.textures);
+        if bytes > grant.max_active_bytes() || textures > grant.max_active_textures() {
+            return Err(TemporalGpuExecutionError::VisualWorkingSetExceeded {
+                bytes,
+                textures,
+                grant,
+            });
+        }
+    }
     let mut values: HashMap<TemporalGpuValue, GpuColorFrameHandle> = HashMap::new();
     let mut resident_bytes = 0usize;
     let mut uploads = 0usize;
     let mut dispatches = 0usize;
 
-    let executed = (|| -> Result<(EffectFrameTileF32, usize), TemporalGpuExecutionError> {
+    let mut matte_scratch = Vec::new();
+    let recorded = (|| -> Result<GpuColorFrameHandle, TemporalGpuExecutionError> {
         for leaf in schedule.leaves() {
             let value = leaf.value();
             if values.contains_key(&value) {
                 return Err(TemporalGpuExecutionError::DuplicateLeaf(value));
+            }
+            if let Some(resident) = from_resident(value) {
+                table.get(&resident.frame).map_err(|error| {
+                    TemporalGpuExecutionError::ResourceTable(format!("{error:?}"))
+                })?;
+                let descriptor = resident.frame.descriptor();
+                if descriptor.color_space.working() != Some(working_color_space)
+                    || !descriptor.alpha.is_straight_compatible()
+                    || resident.frame.texture_format() != GpuColorFrameTextureFormat::Rgba32Float
+                {
+                    return Err(TemporalGpuExecutionError::ResourceTable(format!(
+                        "resident auxiliary {value:?} must be straight working Float32"
+                    )));
+                }
+                if let Some((extent, sampling, _)) =
+                    auxiliary.auxiliary_image(resident.context_time, resident.slot)
+                    && (extent != EffectFrameExtent::new(descriptor.width, descriptor.height)
+                        || sampling != resident.sampling)
+                {
+                    return Err(TemporalGpuExecutionError::ResourceTable(format!(
+                        "resident auxiliary {value:?} differs from its frozen raster geometry"
+                    )));
+                }
+                values.insert(value, resident.frame.clone());
+                continue;
             }
             let (leaf_extent, sampling, alpha, pixels) = match leaf.request() {
                 TemporalGpuLeafRequest::Source(request) => {
@@ -418,10 +741,6 @@ pub fn execute_temporal_schedule(
             resident_bytes = resident_bytes.saturating_add(leaf_pixels.saturating_mul(16));
         }
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("temporal-gpu-schedule"),
-        });
-        let mut matte_scratch = Vec::new();
         for (step, spatial_chain) in schedule.steps().iter().zip(&spatial_chains) {
             let value = step.value();
             let seed = schedule
@@ -433,6 +752,19 @@ pub fn execute_temporal_schedule(
                     .cloned()
                     .ok_or(TemporalGpuExecutionError::MissingStepInput(input))
             };
+            let sample_geometry = |context_time, slot| {
+                let value = TemporalGpuValue::Auxiliary { context_time, slot };
+                if let Some(source) = from_resident(value) {
+                    let descriptor = source.frame.descriptor();
+                    return Some((
+                        EffectFrameExtent::new(descriptor.width, descriptor.height),
+                        source.sampling,
+                    ));
+                }
+                auxiliary
+                    .auxiliary_image(context_time, slot)
+                    .map(|(extent, sampling, _)| (extent, sampling))
+            };
             let output = match step.operation() {
                 TemporalGpuStepOperation::Point { input, plan } => {
                     let input = input_handle(*input)?;
@@ -440,7 +772,7 @@ pub fn execute_temporal_schedule(
                         .record_point_effect_pass(
                             device,
                             queue,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -457,7 +789,7 @@ pub fn execute_temporal_schedule(
                     compositor
                         .record_temporal_blend_pass(
                             device,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -475,7 +807,7 @@ pub fn execute_temporal_schedule(
                     compositor
                         .record_temporal_grain_pass(
                             device,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             resource_pool.as_ref(),
@@ -491,7 +823,7 @@ pub fn execute_temporal_schedule(
                         .record_qualifier_pass(
                             device,
                             queue,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -507,7 +839,7 @@ pub fn execute_temporal_schedule(
                     let record = compositor
                         .record_matte_feather_pass(
                             device,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -523,7 +855,7 @@ pub fn execute_temporal_schedule(
                         .record_matte_preview_pass(
                             device,
                             queue,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -539,7 +871,7 @@ pub fn execute_temporal_schedule(
                         .record_alpha_mask_combine_with_mode(
                             device,
                             queue,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -554,7 +886,7 @@ pub fn execute_temporal_schedule(
                     compositor
                         .record_weighted_matte_mix_pass(
                             device,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -567,6 +899,45 @@ pub fn execute_temporal_schedule(
                         .map_err(TemporalGpuExecutionError::Composite)?
                         .output
                 }
+                TemporalGpuStepOperation::PreviewWindow { original, processed, window } => {
+                    compositor
+                        .record_preview_window_pass(
+                            device,
+                            encoder,
+                            ids,
+                            table,
+                            Some(resource_pool.as_ref()),
+                            &input_handle(*original)?,
+                            &input_handle(*processed)?,
+                            *window,
+                            schedule.sampling(),
+                            working_color_space,
+                        )
+                        .map_err(TemporalGpuExecutionError::Composite)?
+                        .output
+                }
+                TemporalGpuStepOperation::GrainSampleBoxes { input, boxes } => {
+                    if let TemporalGpuValue::Auxiliary { context_time, slot } = *input
+                        && !sample_geometry(context_time, slot).is_some_and(|(extent, sampling)| {
+                            extent == boxes.extent() && sampling == schedule.sampling()
+                        })
+                    {
+                        return Err(TemporalGpuExecutionError::InvalidSamplePicture);
+                    }
+                    compositor
+                        .record_grain_sample_boxes_pass(
+                            device,
+                            encoder,
+                            ids,
+                            table,
+                            Some(resource_pool.as_ref()),
+                            &input_handle(*input)?,
+                            boxes,
+                            working_color_space,
+                        )
+                        .map_err(TemporalGpuExecutionError::Composite)?
+                        .output
+                }
                 TemporalGpuStepOperation::Blend { base, overlay, opacity, blend_mode } => {
                     let base = input_handle(*base)?;
                     let overlay = input_handle(*overlay)?;
@@ -574,7 +945,7 @@ pub fn execute_temporal_schedule(
                         .record_adjustment_blend_pass(
                             device,
                             queue,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -594,7 +965,7 @@ pub fn execute_temporal_schedule(
                     compositor
                         .record_graph_auxiliary_pass(
                             device,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -606,13 +977,54 @@ pub fn execute_temporal_schedule(
                         )
                         .map_err(TemporalGpuExecutionError::Composite)?
                 }
+                TemporalGpuStepOperation::VideoCollage { input, pass, auxiliary: bindings } => {
+                    let mut pictures = Vec::with_capacity(bindings.len());
+                    for &(tile_slot, value) in bindings.iter() {
+                        let TemporalGpuValue::Auxiliary { context_time, slot } = value else {
+                            return Err(TemporalGpuExecutionError::MissingStepInput(value));
+                        };
+                        let (_, sampling) = sample_geometry(context_time, slot).ok_or(
+                            TemporalGpuExecutionError::MissingAuxiliaryRaster {
+                                time: context_time,
+                                slot,
+                            },
+                        )?;
+                        pictures.push((tile_slot, input_handle(value)?, sampling));
+                    }
+                    let rasters = pictures
+                        .iter()
+                        .map(|(slot, frame, sampling)| {
+                            crate::gpu_compositor::GpuSpatialAuxiliaryRaster {
+                                slot: *slot,
+                                frame,
+                                sampling: *sampling,
+                                transform: mondrian_effects::IDENTITY_AFFINE,
+                                policy: mondrian_effects::AuxiliaryPolicy::new(
+                                    mondrian_effects::AuxiliaryResolution::Authored,
+                                ),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    compositor
+                        .record_temporal_video_collage(
+                            device,
+                            encoder,
+                            ids,
+                            table,
+                            resource_pool.as_ref(),
+                            &input_handle(*input)?,
+                            pass,
+                            &rasters,
+                        )
+                        .map_err(TemporalGpuExecutionError::Composite)?
+                }
                 TemporalGpuStepOperation::Spatial { input, .. } => {
                     let input = input_handle(*input)?;
                     compositor
                         .record_prepared_spatial_effect_input(
                             device,
                             queue,
-                            &mut encoder,
+                            encoder,
                             ids,
                             table,
                             Some(resource_pool.as_ref()),
@@ -631,118 +1043,190 @@ pub fn execute_temporal_schedule(
         }
 
         let root = schedule.root();
-        let root_handle = values
+        values
             .get(&root)
             .cloned()
-            .ok_or(TemporalGpuExecutionError::RootNotMaterialized(root))?;
-        let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba32float(root_handle.clone())
-            .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")))?;
-        let readback = {
-            let root_resource = table
-                .get(&root_handle)
-                .map_err(|error| TemporalGpuExecutionError::ResourceTable(format!("{error:?}")))?;
-            GpuColorFrameReadback::record_copy(device, &mut encoder, &readback_plan, root_resource)
-                .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")))?
-        };
-        if cancellation.is_canceled() {
-            return Err(TemporalGpuExecutionError::Cancelled);
-        }
-        if Instant::now() >= deadline {
-            return Err(TemporalGpuExecutionError::DeadlineExceeded);
-        }
-        let submission = queue.submit(std::iter::once(encoder.finish()));
-        let slice = readback.slice(..);
-        let (sender, receiver) = mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        let map_lease = ReadbackMapLease::new(&readback);
-        let map_result = loop {
-            match receiver.try_recv() {
-                Ok(result) => {
-                    break result.map_err(|error| {
-                        TemporalGpuExecutionError::Readback(format!("{error:?}"))
-                    });
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    break Err(TemporalGpuExecutionError::Readback(
-                        "readback map callback was dropped".to_owned(),
-                    ));
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-            if cancellation.is_canceled() {
-                break Err(TemporalGpuExecutionError::Cancelled);
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                break Err(TemporalGpuExecutionError::DeadlineExceeded);
-            }
-            let timeout = deadline.saturating_duration_since(now).min(TEMPORAL_GPU_POLL_SLICE);
-            match device.poll(wgpu::PollType::Wait {
-                submission_index: Some(submission.clone()),
-                timeout: Some(timeout),
-            }) {
-                Ok(_) | Err(wgpu::PollError::Timeout) => {}
-                Err(error) => {
-                    break Err(TemporalGpuExecutionError::Readback(format!("{error:?}")));
+            .ok_or(TemporalGpuExecutionError::RootNotMaterialized(root))
+    })();
+    let root = match recorded {
+        Ok(root) => root,
+        Err(error) => {
+            for handle in values.into_values() {
+                if !resident_auxiliary.iter().any(|source| source.frame == handle) {
+                    let _ = table.take(&handle);
                 }
             }
-        };
-        if let Err(error) = map_result {
-            drop(map_lease);
             return Err(error);
         }
-        let mapped = slice
-            .get_mapped_range()
-            .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")))?;
-        let components = readback_plan
-            .unpack_mapped_rgba32float(&mapped)
-            .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")))?;
-        drop(mapped);
-        drop(map_lease);
-
-        let mut pixels = Vec::with_capacity(components.len() / 4);
-        for chunk in components.chunks_exact(4) {
-            pixels.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
-        if pixels.len() != extent_pixels {
-            return Err(TemporalGpuExecutionError::ReadbackCoverage {
-                expected: extent_pixels,
-                actual: pixels.len(),
-            });
-        }
-        let tile = EffectFrameTileF32::new(
-            schedule.request().output_time(),
-            extent,
-            schedule.sampling(),
-            extent.full_frame_roi(),
-            schedule.request().output_frame_seed(),
-            pixels,
-        )
-        .map_err(TemporalGpuExecutionError::FrameProvider)?;
-        Ok((tile, resident_bytes))
-    })();
-
-    for handle in values.into_values() {
-        let _ = table.take(&handle);
-    }
-    let (tile, resident_bytes) = executed?;
+    };
     let peak_working_bytes = resident_bytes.saturating_add(
         usize::try_from(pooled_spatial_scratch.saturating_add(per_stage_spatial_scratch))
             .unwrap_or(usize::MAX),
     );
-    Ok(TemporalGpuExecution {
-        output: EffectTemporalExecutionOutput::from_device_tile(
-            tile,
-            schedule.cache_identity(),
-            uploads,
-            peak_working_bytes,
-        ),
+    Ok(RecordedTemporalGpuSchedule {
+        root,
+        frames: values,
+        matte_scratch,
         uploads,
         dispatches,
-        readbacks: 1,
+        peak_working_bytes,
     })
+}
+
+pub(crate) fn estimate_temporal_demand(
+    schedule: &PreparedEffectTemporalGpuExecution,
+    auxiliary: &dyn EffectTemporalAuxiliaryProvider,
+    spatial_chains: &[Option<crate::GpuSpatialChainPlan>],
+    is_resident: impl Fn(TemporalGpuValue) -> bool,
+) -> Result<crate::GpuVisualFrameActiveTextureDemand, TemporalGpuExecutionError> {
+    let extent = schedule.frame_extent();
+    let mut bytes = 0u64;
+    let mut textures = 0u64;
+    let texture_bytes = |extent: EffectFrameExtent| {
+        (u64::from(extent.width()) * u64::from(extent.height())).saturating_mul(16)
+    };
+    for leaf in schedule.leaves() {
+        if is_resident(leaf.value()) {
+            continue; // An earlier node's retained demand already includes this texture.
+        }
+        let extent = match leaf.request() {
+            TemporalGpuLeafRequest::Source(request) => request.frame_extent(),
+            TemporalGpuLeafRequest::Auxiliary(demand) => auxiliary
+                .auxiliary_image(demand.context_time(), demand.slot())
+                .map(|(extent, _, _)| extent)
+                .ok_or(TemporalGpuExecutionError::MissingAuxiliaryRaster {
+                    time: demand.context_time(),
+                    slot: demand.slot(),
+                })?,
+        };
+        bytes = bytes.saturating_add(texture_bytes(extent));
+        textures = textures.saturating_add(1);
+    }
+    for (step, chain) in schedule.steps().iter().zip(spatial_chains) {
+        let (output, extra_bytes, extra_textures) = if let Some(chain) = chain {
+            (
+                chain.output_bounds.extent(),
+                chain.scratch_bytes,
+                (chain.scratch_textures as u64)
+                    .saturating_mul(chain.scratch_extents as u64)
+                    .saturating_add(chain.stages.len().saturating_sub(1) as u64),
+            )
+        } else {
+            let scratch = match step.operation() {
+                TemporalGpuStepOperation::Qualifier { qualifier, .. } => {
+                    u64::from(qualifier.gpu_pass_count().saturating_sub(1))
+                }
+                TemporalGpuStepOperation::MatteFeather { .. } => 1,
+                _ => 0,
+            };
+            (
+                extent,
+                texture_bytes(extent).saturating_mul(scratch),
+                scratch,
+            )
+        };
+        bytes = bytes.saturating_add(texture_bytes(output)).saturating_add(extra_bytes);
+        textures = textures.saturating_add(1).saturating_add(extra_textures);
+    }
+    Ok(crate::GpuVisualFrameActiveTextureDemand { bytes, textures })
+}
+
+fn read_temporal_root(
+    gpu: &TemporalGpuDevice<'_>,
+    mut encoder: wgpu::CommandEncoder,
+    root_handle: &GpuColorFrameHandle,
+    schedule: &PreparedEffectTemporalGpuExecution,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<EffectFrameTileF32, TemporalGpuExecutionError> {
+    let TemporalGpuDevice { device, queue, table, .. } = gpu;
+    let extent = schedule.frame_extent();
+    let extent_pixels = extent.width().saturating_mul(extent.height()) as usize;
+    let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba32float(root_handle.clone())
+        .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")))?;
+    let readback = {
+        let root_resource = table
+            .get(root_handle)
+            .map_err(|error| TemporalGpuExecutionError::ResourceTable(format!("{error:?}")))?;
+        GpuColorFrameReadback::record_copy(device, &mut encoder, &readback_plan, root_resource)
+            .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")))?
+    };
+    if cancellation.is_canceled() {
+        return Err(TemporalGpuExecutionError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(TemporalGpuExecutionError::DeadlineExceeded);
+    }
+    let submission = queue.submit(std::iter::once(encoder.finish()));
+    let slice = readback.slice(..);
+    let (sender, receiver) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    let map_lease = ReadbackMapLease::new(&readback);
+    let map_result = loop {
+        match receiver.try_recv() {
+            Ok(result) => {
+                break result
+                    .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err(TemporalGpuExecutionError::Readback(
+                    "readback map callback was dropped".to_owned(),
+                ));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if cancellation.is_canceled() {
+            break Err(TemporalGpuExecutionError::Cancelled);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break Err(TemporalGpuExecutionError::DeadlineExceeded);
+        }
+        let timeout = deadline.saturating_duration_since(now).min(TEMPORAL_GPU_POLL_SLICE);
+        match device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission.clone()),
+            timeout: Some(timeout),
+        }) {
+            Ok(_) | Err(wgpu::PollError::Timeout) => {}
+            Err(error) => {
+                break Err(TemporalGpuExecutionError::Readback(format!("{error:?}")));
+            }
+        }
+    };
+    if let Err(error) = map_result {
+        drop(map_lease);
+        return Err(error);
+    }
+    let mapped = slice
+        .get_mapped_range()
+        .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")))?;
+    let components = readback_plan
+        .unpack_mapped_rgba32float(&mapped)
+        .map_err(|error| TemporalGpuExecutionError::Readback(format!("{error:?}")))?;
+    drop(mapped);
+    drop(map_lease);
+
+    let mut pixels = Vec::with_capacity(components.len() / 4);
+    for chunk in components.chunks_exact(4) {
+        pixels.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    if pixels.len() != extent_pixels {
+        return Err(TemporalGpuExecutionError::ReadbackCoverage {
+            expected: extent_pixels,
+            actual: pixels.len(),
+        });
+    }
+    EffectFrameTileF32::new(
+        schedule.request().output_time(),
+        extent,
+        schedule.sampling(),
+        extent.full_frame_roi(),
+        schedule.request().output_frame_seed(),
+        pixels,
+    )
+    .map_err(TemporalGpuExecutionError::FrameProvider)
 }
 #[cfg(test)]
 mod tests {
@@ -954,6 +1438,368 @@ mod tests {
             .zip(right)
             .flat_map(|(left, right)| left.iter().zip(right).map(|(l, r)| (l - r).abs()))
             .fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    fn device_grain_sample_boxes_draw_only_the_fixed_picture() {
+        use mondrian_core::{
+            MediaFileFingerprint, Rational, SampleAspectRatio, SourceSampleTarget,
+        };
+        use mondrian_effects::{
+            grain_calibration::{
+                calibrate_grain, GrainCalibrationObservation, GrainCalibrationRequest,
+                GrainCalibrationSettings, GrainSamplePicture,
+            },
+            register_effect_definition, EffectColorDomainContract, EffectDefinition,
+            EffectExecutionContract, EffectExecutionModes, EffectFloatFrame, EffectFloatFrameView,
+            EffectGraphTopology, EffectNode, EffectRoiPropagation, PreparedTemporalAuxiliarySet,
+            PreparedTemporalFrameSet,
+        };
+
+        let Ok(context) = pollster::block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping grain sample boxes: no GPU adapter available");
+            return;
+        };
+        eprintln!(
+            "Grain sample boxes adapter: {:?}",
+            context.adapter.get_info()
+        );
+        let mut gpu = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .unwrap();
+        let extent = EffectFrameExtent::new(53, 37);
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 1); 2],
+        )
+        .unwrap();
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let pixel_count = (extent.width() * extent.height()) as usize;
+        let mut random = 19_u32;
+        let pixels: Vec<_> = (0..pixel_count)
+            .map(|_| {
+                random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (random >> 16) as f32 * (0.02 / 65_535.0);
+                [0.4 + noise, -0.03 + noise, 1.2 + noise, 0.75]
+            })
+            .collect();
+        let cancellation = ExecutionCancellationToken::new();
+        let fixed = EffectFloatFrameView::new(extent, format, sampling, &pixels);
+        let automatic = calibrate_grain(
+            fixed,
+            GrainCalibrationSettings::new(16, 4).unwrap(),
+            &cancellation,
+        )
+        .unwrap()
+        .expect("automatic fixed-source windows");
+        let manual = calibrate_grain(
+            fixed,
+            GrainCalibrationSettings::manual(16, &[[20, 18], [21, 18]]).unwrap(),
+            &cancellation,
+        )
+        .unwrap()
+        .expect("manual fixed-source windows");
+        assert_eq!(manual.windows.len(), 2);
+        let color = [0.3, 0.8, 0.2, 0.5];
+        let now = TimelineTime::new(12, 25).unwrap();
+        let picture = GrainSamplePicture {
+            target: SourceSampleTarget::covering(TimelineTime::new(4, 25).unwrap()),
+            fingerprint: MediaFileFingerprint::capture(std::path::Path::new(file!())),
+            video_stream_index: 1,
+            extent,
+            sampling,
+        };
+        for (index, profile) in [Some(Arc::new(automatic)), Some(Arc::new(manual)), None]
+            .into_iter()
+            .enumerate()
+        {
+            let settings = if index == 1 {
+                GrainCalibrationSettings::manual(16, &[[20, 18], [21, 18]]).unwrap()
+            } else {
+                GrainCalibrationSettings::new(16, 4).unwrap()
+            };
+            let authored_request = GrainCalibrationRequest::new(4, settings).unwrap();
+            let windows = profile.as_deref().map_or(&[][..], |profile| profile.windows.as_ref());
+            let kind = EffectType::External(format!("test.fixed-grain-boxes.{index}"));
+            register_effect_definition(
+                EffectDefinition::new(
+                    kind.key(),
+                    "Fixed grain sample boxes",
+                    Default::default(),
+                    EffectColorDomainContract::SCENE_LINEAR,
+                )
+                .with_execution_contract(EffectExecutionContract {
+                    execution_modes: EffectExecutionModes::CPU_F32
+                        .union(EffectExecutionModes::GPU_F32),
+                    roi_propagation: EffectRoiPropagation::FullFrame,
+                    topology: EffectGraphTopology::GeneralDag,
+                    ..EffectExecutionContract::IDENTITY
+                })
+                .with_branching_graph_builder(Arc::new(move |_, _, graph| {
+                    let output = graph.add_fixed_grain_sample_display(authored_request, color)?;
+                    graph.set_current_output(output);
+                    Ok(())
+                })),
+            )
+            .unwrap();
+            let working_color_space = WorkingColorSpace::LinearRec709;
+            let program =
+                PreparedEffectProgram::prepare(&[EffectNode::new(kind)], &[], working_color_space)
+                    .unwrap();
+            let request = EffectTemporalExecutionRequest::new(
+                15,
+                EffectExecutionContinuity::Discontinuous,
+                now,
+                extent,
+                sampling,
+                extent.full_frame_roi(),
+                cancellation.clone(),
+            );
+            let mut effects = EffectExecutionSession::default();
+            let execution = effects
+                .prepare_source_frame_program_with_binding(
+                    &program,
+                    &request,
+                    |_| Ok(0),
+                    |_, graph| {
+                        assert!(graph
+                            .bind_grain_calibration_from_media(|_| Ok(None), |_| Ok(true))
+                            .unwrap_err()
+                            .contains("requires admitted source frame 4"));
+                        graph.bind_grain_calibration_from_media(
+                            |request| {
+                                assert_eq!(request, authored_request);
+                                Ok(Some(GrainCalibrationObservation {
+                                    picture,
+                                    profile: profile.clone(),
+                                }))
+                            },
+                            |_| Ok(true),
+                        )
+                    },
+                )
+                .unwrap()
+                .bind_image_domain(&request)
+                .unwrap();
+            assert!(
+                execution.demands().is_empty(),
+                "the playing picture cannot enter the sample display"
+            );
+            let [demand] = execution.auxiliary_demands().demands() else {
+                panic!("one fixed picture");
+            };
+            assert_eq!(
+                execution.graph().grain_sample_picture(demand.slot()),
+                Some((0, picture))
+            );
+            let identity =
+                EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([17; 32]);
+            let mut frames =
+                PreparedTemporalFrameSet::prepare(identity, execution.demands().clone(), [])
+                    .unwrap();
+            let image =
+                EffectFloatFrame::from_pixels(extent, format, sampling, pixels.clone()).unwrap();
+            let mut auxiliary = PreparedTemporalAuxiliarySet::prepare(
+                identity,
+                15,
+                [(demand.request(15, extent, sampling), image)],
+            )
+            .unwrap();
+            let mut checkpoint = || None;
+            let mut control = EffectProcessorControl::new(&mut checkpoint);
+            let cpu = effects
+                .execute_prepared_temporal_f32_with_auxiliary(
+                    &execution,
+                    &mut frames,
+                    &mut auxiliary,
+                    &mut control,
+                )
+                .unwrap();
+            let schedule = execution.plan_gpu_execution().unwrap();
+            let actual = gpu
+                .execute_temporal_schedule(
+                    &schedule,
+                    &mut frames,
+                    &mut auxiliary,
+                    working_color_space,
+                    Instant::now() + Duration::from_secs(120),
+                    &cancellation,
+                )
+                .unwrap();
+            let samples = actual.output().tile().pixels();
+            assert_eq!(
+                (actual.uploads(), actual.dispatches(), actual.readbacks()),
+                (1, 1, 1)
+            );
+            let error = max_channel_difference(cpu.tile().pixels(), samples);
+            eprintln!(
+                "Grain sample boxes case {index}: {} windows, maximum Float32 error {error:.9e}",
+                windows.len()
+            );
+            assert!(error <= PARITY_TOLERANCE);
+            assert!(samples.iter().all(|pixel| pixel[3] == 0.75));
+            if let Some(window) = windows.first() {
+                let sample = (window.origin[1] * extent.width() + window.origin[0]) as usize;
+                assert_eq!(samples[sample][0], (pixels[sample][0] + color[0]) * 0.5);
+                assert_ne!(samples[sample], pixels[sample]);
+            } else {
+                assert_eq!(samples, pixels);
+            }
+        }
+    }
+
+    #[test]
+    fn device_denoise_preview_window_uses_actual_media_sampling() {
+        use mondrian_core::{Color, FramePosition, Rational, Resolution, SampleAspectRatio};
+        use mondrian_effects::{
+            EffectFrameTileF32, PreparedTemporalAuxiliarySet, PreparedTemporalFrameSet,
+        };
+
+        let Ok(context) = pollster::block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping denoise Preview window test: no GPU adapter available");
+            return;
+        };
+        eprintln!(
+            "Denoise Preview window adapter: {:?}",
+            context.adapter.get_info()
+        );
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .unwrap();
+        let extent = EffectFrameExtent::new(57, 39);
+        let canvas = EffectFrameExtent::new(114, 59);
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let now = TimelineTime::new(8, 25).unwrap();
+        let identity = EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([0x53; 32]);
+
+        for temporal in [false, true] {
+            let mut effect =
+                mondrian_effects::instantiate_effect_node(EffectType::Denoise).unwrap();
+            for (key, value) in [
+                ("view", PropertyValue::Enum("preview".into())),
+                ("temporal_enabled", PropertyValue::Bool(temporal)),
+                ("detail_amount", PropertyValue::Float(0.5)),
+                ("preview_center", PropertyValue::Vec2([55.5, 29.0].into())),
+                ("preview_width", PropertyValue::Float(51.0)),
+                ("preview_height", PropertyValue::Float(52.0)),
+                (
+                    "preview_border_color",
+                    PropertyValue::Color(Color { r: 1.2, g: 0.1, b: 0.3, a: 0.8 }),
+                ),
+            ] {
+                effect
+                    .set_static_value_by_parameter(
+                        &EffectType::Denoise.parameter_id(key).unwrap(),
+                        value,
+                    )
+                    .unwrap();
+            }
+            let mut sequence = mondrian_timeline::Sequence::new("Denoise preview region");
+            sequence.settings.frame_rate = Rational::FPS_25;
+            sequence.settings.resolution =
+                Resolution { width: canvas.width(), height: canvas.height() };
+            let mut clip =
+                mondrian_timeline::Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE)
+                    .unwrap();
+            clip.add_effect_node(effect);
+            sequence.video_tracks[0].add_clip(clip).unwrap();
+            let program = crate::PreparedVisualProgram::prepare(&sequence).unwrap();
+            let request = crate::TimelineFrameExecutionRequest::new(
+                crate::TimelineEvaluationRequest::export(FramePosition::new(
+                    8,
+                    sequence.time_base(),
+                )),
+                15,
+                EffectExecutionContinuity::Discontinuous,
+                canvas,
+                canvas.full_frame_roi(),
+                ExecutionCancellationToken::new(),
+            );
+            let prepared = crate::TimelineCompositeScratch::default()
+                .prepare_timeline_frame_execution_with_media_binding(
+                    &program,
+                    request,
+                    |_, _, graph, _| {
+                        graph.bind_grain_calibration(|_| Ok(Some([0.025; 3])), |_| Ok(true))
+                    },
+                )
+                .unwrap();
+            assert!(prepared.has_unbound_temporal_media());
+            let prepared =
+                prepared.bind_temporal_media_image_domains(|_| Ok((extent, sampling))).unwrap();
+            let [batch] = prepared.batches() else {
+                panic!("one authored Preview batch");
+            };
+            let execution = batch.execution();
+            assert_eq!(execution.request().output_time(), now);
+            let schedule = execution.plan_gpu_execution().unwrap();
+            let expected_leaves = if temporal { 3 } else { 1 };
+            assert_eq!(schedule.leaves().len(), expected_leaves);
+            assert!(matches!(
+                schedule.steps().last().unwrap().operation(),
+                TemporalGpuStepOperation::PreviewWindow { .. }
+            ));
+            let mut frames = PreparedTemporalFrameSet::prepare(
+                identity,
+                execution.demands().clone(),
+                execution.demands().requests().iter().copied().map(|sample| {
+                    let pixels = (0..extent.width() * extent.height())
+                        .map(|i| {
+                            let shift = if sample.time() == now { 0 } else { 1 };
+                            let grain = if (i + shift) % 2 == 0 { 0.09 } else { -0.09 };
+                            [0.5 + grain, -0.1 + grain, 1.3 - grain, 0.6]
+                        })
+                        .collect();
+                    (
+                        sample,
+                        EffectFrameTileF32::new(
+                            sample.time(),
+                            extent,
+                            sampling,
+                            extent.full_frame_roi(),
+                            8,
+                            pixels,
+                        )
+                        .unwrap(),
+                    )
+                }),
+            )
+            .unwrap();
+            let cpu = EffectExecutionSession::default()
+                .execute_prepared_temporal_f32(execution, &mut frames)
+                .unwrap();
+            let mut auxiliary = PreparedTemporalAuxiliarySet::prepare(identity, 15, []).unwrap();
+            let gpu = runtime
+                .execute_temporal_schedule(
+                    &schedule,
+                    &mut frames,
+                    &mut auxiliary,
+                    WorkingColorSpace::LinearRec709,
+                    Instant::now() + Duration::from_secs(120),
+                    execution.request().cancellation(),
+                )
+                .unwrap();
+            let samples = gpu.output().tile().pixels();
+            let error = max_channel_difference(cpu.tile().pixels(), samples);
+            eprintln!("Denoise Preview window temporal={temporal}: {expected_leaves} inputs, maximum Float32 error {error:.9e}");
+            assert!(error <= PARITY_TOLERANCE);
+            assert_eq!(gpu.readbacks(), 1);
+            assert_eq!(gpu.uploads(), expected_leaves);
+            assert_eq!(samples[0], [0.5 + 0.09, -0.1 + 0.09, 1.3 - 0.09, 0.6]);
+            assert!(samples.iter().all(|pixel| pixel[3] == 0.6));
+        }
     }
 
     #[test]

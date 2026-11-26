@@ -4,12 +4,18 @@ use super::*;
 
 type ImageDomain = (EffectFrameExtent, mondrian_core::ImageSampling);
 
-pub(super) fn prepared_auxiliary_working_bytes(
+pub(super) struct PreparedAuxiliaryWorkingSet {
+    pub(super) working_bytes: usize,
+    pub(super) retained_temporal_bytes: Option<usize>,
+}
+
+pub(super) fn estimate_prepared_auxiliary_working_set(
     closure: &PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>,
     sources: &PreviewSourcePreparation,
-) -> Result<usize, PreviewUnavailability> {
+) -> Result<PreparedAuxiliaryWorkingSet, PreviewUnavailability> {
     let mut peak = 0usize;
     let mut retained_history_growth = 0usize;
+    let mut retained_temporal_bytes = Some(0usize);
     for node in closure.nodes() {
         let resolution = node.execution_resolution();
         let canvas = (
@@ -168,6 +174,8 @@ pub(super) fn prepared_auxiliary_working_bytes(
             }
         }
         for batch in node.evaluation().temporal_batches() {
+            retained_temporal_bytes = retained_temporal_bytes
+                .and_then(|bytes| bytes.checked_add(batch.effect_demands().coverage_bytes()));
             let request = batch.execution_request();
             let primary = (request.frame_extent(), request.sampling());
             batch.visit_auxiliary_demands(
@@ -177,9 +185,16 @@ pub(super) fn prepared_auxiliary_working_bytes(
                         .iter()
                         .find(|spec| spec.slot() == key.slot)
                         .ok_or_else(|| refused("temporal auxiliary budget lost its slot"))?;
-                    let (domain, has_pixels) = if let Some(request) =
-                        temporal_preview_asset_request(node, key)?
+                    let (domain, has_pixels) = if let Some(frame) =
+                        ready_fixed_grain_picture(sources, node, key)?
                     {
+                        (
+                            frame.cpu_image_domain().ok_or_else(|| {
+                                refused("fixed grain sample requires its CPU grid")
+                            })?,
+                            true,
+                        )
+                    } else if let Some(request) = temporal_preview_asset_request(node, key)? {
                         let plan = sources.auxiliary.get(&request).ok_or_else(|| {
                             refused("temporal auxiliary budget lost its Asset plan")
                         })?;
@@ -230,9 +245,12 @@ pub(super) fn prepared_auxiliary_working_bytes(
                         );
                     let copy = (registered.0.width() as usize)
                         .checked_mul(registered.0.height() as usize)
-                        .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()));
-                    local = copy
-                        .and_then(|copy| local.checked_add(copy))
+                        .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<[f32; 4]>()))
+                        .ok_or_else(|| refused("temporal auxiliary raster size overflowed"))?;
+                    retained_temporal_bytes =
+                        retained_temporal_bytes.and_then(|bytes| bytes.checked_add(copy));
+                    local = local
+                        .checked_add(copy)
                         .and_then(|local| local.checked_add(charge))
                         .ok_or_else(|| refused("temporal auxiliary budget overflowed"))?;
                     Ok(())
@@ -244,8 +262,10 @@ pub(super) fn prepared_auxiliary_working_bytes(
         // node runs. Retained child outputs are in the existing closure bound.
         peak = peak.max(local);
     }
-    peak.checked_add(retained_history_growth)
-        .ok_or_else(|| refused("auxiliary working pixel size overflowed"))
+    let working_bytes = peak
+        .checked_add(retained_history_growth)
+        .ok_or_else(|| refused("auxiliary working pixel size overflowed"))?;
+    Ok(PreparedAuxiliaryWorkingSet { working_bytes, retained_temporal_bytes })
 }
 
 fn refused(detail: impl Into<String>) -> PreviewUnavailability {
@@ -267,6 +287,10 @@ fn effect_input_domain(
     let [element] = node.evaluation().plan().elements.as_slice() else {
         return Err(refused("historical input has no single source layer"));
     };
+    if let [batch] = node.evaluation().temporal_batches() {
+        let request = batch.execution_request();
+        return Ok((request.frame_extent(), request.sampling()));
+    }
     let (graph, (extent, sampling)) = match element {
         TimelineRenderPlanElement::Media(media) => {
             let request =
@@ -342,11 +366,9 @@ fn media_domain(
     }
     let request = preview_node_media_request(node, media).map_err(preview_route_unavailability)?;
     match sources.media.get(&request) {
-        Some(PreviewTimelineMediaFrame::Ready(frame)) => {
-            frame.cpu_image_domain().ok_or_else(|| {
-                refused("auxiliary primary budget requires the actual CPU media domain")
-            })
-        }
+        Some(PreviewTimelineMediaFrame::Ready(frame)) => frame
+            .spatial_image_domain()
+            .ok_or_else(|| refused("auxiliary primary budget requires the actual media domain")),
         _ => Err(refused(
             "auxiliary primary budget lost its original Ready media",
         )),
