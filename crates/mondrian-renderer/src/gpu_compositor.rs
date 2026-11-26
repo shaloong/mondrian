@@ -7797,6 +7797,34 @@ impl GpuFrameCompositor {
         Ok(handle)
     }
 
+    pub(crate) fn record_temporal_hold(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: &GpuColorFrameWgpuResourcePool,
+        input: &GpuColorFrameHandle,
+    ) -> Result<GpuColorFrameHandle, GpuCompositeError> {
+        let source = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
+        let output = create_working_resource(
+            device,
+            ids,
+            input.descriptor(),
+            "gpu-temporal-held-frame",
+            Some(resource_pool),
+        )?;
+        let source = &source.resource().texture;
+        encoder.copy_texture_to_texture(
+            source.as_image_copy(),
+            output.resource().texture.as_image_copy(),
+            source.size(),
+        );
+        let handle = output.handle().clone();
+        table.insert(output).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(handle)
+    }
+
     /// Record Collage on the already evaluated temporal grid.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_temporal_video_collage(

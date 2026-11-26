@@ -2343,6 +2343,143 @@ fn pin_standard_execution_resources(state: &mut AppState) {
         );
 }
 
+#[test]
+fn production_timewarp_preview_decodes_the_selected_pictures_without_the_output_frame() {
+    use crate::app::preview_viewer_plan::ResolvedPreviewElement;
+    use mondrian_core::PropertyValue;
+    use mondrian_effects::{coverage::mix_straight_rgba, instantiate_effect_node, EffectType};
+
+    ensure_test_ocio_loaded();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("timewarp.mp4");
+    std::fs::write(
+        &path,
+        include_bytes!("../../../../../tests/fixtures/small/h264-bframes.mp4"),
+    )
+    .unwrap();
+    let info = mondrian_media::probe_media_info(&path).unwrap();
+    let library = AssetLibrary::open(directory.path().join("library")).unwrap();
+    let asset = commit_preview_test_media(&library, path, info);
+    let mut sequence = Sequence::new("Timewarp Preview");
+    sequence.settings.frame_rate = Rational::FPS_25;
+    sequence.settings.resolution = Resolution { width: 64, height: 64 };
+    let time = |frame| mondrian_core::TimelineTime::new(frame, 25).unwrap();
+    let mut warped = Clip::new(asset, time(0), time(12)).unwrap();
+    let mut reference = Clip::new(asset, time(24), time(12)).unwrap();
+    for clip in [&mut warped, &mut reference] {
+        clip.media_interpretation_mut().unwrap().color_space_override = Some(ColorSpace::Rec709);
+    }
+    let mut timewarp = instantiate_effect_node(EffectType::Timewarp).unwrap();
+    for (key, value) in [
+        ("adjust_by", PropertyValue::Enum("source_frame".into())),
+        ("source_frame", PropertyValue::Float(1.25)),
+    ] {
+        timewarp
+            .set_static_value_by_parameter(&EffectType::Timewarp.parameter_id(key).unwrap(), value)
+            .unwrap();
+    }
+    warped.add_effect_node(timewarp);
+    sequence.video_tracks[0].add_clip(warped).unwrap();
+    sequence.video_tracks[0].add_clip(reference).unwrap();
+    let mut state = AppState::new();
+    pin_standard_execution_resources(&mut state);
+    state.test_set_asset_library(Some(library));
+    state.test_set_sequence(Some(sequence));
+    state.seek(0).unwrap();
+    let runtime = PreviewProductionRuntime::<()>::try_new_boxed().unwrap();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    let sequence = state.active_sequence().unwrap();
+    let color = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())
+        .unwrap();
+    let ready = |frame| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut preparation = None;
+        loop {
+            runtime.poll_playback_work(None, snapshot.transport().intent());
+            match runtime.resolve_timeline_for_test(
+                &snapshot,
+                &state,
+                sequence,
+                frame,
+                64,
+                64,
+                color.clone(),
+                preparation.take(),
+            ) {
+                PreviewTimelineResolution::Ready(resolved) => return resolved,
+                PreviewTimelineResolution::Pending { preparation: next, .. } => preparation = next,
+                other => panic!("Timewarp Preview frame {frame}: {other:?}"),
+            }
+            assert!(Instant::now() < deadline, "Timewarp Preview did not settle");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    let pixels = |resolved: &crate::app::preview_timeline_execution::ResolvedPreviewTimeline| {
+        let [ResolvedPreviewElement::Media { frame, .. }] = resolved.plan.elements.as_slice()
+        else {
+            panic!("one resolved media layer");
+        };
+        frame
+            .working_frame_with_session(
+                &mut mondrian_renderer::RenderCpuColorExecutionSession::default(),
+            )
+            .unwrap()
+            .frame
+    };
+    let warped = ready(8);
+    let [node] = warped.semantic_trace.nodes.as_ref() else {
+        panic!("one visual node")
+    };
+    let [batch] = node.temporal_batches.as_ref() else {
+        panic!("one Timewarp batch")
+    };
+    assert_eq!(batch.output_time, time(8));
+    assert_eq!(
+        batch
+            .source_samples
+            .iter()
+            .map(|sample| sample.effect_request.time)
+            .collect::<Vec<_>>(),
+        [time(1), time(2)],
+    );
+    let [ResolvedPreviewElement::Media { frame, .. }] = warped.plan.elements.as_slice() else {
+        panic!("one resolved Timewarp layer");
+    };
+    assert!(
+        frame.temporal_picture().is_some(),
+        "the Viewer can record the exact samples"
+    );
+    let actual = pixels(&warped);
+    let repeated = pixels(&ready(9));
+    runtime.request_viewer_cpu_fallback("compare with independently decoded CPU reference frames");
+    let first = pixels(&ready(25));
+    let second = pixels(&ready(26));
+    assert_ne!(first.rgba_f32().data, second.rgba_f32().data);
+    let expected = first
+        .rgba_f32()
+        .data
+        .iter()
+        .zip(&second.rgba_f32().data)
+        .map(|(a, b)| mix_straight_rgba(*a, *b, 0.25))
+        .collect::<Vec<_>>();
+    for rendered in [actual, repeated] {
+        let pixels = &rendered.rgba_f32().data;
+        assert_eq!(pixels.len(), expected.len());
+        let error = pixels
+            .iter()
+            .flatten()
+            .zip(expected.iter().flatten())
+            .map(|(actual, expected)| (actual - expected).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("Timewarp Preview maximum Float32 difference {error:e}");
+        assert!(error <= 1.0e-6, "Timewarp Preview diverged by {error:e}");
+    }
+    runtime.shutdown_and_wait();
+}
+
 fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
     state_with_invalid_video_asset_for_cpu_rgb(false)
 }

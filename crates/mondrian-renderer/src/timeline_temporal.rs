@@ -2323,6 +2323,78 @@ mod tests {
     }
 
     #[test]
+    fn timewarp_maps_only_the_two_selected_owner_frames_through_a_reverse_clip() {
+        use mondrian_core::PropertyValue;
+
+        let mut sequence = Sequence::new("Timewarp over reverse source");
+        sequence.settings.frame_rate = Rational::FPS_25;
+        let asset_id = AssetId::new();
+        let mut clip = Clip::new(asset_id, TimelineTime::ZERO, TimelineTime::ONE).unwrap();
+        clip.set_constant_source_time_map(
+            TimelineTime::new(10, 1).unwrap(),
+            TimeScale::new(-2, 1).unwrap(),
+        )
+        .unwrap();
+        let mut effect = mondrian_effects::instantiate_effect_node(EffectType::Timewarp).unwrap();
+        for (key, value) in [
+            ("adjust_by", PropertyValue::Enum("source_frame".into())),
+            ("source_frame", PropertyValue::Float(1.25)),
+        ] {
+            effect
+                .set_static_value_by_parameter(
+                    &EffectType::Timewarp.parameter_id(key).unwrap(),
+                    value,
+                )
+                .unwrap();
+        }
+        clip.add_effect_node(effect);
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+        let program = PreparedVisualProgram::prepare(&sequence).unwrap();
+        let plan = evaluate_prepared_visual_program(
+            &program,
+            crate::TimelineEvaluationRequest::export(FramePosition::new(8, sequence.time_base())),
+        )
+        .unwrap();
+        let extent = EffectFrameExtent::new(4, 2);
+        let batches = collect_timeline_temporal_demands(
+            &program,
+            &plan,
+            42,
+            EffectExecutionContinuity::Discontinuous,
+            extent,
+            extent.full_frame_roi(),
+            ExecutionCancellationToken::new(),
+        )
+        .unwrap();
+        let [batch] = batches.as_slice() else {
+            panic!("expected one authored Timewarp batch");
+        };
+        assert_eq!(batch.source_demands().len(), 2);
+        for (demand, index) in batch.source_demands().iter().zip([1, 2]) {
+            assert_eq!(
+                demand.effect_request.time(),
+                TimelineTime::new(index, 25).unwrap()
+            );
+            let TimelineTemporalSource::Media { asset_id: source, source_sample, .. } =
+                &demand.source
+            else {
+                panic!("Timewarp must sample this Clip's original media");
+            };
+            assert_eq!(*source, asset_id);
+            assert_eq!(
+                *source_sample,
+                SourceSampleTarget::strict_predecessor(
+                    TimelineTime::new(250 - 2 * index, 25).unwrap()
+                ),
+            );
+        }
+        assert_eq!(
+            batch.execution().plan_gpu_execution().unwrap().step_count(),
+            1
+        );
+    }
+
+    #[test]
     fn future_media_demand_crosses_the_clip_retime_seam_exactly_once() {
         let rate = Rational::new(30, 1);
         let offset = TimelineTime::new(1, 2).expect("offset");

@@ -783,6 +783,16 @@ fn record_temporal_schedule(
                         .map_err(TemporalGpuExecutionError::Composite)?
                         .output
                 }
+                TemporalGpuStepOperation::TemporalHold { input } => compositor
+                    .record_temporal_hold(
+                        device,
+                        encoder,
+                        ids,
+                        table,
+                        resource_pool,
+                        &input_handle(*input)?,
+                    )
+                    .map_err(TemporalGpuExecutionError::Composite)?,
                 TemporalGpuStepOperation::TemporalBlend { input, sample, mix } => {
                     let input = input_handle(*input)?;
                     let sample = input_handle(*sample)?;
@@ -2435,5 +2445,136 @@ mod tests {
             drift > 0.1,
             "the hold must not pass the current frame through, drifted by {drift}"
         );
+    }
+
+    #[test]
+    fn device_timewarp_copies_the_held_frame_and_matches_scalar_coverage_mix() {
+        use mondrian_core::{Rational, SampleAspectRatio, TimelineTimeRange};
+        use mondrian_effects::{EffectFrameContext, EffectProjectGeometry, LutPreparationCache};
+
+        let Ok(context) = pollster::block_on(crate::GpuContext::new()) else {
+            eprintln!("skipping GPU Timewarp parity test: no GPU adapter available");
+            return;
+        };
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .unwrap();
+        let extent = EffectFrameExtent::new(7, 5);
+        let first_time = TimelineTime::new(1, 25).unwrap();
+        let second_time = TimelineTime::new(2, 25).unwrap();
+        let now = TimelineTime::new(8, 25).unwrap();
+        let frame_context = EffectFrameContext::new(
+            Rational::FPS_25,
+            EffectProjectGeometry::new(7, 5, SampleAspectRatio::SQUARE).unwrap(),
+            TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+        )
+        .unwrap();
+        for (position, expected_times) in [
+            (1.0, &[first_time][..]),
+            (1.25, &[first_time, second_time][..]),
+        ] {
+            let mut effect =
+                mondrian_effects::instantiate_effect_node(EffectType::Timewarp).unwrap();
+            for (parameter, value) in [
+                ("adjust_by", PropertyValue::Enum("source_frame".into())),
+                ("method", PropertyValue::Enum("frame_mix".into())),
+                ("source_frame", PropertyValue::Float(position)),
+            ] {
+                effect
+                    .set_static_value_by_parameter(
+                        &EffectType::Timewarp.parameter_id(parameter).unwrap(),
+                        value,
+                    )
+                    .unwrap();
+            }
+            let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+                &[effect],
+                &[],
+                &[],
+                &[],
+                WorkingColorSpace::LinearRec709,
+                frame_context,
+                &LutPreparationCache::uncached(),
+            )
+            .unwrap();
+            let request = EffectTemporalExecutionRequest::new(
+                1,
+                EffectExecutionContinuity::Discontinuous,
+                now,
+                extent,
+                ImageSampling::UNIT_SQUARE,
+                extent.full_frame_roi(),
+                ExecutionCancellationToken::new(),
+            );
+            let execution =
+                prepare_temporal_frame_execution(&program, &request, |_| Ok(1)).unwrap();
+            let schedule = execution.plan_gpu_execution().unwrap();
+            let demands = execution.demands();
+            assert_eq!(
+                demands.requests().iter().map(|request| request.time()).collect::<Vec<_>>(),
+                expected_times,
+            );
+            let resolved = demands.requests().iter().copied().map(|request| {
+                let pair = if request.time() == first_time {
+                    [[2.0, -1.0, 4.0, 0.5], [3.0, -0.5, 1.0, 0.0]]
+                } else {
+                    [[10.0, 4.0, 0.0, 0.0], [-1.0, 3.0, 0.5, 0.75]]
+                };
+                let pixels = (0..35).map(|index| pair[index % 2]).collect();
+                let tile = EffectFrameTileF32::new(
+                    request.time(),
+                    extent,
+                    request.sampling(),
+                    request.input_roi().region(),
+                    1,
+                    pixels,
+                )
+                .unwrap();
+                (request, tile)
+            });
+            let mut frames = PreparedTemporalFrameSet::prepare(
+                EffectTemporalSourceIdentity::from_complete_semantic_fingerprint([0x81; 32]),
+                demands.clone(),
+                resolved,
+            )
+            .unwrap();
+            let cpu = EffectExecutionSession::default()
+                .execute_prepared_temporal_f32_with_auxiliary(
+                    &execution,
+                    &mut frames.clone(),
+                    &mut EmptyMatte,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .unwrap();
+            let gpu = runtime
+                .execute_temporal_schedule(
+                    &schedule,
+                    &mut frames,
+                    &mut EmptyMatte,
+                    WorkingColorSpace::LinearRec709,
+                    Instant::now() + Duration::from_secs(60),
+                    &ExecutionCancellationToken::new(),
+                )
+                .unwrap();
+            assert_eq!(gpu.uploads(), expected_times.len());
+            assert_eq!(gpu.dispatches(), 1);
+            assert_eq!(gpu.readbacks(), 1);
+            let actual = gpu.output().tile().pixels();
+            if position == 1.0 {
+                assert_eq!(
+                    actual[1],
+                    [3.0, -0.5, 1.0, 0.0],
+                    "hold preserves hidden RGB"
+                );
+            } else {
+                assert_eq!(actual[0], [2.0, -1.0, 4.0, 0.375]);
+                assert_eq!(actual[1], [-1.0, 3.0, 0.5, 0.1875]);
+            }
+            let error = max_channel_difference(cpu.tile().pixels(), actual);
+            eprintln!("Timewarp source frame {position}: maximum Float32 error {error:e}");
+            assert!(error <= PARITY_TOLERANCE);
+        }
     }
 }
