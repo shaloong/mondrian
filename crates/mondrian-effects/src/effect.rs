@@ -1,6 +1,7 @@
 //! 效果节点抽象
 
 pub(crate) mod denoise;
+pub(crate) mod timewarp;
 
 use crate::execution::{CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor};
 use crate::extension_contract::{
@@ -1167,6 +1168,15 @@ pub enum EffectRenderOp {
         /// Weight of the offset sample in `[0, 1]`.
         mix: f32,
     },
+    /// Hold an exact retimed stage input or mix two of its exact instants.
+    TemporalFrameResample {
+        /// First sample relative to this output in the owner's visual time domain.
+        first: TimelineTime,
+        /// Second sample when the output lies between two source frames.
+        following: Option<TimelineTime>,
+        /// Straight-coverage interpolation weight of the following sample.
+        weight: f32,
+    },
     /// Motion-gated grain reduction over the entering value's two neighbors.
     TemporalGrain {
         /// Bound offsets and shared RGB calibration.
@@ -1852,6 +1862,12 @@ impl std::fmt::Debug for EffectRenderOp {
                 .debug_struct("TemporalFrameBlend")
                 .field("sample_offset", sample_offset)
                 .field("mix", mix)
+                .finish(),
+            Self::TemporalFrameResample { first, following, weight } => formatter
+                .debug_struct("TemporalFrameResample")
+                .field("first", first)
+                .field("following", following)
+                .field("weight", weight)
                 .finish(),
             Self::TemporalGrain { grade } => {
                 formatter.debug_tuple("TemporalGrain").field(grade).finish()
@@ -2989,6 +3005,12 @@ impl EffectRenderOp {
                 sample_offset.hash(state);
                 mix.to_bits().hash(state);
             }
+            EffectRenderOp::TemporalFrameResample { first, following, weight } => {
+                158u8.hash(state);
+                first.hash(state);
+                following.hash(state);
+                weight.to_bits().hash(state);
+            }
             EffectRenderOp::TemporalGrain { grade } => {
                 156u8.hash(state);
                 grade.hash_controls(state);
@@ -3486,6 +3508,7 @@ impl EffectRenderOp {
             EffectRenderOp::Sharpen { .. } => 4,
             EffectRenderOp::ChromaticAberration { .. } => 4,
             EffectRenderOp::TemporalFrameBlend { .. } => 2,
+            EffectRenderOp::TemporalFrameResample { .. } => 2,
             EffectRenderOp::TemporalGrain { .. } => 3,
             EffectRenderOp::SpatialGrain { .. } => 3,
             EffectRenderOp::RemoveColorMatting { .. } => 1,
@@ -4056,7 +4079,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 156] {
+fn builtin_effect_types() -> [EffectType; 157] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4185,6 +4208,7 @@ fn builtin_effect_types() -> [EffectType; 156] {
         EffectType::CameraView,
         EffectType::BlankingFill,
         EffectType::PosterizeTime,
+        EffectType::Timewarp,
         EffectType::Deinterlace,
         EffectType::Watercolor,
         EffectType::Scanlines,
@@ -9281,6 +9305,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                     .collect(),
             );
         }
+        EffectType::Timewarp => timewarp::define_properties(&mut properties),
         EffectType::PosterizeTime => {
             define_builtin_property(
                 &mut properties,
@@ -18135,6 +18160,7 @@ fn lut_processing_domain(key: &str) -> Option<EffectColorDomain> {
 
 fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> ParameterUnit {
     match (effect_type, parameter) {
+        (EffectType::Timewarp, "speed") => ParameterUnit::Percent,
         (EffectType::BasicCorrection, "exposure") => ParameterUnit::Stops,
         (EffectType::HdrGrading, parameter)
             if parameter == "global_exposure"
@@ -18837,7 +18863,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
-        EffectType::PosterizeTime => EffectExecutionContract {
+        EffectType::Timewarp | EffectType::PosterizeTime => EffectExecutionContract {
             // The held instant is a cross-time read, so the same admission rule
             // as Echo applies: GPU Float32 only through the finite temporal
             // device executor, which supplies the sampled instant. The base
@@ -19471,6 +19497,9 @@ fn finite_kernel_roi_contract(radius: f32) -> EffectRoiPropagation {
 }
 
 fn builtin_graph_preparer_for(effect_type: &EffectType) -> Option<EffectGraphPreparer> {
+    if *effect_type == EffectType::Timewarp {
+        return Some(Arc::new(|effect, _, _| timewarp::prepare(effect)));
+    }
     if !matches!(effect_type, EffectType::Lut3D) {
         return None;
     }
@@ -29639,6 +29668,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::MatteRefine => "遮罩精修",
         EffectType::Echo => "残影",
         EffectType::PosterizeTime => "抽帧",
+        EffectType::Timewarp => "时间扭曲",
         EffectType::Arithmetic => "算术",
         EffectType::LeaveColor => "保留颜色",
         EffectType::BroadcastSafe => "广播安全",
@@ -31121,6 +31151,7 @@ mod tests {
             EffectType::Glass,
             EffectType::VideoCollage,
             EffectType::PosterizeTime,
+            EffectType::Timewarp,
             EffectType::Deinterlace,
             EffectType::Watercolor,
             EffectType::Scanlines,

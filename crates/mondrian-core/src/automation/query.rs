@@ -130,6 +130,32 @@ impl PreparedPropertyQuery {
         &self.key_times
     }
 
+    /// Logical bytes for the prepared segments and query index. Canonical
+    /// authoring allocations are shared with the source property.
+    pub fn retained_bytes_estimate(&self) -> usize {
+        let channels =
+            self.channels.capacity().saturating_mul(std::mem::size_of::<PreparedChannel>());
+        let index = self.key_times.capacity().saturating_mul(std::mem::size_of::<f64>());
+        self.channels.iter().fold(
+            std::mem::size_of::<Self>().saturating_add(channels).saturating_add(index),
+            |bytes, channel| {
+                bytes
+                    .saturating_add(
+                        channel.times.capacity().saturating_mul(std::mem::size_of::<f64>()),
+                    )
+                    .saturating_add(
+                        channel.values.capacity().saturating_mul(std::mem::size_of::<f64>()),
+                    )
+                    .saturating_add(
+                        channel
+                            .segments
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<NumericSegment>()),
+                    )
+            },
+        )
+    }
+
     /// Evaluate the complete scalar or compound value without author-time rounding.
     pub fn evaluate(
         &self,

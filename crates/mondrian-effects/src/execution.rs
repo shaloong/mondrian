@@ -3234,6 +3234,7 @@ fn effect_render_op_supports_rgba_f32(op: &EffectRenderOp) -> bool {
             processor.as_ref().is_some_and(|binding| binding.supports_float32())
         }
         EffectRenderOp::TemporalFrameBlend { .. }
+        | EffectRenderOp::TemporalFrameResample { .. }
         | EffectRenderOp::TemporalGrain { .. }
         | EffectRenderOp::DisplacementMap { .. }
         | EffectRenderOp::VideoCollage { .. } => false,
@@ -3399,6 +3400,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         EffectRenderOp::Stroke { .. } => "stroke",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
+        EffectRenderOp::TemporalFrameResample { .. } => "temporal_frame_resample",
         EffectRenderOp::TemporalGrain { .. } => "temporal_grain",
         EffectRenderOp::SpatialGrain { .. } => "spatial_grain",
         EffectRenderOp::Lut3D { .. } => "lut3d",

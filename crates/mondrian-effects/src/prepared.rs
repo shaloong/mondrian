@@ -592,6 +592,13 @@ fn specialize_builtin_definition(
             temporal_input: posterize_time_author_time_extent(effect),
             ..contract
         },
+        crate::EffectType::Timewarp => EffectExecutionContract {
+            temporal_input: frame_context.map_or(EffectTemporalInputExtent::UNBOUNDED, |frame| {
+                let span = crate::EffectTemporalSpan::Finite(frame.available_range().duration);
+                EffectTemporalInputExtent { past: span, future: span }
+            }),
+            ..contract
+        },
         crate::EffectType::Denoise => EffectExecutionContract {
             temporal_input: crate::effect::denoise::author_time_extent(effect, frame_context),
             ..contract

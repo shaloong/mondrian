@@ -2809,6 +2809,22 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                 )?;
                                 self.temporal_blend(input, sample, mix, control)?
                             }
+                            crate::EffectRenderOp::TemporalFrameResample { weight, .. } => {
+                                let Some(program::TemporalReads::Resample { first, following }) =
+                                    self.temporal_program.temporal_reads(address)
+                                else {
+                                    return Err(
+                                        EffectTemporalExecutionError::InvalidGraphLiveness {
+                                            reason: "temporal resample has no planned sample edges",
+                                        },
+                                    );
+                                };
+                                if let Some(following) = following {
+                                    self.temporal_blend(first, following, weight, control)?
+                                } else {
+                                    self.take_value(first)?
+                                }
+                            }
                             crate::EffectRenderOp::TemporalGrain { grade } => {
                                 let input =
                                     self.temporal_program.address_for_input(context, input)?;
@@ -4004,6 +4020,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         crate::EffectRenderOp::Stroke { .. } => "stroke",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
+        crate::EffectRenderOp::TemporalFrameResample { .. } => "temporal_frame_resample",
         crate::EffectRenderOp::TemporalGrain { .. } => "temporal_grain",
         crate::EffectRenderOp::SpatialGrain { .. } => "spatial_grain",
         crate::EffectRenderOp::Lut3D { .. } => "lut3d",

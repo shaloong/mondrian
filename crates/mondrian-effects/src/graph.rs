@@ -1657,12 +1657,14 @@ impl CompiledEffectGraph {
                     temporal_kernel |= matches!(
                         op,
                         EffectRenderOp::TemporalFrameBlend { .. }
+                            | EffectRenderOp::TemporalFrameResample { .. }
                             | EffectRenderOp::TemporalGrain { .. }
                     );
                     closed_current &= !matches!(
                         op,
                         EffectRenderOp::Custom { .. }
                             | EffectRenderOp::TemporalFrameBlend { .. }
+                            | EffectRenderOp::TemporalFrameResample { .. }
                             | EffectRenderOp::TemporalGrain { .. }
                     ) && raw_render_op_execution_requirements(op).temporal_input
                         == EffectTemporalInputExtent::CURRENT_FRAME;
@@ -3996,6 +3998,16 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             temporal_input: grade.temporal_extent(),
             ..cpu_float
         },
+        EffectRenderOp::TemporalFrameResample { first, following, .. } => {
+            EffectImplementationRequirements {
+                execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
+                temporal_input: following.iter().fold(
+                    temporal_input_extent_for_sample_offset(*first),
+                    |extent, second| extent.merge(temporal_input_extent_for_sample_offset(*second)),
+                ),
+                ..cpu_float
+            }
+        }
         EffectRenderOp::SpatialGrain { grade } => EffectImplementationRequirements {
             execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::Expand {

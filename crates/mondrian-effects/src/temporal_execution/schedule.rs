@@ -100,11 +100,16 @@ pub(super) fn temporal_scalar_required_bytes(
                     }
                     EffectGraphNodeKind::UnaryEffect { input, op }
                     | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
-                        let input = temporal_program.address_for_input(context, *input)?;
-                        plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
+                        let resample =
+                            matches!(op, crate::EffectRenderOp::TemporalFrameResample { .. });
+                        if !resample {
+                            let input = temporal_program.address_for_input(context, *input)?;
+                            plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
+                        }
                         if matches!(
                             op,
                             crate::EffectRenderOp::TemporalFrameBlend { .. }
+                                | crate::EffectRenderOp::TemporalFrameResample { .. }
                                 | crate::EffectRenderOp::TemporalGrain { .. }
                         ) {
                             let reads = temporal_program.temporal_reads(*address).ok_or(
@@ -120,7 +125,7 @@ pub(super) fn temporal_scalar_required_bytes(
                                     &mut working,
                                 )?;
                             }
-                            for _ in reads.values() {
+                            for _ in reads.values().skip(usize::from(resample)) {
                                 working.release_frame()?;
                             }
                         } else {

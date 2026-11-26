@@ -121,14 +121,19 @@ pub enum TemporalGpuStepOperation {
         /// Bound leaf values, deduplicated by the graph slot.
         auxiliary: Arc<[(u32, TemporalGpuValue)]>,
     },
-    /// Straight-alpha cross-fade between the current instant and one sample.
+    /// Straight-alpha cross-fade between two exact values.
     TemporalBlend {
-        /// Value at the context's own instant.
+        /// Value at the first instant.
         input: TemporalGpuValue,
-        /// Value sampled at another instant.
+        /// Value at the second instant.
         sample: TemporalGpuValue,
         /// Weight of `sample`, matching `coverage::mix_straight_rgba`.
         mix: f32,
+    },
+    /// Preserve all Float32 channels of one exact stage input.
+    TemporalHold {
+        /// Value at the held instant.
+        input: TemporalGpuValue,
     },
     /// Motion-gated grain reduction using the same two samples as scalar execution.
     TemporalGrain {
@@ -562,6 +567,32 @@ impl PreparedEffectTemporalExecution {
                                 qualifier: Arc::clone(qualifier),
                             }
                         }
+                        EffectGraphNodeKind::UnaryEffect {
+                            op: crate::EffectRenderOp::TemporalFrameResample { weight, .. },
+                            ..
+                        }
+                        | EffectGraphNodeKind::DomainEffect {
+                            op: crate::EffectRenderOp::TemporalFrameResample { weight, .. },
+                            ..
+                        } => {
+                            let Some(super::program::TemporalReads::Resample { first, following }) =
+                                program.temporal_reads(*address)
+                            else {
+                                return Err(EffectTemporalGpuPlanBlocker::MissingSampleEdge {
+                                    node_id,
+                                });
+                            };
+                            let input = gpu_value(program, first)?;
+                            if let Some(following) = following {
+                                TemporalGpuStepOperation::TemporalBlend {
+                                    input,
+                                    sample: gpu_value(program, following)?,
+                                    mix: *weight,
+                                }
+                            } else {
+                                TemporalGpuStepOperation::TemporalHold { input }
+                            }
+                        }
                         EffectGraphNodeKind::UnaryEffect { input: graph_input, op }
                         | EffectGraphNodeKind::DomainEffect { input: graph_input, op, .. } => {
                             let input =
@@ -906,6 +937,7 @@ mod tests {
         match operation {
             TemporalGpuStepOperation::Point { input, .. }
             | TemporalGpuStepOperation::Spatial { input, .. }
+            | TemporalGpuStepOperation::TemporalHold { input }
             | TemporalGpuStepOperation::Qualifier { input, .. }
             | TemporalGpuStepOperation::GrainSampleBoxes { input, .. }
             | TemporalGpuStepOperation::MatteFeather { input, .. }

@@ -1044,7 +1044,9 @@ pub(crate) fn apply_render_op(
             };
             apply_crop_rgba8(working, width, bounds);
         }
-        EffectRenderOp::TemporalFrameBlend { .. } | EffectRenderOp::TemporalGrain { .. } => {
+        EffectRenderOp::TemporalFrameBlend { .. }
+        | EffectRenderOp::TemporalFrameResample { .. }
+        | EffectRenderOp::TemporalGrain { .. } => {
             return Err(EffectExecutionError::TemporalFrameProviderRequired);
         }
         EffectRenderOp::Lut3D { lut, intensity } => {
@@ -1589,6 +1591,7 @@ pub(crate) const fn render_op_f32_scratch_frame_upper_bound(op: &EffectRenderOp)
         | EffectRenderOp::Invert { .. }
         | EffectRenderOp::Crop { .. }
         | EffectRenderOp::TemporalFrameBlend { .. }
+        | EffectRenderOp::TemporalFrameResample { .. }
         | EffectRenderOp::TemporalGrain { .. }
         | EffectRenderOp::Scanlines { .. }
         | EffectRenderOp::LightLeak { .. }
@@ -3007,9 +3010,9 @@ fn apply_render_op_f32_region_impl<E>(
             apply_crop_rgba_f32_region_controlled(working, region, bounds, checkpoint)?;
             Ok(true)
         }
-        EffectRenderOp::TemporalFrameBlend { .. } | EffectRenderOp::TemporalGrain { .. } => {
-            Ok(false)
-        }
+        EffectRenderOp::TemporalFrameBlend { .. }
+        | EffectRenderOp::TemporalFrameResample { .. }
+        | EffectRenderOp::TemporalGrain { .. } => Ok(false),
         EffectRenderOp::Lut3D { lut, intensity } => {
             lut.apply_rgba_f32_in_place_controlled(working, *intensity, checkpoint)?;
             Ok(true)

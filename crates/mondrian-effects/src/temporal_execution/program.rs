@@ -31,6 +31,10 @@ pub(super) enum TemporalValueAddress {
 pub(super) enum TemporalReads {
     Blend(TemporalValueAddress),
     Neighbors([Option<TemporalValueAddress>; 2]),
+    Resample {
+        first: TemporalValueAddress,
+        following: Option<TemporalValueAddress>,
+    },
 }
 
 impl TemporalReads {
@@ -38,6 +42,7 @@ impl TemporalReads {
         match self {
             Self::Blend(sample) => [Some(sample), None],
             Self::Neighbors(neighbors) => neighbors,
+            Self::Resample { first, following } => [Some(first), following],
         }
         .into_iter()
         .flatten()
@@ -86,7 +91,7 @@ impl PreparedTemporalValueProgram {
     ) -> Option<TemporalValueAddress> {
         match self.temporal_reads(address)? {
             TemporalReads::Blend(sample) => Some(sample),
-            TemporalReads::Neighbors(_) => None,
+            TemporalReads::Neighbors(_) | TemporalReads::Resample { .. } => None,
         }
     }
 
@@ -307,8 +312,10 @@ impl TemporalProgramBuilder<'_> {
             }
             EffectGraphNodeKind::UnaryEffect { input, op }
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
-                let input_address = self.visit_graph_value(context, input)?;
-                self.add_use(input_address)?;
+                if !matches!(op, crate::EffectRenderOp::TemporalFrameResample { .. }) {
+                    let input_address = self.visit_graph_value(context, input)?;
+                    self.add_use(input_address)?;
+                }
                 let reads = match op {
                     crate::EffectRenderOp::SpatialGrain { grade }
                         if grade.calibration().is_some() =>
@@ -323,9 +330,18 @@ impl TemporalProgramBuilder<'_> {
                         Some(TemporalReads::Blend(self.visit_sample(
                             context,
                             stage,
-                            input_address,
+                            input,
                             sample_offset,
                         )?))
+                    }
+                    crate::EffectRenderOp::TemporalFrameResample { first, following, weight } => {
+                        validate_temporal_blend(first, weight)?;
+                        let stage = self.temporal_owner_stage(context, node_id, input)?;
+                        let first = self.visit_sample(context, stage, input, first)?;
+                        let following = following
+                            .map(|offset| self.visit_sample(context, stage, input, offset))
+                            .transpose()?;
+                        Some(TemporalReads::Resample { first, following })
                     }
                     crate::EffectRenderOp::TemporalGrain { grade } => {
                         if grade.calibration().is_some() {
@@ -337,12 +353,7 @@ impl TemporalProgramBuilder<'_> {
                         let mut neighbors = [None; 2];
                         for (sample, offset) in neighbors.iter_mut().zip(grade.offsets()) {
                             if let Some(offset) = offset {
-                                *sample = Some(self.visit_sample(
-                                    context,
-                                    stage,
-                                    input_address,
-                                    offset,
-                                )?);
+                                *sample = Some(self.visit_sample(context, stage, input, offset)?);
                             }
                         }
                         Some(TemporalReads::Neighbors(neighbors))
@@ -513,13 +524,13 @@ impl TemporalProgramBuilder<'_> {
         &mut self,
         context: usize,
         stage_index: usize,
-        input: TemporalValueAddress,
+        input: EffectGraphNodeId,
         offset: TimelineTime,
     ) -> Result<TemporalValueAddress, EffectTemporalExecutionError> {
         let time = self.contexts[context].time;
         let sample_time = temporal_sample_time(time, offset)?;
         if sample_time == time {
-            return Ok(input);
+            return self.visit_graph_value(context, input);
         }
         if stage_index == 0 {
             return self.visit_source(sample_time);
@@ -617,6 +628,13 @@ fn fingerprint_program(
                     if let Some(sample) = sample {
                         hash_address(&mut hasher, *sample);
                     }
+                }
+            }
+            Some(TemporalReads::Resample { first, following }) => {
+                hasher.update([3, u8::from(following.is_some())]);
+                hash_address(&mut hasher, *first);
+                if let Some(following) = following {
+                    hash_address(&mut hasher, *following);
                 }
             }
         }
