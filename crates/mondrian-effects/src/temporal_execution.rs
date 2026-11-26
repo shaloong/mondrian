@@ -804,7 +804,7 @@ pub trait EffectTemporalAuxiliaryProvider {
 pub struct PreparedTemporalAuxiliarySet {
     source_identity: EffectTemporalSourceIdentity,
     generation: u64,
-    rasters: HashMap<(TimelineTime, u32), crate::EffectFloatFrame>,
+    rasters: Arc<HashMap<(TimelineTime, u32), crate::EffectFloatFrame>>,
     retained_coverage_bytes: usize,
 }
 
@@ -873,7 +873,7 @@ impl PreparedTemporalAuxiliarySet {
                 digest.finalize().into(),
             ),
             generation,
-            rasters,
+            rasters: Arc::new(rasters),
             retained_coverage_bytes: retained,
         })
     }
@@ -1182,6 +1182,9 @@ pub enum EffectTemporalExecutionError {
     /// Mask Path Stroke layout preparation or application failed.
     #[error(transparent)]
     MaskPathStroke(crate::mask_path_stroke::MaskPathStrokeError),
+    /// Video Collage needs the complete source grid and one address per cell.
+    #[error(transparent)]
+    VideoCollage(#[from] crate::VideoCollageError),
     /// One definition stage does not admit CPU Float32.
     #[error("effect stage {stage_index} does not admit CPU Float32 temporal execution")]
     ExecutionModeNotAdmitted {
@@ -1419,11 +1422,31 @@ impl PreparedEffectInput {
     pub fn prepare_execution(
         &self,
         request: &EffectTemporalExecutionRequest,
-        mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+        sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
     ) -> Result<PreparedEffectTemporalExecution, EffectTemporalExecutionError> {
-        prepare_exact_frame_execution_with_evaluator(
+        self.prepare_frame_program_with_binding(request, sample_frame_seed, |_, graph| Ok(graph))?
+            .bind_image_domain(request)
+    }
+
+    /// Bind host-owned values on the same entering graph at every sampled time,
+    /// before the producer selects the input image domain.
+    pub fn prepare_frame_program_with_binding(
+        &self,
+        request: &EffectTemporalExecutionRequest,
+        mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+        mut bind: impl FnMut(
+            TimelineTime,
+            Arc<CompiledEffectGraph>,
+        ) -> Result<Arc<CompiledEffectGraph>, String>,
+    ) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
+        prepare_exact_frame_program_with_evaluator(
             request,
-            |time| self.evaluate(time).map_err(|error| error.to_string()),
+            |time| {
+                bind(
+                    time,
+                    self.evaluate(time).map_err(|error| error.to_string())?,
+                )
+            },
             &mut sample_frame_seed,
         )
     }
@@ -1766,6 +1789,27 @@ impl EffectExecutionSession {
         &mut self,
         program: &PreparedEffectProgram,
         request: &EffectTemporalExecutionRequest,
+        sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
+        bind_graph: impl FnMut(
+            TimelineTime,
+            Arc<CompiledEffectGraph>,
+        ) -> Result<Arc<CompiledEffectGraph>, String>,
+    ) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
+        let prepared = self.prepare_source_frame_program_with_binding(
+            program,
+            request,
+            sample_frame_seed,
+            bind_graph,
+        )?;
+        ensure_temporal_program(&prepared.program)?;
+        Ok(prepared)
+    }
+
+    /// Freeze one source picture graph, including any time edges, before pixel-domain admission.
+    pub fn prepare_source_frame_program_with_binding(
+        &mut self,
+        program: &PreparedEffectProgram,
+        request: &EffectTemporalExecutionRequest,
         mut sample_frame_seed: impl FnMut(TimelineTime) -> Result<i64, String>,
         mut bind_graph: impl FnMut(
             TimelineTime,
@@ -1773,7 +1817,7 @@ impl EffectExecutionSession {
         ) -> Result<Arc<CompiledEffectGraph>, String>,
     ) -> Result<PreparedEffectTemporalProgram, EffectTemporalExecutionError> {
         self.bind_generation(request.generation());
-        let prepared = prepare_exact_frame_program_with_evaluator(
+        prepare_exact_frame_program_with_evaluator(
             request,
             |time| {
                 let graph =
@@ -1781,9 +1825,7 @@ impl EffectExecutionSession {
                 bind_graph(time, graph)
             },
             &mut sample_frame_seed,
-        )?;
-        ensure_temporal_program(&prepared.program)?;
-        Ok(prepared)
+        )
     }
 
     /// Prepare one exact finite temporal execution while retaining every
@@ -2745,11 +2787,8 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                             self.working.release_bytes(self.auxiliary_bytes[&auxiliary])?;
                             output
                         }
-                        EffectGraphNodeKind::VideoCollage { .. } => {
-                            return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                                node_id,
-                                kind: crate::gpu_plan::node_kind_name(&node.kind),
-                            })
+                        EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
+                            self.video_collage(context, input, &sources, grade, control)?
                         }
                         EffectGraphNodeKind::Source => {
                             return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
@@ -3027,6 +3066,70 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                             self.working.release_frame()?;
                             output
                         }
+                        EffectGraphNodeKind::PreviewWindow { original, processed, window } => {
+                            let original =
+                                self.temporal_program.address_for_input(context, original)?;
+                            let processed =
+                                self.temporal_program.address_for_input(context, processed)?;
+                            let mut output = self.take_value(original)?;
+                            let processed = self.take_value(processed)?;
+                            if output.len() != processed.len() {
+                                return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+                                    reason: "Preview window values do not cover the same region",
+                                });
+                            }
+                            let region = self.raster_region;
+                            let roi = EffectPixelRoi::new(
+                                region.x(),
+                                region.y(),
+                                region.width(),
+                                region.height(),
+                            );
+                            window.apply(
+                                &mut output,
+                                &processed,
+                                roi,
+                                self.request.sampling(),
+                                &mut || processor_input_checkpoint(self.request, control),
+                            )?;
+                            self.working.release_frame()?;
+                            output
+                        }
+                        EffectGraphNodeKind::GrainSampleBoxes { input, placement } => {
+                            let boxes = placement.boxes().ok_or(
+                                EffectTemporalExecutionError::InvalidRoiProjection {
+                                    reason: "grain sample display was not bound",
+                                },
+                            )?;
+                            if boxes.extent() != self.request.frame_extent() {
+                                return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+                                    reason:
+                                        "grain sample boxes require their original decoded grid",
+                                });
+                            }
+                            let input = self.temporal_program.address_for_input(context, input)?;
+                            if let TemporalValueAddress::Auxiliary { .. } = input {
+                                let (extent, sampling, _) = self.auxiliary_image(input)?;
+                                if extent != boxes.extent()
+                                    || sampling != self.request.sampling()
+                                    || !self.raster_region.is_full_frame()
+                                {
+                                    return Err(EffectTemporalExecutionError::InvalidRoiProjection { reason: "sample picture does not match the frozen calibration grid" });
+                                }
+                            }
+                            let mut output = self.take_value(input)?;
+                            let region = self.raster_region;
+                            let roi = EffectPixelRoi::new(
+                                region.x(),
+                                region.y(),
+                                region.width(),
+                                region.height(),
+                            );
+                            boxes.apply(&mut output, roi, &mut || {
+                                processor_input_checkpoint(self.request, control)
+                            })?;
+                            output
+                        }
                         EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                             let Some(first) = inputs.first().copied() else {
                                 return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
@@ -3247,6 +3350,73 @@ impl<'a> ScalarTemporalEvaluator<'a> {
         })?;
         self.working.release_frame()?;
         Ok(current)
+    }
+
+    fn video_collage(
+        &mut self,
+        context: usize,
+        input: EffectGraphNodeId,
+        sources: &[Option<EffectGraphNodeId>],
+        grade: crate::VideoCollageGrade,
+        control: &mut crate::EffectProcessorControl<'_>,
+    ) -> Result<Vec<[f32; 4]>, EffectTemporalExecutionError> {
+        if !self.raster_region.is_full_frame() {
+            return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+                reason: "video collage requires the full input grid",
+            });
+        }
+        let primary = self.take_value(self.temporal_program.address_for_input(context, input)?)?;
+        let mut images = HashMap::new();
+        let mut tiles = Vec::with_capacity(sources.len());
+        for source in sources {
+            let address = source
+                .map(|id| self.temporal_program.address_for_input(context, id))
+                .transpose()?;
+            if let Some(address) = address
+                && let std::collections::hash_map::Entry::Vacant(entry) = images.entry(address)
+            {
+                let (extent, sampling, format) = self.auxiliary_image(address)?;
+                entry.insert((extent, sampling, format, self.take_value(address)?));
+            }
+            tiles.push(address);
+        }
+        let rasters = tiles
+            .iter()
+            .map(|address| {
+                address.map(|address| {
+                    let (extent, sampling, format, pixels) = &images[&address];
+                    crate::AuxiliaryFloatFrame::new(
+                        crate::EffectFloatFrameView::new(*extent, *format, *sampling, pixels),
+                        crate::AuxiliaryPolicy::new(crate::AuxiliaryResolution::Authored),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let frame = crate::EffectFloatFrameView::new(
+            self.request.frame_extent(),
+            crate::EffectValueFormat::new(
+                EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            self.request.sampling(),
+            &primary,
+        );
+        self.working.reserve_frame()?;
+        let output = crate::video_collage::apply_video_collage_controlled(
+            frame,
+            &rasters,
+            grade,
+            &mut || processor_input_checkpoint(self.request, control),
+        )?;
+        drop(rasters);
+        for (address, image) in images {
+            drop(image);
+            self.working.release_bytes(self.auxiliary_bytes[&address])?;
+        }
+        drop(primary);
+        self.working.release_frame()?;
+        Ok(output)
     }
 
     fn temporal_grain(

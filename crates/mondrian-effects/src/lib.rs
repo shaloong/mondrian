@@ -25,6 +25,8 @@ pub mod glass;
 pub mod grain_calibration;
 pub mod grain_spatial;
 pub mod grain_temporal;
+mod preview_window;
+pub use preview_window::EffectPreviewWindow;
 pub mod grow_bounds;
 pub mod video_collage;
 pub use glass::{

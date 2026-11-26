@@ -71,11 +71,27 @@ pub(super) fn temporal_scalar_required_bytes(
                         )?;
                         working.release_bytes(bytes)?;
                     }
-                    EffectGraphNodeKind::VideoCollage { .. } => {
-                        return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                            node_id,
-                            kind: crate::gpu_plan::node_kind_name(&node.kind),
-                        })
+                    EffectGraphNodeKind::VideoCollage { input, sources, .. } => {
+                        let input = temporal_program.address_for_input(context, *input)?;
+                        plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
+                        let mut auxiliary_inputs = HashSet::new();
+                        for &source in sources.iter().flatten() {
+                            let source = temporal_program.address_for_input(context, source)?;
+                            if auxiliary_inputs.insert(source) {
+                                plan_take_sized_value(
+                                    source,
+                                    &mut live,
+                                    &mut remaining_uses,
+                                    &mut working,
+                                    auxiliary_bytes[&source],
+                                )?;
+                            }
+                        }
+                        working.reserve_frame()?;
+                        for source in auxiliary_inputs {
+                            working.release_bytes(auxiliary_bytes[&source])?;
+                        }
+                        working.release_frame()?;
                     }
                     EffectGraphNodeKind::Source => {
                         return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
@@ -172,6 +188,24 @@ pub(super) fn temporal_scalar_required_bytes(
                         }
                         working.release_frame()?;
                         working.release_frame()?;
+                    }
+                    EffectGraphNodeKind::PreviewWindow { original, processed, .. } => {
+                        for input in [*original, *processed] {
+                            let input = temporal_program.address_for_input(context, input)?;
+                            plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
+                        }
+                        working.release_frame()?;
+                    }
+                    EffectGraphNodeKind::GrainSampleBoxes { input, .. } => {
+                        let input = temporal_program.address_for_input(context, *input)?;
+                        if let Some(bytes) = auxiliary_bytes.get(&input)
+                            && *bytes != frame_bytes
+                        {
+                            return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+                                reason: "sample boxes require a complete native-grid input",
+                            });
+                        }
+                        plan_take_value(input, &mut live, &mut remaining_uses, &mut working)?;
                     }
                     EffectGraphNodeKind::MaskSource { .. } => {
                         working.reserve_frame()?;

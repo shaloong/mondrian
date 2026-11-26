@@ -112,6 +112,15 @@ pub enum TemporalGpuStepOperation {
         /// Admitted single-stage pipeline in the schedule's working space.
         plan: Arc<CompiledEffectGpuPipeline>,
     },
+    /// Compose the current temporal value with the exact auxiliary cells.
+    VideoCollage {
+        /// Current value and the destination grid.
+        input: TemporalGpuValue,
+        /// The spatial Collage pass, including the authored slot of each tile.
+        pass: crate::EffectGpuSpatialPass,
+        /// Bound leaf values, deduplicated by the graph slot.
+        auxiliary: Arc<[(u32, TemporalGpuValue)]>,
+    },
     /// Straight-alpha cross-fade between the current instant and one sample.
     TemporalBlend {
         /// Value at the context's own instant.
@@ -170,6 +179,17 @@ pub enum TemporalGpuStepOperation {
         matte: TemporalGpuValue,
         /// Scale applied to the matte.
         amount: f32,
+    },
+    /// Compare processed and entering working RGB without changing coverage.
+    PreviewWindow {
+        original: TemporalGpuValue,
+        processed: TemporalGpuValue,
+        window: crate::EffectPreviewWindow,
+    },
+    /// Annotate the native decoded raster selected for grain measurement.
+    GrainSampleBoxes {
+        input: TemporalGpuValue,
+        boxes: Arc<crate::grain_calibration::GrainSampleBoxes>,
     },
     /// Composite one value over another with the graph's own blend policy.
     Blend {
@@ -663,6 +683,37 @@ impl PreparedEffectTemporalExecution {
                                 amount: *amount,
                             }
                         }
+                        EffectGraphNodeKind::PreviewWindow { original, processed, window } => {
+                            TemporalGpuStepOperation::PreviewWindow {
+                                original: gpu_value(
+                                    program,
+                                    node_input(program, context, *original)?,
+                                )?,
+                                processed: gpu_value(
+                                    program,
+                                    node_input(program, context, *processed)?,
+                                )?,
+                                window: *window,
+                            }
+                        }
+                        EffectGraphNodeKind::GrainSampleBoxes { input, placement } => {
+                            let boxes = placement.boxes().ok_or(
+                                EffectTemporalGpuPlanBlocker::UnsupportedNode {
+                                    node_id: node.id,
+                                    kind: "unbound grain sample display",
+                                },
+                            )?;
+                            let input = gpu_value(program, node_input(program, context, *input)?)?;
+                            if boxes.extent() != self.request.frame_extent() {
+                                return Err(EffectTemporalGpuPlanBlocker::ExtentMismatch {
+                                    value: input,
+                                });
+                            }
+                            TemporalGpuStepOperation::GrainSampleBoxes {
+                                input,
+                                boxes: Arc::clone(boxes),
+                            }
+                        }
                         EffectGraphNodeKind::AuxiliaryEffect {
                             input,
                             auxiliary,
@@ -691,6 +742,30 @@ impl PreparedEffectTemporalExecution {
                                     node_input(program, context, *auxiliary)?,
                                 )?,
                                 pass,
+                            }
+                        }
+                        EffectGraphNodeKind::VideoCollage { input, sources, grade } => {
+                            let mut bindings = Vec::new();
+                            let slots = sources.iter().map(|source| source.map(|source| {
+                                let leaf = gpu_value(program, node_input(program, context, source)?)?;
+                                let TemporalGpuValue::Auxiliary { slot, .. } = leaf else {
+                                    return Err(EffectTemporalGpuPlanBlocker::UnsupportedNode {
+                                        node_id, kind: "video collage source is not an auxiliary leaf",
+                                    });
+                                };
+                                if !bindings.iter().any(|(bound_slot, _)| *bound_slot == slot) {
+                                    bindings.push((slot, leaf));
+                                }
+                                Ok(slot)
+                            }).transpose()).collect::<Result<Arc<[_]>, _>>()?;
+                            TemporalGpuStepOperation::VideoCollage {
+                                input: gpu_value(program, node_input(program, context, *input)?)?,
+                                pass: crate::EffectGpuSpatialPass::VideoCollage {
+                                    grade: *grade,
+                                    slots,
+                                    sampling: Some(request.sampling()),
+                                },
+                                auxiliary: bindings.into(),
                             }
                         }
                         kind => {
@@ -832,10 +907,16 @@ mod tests {
             TemporalGpuStepOperation::Point { input, .. }
             | TemporalGpuStepOperation::Spatial { input, .. }
             | TemporalGpuStepOperation::Qualifier { input, .. }
+            | TemporalGpuStepOperation::GrainSampleBoxes { input, .. }
             | TemporalGpuStepOperation::MatteFeather { input, .. }
             | TemporalGpuStepOperation::MattePreview { input, .. } => vec![*input],
             TemporalGpuStepOperation::TemporalBlend { input, sample, .. } => {
                 vec![*input, *sample]
+            }
+            TemporalGpuStepOperation::VideoCollage { input, auxiliary, .. } => {
+                std::iter::once(*input)
+                    .chain(auxiliary.iter().map(|(_, value)| *value))
+                    .collect()
             }
             TemporalGpuStepOperation::TemporalGrain { input, neighbors, .. } => {
                 std::iter::once(*input).chain(neighbors.iter().flatten().copied()).collect()
@@ -844,6 +925,9 @@ mod tests {
             TemporalGpuStepOperation::MaskCombine { left, right, .. } => vec![*left, *right],
             TemporalGpuStepOperation::MatteMix { base, graded, matte, .. } => {
                 vec![*base, *graded, *matte]
+            }
+            TemporalGpuStepOperation::PreviewWindow { original, processed, .. } => {
+                vec![*original, *processed]
             }
             TemporalGpuStepOperation::Auxiliary { input, auxiliary, .. } => {
                 vec![*input, *auxiliary]

@@ -287,11 +287,23 @@ impl TemporalProgramBuilder<'_> {
                 self.add_use(input_address)?;
                 self.add_use(auxiliary_address)?;
             }
-            EffectGraphNodeKind::VideoCollage { .. } => {
-                return Err(EffectTemporalExecutionError::UnsupportedGraphNode {
-                    node_id,
-                    kind: crate::gpu_plan::node_kind_name(&node.kind),
-                })
+            EffectGraphNodeKind::VideoCollage { input, sources, .. } => {
+                let input = self.visit_graph_value(context, input)?;
+                self.add_use(input)?;
+                let mut slots = HashSet::new();
+                for &source in sources.iter().flatten() {
+                    let Some(EffectGraphNodeKind::ExternalInput { slot, .. }) =
+                        self.contexts[context].graph.graph().node(source).map(|node| &node.kind)
+                    else {
+                        return Err(EffectTemporalExecutionError::InvalidGraphLiveness {
+                            reason: "video collage tile lacks a host source binding",
+                        });
+                    };
+                    if slots.insert(*slot) {
+                        let source = self.visit_auxiliary(context, *slot)?;
+                        self.add_use(source)?;
+                    }
+                }
             }
             EffectGraphNodeKind::UnaryEffect { input, op }
             | EffectGraphNodeKind::DomainEffect { input, op, .. } => {
@@ -377,6 +389,22 @@ impl TemporalProgramBuilder<'_> {
                     let input = self.visit_graph_value(context, input)?;
                     self.add_use(input)?;
                 }
+            }
+            EffectGraphNodeKind::PreviewWindow { original, processed, .. } => {
+                for input in [original, processed] {
+                    let input = self.visit_graph_value(context, input)?;
+                    self.add_use(input)?;
+                }
+            }
+            EffectGraphNodeKind::GrainSampleBoxes { input, .. } => {
+                let input =
+                    match self.contexts[context].graph.graph().node(input).map(|node| &node.kind) {
+                        Some(EffectGraphNodeKind::ExternalInput { slot, .. }) => {
+                            self.visit_auxiliary(context, *slot)?
+                        }
+                        _ => self.visit_graph_value(context, input)?,
+                    };
+                self.add_use(input)?;
             }
             EffectGraphNodeKind::MultiInput { inputs, .. } => {
                 if inputs.is_empty() {

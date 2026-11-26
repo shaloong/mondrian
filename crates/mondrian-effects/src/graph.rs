@@ -408,6 +408,17 @@ pub enum EffectGraphNodeKind {
         /// Scale applied to the matte coverage when mixing picture RGB.
         amount: f32,
     },
+    /// Observe the processed RGB inside a source-pixel window, preserving original alpha.
+    PreviewWindow {
+        original: EffectGraphNodeId,
+        processed: EffectGraphNodeId,
+        window: crate::EffectPreviewWindow,
+    },
+    /// Outline measured windows on the exact picture used for grain calibration.
+    GrainSampleBoxes {
+        input: EffectGraphNodeId,
+        placement: crate::grain_calibration::GrainSampleBoxPlacement,
+    },
     /// Ordered N-input visual compositing node.
     ///
     /// Inputs are evaluated in stored order through the shared compiled graph
@@ -506,6 +517,10 @@ impl EffectGraphNode {
             EffectGraphNodeKind::MaskSource { .. } => Vec::new(),
             EffectGraphNodeKind::MaskCombine { left, right, .. } => vec![left, right],
             EffectGraphNodeKind::MatteMix { base, graded, matte, .. } => vec![base, graded, matte],
+            EffectGraphNodeKind::PreviewWindow { original, processed, .. } => {
+                vec![original, processed]
+            }
+            EffectGraphNodeKind::GrainSampleBoxes { input, .. } => vec![input],
             EffectGraphNodeKind::MultiInput { ref inputs, .. } => inputs.clone(),
             EffectGraphNodeKind::ExternalInput { .. } => Vec::new(),
             EffectGraphNodeKind::AuxiliaryEffect { input, auxiliary, .. } => {
@@ -601,6 +616,17 @@ impl EffectGraphIdentity {
                     graded.hash(&mut writer);
                     matte.hash(&mut writer);
                     amount.to_bits().hash(&mut writer);
+                }
+                EffectGraphNodeKind::PreviewWindow { original, processed, window } => {
+                    17u8.hash(&mut writer);
+                    original.hash(&mut writer);
+                    processed.hash(&mut writer);
+                    window.hash_controls(&mut writer);
+                }
+                EffectGraphNodeKind::GrainSampleBoxes { input, placement } => {
+                    18u8.hash(&mut writer);
+                    input.hash(&mut writer);
+                    placement.hash_controls(&mut writer);
                 }
                 EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                     7u8.hash(&mut writer);
@@ -767,12 +793,16 @@ impl EffectRenderGraph {
                 EffectGraphNodeKind::VideoCollage { sources, .. } => {
                     std::mem::size_of_val(sources.as_ref())
                 }
+                EffectGraphNodeKind::GrainSampleBoxes { placement, .. } => {
+                    placement.boxes().map_or(0, |boxes| boxes.retained_bytes())
+                }
                 EffectGraphNodeKind::ExternalInput { .. }
                 | EffectGraphNodeKind::Source
                 | EffectGraphNodeKind::Blend { .. }
                 | EffectGraphNodeKind::Mask { .. }
                 | EffectGraphNodeKind::MaskCombine { .. }
                 | EffectGraphNodeKind::MatteMix { .. }
+                | EffectGraphNodeKind::PreviewWindow { .. }
                 | EffectGraphNodeKind::MaskSource { .. } => 0,
             })
             .fold(0_usize, usize::saturating_add);
@@ -903,6 +933,7 @@ pub struct CompiledEffectStageBinding {
     input_history: Arc<[EffectInputHistoryBinding]>,
     auxiliary_preview_fallback: Option<crate::AuxiliaryPreviewFallback>,
     native_fill_matte: bool,
+    primary_history_is_explicit: bool,
 }
 
 /// Authored position of a stage in the program that compiled it. A shared grade
@@ -955,6 +986,7 @@ impl CompiledEffectStageBinding {
             input_history: Arc::from([]),
             auxiliary_preview_fallback: None,
             native_fill_matte: false,
+            primary_history_is_explicit: false,
         }
     }
 
@@ -981,6 +1013,15 @@ impl CompiledEffectStageBinding {
 
     pub(crate) fn native_fill_matte(&self) -> bool {
         self.native_fill_matte
+    }
+
+    pub(crate) fn with_explicit_primary_history(mut self, explicit: bool) -> Self {
+        self.primary_history_is_explicit = explicit;
+        self
+    }
+
+    pub(crate) fn primary_history_is_explicit(&self) -> bool {
+        self.primary_history_is_explicit
     }
 
     /// Explicit host addresses attached to ExternalInput values emitted by this stage.
@@ -1184,6 +1225,7 @@ impl CompiledEffectGraph {
                     EffectRenderOp::SpatialGrain { grade } => grade.calibration(),
                     _ => None,
                 },
+                EffectGraphNodeKind::GrainSampleBoxes { placement, .. } => placement.request(),
                 _ => None,
             })
     }
@@ -1198,8 +1240,49 @@ impl CompiledEffectGraph {
         mut resolve: impl FnMut(
             crate::grain_calibration::GrainCalibrationRequest,
         ) -> Result<Option<[f32; 3]>, String>,
+        admit_offset: impl FnMut(mondrian_core::TimelineTime) -> Result<bool, String>,
+    ) -> Result<Arc<Self>, String> {
+        self.bind_grain_calibration_inner(|request| Ok((resolve(request)?, None)), admit_offset)
+    }
+
+    /// Bind filters and source observations from the same admitted media sample.
+    pub fn bind_grain_calibration_from_media(
+        self: &Arc<Self>,
+        mut resolve: impl FnMut(
+            crate::grain_calibration::GrainCalibrationRequest,
+        ) -> Result<
+            Option<crate::grain_calibration::GrainCalibrationObservation>,
+            String,
+        >,
+        admit_offset: impl FnMut(mondrian_core::TimelineTime) -> Result<bool, String>,
+    ) -> Result<Arc<Self>, String> {
+        self.bind_grain_calibration_inner(
+            |request| {
+                let observation = resolve(request)?;
+                let sigma = observation
+                    .as_ref()
+                    .and_then(|value| value.profile.as_ref())
+                    .map(|profile| profile.sigma);
+                Ok((sigma, observation))
+            },
+            admit_offset,
+        )
+    }
+
+    fn bind_grain_calibration_inner(
+        self: &Arc<Self>,
+        mut resolve: impl FnMut(
+            crate::grain_calibration::GrainCalibrationRequest,
+        ) -> Result<
+            (
+                Option<[f32; 3]>,
+                Option<crate::grain_calibration::GrainCalibrationObservation>,
+            ),
+            String,
+        >,
         mut admit_offset: impl FnMut(mondrian_core::TimelineTime) -> Result<bool, String>,
     ) -> Result<Arc<Self>, String> {
+        use crate::grain_calibration::{GrainSampleBoxPlacement, GrainSampleBoxes};
         if self.grain_calibration_requests().next().is_none() {
             return Ok(Arc::clone(self));
         }
@@ -1211,6 +1294,28 @@ impl CompiledEffectGraph {
         }
         let mut graph = self.graph.clone();
         for node in &mut graph.nodes {
+            if let EffectGraphNodeKind::GrainSampleBoxes { placement, .. } = &mut node.kind
+                && let GrainSampleBoxPlacement::Pending { request, color } = placement
+                && let Some((_, observation)) = profiles.get(request)
+            {
+                let observation = observation.as_ref().ok_or_else(|| {
+                    format!(
+                        "grain sample display requires admitted source frame {}",
+                        request.frame_index()
+                    )
+                })?;
+                let windows =
+                    observation.profile.as_ref().map_or(&[][..], |profile| &profile.windows);
+                let boxes = GrainSampleBoxes::new(observation.picture.extent, windows, *color)
+                    .ok_or_else(|| {
+                        "grain sample windows do not match the admitted picture".to_owned()
+                    })?;
+                *placement = GrainSampleBoxPlacement::Bound {
+                    boxes: Arc::new(boxes),
+                    picture: observation.picture,
+                };
+                continue;
+            }
             let (EffectGraphNodeKind::UnaryEffect { op, .. }
             | EffectGraphNodeKind::DomainEffect { op, .. }) = &mut node.kind
             else {
@@ -1218,12 +1323,14 @@ impl CompiledEffectGraph {
             };
             match op {
                 EffectRenderOp::TemporalGrain { grade } => {
-                    if let Some(sigma) = grade.calibration().and_then(|key| profiles.get(&key)) {
+                    if let Some((sigma, _)) = grade.calibration().and_then(|key| profiles.get(&key))
+                    {
                         *grade = grade.bind_calibration(*sigma, &mut admit_offset)?;
                     }
                 }
                 EffectRenderOp::SpatialGrain { grade } => {
-                    if let Some(sigma) = grade.calibration().and_then(|key| profiles.get(&key)) {
+                    if let Some((sigma, _)) = grade.calibration().and_then(|key| profiles.get(&key))
+                    {
                         *grade = grade
                             .bind_calibration(sigma.unwrap_or([0.0; 3]))
                             .map_err(|error| error.to_string())?;
@@ -1233,6 +1340,25 @@ impl CompiledEffectGraph {
             }
         }
         Ok(self.with_bound_graph(graph))
+    }
+
+    /// Return the admitted fixed picture and its Definition stage for one slot.
+    pub fn grain_sample_picture(
+        &self,
+        slot: u32,
+    ) -> Option<(usize, crate::grain_calibration::GrainSamplePicture)> {
+        use crate::grain_calibration::GrainSampleBoxPlacement;
+        self.schedule.ordered_nodes.iter().find_map(|id| {
+            let EffectGraphNodeKind::GrainSampleBoxes {
+                input,
+                placement: GrainSampleBoxPlacement::Bound { picture, .. },
+            } = &self.graph.node(*id)?.kind else { return None };
+            if !matches!(&self.graph.node(*input)?.kind, EffectGraphNodeKind::ExternalInput { slot: candidate, .. } if *candidate == slot) {
+                return None;
+            }
+            self.stage_bindings.iter().find(|stage| stage.emitted_nodes().contains(id))
+                .map(|stage| (stage.stage_index(), *picture))
+        })
     }
 
     fn with_bound_graph(&self, graph: EffectRenderGraph) -> Arc<Self> {
@@ -1489,6 +1615,19 @@ impl CompiledEffectGraph {
             .any(|stage| self.stage_requires_primary_history(stage))
     }
 
+    /// Whether a reachable observation must run on the original media grid.
+    pub fn uses_source_grid_observation(&self) -> bool {
+        self.schedule.ordered_nodes.iter().any(|id| {
+            self.graph.node(*id).is_some_and(|node| {
+                matches!(
+                    node.kind,
+                    EffectGraphNodeKind::PreviewWindow { .. }
+                        | EffectGraphNodeKind::GrainSampleBoxes { .. }
+                )
+            })
+        })
+    }
+
     /// Bound the primary pictures required independently of authored auxiliary retimes.
     pub fn primary_temporal_input_extent(
         &self,
@@ -1534,13 +1673,15 @@ impl CompiledEffectGraph {
                 | EffectGraphNodeKind::MaskSource { .. }
                 | EffectGraphNodeKind::MaskCombine { .. }
                 | EffectGraphNodeKind::MatteMix { .. }
+                | EffectGraphNodeKind::PreviewWindow { .. }
+                | EffectGraphNodeKind::GrainSampleBoxes { .. }
                 | EffectGraphNodeKind::VideoCollage { .. }
                 | EffectGraphNodeKind::MultiInput { .. } => {}
             }
         }
         temporal_kernel
             || (stage.contract.temporal_input != EffectTemporalInputExtent::CURRENT_FRAME
-                && !(external && closed_current))
+                && !((external || stage.primary_history_is_explicit) && closed_current))
     }
 
     /// Admit the backend after external source time has been resolved by the
@@ -1748,6 +1889,15 @@ enum EffectGraphNodeShape {
         base: EffectGraphNodeId,
         graded: EffectGraphNodeId,
         matte: EffectGraphNodeId,
+    },
+    PreviewWindow {
+        id: EffectGraphNodeId,
+        original: EffectGraphNodeId,
+        processed: EffectGraphNodeId,
+    },
+    GrainSampleBoxes {
+        id: EffectGraphNodeId,
+        input: EffectGraphNodeId,
     },
     MultiInput {
         id: EffectGraphNodeId,
@@ -2111,6 +2261,14 @@ fn derive_implementation_requirements<'a>(
                     .merge_branches(requirement_for(*matte, &requirements))
                     .compose_node(gpu_blend_node_requirements())
             }
+            EffectGraphNodeKind::PreviewWindow { original, processed, .. } => {
+                requirement_for(*original, &requirements)
+                    .merge_branches(requirement_for(*processed, &requirements))
+                    .compose_node(preview_window_requirements())
+            }
+            EffectGraphNodeKind::GrainSampleBoxes { input, .. } => {
+                requirement_for(*input, &requirements).compose_node(grain_sample_box_requirements())
+            }
             EffectGraphNodeKind::MultiInput { inputs, .. } => inputs
                 .iter()
                 .map(|input| requirement_for(*input, &requirements))
@@ -2211,6 +2369,8 @@ fn raw_node_implementation_requirements(
         EffectGraphNodeKind::Mask { .. } => Some(gpu_mask_node_requirements()),
         EffectGraphNodeKind::MaskCombine { .. } => Some(gpu_mask_node_requirements()),
         EffectGraphNodeKind::MatteMix { .. } => Some(gpu_blend_node_requirements()),
+        EffectGraphNodeKind::PreviewWindow { .. } => Some(preview_window_requirements()),
+        EffectGraphNodeKind::GrainSampleBoxes { .. } => Some(grain_sample_box_requirements()),
         EffectGraphNodeKind::MaskSource { .. } | EffectGraphNodeKind::MultiInput { .. } => {
             Some(compositing_node_requirements())
         }
@@ -2814,6 +2974,51 @@ impl EffectGraphBuilderState {
             kind: EffectGraphNodeKind::MatteMix { base, graded, matte, amount },
         });
         id
+    }
+
+    /// Compare two working pictures inside an authored source-pixel rectangle.
+    pub fn add_preview_window(
+        &mut self,
+        original: EffectGraphNodeId,
+        processed: EffectGraphNodeId,
+        window: crate::EffectPreviewWindow,
+    ) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::PreviewWindow { original, processed, window },
+        });
+        id
+    }
+
+    /// Observe an absolute media sample instead of the Definition's entering value.
+    pub fn add_fixed_grain_sample_display(
+        &mut self,
+        request: crate::grain_calibration::GrainCalibrationRequest,
+        color: [f32; 4],
+    ) -> Result<EffectGraphNodeId, crate::EffectGraphBuildError> {
+        let slot = self.next_auxiliary_slot()?;
+        let input = self.append_external_input(
+            slot,
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            EffectColorDomainContract::SCENE_LINEAR,
+        );
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::GrainSampleBoxes {
+                input,
+                placement: crate::grain_calibration::GrainSampleBoxPlacement::Pending {
+                    request,
+                    color,
+                },
+            },
+        });
+        Ok(id)
     }
 
     /// Declare a host auxiliary raster for this layer.
@@ -3937,6 +4142,20 @@ fn gpu_blend_node_requirements() -> EffectImplementationRequirements {
     }
 }
 
+fn preview_window_requirements() -> EffectImplementationRequirements {
+    EffectImplementationRequirements {
+        execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+        ..gpu_blend_node_requirements()
+    }
+}
+
+fn grain_sample_box_requirements() -> EffectImplementationRequirements {
+    EffectImplementationRequirements {
+        roi_from_effect_input: EffectRoiPropagation::FullFrame,
+        ..preview_window_requirements()
+    }
+}
+
 fn gpu_mask_node_requirements() -> EffectImplementationRequirements {
     EffectImplementationRequirements {
         execution_modes: compositing_node_requirements()
@@ -4141,6 +4360,31 @@ pub(crate) fn compile_effect_domain_plan(
                     });
                 }
                 base_domain
+            }
+            EffectGraphNodeKind::PreviewWindow { original, processed, .. } => {
+                let domain = *plan.node_output_domains.get(original)?;
+                let processed_domain = *plan.node_output_domains.get(processed)?;
+                plan_domain_edge(
+                    &mut plan,
+                    Some(node.id),
+                    *processed,
+                    processed_domain,
+                    domain,
+                    EffectDomainBlockerKind::NonRgbDomainTransition,
+                );
+                domain
+            }
+            EffectGraphNodeKind::GrainSampleBoxes { input, .. } => {
+                let domain = *plan.node_output_domains.get(input)?;
+                plan_domain_edge(
+                    &mut plan,
+                    Some(node.id),
+                    *input,
+                    domain,
+                    EffectColorDomain::SceneLinearRgb,
+                    EffectDomainBlockerKind::NonRgbDomainTransition,
+                );
+                EffectColorDomain::SceneLinearRgb
             }
             EffectGraphNodeKind::MultiInput { inputs, .. } => {
                 let first = *inputs.first()?;
@@ -4478,6 +4722,23 @@ fn auxiliary_slot_declarations(
                     )?;
                 }
             }
+            EffectGraphNodeKind::GrainSampleBoxes { input, .. } => {
+                if let Some(EffectGraphNodeKind::ExternalInput { slot, format, .. }) =
+                    graph.node(*input).map(|node| &node.kind)
+                {
+                    if format.precision() != crate::EffectWorkingPrecision::Float32
+                        || format.domain() != EffectColorDomain::SceneLinearRgb
+                        || !format.alpha().is_straight_compatible()
+                    {
+                        return Err(EffectGraphError::InvalidAuxiliaryFormat { node: *input });
+                    }
+                    declare(
+                        *slot,
+                        AuxiliaryRole::Layer,
+                        AuxiliarySampling::FRAME_TRANSFORM_LINEAR_CLAMP,
+                    )?;
+                }
+            }
             _ => {}
         }
     }
@@ -4648,6 +4909,16 @@ fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
                     graded: *graded,
                     matte: *matte,
                 }
+            }
+            EffectGraphNodeKind::PreviewWindow { original, processed, .. } => {
+                EffectGraphNodeShape::PreviewWindow {
+                    id: node.id,
+                    original: *original,
+                    processed: *processed,
+                }
+            }
+            EffectGraphNodeKind::GrainSampleBoxes { input, .. } => {
+                EffectGraphNodeShape::GrainSampleBoxes { id: node.id, input: *input }
             }
             EffectGraphNodeKind::MultiInput { inputs, .. } => {
                 EffectGraphNodeShape::MultiInput { id: node.id, inputs: inputs.clone() }
@@ -4969,6 +5240,37 @@ pub(crate) fn compile_effect_node_profiles(
                     subtree_signature: hasher.finish(),
                     cache_policy,
                     estimated_cost,
+                    output_cache_enabled: false,
+                }
+            }
+            EffectGraphNodeKind::PreviewWindow { original, processed, window } => {
+                let original = profiles.get(original)?;
+                let processed = profiles.get(processed)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                17u8.hash(&mut hasher);
+                original.subtree_signature.hash(&mut hasher);
+                processed.subtree_signature.hash(&mut hasher);
+                window.hash_controls(&mut hasher);
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy: original.cache_policy.combine(processed.cache_policy),
+                    estimated_cost: original
+                        .estimated_cost
+                        .saturating_add(processed.estimated_cost)
+                        .saturating_add(1),
+                    output_cache_enabled: false,
+                }
+            }
+            EffectGraphNodeKind::GrainSampleBoxes { input, placement } => {
+                let source = profiles.get(input)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                18u8.hash(&mut hasher);
+                source.subtree_signature.hash(&mut hasher);
+                placement.hash_controls(&mut hasher);
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy: source.cache_policy,
+                    estimated_cost: source.estimated_cost.saturating_add(1),
                     output_cache_enabled: false,
                 }
             }
@@ -5766,6 +6068,58 @@ mod tests {
         assert_eq!(
             compiled.node_use_counts.get(&EffectGraphNodeId(3)),
             Some(&0)
+        );
+    }
+
+    #[test]
+    fn fixed_grain_sample_graph_identity_includes_the_bound_source_revision() {
+        use crate::grain_calibration::{
+            GrainCalibrationObservation, GrainCalibrationRequest, GrainCalibrationSettings,
+            GrainSamplePicture,
+        };
+        use mondrian_core::{ImageSampling, MediaFileFingerprint, SourceSampleTarget};
+
+        let mut builder = EffectGraphBuilderState::new();
+        let request = GrainCalibrationRequest::new(4, GrainCalibrationSettings::DEFAULT).unwrap();
+        let output = builder.add_fixed_grain_sample_display(request, [1.0; 4]).unwrap();
+        builder.set_current_output(output);
+        let graph = compile_reference_render_graph(builder.finish()).unwrap();
+        assert_eq!(
+            graph.grain_calibration_requests().collect::<Vec<_>>(),
+            [request]
+        );
+        let picture = GrainSamplePicture {
+            target: SourceSampleTarget::covering(TimelineTime::new(4, 25).unwrap()),
+            fingerprint: MediaFileFingerprint { len: Some(1234), ..Default::default() },
+            video_stream_index: 0,
+            extent: crate::EffectFrameExtent::new(64, 48),
+            sampling: ImageSampling::UNIT_SQUARE,
+        };
+        let bind = |picture| {
+            graph
+                .bind_grain_calibration_from_media(
+                    |key| {
+                        assert_eq!(key, request);
+                        Ok(Some(GrainCalibrationObservation { picture, profile: None }))
+                    },
+                    |_| Ok(true),
+                )
+                .unwrap()
+        };
+        let bound = bind(picture);
+        assert_eq!(bound.grain_calibration_requests().count(), 0);
+        assert_ne!(bound.semantic_fingerprint(), graph.semantic_fingerprint());
+        assert_eq!(
+            bound.semantic_fingerprint(),
+            bind(picture).semantic_fingerprint()
+        );
+        let replaced = GrainSamplePicture {
+            fingerprint: MediaFileFingerprint { len: Some(5678), ..picture.fingerprint },
+            ..picture
+        };
+        assert_ne!(
+            bound.semantic_fingerprint(),
+            bind(replaced).semantic_fingerprint()
         );
     }
 

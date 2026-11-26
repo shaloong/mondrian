@@ -1397,7 +1397,7 @@ fn flush_point_stage(
 pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
     match op {
         EffectRenderOp::UnsharpMask { gain, radius, threshold } => {
-            let radius = crate::unsharp_mask::valid_unsharp_mask_radius(*radius)?;
+            let radius = crate::unsharp_mask::unsharp_mask_kernel_radius(*radius)?;
             Some(EffectGpuSpatialPass::UnsharpMask {
                 gain: if *gain <= crate::unsharp_mask::MIN_EFFECTIVE_GAIN {
                     0.0

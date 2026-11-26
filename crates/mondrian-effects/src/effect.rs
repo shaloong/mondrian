@@ -1,5 +1,7 @@
 //! 效果节点抽象
 
+pub(crate) mod denoise;
+
 use crate::execution::{CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor};
 use crate::extension_contract::{
     effect_extension_is_library_visible, record_extension_runtime_failure, EffectExtensionContract,
@@ -4054,7 +4056,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 155] {
+fn builtin_effect_types() -> [EffectType; 156] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4211,6 +4213,7 @@ fn builtin_effect_types() -> [EffectType; 155] {
         EffectType::Beam,
         EffectType::InnerOuterKey,
         EffectType::Shape,
+        EffectType::Denoise,
     ]
 }
 
@@ -4477,6 +4480,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
     let mut properties = PropertyBag::default();
 
     match &effect_type {
+        EffectType::Denoise => denoise::define_properties(&mut properties, &effect_type),
         EffectType::BasicCorrection => {
             define_builtin_property(
                 &mut properties,
@@ -18358,6 +18362,20 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
         (EffectType::Fill, "all_masks" | "opacity") => ParameterUnit::Normalized,
         (EffectType::DustScratches, "radius") => ParameterUnit::Pixels,
         (EffectType::DustScratches, "threshold") => ParameterUnit::Normalized,
+        (
+            EffectType::Denoise,
+            "detail_radius" | "matte_blur" | "sample_size" | "preview_width" | "preview_height"
+            | "preview_center",
+        ) => ParameterUnit::Pixels,
+        (EffectType::Denoise, key) if denoise::SAMPLE_POINTS.contains(&key) => {
+            ParameterUnit::Pixels
+        }
+        (EffectType::Denoise, "blend_amount" | "temporal_amount") => ParameterUnit::Percent,
+        (
+            EffectType::Denoise,
+            "texture" | "solid_cleanup" | "motion_sensitivity" | "detail_threshold"
+            | "match_tolerance" | "match_softness",
+        ) => ParameterUnit::Normalized,
         (EffectType::KeyCleaner, "other_edge_radius") => ParameterUnit::Pixels,
         (EffectType::KeyCleaner, "reduce_chatter") => ParameterUnit::Normalized,
         (EffectType::KeyCleaner, "alpha_contrast" | "strength") => ParameterUnit::Percent,
@@ -18597,6 +18615,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
                 | EffectType::CompoundArithmetic
                 | EffectType::CompoundBlur
                 | EffectType::Texturize
+                | EffectType::Denoise
         ) {
             definition.with_branching_graph_builder(graph_builder)
         } else {
@@ -19434,6 +19453,13 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             ),
             ..cpu_linear
         },
+        EffectType::Denoise => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            temporal_input: EffectTemporalInputExtent::UNBOUNDED,
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            topology: EffectGraphTopology::GeneralDag,
+            ..cpu_linear
+        },
     }
 }
 
@@ -19527,6 +19553,7 @@ fn builtin_graph_preparer_for(effect_type: &EffectType) -> Option<EffectGraphPre
 
 fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuilder> {
     match effect_type {
+        EffectType::Denoise => Some(Arc::new(denoise::build_graph)),
         EffectType::BasicCorrection => {
             let exposure_id = builtin_parameter_id(effect_type, "exposure");
             let contrast_id = builtin_parameter_id(effect_type, "contrast");
@@ -29693,6 +29720,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::InnerOuterKey => "内部/外部键",
         EffectType::KeyCleaner => "键控清理",
         EffectType::Shape => "形状",
+        EffectType::Denoise => "降噪",
         EffectType::External(_) => "外部效果",
     }
 }
@@ -31121,6 +31149,7 @@ mod tests {
             EffectType::Beam,
             EffectType::InnerOuterKey,
             EffectType::Shape,
+            EffectType::Denoise,
         ]
         .into_iter()
         .map(|effect_type| effect_type.key())

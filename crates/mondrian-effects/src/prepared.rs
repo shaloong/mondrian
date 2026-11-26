@@ -219,7 +219,7 @@ impl PreparedEffectStack {
                 &definition,
                 frame_context.map(|context| context.project_geometry()),
             )?;
-            let definition = specialize_builtin_definition(effect, definition);
+            let definition = specialize_builtin_definition(effect, definition, frame_context);
             let contract = definition.execution_contract();
             contract.validate().map_err(|error| {
                 EffectGraphBuildError::InvalidExecutionContract {
@@ -580,6 +580,7 @@ fn fill_may_use_masks(effect: &EffectNode) -> bool {
 fn specialize_builtin_definition(
     effect: &EffectNode,
     definition: Arc<EffectDefinition>,
+    frame_context: Option<EffectFrameContext>,
 ) -> Arc<EffectDefinition> {
     let contract = definition.execution_contract();
     let specialized = match effect.effect_type {
@@ -589,6 +590,10 @@ fn specialize_builtin_definition(
         },
         crate::EffectType::PosterizeTime => EffectExecutionContract {
             temporal_input: posterize_time_author_time_extent(effect),
+            ..contract
+        },
+        crate::EffectType::Denoise => EffectExecutionContract {
+            temporal_input: crate::effect::denoise::author_time_extent(effect, frame_context),
             ..contract
         },
         crate::EffectType::Fill if fill_may_use_masks(effect) => EffectExecutionContract {
@@ -820,6 +825,12 @@ fn evaluate_instance_into_builder(
             .with_input_history(staged.input_history_since(checkpoint))
             .with_native_fill_matte(
                 instance.definition.is_registered_builtin() && fill_may_use_masks(&instance.effect),
+            )
+            // Denoise declares the full animation envelope. Its active kernel
+            // explicitly carries all primary time edges on each sampled graph.
+            .with_explicit_primary_history(
+                instance.definition.is_registered_builtin()
+                    && instance.effect.effect_type == crate::EffectType::Denoise,
             );
             *builder = staged;
             Ok(binding)
@@ -2365,6 +2376,7 @@ fn append_evaluated_graph(
             )
             .with_auxiliary_preview_fallback(binding.auxiliary_preview_fallback().cloned())
             .with_native_fill_matte(binding.native_fill_matte())
+            .with_explicit_primary_history(binding.primary_history_is_explicit())
             .with_origin(match (grade, binding.origin()) {
                 (
                     Some(ProgramGradePlacement::Before(assignment)),
@@ -2440,6 +2452,19 @@ fn remap_graph_node_kind(
                 graded: remap(*graded)?,
                 matte: remap(*matte)?,
                 amount: *amount,
+            }
+        }
+        EffectGraphNodeKind::PreviewWindow { original, processed, window } => {
+            EffectGraphNodeKind::PreviewWindow {
+                original: remap(*original)?,
+                processed: remap(*processed)?,
+                window: *window,
+            }
+        }
+        EffectGraphNodeKind::GrainSampleBoxes { input, placement } => {
+            EffectGraphNodeKind::GrainSampleBoxes {
+                input: remap(*input)?,
+                placement: placement.clone(),
             }
         }
         EffectGraphNodeKind::ExternalInput { slot, format, alpha, domain, time_offset } => {

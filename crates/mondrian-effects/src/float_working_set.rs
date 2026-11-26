@@ -75,6 +75,8 @@ pub(crate) fn reservations(
                 | EffectGraphNodeKind::Mask { .. }
                 | EffectGraphNodeKind::MaskCombine { .. }
                 | EffectGraphNodeKind::MatteMix { .. }
+                | EffectGraphNodeKind::PreviewWindow { .. }
+                | EffectGraphNodeKind::GrainSampleBoxes { .. }
                 | EffectGraphNodeKind::MultiInput { .. }
         );
         for input in node.input_ids() {
@@ -197,6 +199,8 @@ pub(crate) fn reservations(
             | EffectGraphNodeKind::Mask { .. }
             | EffectGraphNodeKind::MaskCombine { .. }
             | EffectGraphNodeKind::MatteMix { .. }
+            | EffectGraphNodeKind::PreviewWindow { .. }
+            | EffectGraphNodeKind::GrainSampleBoxes { .. }
             | EffectGraphNodeKind::MultiInput { .. } => {
                 (*taken.first().ok_or_else(|| missing(*id))?, 0)
             }

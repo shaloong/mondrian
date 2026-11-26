@@ -1093,6 +1093,8 @@ pub(crate) fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
         EffectGraphNodeKind::MaskSource { .. } => "mask_source",
         EffectGraphNodeKind::MaskCombine { .. } => "mask_combine",
         EffectGraphNodeKind::MatteMix { .. } => "matte_mix",
+        EffectGraphNodeKind::PreviewWindow { .. } => "preview_window",
+        EffectGraphNodeKind::GrainSampleBoxes { .. } => "grain_sample_boxes",
         EffectGraphNodeKind::MultiInput { .. } => "multi_input",
         EffectGraphNodeKind::ExternalInput { .. } => "external_input",
         EffectGraphNodeKind::AuxiliaryEffect { .. } => "auxiliary_effect",

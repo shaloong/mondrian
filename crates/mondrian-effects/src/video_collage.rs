@@ -308,12 +308,14 @@ pub fn video_collage_frame_f32(
     apply_video_collage_controlled(primary, sources, grade, &mut || Ok(()))
 }
 
-pub(crate) fn apply_video_collage_controlled(
+pub(crate) fn apply_video_collage_controlled<
+    E: From<VideoCollageError> + From<EffectFloatFrameError>,
+>(
     primary: EffectFloatFrameView<'_>,
     sources: &[Option<AuxiliaryFloatFrame<'_>>],
     grade: VideoCollageGrade,
-    checkpoint: &mut impl FnMut() -> Result<(), crate::EffectFloatExecutionError>,
-) -> Result<Vec<[f32; 4]>, crate::EffectFloatExecutionError> {
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Vec<[f32; 4]>, E> {
     if sources.len() != grade.tile_count() {
         return Err(VideoCollageError::Sources.into());
     }

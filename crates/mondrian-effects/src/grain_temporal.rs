@@ -140,11 +140,11 @@ impl GrainTemporalGrade {
         }
     }
 
-    fn motion_scale(self) -> f32 {
+    fn motion_scale(&self) -> f32 {
         3.0 + 3.0 * (1.0 - self.motion_sensitivity)
     }
 
-    fn apply_pixel(self, center: [f32; 4], neighbors: [Option<[f32; 4]>; 2]) -> [f32; 4] {
+    fn apply_pixel(&self, center: [f32; 4], neighbors: [Option<[f32; 4]>; 2]) -> [f32; 4] {
         if self.mix == 0.0 || center[3] <= 0.0 || !center.into_iter().all(f32::is_finite) {
             return center;
         }

@@ -43,6 +43,12 @@ pub(crate) fn valid_unsharp_mask_radius(radius: f32) -> Option<f32> {
     .then_some(radius)
 }
 
+// Denoise also authors radii below the standalone Unsharp Mask control's
+// minimum. The shared fractional box kernel admits every positive radius.
+pub(crate) fn unsharp_mask_kernel_radius(radius: f32) -> Option<f32> {
+    (radius > 0.0 && radius <= UNSHARP_MASK_AUTHOR_MAX_RADIUS_PIXELS).then_some(radius)
+}
+
 /// Converts an author-facing amount in percent into a dimensionless gain.
 ///
 /// The declared parameter range keeps authors inside `0`–`500`; the clamp here

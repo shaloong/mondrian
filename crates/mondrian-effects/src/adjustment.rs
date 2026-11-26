@@ -2976,7 +2976,7 @@ fn apply_render_op_f32_region_impl<E>(
             )
         }
         EffectRenderOp::UnsharpMask { gain, radius, threshold } => {
-            let Some(radius) = crate::unsharp_mask::valid_unsharp_mask_radius(*radius) else {
+            let Some(radius) = crate::unsharp_mask::unsharp_mask_kernel_radius(*radius) else {
                 return Ok(false);
             };
             if *gain <= crate::unsharp_mask::MIN_EFFECTIVE_GAIN {

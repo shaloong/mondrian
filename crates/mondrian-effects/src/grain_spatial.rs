@@ -143,7 +143,11 @@ impl GrainSpatialGrade {
         }
     }
 
-    fn filter_pixel(self, center: [f32; 4], sample: impl Fn(isize, isize) -> [f32; 4]) -> [f32; 4] {
+    fn filter_pixel(
+        &self,
+        center: [f32; 4],
+        sample: impl Fn(isize, isize) -> [f32; 4],
+    ) -> [f32; 4] {
         if center[3] <= 0.0 || !center.into_iter().all(f32::is_finite) {
             return center;
         }
@@ -185,7 +189,7 @@ impl GrainSpatialGrade {
     }
 
     fn residual(
-        self,
+        &self,
         center: [f32; 4],
         sample: &impl Fn(isize, isize) -> [f32; 4],
         step: isize,

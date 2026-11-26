@@ -2183,6 +2183,25 @@ pub enum PreparedHeterogeneousGpuDispatch {
         waits: Arc<[EffectCompletionToken]>,
         signal: EffectCompletionToken,
     },
+    /// Compare two device-resident pictures inside a source-pixel window.
+    PreviewWindow {
+        node: EffectGraphNodeId,
+        original: EffectMaterializationId,
+        processed: EffectMaterializationId,
+        window: crate::EffectPreviewWindow,
+        output: EffectMaterializationId,
+        waits: Arc<[EffectCompletionToken]>,
+        signal: EffectCompletionToken,
+    },
+    /// Annotate the accepted sample windows on their decoded texture.
+    GrainSampleBoxes {
+        node: EffectGraphNodeId,
+        input: EffectMaterializationId,
+        boxes: Arc<crate::grain_calibration::GrainSampleBoxes>,
+        output: EffectMaterializationId,
+        waits: Arc<[EffectCompletionToken]>,
+        signal: EffectCompletionToken,
+    },
 }
 
 impl PreparedHeterogeneousGpuDispatch {
@@ -2203,7 +2222,9 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::DisplacementMap { output, .. }
             | Self::GlassMap { output, .. }
             | Self::MaskCombine { output, .. }
-            | Self::MatteMix { output, .. } => *output,
+            | Self::MatteMix { output, .. }
+            | Self::PreviewWindow { output, .. }
+            | Self::GrainSampleBoxes { output, .. } => *output,
         }
     }
 
@@ -2224,7 +2245,9 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::DisplacementMap { waits, .. }
             | Self::GlassMap { waits, .. }
             | Self::MaskCombine { waits, .. }
-            | Self::MatteMix { waits, .. } => waits,
+            | Self::MatteMix { waits, .. }
+            | Self::PreviewWindow { waits, .. }
+            | Self::GrainSampleBoxes { waits, .. } => waits,
         }
     }
 
@@ -2245,7 +2268,9 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::DisplacementMap { signal, .. }
             | Self::GlassMap { signal, .. }
             | Self::MaskCombine { signal, .. }
-            | Self::MatteMix { signal, .. } => *signal,
+            | Self::MatteMix { signal, .. }
+            | Self::PreviewWindow { signal, .. }
+            | Self::GrainSampleBoxes { signal, .. } => *signal,
         }
     }
 
@@ -2265,7 +2290,9 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::DisplacementMap { node, .. }
             | Self::GlassMap { node, .. }
             | Self::MaskCombine { node, .. }
-            | Self::MatteMix { node, .. } => output.push(*node),
+            | Self::MatteMix { node, .. }
+            | Self::PreviewWindow { node, .. }
+            | Self::GrainSampleBoxes { node, .. } => output.push(*node),
         }
     }
 
@@ -2278,6 +2305,7 @@ impl PreparedHeterogeneousGpuDispatch {
             | Self::Qualifier { input, .. }
             | Self::MatteFeather { input, .. }
             | Self::MattePreview { input, .. }
+            | Self::GrainSampleBoxes { input, .. }
             | Self::Copy { input, .. } => visit(*input)?,
             Self::Blend { base, overlay, .. } => {
                 visit(*base)?;
@@ -2305,6 +2333,10 @@ impl PreparedHeterogeneousGpuDispatch {
                 visit(*base)?;
                 visit(*graded)?;
                 visit(*matte)?;
+            }
+            Self::PreviewWindow { original, processed, .. } => {
+                visit(*original)?;
+                visit(*processed)?;
             }
         }
         Ok(())
@@ -2818,6 +2850,8 @@ fn hash_effect_operation_shape(
         EffectGraphNodeKind::MultiInput { .. } => hasher.update([6]),
         EffectGraphNodeKind::MaskCombine { .. } => hasher.update([7]),
         EffectGraphNodeKind::MatteMix { .. } => hasher.update([8]),
+        EffectGraphNodeKind::PreviewWindow { .. } => hasher.update([11]),
+        EffectGraphNodeKind::GrainSampleBoxes { .. } => hasher.update([12]),
         EffectGraphNodeKind::AuxiliaryEffect {
             op: op @ EffectRenderOp::Fill { .. },
             role: crate::AuxiliaryRole::Matte,
@@ -4071,6 +4105,48 @@ fn execute_cpu_dag_prefix(
                 })?;
                 base
             }
+            EffectGraphNodeKind::PreviewWindow { window, .. } => {
+                let invalid =
+                    PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node };
+                let [original, processed] = <[_; 2]>::try_from(inputs).map_err(|_| invalid)?;
+                let mut checkpoint = || heterogeneous_processor_checkpoint(control, generation);
+                let mut original = crate::materialize_finite_coverage_controlled(
+                    original,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                    &mut checkpoint,
+                )?;
+                let processed = crate::materialize_finite_coverage_controlled(
+                    processed,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                    &mut checkpoint,
+                )?;
+                original.ensure_same_grid(processed.view())?;
+                let region = original.extent().full_frame_roi();
+                let sampling = original.sampling();
+                window.apply(&mut original, &processed, region, sampling, &mut checkpoint)?;
+                original
+            }
+            EffectGraphNodeKind::GrainSampleBoxes { placement, .. } => {
+                let invalid = || PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                    node: dispatch.node,
+                };
+                let boxes = placement.boxes().ok_or_else(invalid)?;
+                let [input] = <[_; 1]>::try_from(inputs).map_err(|_| invalid())?;
+                if input.extent() != boxes.extent() {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                let mut checkpoint = || heterogeneous_processor_checkpoint(control, generation);
+                let mut frame = crate::materialize_finite_coverage_controlled(
+                    input,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                    &mut checkpoint,
+                )?;
+                let roi = frame.extent().full_frame_roi();
+                boxes.apply(&mut frame, roi, &mut checkpoint)?;
+                frame
+            }
             EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
                 if inputs.is_empty() {
                     return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
@@ -5144,6 +5220,52 @@ fn prepare_gpu_suffix(
                                 signal: *signal,
                             })
                         }
+                        EffectGraphNodeKind::PreviewWindow { window, .. } => {
+                            let [original, processed] = inputs.as_ref() else {
+                                return Err(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_preview_window_dispatch_input_arity",
+                                });
+                            };
+                            let scene_linear = EffectValueFormat::new(
+                                EffectWorkingPrecision::Float32, EffectColorDomain::SceneLinearRgb,
+                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                            );
+                            if [*original, *processed, *output].into_iter().any(|id| {
+                                plan.materialization(id).map(EffectValueMaterialization::residency)
+                                    .and_then(|residency| residency.format().exact_format()) != Some(scene_linear)
+                            }) {
+                                return Err(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_preview_window_dispatch_domain_mismatch",
+                                });
+                            }
+                            Ok(PreparedHeterogeneousGpuDispatch::PreviewWindow {
+                                node: *node_id, original: *original, processed: *processed, window: *window,
+                                output: *output, waits: Arc::clone(waits), signal: *signal,
+                            })
+                        }
+                        EffectGraphNodeKind::GrainSampleBoxes { placement, .. } => {
+                            let boxes = placement.boxes().ok_or(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_grain_sample_boxes_unbound",
+                                },
+                            )?;
+                            let [input] = inputs.as_ref() else {
+                                return Err(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape { reason: "gpu_grain_sample_boxes_input_arity" });
+                            };
+                            let expected = EffectValueFormat::new(
+                                EffectWorkingPrecision::Float32, EffectColorDomain::SceneLinearRgb,
+                                mondrian_core::ColorFrameAlpha::StraightCoverage,
+                            );
+                            if [input, output].into_iter().any(|id| {
+                                plan.materialization(*id).and_then(|value| value.residency().format().exact_format()) != Some(expected)
+                            }) {
+                                return Err(PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape { reason: "gpu_grain_sample_boxes_domain_mismatch" });
+                            }
+                            Ok(PreparedHeterogeneousGpuDispatch::GrainSampleBoxes {
+                                node: *node_id, input: *input, boxes: Arc::clone(boxes), output: *output,
+                                waits: Arc::clone(waits), signal: *signal,
+                            })
+                        }
                         EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
                             match inputs.len() {
                                 0 => Err(
@@ -5561,7 +5683,9 @@ fn cpu_node_scratch_frames(
         | EffectGraphNodeKind::Mask { .. }
         | EffectGraphNodeKind::MaskSource { .. }
         | EffectGraphNodeKind::MaskCombine { .. }
-        | EffectGraphNodeKind::MatteMix { .. } => Ok(0),
+        | EffectGraphNodeKind::MatteMix { .. }
+        | EffectGraphNodeKind::PreviewWindow { .. }
+        | EffectGraphNodeKind::GrainSampleBoxes { .. } => Ok(0),
         EffectGraphNodeKind::ExternalInput { .. } => Ok(0),
         EffectGraphNodeKind::AuxiliaryEffect { op, .. } => {
             Ok(crate::adjustment::render_op_f32_scratch_frames(op)

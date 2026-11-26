@@ -821,6 +821,10 @@ fn execute_effect_graph_with_auxiliary(
                 release_execution_buffer(&mut buffer_pool, right_frame);
                 outputs.insert(node.id, left_frame);
             }
+            EffectGraphNodeKind::PreviewWindow { .. }
+            | EffectGraphNodeKind::GrainSampleBoxes { .. } => {
+                return Err(EffectExecutionError::InvalidGraph)
+            }
             EffectGraphNodeKind::MatteMix { base, graded, matte, amount } => {
                 let Some(mut base_frame) = take_graph_input(
                     &mut outputs,
@@ -2266,6 +2270,61 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                 release_float_execution_buffer(&mut buffer_pool, matte_frame);
                 outputs.insert(node.id, base_frame);
             }
+            EffectGraphNodeKind::PreviewWindow { original, processed, window } => {
+                let mut take = |id| {
+                    take_float_graph_input(&mut outputs, &mut remaining_uses, &mut buffer_pool, id)
+                        .ok_or(EffectFloatExecutionError::MissingOutput { node_id: id })
+                };
+                let original = take(*original)?;
+                let processed = take(*processed)?;
+                let mut original = crate::materialize_straight_coverage(
+                    original,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )?;
+                let processed = crate::materialize_straight_coverage(
+                    processed,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )?;
+                original.set_format_after_write(
+                    original.format().with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                );
+                original.ensure_same_grid(processed.view())?;
+                let region = original.extent().full_frame_roi();
+                let sampling = original.sampling();
+                window.apply(&mut original, &processed, region, sampling, &mut || {
+                    scalar_checkpoint(control)
+                })?;
+                release_float_execution_buffer(&mut buffer_pool, processed);
+                outputs.insert(node.id, original);
+            }
+            EffectGraphNodeKind::GrainSampleBoxes { input, placement } => {
+                let boxes = placement.boxes().ok_or_else(|| {
+                    unsupported_float_graph_node(node.id, "grain sample display was not bound")
+                })?;
+                let frame = take_float_graph_input(
+                    &mut outputs,
+                    &mut remaining_uses,
+                    &mut buffer_pool,
+                    *input,
+                )
+                .ok_or(EffectFloatExecutionError::MissingOutput { node_id: *input })?;
+                if frame.extent() != boxes.extent() {
+                    return Err(unsupported_float_graph_node(
+                        node.id,
+                        "grain sample grid mismatch",
+                    ));
+                }
+                let mut frame = crate::materialize_straight_coverage(
+                    frame,
+                    crate::EffectAlphaConsumer::AlphaMask,
+                )?;
+                frame.set_format_after_write(
+                    frame.format().with_alpha(mondrian_core::ColorFrameAlpha::StraightCoverage),
+                );
+                let roi = frame.extent().full_frame_roi();
+                boxes.apply(&mut frame, roi, &mut || scalar_checkpoint(control))?;
+                outputs.insert(node.id, frame);
+            }
             EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                 let Some(first_id) = inputs.first().copied() else {
                     return Err(unsupported_float_graph_node(node.id, "multi_input_empty"));
@@ -3152,6 +3211,8 @@ fn validate_float_effect_graph_shape(
             | EffectGraphNodeKind::MaskSource { .. }
             | EffectGraphNodeKind::MaskCombine { .. }
             | EffectGraphNodeKind::MatteMix { .. }
+            | EffectGraphNodeKind::PreviewWindow { .. }
+            | EffectGraphNodeKind::GrainSampleBoxes { .. }
             | EffectGraphNodeKind::VideoCollage { .. }
             | EffectGraphNodeKind::MultiInput { .. } => {}
         }

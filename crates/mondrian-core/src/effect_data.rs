@@ -299,6 +299,8 @@ pub enum EffectType {
     Shape,
     /// Paints a brush stroke along one or more authored clip mask paths.
     MaskPathStroke,
+    /// Reduces calibrated image grain and optionally blends the original through a matte.
+    Denoise,
 }
 
 impl EffectType {
@@ -421,6 +423,7 @@ impl EffectType {
             Self::Fill => "builtin.fill".to_string(),
             Self::Magnify => "builtin.magnify".to_string(),
             Self::DustScratches => "builtin.dust_scratches".to_string(),
+            Self::Denoise => "builtin.denoise".to_string(),
             Self::VrRotateSphere => "builtin.vr_rotate_sphere".to_string(),
             Self::VrSphereToPlane => "builtin.vr_sphere_to_plane".to_string(),
             Self::VrProject2D => "builtin.vr_project_2d".to_string(),
@@ -582,6 +585,7 @@ impl EffectType {
             "builtin.fill" => Self::Fill,
             "builtin.magnify" => Self::Magnify,
             "builtin.dust_scratches" => Self::DustScratches,
+            "builtin.denoise" => Self::Denoise,
             "builtin.vr_rotate_sphere" => Self::VrRotateSphere,
             "builtin.vr_sphere_to_plane" => Self::VrSphereToPlane,
             "builtin.vr_project_2d" => Self::VrProject2D,
@@ -743,6 +747,7 @@ impl EffectType {
             Self::Fill => "填充",
             Self::Magnify => "放大",
             Self::DustScratches => "蒙尘与划痕",
+            Self::Denoise => "降噪",
             Self::VrRotateSphere => "VR 旋转球面",
             Self::VrSphereToPlane => "VR 球面到平面",
             Self::VrProject2D => "VR 平面到球面",
@@ -906,7 +911,7 @@ impl EffectType {
             Self::Stroke | Self::MaskPathStroke => vec!["生成器"],
             Self::Fill => vec!["生成器"],
             Self::Magnify => vec!["变形"],
-            Self::DustScratches => vec!["修复"],
+            Self::DustScratches | Self::Denoise => vec!["修复"],
             Self::VrRotateSphere => vec!["变形"],
             Self::VrSphereToPlane => vec!["变形"],
             Self::VrProject2D => vec!["变形"],
@@ -1059,6 +1064,7 @@ impl EffectType {
             Self::Fill => "fill".to_string(),
             Self::Magnify => "magnify".to_string(),
             Self::DustScratches => "dust_scratches".to_string(),
+            Self::Denoise => "denoise".to_string(),
             Self::VrRotateSphere => "vr_rotate_sphere".to_string(),
             Self::VrSphereToPlane => "vr_sphere_to_plane".to_string(),
             Self::VrProject2D => "vr_project_2d".to_string(),
@@ -1591,7 +1597,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Stroke | Self::MaskPathStroke => Ok(()),
             Self::Fill => Ok(()),
             Self::Magnify => Ok(()),
-            Self::DustScratches => Ok(()),
+            Self::DustScratches | Self::Denoise => Ok(()),
             Self::VrRotateSphere => Ok(()),
             Self::VrSphereToPlane => Ok(()),
             Self::VrProject2D => Ok(()),
