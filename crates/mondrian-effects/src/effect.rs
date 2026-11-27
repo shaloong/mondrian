@@ -1243,6 +1243,13 @@ pub enum EffectRenderOp {
         /// Authored ink, band width, profile, opacity and paint style.
         grade: crate::StrokeGrade,
     },
+    /// Particle System: paints the immutable live set from the exact author-time query.
+    ParticleSystem {
+        /// Birth-ordered particles in normalized and physical coordinates.
+        particles: Arc<[crate::particle_system::Particle]>,
+        /// Compositing mode at the requested author time.
+        blend: crate::particle_system::ParticleBlend,
+    },
     /// Mask path stroke: paints a brush stroke along time-resolved clip paths.
     MaskPathStroke {
         /// Ordered immutable geometry and brush controls, independent of clip IDs.
@@ -1761,6 +1768,11 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Stroke { grade } => {
                 formatter.debug_struct("Stroke").field("grade", grade).finish()
             }
+            Self::ParticleSystem { particles, blend } => formatter
+                .debug_struct("ParticleSystem")
+                .field("particles", &particles.len())
+                .field("blend", blend)
+                .finish(),
             Self::MaskPathStroke { geometry } => {
                 formatter.debug_struct("MaskPathStroke").field("geometry", geometry).finish()
             }
@@ -2802,6 +2814,14 @@ impl EffectRenderOp {
                     cell.map(f32::to_bits).hash(state);
                 }
             }
+            EffectRenderOp::ParticleSystem { particles, blend } => {
+                159u8.hash(state);
+                blend.hash(state);
+                particles.len().hash(state);
+                for particle in &**particles {
+                    particle.hash_signature(state);
+                }
+            }
             EffectRenderOp::MaskPathStroke { geometry } => {
                 155u8.hash(state);
                 geometry.hash_signature(state);
@@ -3479,6 +3499,7 @@ impl EffectRenderOp {
             }
             EffectRenderOp::Grid { .. } => 1,
             EffectRenderOp::CircleEllipse { .. } => 1,
+            EffectRenderOp::ParticleSystem { .. } => 8,
             EffectRenderOp::MaskPathStroke { .. } => 8,
             EffectRenderOp::Stroke { .. } => 5,
             EffectRenderOp::Fill { .. } => 1,
@@ -4079,7 +4100,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 157] {
+fn builtin_effect_types() -> [EffectType; 158] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4209,6 +4230,7 @@ fn builtin_effect_types() -> [EffectType; 157] {
         EffectType::BlankingFill,
         EffectType::PosterizeTime,
         EffectType::Timewarp,
+        EffectType::ParticleSystem,
         EffectType::Deinterlace,
         EffectType::Watercolor,
         EffectType::Scanlines,
@@ -9306,6 +9328,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             );
         }
         EffectType::Timewarp => timewarp::define_properties(&mut properties),
+        EffectType::ParticleSystem => define_particle_properties(&mut properties, &effect_type),
         EffectType::PosterizeTime => {
             define_builtin_property(
                 &mut properties,
@@ -17319,6 +17342,82 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
     properties
 }
 
+fn define_particle_properties(properties: &mut PropertyBag, kind: &EffectType) {
+    use crate::particle_system::{
+        PARTICLE_BLEND_OPTIONS, PARTICLE_GROUP, PARTICLE_SCALARS, PARTICLE_SHAPE_OPTIONS,
+    };
+    define_builtin_property(
+        properties,
+        kind,
+        "emitter_position",
+        PARTICLE_GROUP,
+        "发射器位置",
+        PropertyValue::Vec2(glam::Vec2::splat(0.5)),
+        None,
+        None,
+        None,
+    );
+    for (key, label, options) in [
+        ("emitter_shape", "发射形状", PARTICLE_SHAPE_OPTIONS),
+        ("blend", "混合方式", PARTICLE_BLEND_OPTIONS),
+    ] {
+        define_builtin_enum_property(
+            properties,
+            kind,
+            key,
+            PARTICLE_GROUP,
+            label,
+            options[0].0,
+            options
+                .iter()
+                .map(|&(option, label)| {
+                    ParameterEnumOption::new(
+                        option,
+                        label,
+                        format!("mondrian.effect.particle_system.{key}.{option}"),
+                    )
+                })
+                .collect(),
+        );
+    }
+    let defaults = crate::particle_system::ParticleEmitter::default();
+    for scalar in PARTICLE_SCALARS {
+        define_builtin_property(
+            properties,
+            kind,
+            scalar.key,
+            PARTICLE_GROUP,
+            scalar.label,
+            PropertyValue::Float((scalar.read)(&defaults) * scalar.scale),
+            Some(f64::from(scalar.bounds[0])),
+            Some(f64::from(scalar.bounds[1])),
+            Some(scalar.step),
+        );
+    }
+    define_builtin_property(
+        properties,
+        kind,
+        "color",
+        PARTICLE_GROUP,
+        "粒子颜色",
+        PropertyValue::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+        None,
+        None,
+        None,
+    );
+    define_builtin_property(
+        properties,
+        kind,
+        "seed",
+        PARTICLE_GROUP,
+        "随机种子",
+        PropertyValue::Int(0),
+        Some(0.0),
+        Some(9999.0),
+        Some(1.0),
+    );
+}
+
 fn define_blanking_fill_properties(properties: &mut PropertyBag, kind: &EffectType) {
     const SOURCE: &str = "遮幅填充源";
     const EXTENT: &str = "填充范围";
@@ -18161,6 +18260,16 @@ fn lut_processing_domain(key: &str) -> Option<EffectColorDomain> {
 fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> ParameterUnit {
     match (effect_type, parameter) {
         (EffectType::Timewarp, "speed") => ParameterUnit::Percent,
+        (EffectType::ParticleSystem, "emitter_position") => ParameterUnit::Normalized,
+        (EffectType::ParticleSystem, "emitter_size" | "size") => ParameterUnit::Pixels,
+        (EffectType::ParticleSystem, "direction" | "spread" | "rotation" | "rotation_random") => {
+            ParameterUnit::Degrees
+        }
+        (
+            EffectType::ParticleSystem,
+            "lifetime_random" | "speed_random" | "size_random" | "color_variation"
+            | "opacity_variation",
+        ) => ParameterUnit::Percent,
         (EffectType::BasicCorrection, "exposure") => ParameterUnit::Stops,
         (EffectType::HdrGrading, parameter)
             if parameter == "global_exposure"
@@ -19021,6 +19130,10 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
+        EffectType::ParticleSystem => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            ..cpu_linear
+        },
         EffectType::MaskPathStroke => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Brush coverage depends on authored geometry, not neighboring source pixels.
@@ -19582,6 +19695,7 @@ fn builtin_graph_preparer_for(effect_type: &EffectType) -> Option<EffectGraphPre
 
 fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuilder> {
     match effect_type {
+        EffectType::ParticleSystem => Some(crate::particle_system::graph_builder()),
         EffectType::Denoise => Some(Arc::new(denoise::build_graph)),
         EffectType::BasicCorrection => {
             let exposure_id = builtin_parameter_id(effect_type, "exposure");
@@ -29669,6 +29783,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Echo => "残影",
         EffectType::PosterizeTime => "抽帧",
         EffectType::Timewarp => "时间扭曲",
+        EffectType::ParticleSystem => "粒子系统",
         EffectType::Arithmetic => "算术",
         EffectType::LeaveColor => "保留颜色",
         EffectType::BroadcastSafe => "广播安全",
@@ -31152,6 +31267,7 @@ mod tests {
             EffectType::VideoCollage,
             EffectType::PosterizeTime,
             EffectType::Timewarp,
+            EffectType::ParticleSystem,
             EffectType::Deinterlace,
             EffectType::Watercolor,
             EffectType::Scanlines,

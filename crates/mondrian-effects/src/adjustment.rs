@@ -518,6 +518,7 @@ pub(crate) fn apply_render_op(
         EffectRenderOp::Smear { .. }
         | EffectRenderOp::Reshape { .. }
         | EffectRenderOp::MaskPathStroke { .. }
+        | EffectRenderOp::ParticleSystem { .. }
         | EffectRenderOp::DetailPreservingUpscale { .. }
         | EffectRenderOp::VideoCollage { .. }
         | EffectRenderOp::Glass { .. } => {
@@ -1376,6 +1377,9 @@ pub(crate) fn render_op_tile_scratch_bytes(op: &EffectRenderOp, width: u32, heig
         EffectRenderOp::Glass { .. } => {
             crate::GlassHeightPlan::scratch_bytes(crate::EffectFrameExtent::new(width, height))
         }
+        EffectRenderOp::ParticleSystem { particles, .. } => particles
+            .len()
+            .saturating_mul(std::mem::size_of::<crate::particle_system::RasterParticle>()),
         EffectRenderOp::MaskPathStroke { .. } => {
             use crate::mask_path_stroke::{
                 MASK_PATH_STROKE_MAX_PREPARE_SCRATCH_BYTES, MASK_PATH_STROKE_MAX_RETAINED_BYTES,
@@ -1603,6 +1607,7 @@ pub(crate) const fn render_op_f32_scratch_frame_upper_bound(op: &EffectRenderOp)
         | EffectRenderOp::AcesTransform { .. }
         | EffectRenderOp::LightSweep { .. }
         | EffectRenderOp::MaskPathStroke { .. }
+        | EffectRenderOp::ParticleSystem { .. }
         | EffectRenderOp::Shape { .. }
         | EffectRenderOp::Beam { .. }
         | EffectRenderOp::Strobe { .. }
@@ -1717,6 +1722,27 @@ impl EffectRasterRegion {
 /// boundaries inside long-running scalar kernels. An error aborts the
 /// operation immediately; callers own the partially mutated private buffer and
 /// must not publish it.
+#[derive(Debug)]
+pub(crate) enum ControlledRenderOpF32Error<E> {
+    MaskPathStroke(crate::mask_path_stroke::MaskPathStrokeError),
+    ParticleSystem(crate::particle_system::ParticleError),
+    Checkpoint(E),
+}
+
+impl<E> ControlledRenderOpF32Error<E> {
+    pub(crate) fn into_execution_error(
+        self,
+        mask_path_stroke: impl FnOnce(crate::mask_path_stroke::MaskPathStrokeError) -> E,
+        particle_system: impl FnOnce(crate::particle_system::ParticleError) -> E,
+    ) -> E {
+        match self {
+            Self::MaskPathStroke(error) => mask_path_stroke(error),
+            Self::ParticleSystem(error) => particle_system(error),
+            Self::Checkpoint(error) => error,
+        }
+    }
+}
+
 pub(crate) fn apply_render_op_f32_controlled<E>(
     working: &mut Vec<[f32; 4]>,
     width: u32,
@@ -1725,7 +1751,7 @@ pub(crate) fn apply_render_op_f32_controlled<E>(
     op: &EffectRenderOp,
     frame_seed: i64,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
-) -> Result<bool, crate::mask_path_stroke::ControlledMaskPathStrokeError<E>> {
+) -> Result<bool, ControlledRenderOpF32Error<E>> {
     apply_render_op_f32_region_controlled(
         working,
         EffectRasterRegion::full_frame(width, height),
@@ -1750,20 +1776,55 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
     op: &EffectRenderOp,
     frame_seed: i64,
     checkpoint: &mut impl FnMut() -> Result<(), E>,
-) -> Result<bool, crate::mask_path_stroke::ControlledMaskPathStrokeError<E>> {
-    use crate::mask_path_stroke::ControlledMaskPathStrokeError;
-    if let EffectRenderOp::MaskPathStroke { geometry } = op {
-        if !region.is_valid_for(working.len()) {
-            return Err(crate::mask_path_stroke::MaskPathStrokeError::InvalidPixelBuffer.into());
+) -> Result<bool, ControlledRenderOpF32Error<E>> {
+    use crate::{
+        mask_path_stroke::ControlledMaskPathStrokeError,
+        particle_system::{ControlledParticleError, ParticleError, ParticleRaster},
+    };
+    let extent = crate::EffectFrameExtent::new(region.frame_width, region.frame_height);
+    let roi = crate::EffectPixelRoi::new(region.x, region.y, region.width, region.height);
+    match op {
+        EffectRenderOp::MaskPathStroke { geometry } => {
+            if !region.is_valid_for(working.len()) {
+                return Err(ControlledRenderOpF32Error::MaskPathStroke(
+                    crate::mask_path_stroke::MaskPathStrokeError::InvalidPixelBuffer,
+                ));
+            }
+            let wrap = |error| match error {
+                ControlledMaskPathStrokeError::Layout(error) => {
+                    ControlledRenderOpF32Error::MaskPathStroke(error)
+                }
+                ControlledMaskPathStrokeError::Checkpoint(error) => {
+                    ControlledRenderOpF32Error::Checkpoint(error)
+                }
+            };
+            let layout = geometry.prepare_controlled(extent, sampling, checkpoint).map_err(wrap)?;
+            layout.apply_region_f32_controlled(working, roi, checkpoint).map_err(wrap)?;
+            Ok(true)
         }
-        let extent = crate::EffectFrameExtent::new(region.frame_width, region.frame_height);
-        let roi = crate::EffectPixelRoi::new(region.x, region.y, region.width, region.height);
-        let layout = geometry.prepare_controlled(extent, sampling, checkpoint)?;
-        layout.apply_region_f32_controlled(working, roi, checkpoint)?;
-        return Ok(true);
+        EffectRenderOp::ParticleSystem { particles, blend } => {
+            if !region.is_valid_for(working.len()) {
+                return Err(ControlledRenderOpF32Error::ParticleSystem(
+                    ParticleError::InvalidRaster,
+                ));
+            }
+            checkpoint().map_err(ControlledRenderOpF32Error::Checkpoint)?;
+            ParticleRaster::prepare(particles, extent, sampling)
+                .map_err(ControlledRenderOpF32Error::ParticleSystem)?
+                .apply_region_f32(working, roi, *blend, checkpoint)
+                .map_err(|error| match error {
+                    ControlledParticleError::Particle(error) => {
+                        ControlledRenderOpF32Error::ParticleSystem(error)
+                    }
+                    ControlledParticleError::Caller(error) => {
+                        ControlledRenderOpF32Error::Checkpoint(error)
+                    }
+                })?;
+            Ok(true)
+        }
+        _ => apply_render_op_f32_region_impl(working, region, sampling, op, frame_seed, checkpoint)
+            .map_err(ControlledRenderOpF32Error::Checkpoint),
     }
-    apply_render_op_f32_region_impl(working, region, sampling, op, frame_seed, checkpoint)
-        .map_err(ControlledMaskPathStrokeError::Checkpoint)
 }
 
 fn apply_render_op_f32_region_impl<E>(
@@ -3019,7 +3080,9 @@ fn apply_render_op_f32_region_impl<E>(
         }
         // Mask path geometry is prepared by the region dispatcher so it can
         // distinguish a geometry error from an execution checkpoint.
-        EffectRenderOp::MaskPathStroke { .. } | EffectRenderOp::Custom { .. } => Ok(false),
+        EffectRenderOp::MaskPathStroke { .. }
+        | EffectRenderOp::ParticleSystem { .. }
+        | EffectRenderOp::Custom { .. } => Ok(false),
     }
 }
 

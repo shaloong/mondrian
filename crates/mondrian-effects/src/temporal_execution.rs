@@ -1182,6 +1182,9 @@ pub enum EffectTemporalExecutionError {
     /// Mask Path Stroke layout preparation or application failed.
     #[error(transparent)]
     MaskPathStroke(crate::mask_path_stroke::MaskPathStrokeError),
+    /// Particle layout preparation or application failed.
+    #[error(transparent)]
+    ParticleSystem(crate::particle_system::ParticleError),
     /// Video Collage needs the complete source grid and one address per cell.
     #[error(transparent)]
     VideoCollage(#[from] crate::VideoCollageError),
@@ -2949,6 +2952,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                     .map_err(|error| {
                                         error.into_execution_error(
                                             EffectTemporalExecutionError::MaskPathStroke,
+                                            EffectTemporalExecutionError::ParticleSystem,
                                         )
                                     })
                                 };
@@ -4017,6 +4021,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         crate::EffectRenderOp::Crop { .. } => "crop",
         crate::EffectRenderOp::SelectiveColor { .. } => "selective_color",
+        crate::EffectRenderOp::ParticleSystem { .. } => "particle_system",
         crate::EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         crate::EffectRenderOp::Stroke { .. } => "stroke",
         crate::EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",

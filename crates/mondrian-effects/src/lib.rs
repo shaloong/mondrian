@@ -256,6 +256,7 @@ pub mod noise;
 pub mod offset;
 pub mod page_turn;
 pub(crate) mod parallel;
+pub mod particle_system;
 pub mod photo_filter;
 pub mod polar_coordinates;
 pub mod posterize;

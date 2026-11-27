@@ -156,18 +156,6 @@ pub enum ControlledMaskPathStrokeError<E> {
     Checkpoint(E),
 }
 
-impl<E> ControlledMaskPathStrokeError<E> {
-    pub(crate) fn into_execution_error(
-        self,
-        map_layout: impl FnOnce(MaskPathStrokeError) -> E,
-    ) -> E {
-        match self {
-            Self::Layout(error) => map_layout(error),
-            Self::Checkpoint(error) => error,
-        }
-    }
-}
-
 impl<E> From<MaskPathStrokeError> for ControlledMaskPathStrokeError<E> {
     fn from(error: MaskPathStrokeError) -> Self {
         Self::Layout(error)

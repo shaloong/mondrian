@@ -300,6 +300,8 @@ pub enum EffectType {
     Shape,
     /// Paints a brush stroke along one or more authored clip mask paths.
     MaskPathStroke,
+    /// Deterministic native particle emitter and analytic compositor.
+    ParticleSystem,
     /// Reduces calibrated image grain and optionally blends the original through a matte.
     Denoise,
 }
@@ -421,6 +423,7 @@ impl EffectType {
             Self::Grid => "builtin.grid".to_string(),
             Self::CircleEllipse => "builtin.circle_ellipse".to_string(),
             Self::MaskPathStroke => "builtin.mask_path_stroke".to_string(),
+            Self::ParticleSystem => "builtin.particle_system".to_string(),
             Self::Stroke => "builtin.stroke".to_string(),
             Self::Fill => "builtin.fill".to_string(),
             Self::Magnify => "builtin.magnify".to_string(),
@@ -584,6 +587,7 @@ impl EffectType {
             "builtin.grid" => Self::Grid,
             "builtin.circle_ellipse" => Self::CircleEllipse,
             "builtin.mask_path_stroke" => Self::MaskPathStroke,
+            "builtin.particle_system" => Self::ParticleSystem,
             "builtin.stroke" => Self::Stroke,
             "builtin.fill" => Self::Fill,
             "builtin.magnify" => Self::Magnify,
@@ -748,6 +752,7 @@ impl EffectType {
             Self::CircleEllipse => "圆形与椭圆",
             Self::Stroke => "轮廓描边",
             Self::MaskPathStroke => "蒙版路径描边",
+            Self::ParticleSystem => "粒子系统",
             Self::Fill => "填充",
             Self::Magnify => "放大",
             Self::DustScratches => "蒙尘与划痕",
@@ -913,7 +918,7 @@ impl EffectType {
             Self::Colorama => vec!["颜色", "调色"],
             Self::Grid => vec!["生成器"],
             Self::CircleEllipse => vec!["生成器"],
-            Self::Stroke | Self::MaskPathStroke => vec!["生成器"],
+            Self::Stroke | Self::MaskPathStroke | Self::ParticleSystem => vec!["生成器"],
             Self::Fill => vec!["生成器"],
             Self::Magnify => vec!["变形"],
             Self::DustScratches | Self::Denoise => vec!["修复"],
@@ -1066,6 +1071,7 @@ impl EffectType {
             Self::Grid => "grid".to_string(),
             Self::CircleEllipse => "circle_ellipse".to_string(),
             Self::MaskPathStroke => "mask_path_stroke".to_string(),
+            Self::ParticleSystem => "particle_system".to_string(),
             Self::Stroke => "stroke".to_string(),
             Self::Fill => "fill".to_string(),
             Self::Magnify => "magnify".to_string(),
@@ -1601,7 +1607,7 @@ impl crate::AuthoringFootprint for EffectType {
             Self::Colorama => Ok(()),
             Self::Grid => Ok(()),
             Self::CircleEllipse => Ok(()),
-            Self::Stroke | Self::MaskPathStroke => Ok(()),
+            Self::Stroke | Self::MaskPathStroke | Self::ParticleSystem => Ok(()),
             Self::Fill => Ok(()),
             Self::Magnify => Ok(()),
             Self::DustScratches | Self::Denoise => Ok(()),

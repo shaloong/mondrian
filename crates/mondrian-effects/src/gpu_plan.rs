@@ -1247,6 +1247,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::SelectiveColor { .. } => "selective_color",
+        EffectRenderOp::ParticleSystem { .. } => "particle_system",
         EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         EffectRenderOp::Stroke { .. } => "stroke",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",

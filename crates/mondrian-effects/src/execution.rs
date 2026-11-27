@@ -256,6 +256,8 @@ pub enum EffectFloatExecutionError {
     },
     /// Mask Path Stroke layout preparation or application failed.
     MaskPathStroke(crate::mask_path_stroke::MaskPathStrokeError),
+    /// Particle layout preparation or application failed.
+    ParticleSystem(crate::particle_system::ParticleError),
     /// A Video Collage source or cell geometry violates the compiled plan.
     VideoCollage(crate::VideoCollageError),
     /// The graph contains a node shape or render op that cannot execute in float.
@@ -1941,7 +1943,10 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         &mut || scalar_checkpoint(control),
                     )
                     .map_err(|error| {
-                        error.into_execution_error(EffectFloatExecutionError::MaskPathStroke)
+                        error.into_execution_error(
+                            EffectFloatExecutionError::MaskPathStroke,
+                            EffectFloatExecutionError::ParticleSystem,
+                        )
                     })?;
                     if !supported {
                         return Err(unsupported_float_graph_node(
@@ -2062,7 +2067,10 @@ fn apply_compiled_effect_graph_rgba_f32_inner(
                         &mut || scalar_checkpoint(control),
                     )
                     .map_err(|error| {
-                        error.into_execution_error(EffectFloatExecutionError::MaskPathStroke)
+                        error.into_execution_error(
+                            EffectFloatExecutionError::MaskPathStroke,
+                            EffectFloatExecutionError::ParticleSystem,
+                        )
                     })?
                 };
                 if !supported {
@@ -3397,6 +3405,7 @@ pub(crate) fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::UnsharpMask { .. } => "unsharp_mask",
         EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::SelectiveColor { .. } => "selective_color",
+        EffectRenderOp::ParticleSystem { .. } => "particle_system",
         EffectRenderOp::MaskPathStroke { .. } => "mask_path_stroke",
         EffectRenderOp::Stroke { .. } => "stroke",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",

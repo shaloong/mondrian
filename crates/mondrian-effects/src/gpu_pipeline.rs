@@ -447,6 +447,15 @@ pub enum EffectGpuSpatialPass {
         /// The nine authored controls.
         grade: crate::InnerOuterKeyGrade,
     },
+    /// Composite the frozen live particle set on the actual source grid.
+    ParticleSystem {
+        /// Birth-ordered particles in normalized and physical coordinates.
+        particles: Arc<[crate::particle_system::Particle]>,
+        /// Compositing at the requested author time.
+        blend: crate::particle_system::ParticleBlend,
+        /// Proven sampling of the actual input grid.
+        sampling: Option<mondrian_core::ImageSampling>,
+    },
     /// Draw the sampled native Clip mask paths with a pixel-local analytic brush.
     MaskPathStroke {
         /// Immutable, ordered author-time paths and paint controls.
@@ -620,6 +629,7 @@ impl EffectGpuSpatialPass {
             Self::PictureInPicture { .. } => "picture_in_picture",
             Self::InnerOuterKey { .. } => "inner_outer_key",
             Self::GrowBounds { .. } => "grow_bounds",
+            Self::ParticleSystem { .. } => "particle_system",
             Self::MaskPathStroke { .. } => "mask_path_stroke",
             Self::Smear { .. } => "smear",
             Self::Reshape { .. } => "reshape",
@@ -762,7 +772,7 @@ impl EffectGpuSpatialPass {
             // read a bounded window, so the halo is the sum of their reaches plus
             // the sample tap of the estimate.
             Self::InnerOuterKey { grade } => grade.halo(),
-            Self::MaskPathStroke { .. } => 0,
+            Self::MaskPathStroke { .. } | Self::ParticleSystem { .. } => 0,
             Self::GrowBounds { grade } => grade.output_outset()[0],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -877,7 +887,7 @@ impl EffectGpuSpatialPass {
             // complete frame raster vertically as well.
             Self::PictureInPicture { .. } => u32::MAX,
             Self::InnerOuterKey { grade } => grade.halo(),
-            Self::MaskPathStroke { .. } => 0,
+            Self::MaskPathStroke { .. } | Self::ParticleSystem { .. } => 0,
             Self::GrowBounds { grade } => grade.output_outset()[1],
             Self::Smear { .. } | Self::Reshape { .. } | Self::DetailPreservingUpscale { .. } => {
                 u32::MAX
@@ -1070,7 +1080,8 @@ impl CompiledEffectGpuPipeline {
                         | EffectGpuSpatialPass::Reshape { .. }
                         | EffectGpuSpatialPass::Glass { .. }
                         | EffectGpuSpatialPass::VideoCollage { .. }
-                        | EffectGpuSpatialPass::MaskPathStroke { .. },
+                        | EffectGpuSpatialPass::MaskPathStroke { .. }
+                        | EffectGpuSpatialPass::ParticleSystem { .. },
                     ..
                 }
             )
@@ -1088,7 +1099,8 @@ impl CompiledEffectGpuPipeline {
                     | EffectGpuSpatialPass::Reshape { sampling: value, .. }
                     | EffectGpuSpatialPass::Glass { sampling: value, .. }
                     | EffectGpuSpatialPass::VideoCollage { sampling: value, .. }
-                    | EffectGpuSpatialPass::MaskPathStroke { sampling: value, .. },
+                    | EffectGpuSpatialPass::MaskPathStroke { sampling: value, .. }
+                    | EffectGpuSpatialPass::ParticleSystem { sampling: value, .. },
                 ..
             } = stage
             {
@@ -1516,6 +1528,13 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         EffectRenderOp::Median { grade } => Some(EffectGpuSpatialPass::Median { grade: *grade }),
         EffectRenderOp::SelectiveColor { grade } => {
             Some(EffectGpuSpatialPass::SelectiveColor { grade: *grade })
+        }
+        EffectRenderOp::ParticleSystem { particles, blend } => {
+            Some(EffectGpuSpatialPass::ParticleSystem {
+                particles: Arc::clone(particles),
+                blend: *blend,
+                sampling: None,
+            })
         }
         EffectRenderOp::MaskPathStroke { geometry } => Some(EffectGpuSpatialPass::MaskPathStroke {
             geometry: Arc::clone(geometry),

@@ -2563,6 +2563,9 @@ pub enum PreparedHeterogeneousEffectWorkError {
     /// Mask Path Stroke layout preparation or application failed.
     #[error(transparent)]
     MaskPathStroke(crate::mask_path_stroke::MaskPathStrokeError),
+    /// Particle layout preparation or application failed.
+    #[error(transparent)]
+    ParticleSystem(crate::particle_system::ParticleError),
     /// A Glass node failed while producing its complete CPU materialization.
     #[error("heterogeneous Glass execution failed: {0:?}")]
     Glass(crate::EffectFloatExecutionError),
@@ -3014,6 +3017,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::Beam { .. } => 151,
         EffectRenderOp::InnerOuterKey { .. } => 153,
         EffectRenderOp::MaskPathStroke { .. } => 155,
+        EffectRenderOp::ParticleSystem { .. } => 159,
         EffectRenderOp::TemporalGrain { .. } => 156,
         EffectRenderOp::SpatialGrain { .. } => 157,
         EffectRenderOp::TemporalFrameResample { .. } => 158,
@@ -3951,6 +3955,7 @@ fn execute_cpu_dag_prefix(
                     .map_err(|error| {
                         error.into_execution_error(
                             PreparedHeterogeneousEffectWorkError::MaskPathStroke,
+                            PreparedHeterogeneousEffectWorkError::ParticleSystem,
                         )
                     })?
                 };
@@ -5639,6 +5644,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Grid { .. }
             | crate::EffectRenderOp::CircleEllipse { .. }
             | crate::EffectRenderOp::MaskPathStroke { .. }
+            | crate::EffectRenderOp::ParticleSystem { .. }
             | crate::EffectRenderOp::Stroke { .. }
             | crate::EffectRenderOp::Fill { .. }
             | crate::EffectRenderOp::ColorBalance { .. }

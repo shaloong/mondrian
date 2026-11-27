@@ -820,6 +820,8 @@ fn render_op_retained_bytes_estimate(op: &EffectRenderOp) -> usize {
         EffectRenderOp::Qualifier { qualifier } => qualifier.retained_bytes_estimate(),
         EffectRenderOp::HdrGrading { grade } => grade.retained_bytes_estimate(),
         EffectRenderOp::Glass { lighting: Some(lighting), .. } => lighting.retained_bytes(),
+        EffectRenderOp::ParticleSystem { particles, .. } => std::mem::size_of::<EffectRenderOp>()
+            .saturating_add(std::mem::size_of_val(particles.as_ref())),
         EffectRenderOp::Custom { key, params, cache_key, processor, .. } => {
             let params_bytes = serde_json::to_vec(params).map_or(512, |bytes| bytes.len().max(512));
             std::mem::size_of::<EffectRenderOp>()
@@ -3761,11 +3763,13 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float
         },
-        EffectRenderOp::MaskPathStroke { .. } => EffectImplementationRequirements {
-            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-            roi_from_effect_input: EffectRoiPropagation::PixelLocal,
-            ..cpu_float
-        },
+        EffectRenderOp::MaskPathStroke { .. } | EffectRenderOp::ParticleSystem { .. } => {
+            EffectImplementationRequirements {
+                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+                roi_from_effect_input: EffectRoiPropagation::PixelLocal,
+                ..cpu_float
+            }
+        }
         EffectRenderOp::Stroke { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // The band is centred on a contour the kernel finds by scanning
