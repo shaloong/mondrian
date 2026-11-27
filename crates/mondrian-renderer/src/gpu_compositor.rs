@@ -6882,7 +6882,10 @@ impl GpuFrameCompositor {
                         });
                     }
                     let mask_path_stroke = chain.mask_path_strokes.get(&stage_index);
-                    if mask_path_stroke.is_some_and(|layout| layout.is_empty()) {
+                    let particle_system = chain.particle_systems.get(&stage_index);
+                    if mask_path_stroke.is_some_and(|layout| layout.is_empty())
+                        || particle_system.is_some_and(|layout| layout.is_empty())
+                    {
                         continue;
                     }
                     let (width, height) = (output_extent.width(), output_extent.height());
@@ -6895,7 +6898,20 @@ impl GpuFrameCompositor {
                         "gpu-spatial-pass",
                         resource_pool,
                     )?;
-                    if let Some(layout) = mask_path_stroke {
+                    if let Some(layout) = particle_system {
+                        self.spatial
+                            .record_particle_system(
+                                device,
+                                encoder,
+                                &current_texture,
+                                &output.resource().texture,
+                                layout,
+                            )
+                            .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                                pass: spatial_failure_pass(&error),
+                                detail: error.to_string(),
+                            })?;
+                    } else if let Some(layout) = mask_path_stroke {
                         self.spatial
                             .record_mask_path_stroke(
                                 device,
@@ -10198,6 +10214,14 @@ fn prepare_spatial_chains(
                     pass: spatial_chain_blocker_pass(&blocker),
                     detail: blocker.to_string(),
                 })?;
+        for layout in chain.particle_systems.values() {
+            layout
+                .check_limits(limits)
+                .map_err(|error| GpuCompositeError::SpatialChainFailed {
+                    pass: spatial_failure_pass(&error),
+                    detail: error.to_string(),
+                })?;
+        }
         for layout in chain.mask_path_strokes.values() {
             crate::mask_path_stroke_gpu::check_limits(layout, limits).map_err(|error| {
                 GpuCompositeError::SpatialChainFailed {
@@ -28377,6 +28401,121 @@ mod tests {
             let error = max_spatial_float_error(expected.pixels(), &actual);
             eprintln!("authored mask-path Stroke {style:?}, Float32 absolute error {error:.9e}");
             assert!(error <= 1.0e-4);
+        }
+    }
+
+    #[tokio::test]
+    async fn spatial_chain_particle_system_matches_float32_for_all_blends() {
+        use mondrian_core::{
+            Color, ImageSampling, PropertyHost, PropertyMutation, PropertyValue, Rational,
+            SampleAspectRatio, TimelineTime,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, instantiate_effect_node,
+            lower_effect_graph_to_gpu_pipeline, EffectFloatFrameView, EffectFrameExtent,
+            EffectType, EffectValueFormat, EffectWorkingPrecision, PreparedEffectProgram,
+        };
+
+        let gpu = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for particle parity");
+        let (width, height) = (77, 53);
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = ImageSampling::new(
+            SampleAspectRatio::new(4, 3).unwrap(),
+            [Rational::new(1, 2), Rational::new(2, 3)],
+        )
+        .unwrap();
+        let pixels = (0..width * height)
+            .map(|i| {
+                if i % 5 < 2 {
+                    [0.0; 4]
+                } else {
+                    [(i % 11) as f32 * 0.21, -0.04, 0.68, 0.65]
+                }
+            })
+            .collect::<Vec<_>>();
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width,
+            height,
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: space,
+            data: pixels.clone(),
+        });
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let time = TimelineTime::new(37, 24).unwrap();
+        let kind = EffectType::ParticleSystem;
+        for blend in ["add", "normal", "screen", "overlay"] {
+            let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+            for (name, value) in [
+                ("blend", PropertyValue::Enum(blend.to_owned())),
+                ("emitter_shape", PropertyValue::Enum("rectangle".to_owned())),
+                ("rate", PropertyValue::Float(240.0)),
+                ("speed", PropertyValue::Float(57.0)),
+                ("emitter_size", PropertyValue::Float(110.0)),
+                ("size", PropertyValue::Float(13.0)),
+                ("drag", PropertyValue::Float(0.32)),
+                ("gravity", PropertyValue::Float(67.0)),
+                ("rotation", PropertyValue::Float(61.0)),
+                (
+                    "color",
+                    PropertyValue::Color(Color { r: 1.13, g: 0.21, b: 0.65, a: 0.28 }),
+                ),
+            ] {
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: kind.property_path(name),
+                        value,
+                    })
+                    .unwrap();
+            }
+            let graph = PreparedEffectProgram::prepare(&[effect], &[], space)
+                .unwrap()
+                .evaluate(time)
+                .unwrap();
+            let lowering = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            assert!(lowering.requires_image_sampling());
+            let pipeline = lowering.with_image_sampling(sampling);
+            let layers = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &gpu, &layers, width, height, space,
+            );
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                EffectFloatFrameView::new(extent, format, sampling, &pixels),
+                &graph,
+                0,
+            )
+            .unwrap();
+            assert_eq!(diagnostics.spatial_effect_passes, 1);
+            assert_eq!(diagnostics.spatial_scratch_textures_peak, 0);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+            assert!(diagnostics.spatial_scratch_bytes_peak > 0);
+            assert!(pixels
+                .iter()
+                .zip(&actual)
+                .any(|(before, after)| before[3] == 0.0 && after[3] > 0.1));
+            assert_eq!(expected.pixels().len(), actual.len());
+            let (mut rgb, mut alpha) = (0.0_f32, 0.0_f32);
+            for (cpu, gpu) in expected.pixels().iter().zip(&actual) {
+                assert!(cpu.iter().chain(gpu).all(|channel| channel.is_finite()));
+                alpha = alpha.max((cpu[3] - gpu[3]).abs());
+                for channel in 0..3 {
+                    rgb = rgb.max((cpu[channel] * cpu[3] - gpu[channel] * gpu[3]).abs());
+                }
+            }
+            eprintln!(
+                "particle system {blend}, associated Float32 RGB {rgb:.9e}, alpha {alpha:.9e}"
+            );
+            assert!(rgb <= 1e-4 && alpha <= 1e-4);
         }
     }
 

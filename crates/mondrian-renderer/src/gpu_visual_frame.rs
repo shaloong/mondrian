@@ -1315,9 +1315,10 @@ pub(crate) fn estimate_visual_spatial_plan(
         .and_then(|count| u64::try_from(count).ok())
         .ok_or(GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
     let mut demand = GpuVisualFrameActiveTextureDemand { bytes: plan.scratch_bytes, textures };
-    // Idle path strokes reuse their input; all other stages own a result.
-    let idle_strokes = plan.mask_path_strokes.values().filter(|layout| layout.is_empty()).count();
-    let stage_outputs = u64::try_from(plan.stages.len() - idle_strokes)
+    // Empty geometry stages reuse their input resource.
+    let idle_geometry = plan.mask_path_strokes.values().filter(|layout| layout.is_empty()).count()
+        + plan.particle_systems.values().filter(|layout| layout.is_empty()).count();
+    let stage_outputs = u64::try_from(plan.stages.len() - idle_geometry)
         .map_err(|_| GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
     let output = plan.output_bounds.extent();
     demand.checked_add(

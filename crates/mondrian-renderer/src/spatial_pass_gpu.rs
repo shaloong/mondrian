@@ -59,6 +59,7 @@ pub(crate) struct EffectSpatialGpu {
     bilateral: std::sync::OnceLock<crate::bilateral_gpu::BilateralGpu>,
     mask_deformation: std::sync::OnceLock<crate::mask_deformation_gpu::MaskDeformationGpu>,
     mask_path_stroke: std::sync::OnceLock<crate::mask_path_stroke_gpu::MaskPathStrokeGpu>,
+    particle_system: std::sync::OnceLock<crate::particle_system_gpu::ParticleGpu>,
     detail_preserving_upscale:
         std::sync::OnceLock<crate::detail_preserving_upscale_gpu::DetailPreservingUpscaleGpu>,
     glass: std::sync::OnceLock<crate::glass_gpu::GlassGpu>,
@@ -2937,6 +2938,7 @@ impl EffectSpatialGpu {
             bilateral: std::sync::OnceLock::new(),
             mask_deformation: std::sync::OnceLock::new(),
             mask_path_stroke: std::sync::OnceLock::new(),
+            particle_system: std::sync::OnceLock::new(),
             detail_preserving_upscale: std::sync::OnceLock::new(),
             glass: std::sync::OnceLock::new(),
             video_collage: std::sync::OnceLock::new(),
@@ -4901,7 +4903,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::CameraView { .. } => Ok(1),
             EffectGpuSpatialPass::GrowBounds { .. } => Ok(1),
             EffectGpuSpatialPass::Smear { .. } | EffectGpuSpatialPass::Reshape { .. } => Ok(1),
-            EffectGpuSpatialPass::MaskPathStroke { .. } => Ok(0),
+            EffectGpuSpatialPass::MaskPathStroke { .. } | EffectGpuSpatialPass::ParticleSystem { .. } => Ok(0),
             EffectGpuSpatialPass::DetailPreservingUpscale { .. } => Ok(1),
             EffectGpuSpatialPass::Glass { .. } => Ok(1),
             EffectGpuSpatialPass::VideoCollage { .. } => Ok(0),
@@ -5075,6 +5077,11 @@ impl EffectSpatialGpu {
                     mondrian_effects::EffectFrameExtent::new(source.width(), source.height());
                 self.record_glass(device, encoder, pass, source, output, None, primary)?;
                 return Ok(output.clone());
+            }
+            EffectGpuSpatialPass::ParticleSystem { .. } => {
+                return Err(EffectSpatialGpuError::UnsupportedPass(
+                    "particle_system_direct_output",
+                ));
             }
             EffectGpuSpatialPass::MaskPathStroke { .. } => {
                 // The driver prepares and validates the extent-bound layout before recording.
@@ -6339,6 +6346,20 @@ impl EffectSpatialGpu {
             auxiliary,
             &plan,
         )
+    }
+
+    pub(crate) fn record_particle_system(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+        source: &wgpu::Texture,
+        destination: &wgpu::Texture,
+        layout: &crate::particle_system_gpu::ParticleGpuLayout,
+    ) -> Result<(), EffectSpatialGpuError> {
+        layout.check_limits(&device.limits())?;
+        self.particle_system
+            .get_or_init(|| crate::particle_system_gpu::ParticleGpu::new(device))
+            .record(device, encoder, source, destination, layout)
     }
 
     pub(crate) fn record_mask_path_stroke(

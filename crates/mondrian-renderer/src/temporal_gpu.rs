@@ -574,6 +574,14 @@ fn record_temporal_schedule(
         }
         let chain = temporal_spatial_chain(extent, step.operation())?;
         if let Some(chain) = &chain {
+            for layout in chain.particle_systems.values() {
+                layout.check_limits(&device.limits()).map_err(|error| {
+                    TemporalGpuExecutionError::Composite(GpuCompositeError::SpatialChainFailed {
+                        pass: "particle_system",
+                        detail: error.to_string(),
+                    })
+                })?;
+            }
             for layout in chain.mask_path_strokes.values() {
                 crate::mask_path_stroke_gpu::check_limits(layout, &device.limits()).map_err(
                     |error| {

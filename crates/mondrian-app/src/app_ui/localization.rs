@@ -440,6 +440,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "缩放模糊" => Some("parameter-group-zoom-blur"),
         "翻页" => Some("parameter-group-page-turn"),
         "形状" => Some("parameter-group-shape"),
+        "粒子系统" => Some("parameter-group-particle-system"),
         "降噪" => Some("parameter-group-denoise"),
         "降噪时序滤波" => Some("parameter-group-denoise-temporal"),
         "降噪采样" => Some("parameter-group-denoise-calibration"),

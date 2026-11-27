@@ -114,6 +114,9 @@ impl PreviewCpuExecutionError {
                         reason: EffectFloatExecutionError::MaskPathStroke(reason),
                     } => (reason.to_string(), *reason == MaskPathStrokeError::Canceled),
                     TimelineCompositeError::FloatEffect {
+                        reason: EffectFloatExecutionError::ParticleSystem(reason),
+                    } => (reason.to_string(), false),
+                    TimelineCompositeError::FloatEffect {
                         reason: EffectFloatExecutionError::Stopped { .. },
                     } => (self.to_string(), true),
                     _ => (self.to_string(), false),
@@ -196,6 +199,15 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
             | MaskPathStrokeError::AllocationFailed { .. }
             | MaskPathStrokeError::RegionOutsideExtent
             | MaskPathStrokeError::InvalidPixelBuffer => false,
+        },
+        TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::ParticleSystem(error),
+        } => match error {
+            mondrian_effects::particle_system::ParticleError::InvalidControl(_)
+            | mondrian_effects::particle_system::ParticleError::Time(_)
+            | mondrian_effects::particle_system::ParticleError::IndexBudget => true,
+            mondrian_effects::particle_system::ParticleError::InvalidRaster
+            | mondrian_effects::particle_system::ParticleError::Allocation => false,
         },
         TimelineCompositeError::FloatEffect {
             reason:
@@ -926,6 +938,35 @@ mod tests {
             let error =
                 PreviewCpuExecutionError::TimelineComposite(TimelineCompositeError::FloatEffect {
                     reason: EffectFloatExecutionError::MaskPathStroke(reason),
+                });
+            let unavailable = error.unavailability();
+            assert_eq!(unavailable.disposition(), disposition);
+            assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+            assert!(unavailable.detail().contains(detail));
+            assert!(error.processor_blocked().is_none());
+        }
+    }
+
+    #[test]
+    fn particle_preview_errors_keep_their_typed_detail() {
+        use mondrian_effects::particle_system::ParticleError;
+        use PreviewUnavailabilityDisposition::{Blocked, Failed};
+
+        for (reason, disposition, detail) in [
+            (
+                ParticleError::InvalidControl("rate"),
+                Blocked,
+                "invalid particle emitter control rate",
+            ),
+            (
+                ParticleError::Allocation,
+                Failed,
+                "could not allocate particle raster storage",
+            ),
+        ] {
+            let error =
+                PreviewCpuExecutionError::TimelineComposite(TimelineCompositeError::FloatEffect {
+                    reason: EffectFloatExecutionError::ParticleSystem(reason),
                 });
             let unavailable = error.unavailability();
             assert_eq!(unavailable.disposition(), disposition);

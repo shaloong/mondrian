@@ -338,6 +338,15 @@ fn estimate_ns(
                     let uploaded = crate::mask_path_stroke_gpu::payload_bytes(layout) as f64;
                     gpu += uploaded / GPU_EFFECTIVE_BANDWIDTH_BYTES_PER_NS;
                 }
+                if let Some(layout) = plan.particle_systems.get(&stage_index) {
+                    if layout.is_empty() {
+                        continue;
+                    }
+                    let (device_tests, cpu_tests) = layout.coverage_work();
+                    gpu += layout.payload_bytes() as f64 / GPU_EFFECTIVE_BANDWIDTH_BYTES_PER_NS;
+                    gpu += device_tests as f64 * 0.6;
+                    cpu += cpu_tests as f64 * 5.0;
+                }
                 let passes = f64::from(*draw_passes);
                 gpu += *draw_pixels as f64 * gpu_ns_per_px(pass) + passes * GPU_PASS_OVERHEAD_NS;
                 if *scratch_textures > 0 {
@@ -442,6 +451,7 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // Stroke scans up to a hundred and twelve taps per pixel before the
         // band composite, so it sits far above one-pass arithmetic.
         "stroke" | "mask_path_stroke" => 3.0,
+        "particle_system" => 1.0,
         // The median gathers the whole window eight times over, so it costs more
         // than a separable blur pass despite the small GPU radius cap.
         "median" => 4.0,
@@ -557,6 +567,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // Fifty-six to a hundred and twelve nearest-neighbour taps with a
         // bracket decision per tap: the most expensive CPU kernel in the family.
         "stroke" | "mask_path_stroke" => 6.0,
+        "particle_system" => 2.0,
         "fill_matte" => 2.5,
         "channel_combiner_layer" => 3.0,
         "set_matte" => 3.0,
@@ -695,6 +706,7 @@ mod tests {
         GpuSpatialChainPlan {
             stages,
             mask_path_strokes: Default::default(),
+            particle_systems: Default::default(),
             spatial_passes,
             point_stages,
             scratch_textures: usize::try_from(largest).unwrap_or(usize::MAX).saturating_add(1),
