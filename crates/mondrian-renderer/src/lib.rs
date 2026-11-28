@@ -31,6 +31,7 @@ mod mask_path_stroke_gpu;
 mod particle_system_gpu;
 pub mod spatial_driver;
 mod spatial_pass_gpu;
+pub mod stabilization;
 mod video_collage_gpu;
 pub use display_matte::GpuDisplayCalibrationBackdrop;
 pub use spatial_driver::{

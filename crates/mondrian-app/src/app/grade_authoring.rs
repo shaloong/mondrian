@@ -137,6 +137,11 @@ impl AppState {
     }
 
     fn add_grade_effect(&mut self, payload: GradeAddEffectPayload) -> Result<()> {
+        if payload.effect_type == mondrian_effects::EffectType::Stabilizer {
+            return Err(grade_error(
+                "Stabilizer analysis belongs to an individual video Clip",
+            ));
+        }
         let mut effect = self.instantiate_effect_for_active_sequence(
             payload.effect_type.clone(),
             "add_grade_effect",

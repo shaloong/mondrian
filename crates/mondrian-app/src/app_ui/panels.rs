@@ -2549,6 +2549,9 @@ pub struct InspectorEffectModel {
         Option<std::sync::Arc<crate::app::preview_native_gui::PreviewNativeGuiController>>,
     /// Effect instance id targeted by enable/disable actions.
     pub effect_id: EffectId,
+    pub(crate) stabilization_status:
+        Option<crate::app::clip_stabilization::ClipStabilizationStatus>,
+    pub(crate) can_analyze_stabilization: bool,
     /// Human-readable effect name.
     pub label: String,
     /// Whether the effect is enabled.
@@ -3104,6 +3107,17 @@ impl InspectorPanelModel {
                         .flatten(),
                     native_gui_controller: None,
                     effect_id: effect.id,
+                    stabilization_status: (effect.effect_type == EffectType::Stabilizer).then(
+                        || {
+                            state.clip_stabilization_status(
+                                clip.id,
+                                effect.id,
+                            mondrian_effects::stabilization::StabilizationRecord::has_saved_analysis(effect),
+                            )
+                        },
+                    ),
+                    can_analyze_stabilization: clip.media_asset_id().is_some()
+                        && state.can_analyze_clip_stabilization(),
                     label: localized_effect_name(&effect.effect_type, Some(localizer)),
                     enabled: effect.is_enabled,
                     properties: {

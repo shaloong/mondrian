@@ -111,6 +111,7 @@ pub(crate) struct EffectSpatialGpu {
     wave_warp: wgpu::RenderPipeline,
     transform: wgpu::RenderPipeline,
     corner_pin: wgpu::RenderPipeline,
+    stabilization_warp: wgpu::RenderPipeline,
     turbulent_displace: wgpu::RenderPipeline,
     lens_flare: wgpu::RenderPipeline,
     bulge: wgpu::RenderPipeline,
@@ -1427,36 +1428,43 @@ impl EffectSpatialGpu {
             multiview_mask: None,
             cache: None,
         });
-        let corner_pin = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mondrian.effect-spatial.corner-pin"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_corner_pin"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba32Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                cull_mode: None,
-                ..wgpu::PrimitiveState::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let remap_pipeline = |label, entry_point| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry_point),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    cull_mode: None,
+                    ..wgpu::PrimitiveState::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let corner_pin = remap_pipeline("mondrian.effect-spatial.corner-pin", "fs_corner_pin");
+        let stabilization_warp = remap_pipeline(
+            "mondrian.effect-spatial.stabilization-warp",
+            "fs_stabilization_warp",
+        );
         let turbulent_displace = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mondrian.effect-spatial.turbulent-displace"),
             layout: Some(&layout),
@@ -2905,6 +2913,7 @@ impl EffectSpatialGpu {
             wave_warp,
             transform,
             corner_pin,
+            stabilization_warp,
             turbulent_displace,
             lens_flare,
             bulge,
@@ -4780,7 +4789,7 @@ impl EffectSpatialGpu {
             EffectGpuSpatialPass::Ripple { .. } => Ok(1),
             EffectGpuSpatialPass::WaveWarp { .. } => Ok(1),
             EffectGpuSpatialPass::Transform { .. } => Ok(1),
-            EffectGpuSpatialPass::CornerPin { .. } => Ok(1),
+            EffectGpuSpatialPass::StabilizationWarp { .. } | EffectGpuSpatialPass::CornerPin { .. } => Ok(1),
             EffectGpuSpatialPass::TurbulentDisplace { .. } => Ok(1),
             EffectGpuSpatialPass::FractalNoise { .. } => Ok(1),
             // Two blur passes feed one composite pass.
@@ -5493,6 +5502,30 @@ impl EffectSpatialGpu {
                     width,
                     height,
                 );
+            }
+            EffectGpuSpatialPass::StabilizationWarp { warp } => {
+                if warp.is_identity() {
+                    return Ok(source.clone());
+                }
+                let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
+                let uniforms = SpatialPassUniform {
+                    size: [width as f32, height as f32, 0.0, 0.0],
+                    params: warp.gpu_controls(),
+                    extra: [0.0; 4],
+                    aces: [0.0; 4],
+                    extra1: [0.0; 4],
+                };
+                let input = source.create_view(&wgpu::TextureViewDescriptor::default());
+                let output = destination.create_view(&wgpu::TextureViewDescriptor::default());
+                self.record_pass(
+                    device,
+                    encoder,
+                    &self.stabilization_warp,
+                    &input,
+                    &output,
+                    &uniforms,
+                );
+                return Ok(destination.clone());
             }
             EffectGpuSpatialPass::CornerPin { grade } => {
                 let destination = scratch.first().ok_or(EffectSpatialGpuError::EmptyFrame)?;
@@ -10673,6 +10706,23 @@ fn fs_corner_pin(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
             / third,
     );
     return unpremultiply(sample_bilinear_premultiplied(sample.x, sample.y));
+}
+
+@fragment
+fn fs_stabilization_warp(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    if uniforms.params.x == 0.0 {
+        return vec4(0.0);
+    }
+    let size = uniforms.size.xy;
+    let center = size * 0.5;
+    let offset = uniforms.params.yz * size;
+    let source_center = (position.xy - center) * uniforms.params.x + center + offset;
+    let epsilon = size * 1.0e-6;
+    if !(all(source_center >= -epsilon) && all(source_center <= size + epsilon)) {
+        return vec4(0.0);
+    }
+    let p = source_center - vec2(0.5);
+    return unpremultiply(sample_bilinear_premultiplied(p.x, p.y));
 }
 
 // The turbulent displace field. The hash, the octave sum and the displacement

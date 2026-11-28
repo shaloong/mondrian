@@ -1402,8 +1402,9 @@ impl AppUiHost {
             media_asset_mutations_changed,
             proxy_generation_changed,
             visual_tracking_changed,
+            clip_stabilization_changed,
         ) = if project_execution_frozen {
-            (false, false, false, false)
+            (false, false, false, false, false)
         } else {
             let mut state = self.app_state.borrow_mut();
             (
@@ -1411,6 +1412,7 @@ impl AppUiHost {
                 state.poll_media_asset_mutations(),
                 state.poll_proxy_generation(),
                 state.poll_visual_tracking(),
+                state.poll_clip_stabilization(),
             )
         };
         let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
@@ -1446,6 +1448,7 @@ impl AppUiHost {
             || media_asset_mutations_changed
             || proxy_generation_changed
             || visual_tracking_changed
+            || clip_stabilization_changed
             || export_queue_changed
             || portable_package_changed
             || thumbnails_changed

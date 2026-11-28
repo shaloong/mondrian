@@ -451,7 +451,7 @@ fn gpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // Stroke scans up to a hundred and twelve taps per pixel before the
         // band composite, so it sits far above one-pass arithmetic.
         "stroke" | "mask_path_stroke" => 3.0,
-        "particle_system" => 1.0,
+        "particle_system" | "stabilization_warp" => 1.0,
         // The median gathers the whole window eight times over, so it costs more
         // than a separable blur pass despite the small GPU radius cap.
         "median" => 4.0,
@@ -568,6 +568,7 @@ fn cpu_ns_per_px(pass: &EffectGpuSpatialPass) -> f64 {
         // bracket decision per tap: the most expensive CPU kernel in the family.
         "stroke" | "mask_path_stroke" => 6.0,
         "particle_system" => 2.0,
+        "stabilization_warp" => 4.0,
         "fill_matte" => 2.5,
         "channel_combiner_layer" => 3.0,
         "set_matte" => 3.0,

@@ -532,7 +532,13 @@ impl AppState {
         effect_type: EffectType,
     ) -> mondrian_core::Result<EffectId> {
         let sequence = active_sequence_for_visual_effect(self, "add_effect_to_clip")?;
-        authorable_visual_effect_clip(sequence, clip_id, "add_effect_to_clip")?;
+        let clip = authorable_visual_effect_clip(sequence, clip_id, "add_effect_to_clip")?;
+        if effect_type == EffectType::Stabilizer && clip.media_asset_id().is_none() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "add_effect_to_clip".to_owned(),
+                reason: "Stabilizer requires a file-backed video Clip".to_owned(),
+            });
+        }
         let mut effect =
             self.instantiate_effect_for_active_sequence(effect_type.clone(), "add_effect_to_clip")?;
         self.resolve_effect_resources(&mut effect)?;

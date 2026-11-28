@@ -73,6 +73,7 @@ use super::preview_viewer_plan::{
 /// Complete media-layer request emitted while materializing a prepared node.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PreviewTimelineMediaRequest {
+    pub(crate) stabilization_sources: Vec<mondrian_effects::stabilization::StabilizationSource>,
     /// Frozen requirement of the original reachable Clip graph.
     pub(crate) image_scale_requirement: mondrian_effects::EffectImageScaleRequirement,
     pub(crate) asset_id: AssetId,
@@ -4581,6 +4582,7 @@ fn preview_timeline_media_request(
 ) -> Result<PreviewTimelineMediaRequest, TimelinePreviewEffectRouteError> {
     let route = routes.route_for(media.placement, &media.effect_graph)?;
     Ok(PreviewTimelineMediaRequest {
+        stabilization_sources: media.effect_graph.stabilization_sources().collect(),
         asset_id: media.asset_id,
         color_space_override: media.color_space_override,
         alpha_interpretation: media.alpha_interpretation,
@@ -4667,6 +4669,7 @@ fn preview_temporal_media_request(
     image_scale_requirement: mondrian_effects::EffectImageScaleRequirement,
 ) -> PreviewTimelineMediaRequest {
     PreviewTimelineMediaRequest {
+        stabilization_sources: Vec::new(),
         image_scale_requirement,
         asset_id,
         color_space_override,

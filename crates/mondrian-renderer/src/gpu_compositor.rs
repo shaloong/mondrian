@@ -28405,6 +28405,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spatial_chain_stabilization_warp_matches_cpu_framing() {
+        use mondrian_core::{
+            mask_data::MaskTrackingSettings, AssetId, ImageSampling, MediaFileChangeStamp,
+            MediaFileFingerprint, MediaFileObjectIdentity, PropertyHost, PropertyMutation,
+            PropertyValue, SourceSampleTarget, TimelineTime,
+        };
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, instantiate_effect_node,
+            lower_effect_graph_to_gpu_pipeline,
+            stabilization::{StabilizationAnalyzer, StabilizationRecord, StabilizationSource},
+            EffectFloatFrameView, EffectFrameExtent, EffectType, EffectValueFormat,
+            EffectWorkingPrecision, PreparedEffectProgram, TrackingFrame,
+        };
+
+        let gpu = crate::GpuContext::new_without_float32_filterable_for_test()
+            .await
+            .expect("real GPU adapter for stabilization parity");
+        let (analysis_width, analysis_height) = (160u32, 120u32);
+        let make_frame = |shift_x: u32| {
+            let luminance = (0..analysis_width * analysis_height)
+                .map(|i| {
+                    let x = (i % analysis_width).wrapping_sub(shift_x);
+                    let y = i / analysis_width;
+                    let hash = x.wrapping_mul(0x9e37_79b9) ^ y.wrapping_mul(0x85eb_ca6b);
+                    let hash = (hash ^ (hash >> 16)).wrapping_mul(0x7feb_352d);
+                    f32::from(hash as u16) / 65_535.0
+                })
+                .collect();
+            TrackingFrame::new(analysis_width, analysis_height, luminance).unwrap()
+        };
+        let one = TimelineTime::new(1, 30).unwrap();
+        let settings = MaskTrackingSettings { search_radius: 12, ..Default::default() };
+        let mut analyzer = StabilizationAnalyzer::new(settings).unwrap();
+        analyzer.push_frame(TimelineTime::ZERO, make_frame(0), false, || false).unwrap();
+        analyzer.push_frame(one, make_frame(8), false, || false).unwrap();
+        let analysis = analyzer.finish(TimelineTime::new(1, 15).unwrap()).unwrap();
+        let source = StabilizationSource {
+            asset: AssetId::new(),
+            video_stream: 0,
+            media: MediaFileFingerprint {
+                len: Some(514),
+                modified_secs: Some(31),
+                modified_nanos: Some(3),
+                object_identity: Some(MediaFileObjectIdentity::Unix { device: 1, inode: 2 }),
+                change_stamp: Some(MediaFileChangeStamp::Unix { seconds: 42, nanoseconds: 0 }),
+            },
+        };
+        let record = StabilizationRecord::new(
+            source,
+            settings,
+            [TimelineTime::ZERO, one]
+                .into_iter()
+                .map(SourceSampleTarget::covering)
+                .collect(),
+            analysis,
+        )
+        .unwrap();
+        let (width, height) = (73, 51);
+        let extent = EffectFrameExtent::new(width, height);
+        let space = WorkingColorSpace::LinearRec709;
+        let sampling = ImageSampling::UNIT_SQUARE;
+        let pixels = (0..width * height)
+            .map(|i| {
+                [
+                    (i % 11) as f32 * 0.18,
+                    -0.05,
+                    0.6,
+                    if i % 29 < 5 { 0.0 } else { 0.65 },
+                ]
+            })
+            .collect::<Vec<_>>();
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width,
+            height,
+            sampling,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            color_space: space,
+            data: pixels.clone(),
+        });
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let kind = EffectType::Stabilizer;
+        for (framing, zoom, should_expose) in [
+            ("show_edges", 100.0, true),
+            ("auto_zoom", 100.0, false),
+            ("auto_zoom", 0.0, true),
+        ] {
+            let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+            record.store_in_effect(&mut effect).unwrap();
+            for (name, value) in [
+                ("result", PropertyValue::Enum("lock".to_owned())),
+                ("framing", PropertyValue::Enum(framing.to_owned())),
+                ("additional_zoom", PropertyValue::Float(zoom)),
+            ] {
+                effect
+                    .apply_property_mutation(PropertyMutation::SetStaticValue {
+                        path: kind.property_path(name),
+                        value,
+                    })
+                    .unwrap();
+            }
+            let graph = PreparedEffectProgram::prepare(&[effect], &[], space)
+                .unwrap()
+                .evaluate(one)
+                .unwrap();
+            assert_eq!(graph.stabilization_sources().collect::<Vec<_>>(), [source]);
+            let pipeline = lower_effect_graph_to_gpu_pipeline(&graph).unwrap();
+            let layers = [GpuCompositeSpatialLayer {
+                layer: spatial_test_layer(&frame),
+                spatial_plan: Some(&pipeline),
+            }];
+            let (actual, diagnostics) = readback_spatial_test_composite_with_diagnostics(
+                &gpu, &layers, width, height, space,
+            );
+            let expected = apply_compiled_effect_graph_rgba_f32(
+                EffectFloatFrameView::new(extent, format, sampling, &pixels),
+                &graph,
+                0,
+            )
+            .unwrap();
+            assert_eq!(
+                expected.pixels().iter().all(|pixel| pixel[3] == 0.0),
+                zoom == 0.0
+            );
+            assert_eq!(
+                expected.pixels()[(width - 1) as usize][3] == 0.0,
+                should_expose
+            );
+            assert_eq!(diagnostics.spatial_effect_passes, 1);
+            assert_eq!(diagnostics.cpu_fallback_composites, 0);
+            let mut error = 0.0_f32;
+            assert_eq!(expected.pixels().len(), actual.len());
+            for (cpu, gpu) in expected.pixels().iter().zip(&actual) {
+                assert!(cpu.iter().chain(gpu).all(|channel| channel.is_finite()));
+                error = error.max((cpu[3] - gpu[3]).abs());
+                for channel in 0..3 {
+                    error = error.max((cpu[channel] * cpu[3] - gpu[channel] * gpu[3]).abs());
+                }
+            }
+            eprintln!("stabilization {framing} at {zoom}% zoom, associated Float32 maximum error {error:.9e}");
+            assert!(error <= 1.0e-4);
+        }
+    }
+
+    #[tokio::test]
     async fn spatial_chain_particle_system_matches_float32_for_all_blends() {
         use mondrian_core::{
             Color, ImageSampling, PropertyHost, PropertyMutation, PropertyValue, Rational,

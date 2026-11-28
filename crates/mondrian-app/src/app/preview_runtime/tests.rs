@@ -16330,6 +16330,7 @@ fn current_media_grant_rejection_is_blocked_without_phantom_pending_work() {
         height: sequence.settings.resolution.height,
     };
     let request = crate::app::preview_timeline_execution::PreviewTimelineMediaRequest {
+        stabilization_sources: Vec::new(),
         image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Any,
         asset_id,
         color_space_override: None,

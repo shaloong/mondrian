@@ -16,6 +16,7 @@ use mondrian_core::{
     GradeGraphNodeId, MondrianError, Rational, Resolution, Result, SequenceId, SequenceRevision,
     TimelineTime, TimelineTimeRange, VideoTransitionId, VisualSourceRetime,
 };
+use mondrian_effects::stabilization::StabilizationRecord;
 use mondrian_effects::{
     effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
     EffectExecutionEnvelope, EffectExecutionSession, EffectFrameContext, EffectProjectGeometry,
@@ -126,6 +127,26 @@ fn prepared_clip_grade_segments(
             .collect::<std::result::Result<Vec<_>, _>>()?,
         assignments,
     ))
+}
+
+fn validate_clip_stabilization_records(clip: &Clip) -> std::result::Result<(), String> {
+    for effect in clip.effects.iter().filter(|effect| {
+        effect.is_enabled && effect.effect_type == mondrian_effects::EffectType::Stabilizer
+    }) {
+        let Some(record) =
+            StabilizationRecord::from_effect(effect).map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        crate::stabilization::stabilization_analysis_for_clip(
+            &record,
+            clip,
+            record.source(),
+            record.settings(),
+        )
+        .map_err(|error| format!("stabilization effect {}: {error}", effect.id))?;
+    }
+    Ok(())
 }
 
 fn hierarchical_clip_author_fingerprint(
@@ -839,6 +860,17 @@ impl PreparedVisualProgram {
                 } else {
                     None
                 };
+                if let Err(reason) = validate_clip_stabilization_records(clip) {
+                    blocked_clips += 1;
+                    clip_effects.insert(
+                        clip.id,
+                        PreparedClipEffects::Blocked {
+                            reason: Arc::from(reason),
+                            retry: PreparedVisualBlockerRetry::AuthorOrDefinitionChange,
+                        },
+                    );
+                    continue;
+                }
                 let author_fingerprint = if has_processing {
                     hierarchical_clip_author_fingerprint(sequence, clip, working_color_space)
                         .map_err(|reason| PreparedVisualProgramError::AuthorFingerprint {

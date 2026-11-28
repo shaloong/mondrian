@@ -420,6 +420,7 @@ fn builtin_parameter_group_message_id(group: &str) -> Option<&'static str> {
         "边缘拉伸" => Some("parameter-group-blanking-fill-edge-stretch"),
         "抽帧" => Some("parameter-group-posterize-time"),
         "时间扭曲" => Some("parameter-group-timewarp"),
+        "画面稳定器" => Some("parameter-group-stabilizer"),
         "去交错" => Some("parameter-group-deinterlace"),
         "水彩" => Some("parameter-group-watercolor"),
         "扫描线" => Some("parameter-group-scanlines"),

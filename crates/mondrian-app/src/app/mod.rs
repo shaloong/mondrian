@@ -271,6 +271,7 @@ pub use project_packaging::{
     verify_portable_project_package, PortableDependencyFile, PortableDependencyInventory,
     PortableDependencyIssue, PortablePackageFile, PortablePackageManifest,
 };
+pub(crate) mod clip_stabilization;
 pub(crate) mod parameter_gesture;
 mod project_persistence;
 mod project_recovery;
@@ -633,6 +634,7 @@ pub struct AppState {
     media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution,
     /// Instance-owned, bounded Mask tracking execution and result cache.
     visual_tracking: visual_tracking::VisualTrackingService,
+    clip_stabilization: clip_stabilization::ClipStabilizationService,
 }
 
 #[cfg(test)]
@@ -806,6 +808,7 @@ impl AppState {
             pending_timeline_file_drops: HashMap::new(),
             media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution::new(),
             visual_tracking: visual_tracking::VisualTrackingService::new(),
+            clip_stabilization: clip_stabilization::ClipStabilizationService::default(),
         }
     }
 
@@ -1133,6 +1136,7 @@ impl AppState {
     pub(crate) fn test_set_sequence(&mut self, sequence: Option<Sequence>) {
         let Some(sequence) = sequence else {
             self.visual_tracking.cancel_all();
+            self.clip_stabilization.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
             self.pending_timeline_file_drops.clear();
@@ -1246,6 +1250,7 @@ impl AppState {
     pub(crate) fn test_set_asset_library(&mut self, library: Option<Arc<AssetLibrary>>) {
         let Some(library) = library else {
             self.visual_tracking.cancel_all();
+            self.clip_stabilization.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
             self.pending_timeline_file_drops.clear();
@@ -1272,6 +1277,7 @@ impl AppState {
                 .expect("replace test asset library"),
         );
         self.visual_tracking.cancel_all();
+        self.clip_stabilization.cancel_all();
         self.manual_project_file_destination = None;
         self.manual_project_file_applied_request = None;
         self.synchronize_audio_idle_warmup_binding();

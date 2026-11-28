@@ -10748,7 +10748,7 @@ fn prepare_export_media_decode<'a>(
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     route: ExportDecodedSourceRoute,
 ) -> Result<(ExportDecodeCacheKey, ExportVideoLayerDecodeRequest<'a>), String> {
-    prepare_export_picture_decode(
+    let (key, request) = prepare_export_picture_decode(
         media_dependencies,
         ExportPictureDecodeSource {
             asset_id: media.asset_id,
@@ -10765,7 +10765,18 @@ fn prepare_export_media_decode<'a>(
         color_context,
         input_color_counts,
         route,
-    )
+    )?;
+    if media.effect_graph.stabilization_sources().any(|source| {
+        source.asset != key.asset_id
+            || source.media != key.source_fingerprint
+            || source.video_stream != key.video_stream_index
+    }) {
+        return Err(format!(
+            "asset={} stabilization analysis belongs to a different source revision or stream",
+            media.asset_id
+        ));
+    }
+    Ok((key, request))
 }
 
 struct ExportPictureDecodeSource {

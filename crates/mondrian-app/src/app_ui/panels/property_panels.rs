@@ -1495,6 +1495,64 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                     ),
                 ));
             let mut previous_group = None;
+            if let Some(status) = &effect.stabilization_status {
+                use crate::app::clip_stabilization::ClipStabilizationStatus;
+                use crate::app::product_action::{ProductAction, VisualEffectProductAction};
+
+                let text = match status {
+                    ClipStabilizationStatus::Required => localizer.text("stabilization-required"),
+                    ClipStabilizationStatus::Saved => localizer.text("stabilization-saved"),
+                    ClipStabilizationStatus::Analyzing { completed, total } => {
+                        let mut args = fluent_bundle::FluentArgs::new();
+                        args.set("completed", *completed as i64);
+                        args.set("total", *total as i64);
+                        localizer.format("stabilization-analyzing", Some(&args))
+                    }
+                    ClipStabilizationStatus::Canceling => localizer.text("stabilization-canceling"),
+                    ClipStabilizationStatus::Canceled => localizer.text("stabilization-canceled"),
+                    ClipStabilizationStatus::Failed(detail) => {
+                        localizer.format_text("stabilization-failed", "detail", detail)
+                    }
+                };
+                let active = matches!(
+                    status,
+                    ClipStabilizationStatus::Analyzing { .. } | ClipStabilizationStatus::Canceling
+                );
+                let allowed = if active {
+                    matches!(status, ClipStabilizationStatus::Analyzing { .. })
+                } else {
+                    can_edit && effect.can_analyze_stabilization
+                };
+                let action = selected_clip.filter(|_| allowed).map(|selection| {
+                    let target =
+                        VisualEffectTargetPayload { clip_id: selection.clip_id, effect_id };
+                    let action = if active {
+                        VisualEffectProductAction::CancelStabilization(target)
+                    } else {
+                        VisualEffectProductAction::AnalyzeStabilization(target)
+                    };
+                    ProductAction::VisualEffect(action).into_external_action()
+                });
+                let button = if active {
+                    "stabilization-cancel"
+                } else {
+                    "stabilization-analyze"
+                };
+                section = section.with_row(PropertyRow::new(
+                    localizer.text("stabilization-analysis"),
+                    Box::new(
+                        FlexContainer::row(vec![
+                            FlexChild::flex(Box::new(Label::new(text).muted()), 1.0),
+                            FlexChild::fixed(Box::new(
+                                Button::new(localizer.text(button))
+                                    .enabled(allowed)
+                                    .on_click(action),
+                            )),
+                        ])
+                        .with_gap(8.0),
+                    ),
+                ));
+            }
             for property in &effect.properties {
                 if property.group_name.as_deref() != previous_group {
                     if let Some(group_name) = &property.group_name {

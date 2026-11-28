@@ -7615,6 +7615,8 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         numeric_curve: None,
     };
     let disabled_effect = InspectorEffectModel {
+        stabilization_status: None,
+        can_analyze_stabilization: false,
         native_author_view: None,
         native_gui_controller: None,
         effect_id,
@@ -11935,6 +11937,8 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         audio_processor_racks: Vec::new(),
         clip_properties: Vec::new(),
         effects: vec![InspectorEffectModel {
+            stabilization_status: None,
+            can_analyze_stabilization: false,
             native_author_view: None,
             native_gui_controller: None,
             effect_id,

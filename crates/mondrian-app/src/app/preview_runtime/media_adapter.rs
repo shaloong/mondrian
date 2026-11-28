@@ -347,6 +347,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             request.cpu_working_required || self.viewer_cpu_fallback_active.get(),
             representation_quality,
             request.image_scale_requirement,
+            &request.stabilization_sources,
         )
     }
 
@@ -386,6 +387,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 self.raster_requirement.get().execution_scale(runtime_scale),
             ),
             mondrian_effects::EffectImageScaleRequirement::Any,
+            &[],
         )
     }
 
@@ -408,6 +410,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         cpu_working_required: bool,
         representation_quality: mondrian_media::PreviewRepresentationQuality,
         image_scale_requirement: mondrian_effects::EffectImageScaleRequirement,
+        stabilization_sources: &[mondrian_effects::stabilization::StabilizationSource],
     ) -> Result<MediaPreviewKey, PreviewUnavailability> {
         let authoring = snapshot.authoring().ok_or_else(|| {
             PreviewUnavailability::blocked(
@@ -439,6 +442,25 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ));
             }
         };
+        // Match the original Asset before any proxy is admitted. Canonical
+        // source resolution below also checks the current file against it.
+        if !stabilization_sources.is_empty() {
+            let fingerprint = asset.source_fingerprint();
+            let stream = asset
+                .media_probe()
+                .and_then(|probe| probe.primary_video())
+                .map(|video| video.index);
+            if stabilization_sources.iter().any(|source| {
+                source.asset != *asset_id
+                    || fingerprint != Some(source.media)
+                    || stream != Some(source.video_stream)
+            }) {
+                return Err(PreviewUnavailability::blocked(
+                    PreviewOutputStage::MediaResolution,
+                    "stabilization analysis belongs to a different source revision or stream",
+                ));
+            }
+        }
         let unit = image_scale_requirement == mondrian_effects::EffectImageScaleRequirement::Unit;
         let representation_quality = if unit {
             mondrian_media::PreviewRepresentationQuality::Full

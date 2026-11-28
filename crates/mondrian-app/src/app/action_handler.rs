@@ -1526,6 +1526,12 @@ impl AppState {
                 "visual_effect_set_enabled",
                 "Effect already has the requested enabled state",
             ),
+            VisualEffectProductAction::AnalyzeStabilization(payload) => {
+                self.start_clip_stabilization(payload.clip_id, payload.effect_id)
+            }
+            VisualEffectProductAction::CancelStabilization(payload) => {
+                self.cancel_clip_stabilization(payload.clip_id, payload.effect_id)
+            }
             VisualEffectProductAction::Remove(payload) => require_action_executed(
                 self.remove_effect_from_clip(payload.clip_id, payload.effect_id)?,
                 "visual_effect_remove",

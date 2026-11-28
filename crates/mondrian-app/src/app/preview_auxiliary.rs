@@ -385,6 +385,7 @@ pub(crate) fn resolve_preview_auxiliary_asset(
         }
     };
     let media = PreviewTimelineMediaRequest {
+        stabilization_sources: Vec::new(),
         image_scale_requirement: mondrian_effects::EffectImageScaleRequirement::Unit,
         asset_id,
         color_space_override: None,

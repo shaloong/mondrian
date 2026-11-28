@@ -22,6 +22,7 @@ use mondrian_core::{
     TrackingId,
 };
 use mondrian_editor_state::AuthoringSessionId;
+use mondrian_effects::stabilization::StabilizationSource;
 use mondrian_effects::{
     canonicalize_tracking_shape, track_frame_pair, transform_tracking_shape, TrackingFrame,
     TrackingRegion, TrackingTransform,
@@ -30,7 +31,8 @@ use mondrian_media::{
     DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
     PreviewDecodeSessionContext, PreviewSourceColorContract,
 };
-use mondrian_timeline::sequence::ResolvedInputColor;
+use mondrian_timeline::sequence::{MediaInputColorContext, ResolvedInputColor};
+use mondrian_timeline::Clip;
 use sha2::{Digest, Sha256};
 
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
@@ -799,6 +801,58 @@ impl AppState {
                 initial_shape,
             )
         };
+        let (source_path, source, source_color) =
+            self.tracking_media_source(&clip, &input_color)?;
+        let current_sequence_time = anchor_sequence_time.unwrap_or(clip.position);
+        let (frames, anchor_index) =
+            tracking_frame_requests(&clip, frame_rate, current_sequence_time, direction)?;
+        let tracking_id = TrackingId::new();
+        let cache_key = tracking_cache_key(
+            source.asset,
+            source.media,
+            source.video_stream,
+            source_color,
+            &frames,
+            anchor_index,
+            &initial_shape,
+            model,
+            direction,
+            settings,
+        )?;
+        let job = TrackingJob {
+            tracking_id,
+            binding: TrackingBinding {
+                session_id,
+                sequence_id,
+                sequence_revision,
+                target: TrackingTarget { clip_id, mask_id },
+                asset_id: source.asset,
+                source_fingerprint: source.media,
+            },
+            source_path,
+            video_stream_index: source.video_stream,
+            source_color,
+            frames,
+            anchor_index,
+            initial_shape,
+            model,
+            direction,
+            settings,
+            cache_key,
+            bypass_cache,
+            cancellation: ExecutionCancellationToken::new(),
+        };
+        self.visual_tracking.request(job)
+    }
+
+    pub(super) fn tracking_media_source(
+        &self,
+        clip: &Clip,
+        input_color: &MediaInputColorContext,
+    ) -> Result<
+        (PathBuf, StabilizationSource, PreviewSourceColorContract),
+        VisualTrackingRequestError,
+    > {
         let asset_id = clip.media_asset_id().ok_or_else(|| {
             VisualTrackingRequestError::MediaUnavailable(
                 "target is generated or nested content, not file-backed media".to_owned(),
@@ -863,46 +917,15 @@ impl AppState {
         )
         .with_video_stream_sampling(video)
         .with_matrix_interpretation(asset.interpretation.matrix);
-        let current_sequence_time = anchor_sequence_time.unwrap_or(clip.position);
-        let (frames, anchor_index) =
-            tracking_frame_requests(&clip, frame_rate, current_sequence_time, direction)?;
-        let tracking_id = TrackingId::new();
-        let cache_key = tracking_cache_key(
-            asset_id,
-            source_fingerprint,
-            video.index,
-            source_color,
-            &frames,
-            anchor_index,
-            &initial_shape,
-            model,
-            direction,
-            settings,
-        )?;
-        let job = TrackingJob {
-            tracking_id,
-            binding: TrackingBinding {
-                session_id,
-                sequence_id,
-                sequence_revision,
-                target: TrackingTarget { clip_id, mask_id },
-                asset_id,
-                source_fingerprint,
-            },
+        Ok((
             source_path,
-            video_stream_index: video.index,
+            StabilizationSource {
+                asset: asset_id,
+                media: source_fingerprint,
+                video_stream: video.index,
+            },
             source_color,
-            frames,
-            anchor_index,
-            initial_shape,
-            model,
-            direction,
-            settings,
-            cache_key,
-            bypass_cache,
-            cancellation: ExecutionCancellationToken::new(),
-        };
-        self.visual_tracking.request(job)
+        ))
     }
 
     /// Pump worker progress and atomically publish current completions.
@@ -1598,6 +1621,87 @@ mod tests {
             "tracking fixture encoder failed: {status}"
         );
         video
+    }
+
+    #[test]
+    fn clip_stabilization_worker_publishes_real_analysis_and_cancellation_wins() {
+        use crate::app::clip_stabilization::ClipStabilizationStatus;
+        use mondrian_effects::{stabilization::StabilizationRecord, EffectType};
+        use mondrian_renderer::PreparedVisualProgram;
+
+        let root = tempfile::tempdir().unwrap();
+        let video = std::fs::canonicalize(generate_translation_fixture(root.path())).unwrap();
+        let fingerprint = MediaFileFingerprint::capture(&video);
+        let media = mondrian_media::probe_media_info(&video).unwrap();
+        let library = AssetLibrary::open(root.path().join("library")).unwrap();
+        let asset = library
+            .commit_media_probe(
+                AssetMediaProbeCandidate::new(video, fingerprint, media).unwrap(),
+                None,
+            )
+            .unwrap();
+        let mut sequence = Sequence::new("Stabilization integration");
+        sequence.settings.frame_rate = mondrian_core::Rational::FPS_10;
+        sequence.add_video_track();
+        let clip = Clip::new(asset, TimelineTime::ZERO, TimelineTime::new(1, 2).unwrap()).unwrap();
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).unwrap();
+
+        let mut state = AppState::new();
+        state.test_set_asset_library(Some(library));
+        state.test_set_sequence(Some(sequence));
+        let effect = state.add_effect_to_clip(clip_id, EffectType::Stabilizer).unwrap();
+        let wait = |state: &mut AppState| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                state.poll_clip_stabilization();
+                let saved = state
+                    .active_sequence()
+                    .and_then(|sequence| sequence.find_clip(clip_id))
+                    .and_then(|clip| clip.effects.iter().find(|author| author.id == effect))
+                    .is_some_and(StabilizationRecord::has_saved_analysis);
+                let status = state.clip_stabilization_status(clip_id, effect, saved);
+                if !matches!(
+                    status,
+                    ClipStabilizationStatus::Analyzing { .. } | ClipStabilizationStatus::Canceling
+                ) {
+                    break status;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "analysis did not finish: {status:?}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let original_revision = state.active_sequence().unwrap().revision;
+        state.start_clip_stabilization(clip_id, effect).unwrap();
+        state.cancel_clip_stabilization(clip_id, effect).unwrap();
+        assert_eq!(wait(&mut state), ClipStabilizationStatus::Canceled);
+        assert_eq!(state.active_sequence().unwrap().revision, original_revision);
+
+        state.start_clip_stabilization(clip_id, effect).unwrap();
+        let sequence_id = state.active_sequence().unwrap().id;
+        state
+            .commit_sequence_edit(sequence_id, "Rename during analysis", |sequence| {
+                sequence.name = "Renamed during analysis".to_owned();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(wait(&mut state), ClipStabilizationStatus::Saved);
+        let sequence = state.active_sequence().unwrap();
+        assert_ne!(sequence.revision, original_revision);
+        let reopened: Sequence =
+            serde_json::from_slice(&serde_json::to_vec(sequence).unwrap()).unwrap();
+        let clip = reopened.find_clip(clip_id).unwrap();
+        let author = clip.effects.iter().find(|author| author.id == effect).unwrap();
+        let record = StabilizationRecord::from_effect(author).unwrap().unwrap();
+        assert_eq!(record.source().asset, asset);
+        assert_eq!(record.source().media, fingerprint);
+        assert!(PreparedVisualProgram::prepare(&reopened)
+            .unwrap()
+            .clip_execution_envelope(clip_id)
+            .is_some());
     }
 
     fn wait_for_terminal(state: &mut AppState, clip_id: ClipId, mask_id: MaskId) {

@@ -181,6 +181,8 @@ pub const VISUAL_EFFECT_INSTALL_OPENFX_BUNDLE: &str = "install_openfx_bundle";
 pub const VISUAL_EFFECT_SELECT: &str = "select";
 /// External action name for changing one visual Effect enabled state.
 pub const VISUAL_EFFECT_SET_ENABLED: &str = "set_enabled";
+pub const VISUAL_EFFECT_ANALYZE_STABILIZATION: &str = "analyze_stabilization";
+pub const VISUAL_EFFECT_CANCEL_STABILIZATION: &str = "cancel_stabilization";
 /// External action name for removing one visual Effect instance.
 pub const VISUAL_EFFECT_REMOVE: &str = "remove";
 /// External action name for moving one visual Effect relative to another instance.
@@ -418,6 +420,10 @@ pub enum VisualEffectProductAction {
     Select(VisualEffectTargetPayload),
     /// Change whether one Effect instance participates in rendering.
     SetEnabled(VisualEffectSetEnabledPayload),
+    /// Analyze the Clip's original media for one Stabilizer instance.
+    AnalyzeStabilization(VisualEffectTargetPayload),
+    /// Cancel the matching running analysis, including queued publication.
+    CancelStabilization(VisualEffectTargetPayload),
     /// Remove one Effect instance from its Clip.
     Remove(VisualEffectTargetPayload),
     /// Move one Effect relative to another stable instance identity.
@@ -1058,6 +1064,16 @@ impl ProductAction {
                         namespace, name, payload,
                     )?),
                 ))),
+                VISUAL_EFFECT_ANALYZE_STABILIZATION => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::AnalyzeStabilization(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VISUAL_EFFECT_CANCEL_STABILIZATION => Ok(Some(Self::VisualEffect(
+                    VisualEffectProductAction::CancelStabilization(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 VISUAL_EFFECT_REMOVE => Ok(Some(Self::VisualEffect(
                     VisualEffectProductAction::Remove(decode_payload(namespace, name, payload)?),
                 ))),
@@ -1626,6 +1642,16 @@ impl ProductAction {
             Self::VisualEffect(VisualEffectProductAction::SetEnabled(payload)) => (
                 VISUAL_EFFECT_NAMESPACE,
                 VISUAL_EFFECT_SET_ENABLED,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::AnalyzeStabilization(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_ANALYZE_STABILIZATION,
+                serde_json::json!(payload),
+            ),
+            Self::VisualEffect(VisualEffectProductAction::CancelStabilization(payload)) => (
+                VISUAL_EFFECT_NAMESPACE,
+                VISUAL_EFFECT_CANCEL_STABILIZATION,
                 serde_json::json!(payload),
             ),
             Self::VisualEffect(VisualEffectProductAction::Remove(payload)) => (
@@ -3405,6 +3431,8 @@ impl<'a> ProductActionAvailability<'a> {
                 visual_effect_clip(sequence, payload.clip_id).is_some_and(|target| {
                     target.track_unlocked
                         && target.is_video_track
+                        && (payload.effect_type != mondrian_effects::EffectType::Stabilizer
+                            || target.clip.media_asset_id().is_some())
                         && mondrian_effects::effect_definition(&payload.effect_type)
                             .is_some_and(|definition| definition.supports_visual_evaluation())
                 })
@@ -3421,6 +3449,20 @@ impl<'a> ProductActionAvailability<'a> {
                     |target| target.track_unlocked && target.effect.is_enabled != payload.enabled,
                 )
             }
+            VisualEffectProductAction::AnalyzeStabilization(payload) => {
+                self.state.can_analyze_clip_stabilization()
+                    && visual_effect_target(sequence, payload.clip_id, payload.effect_id)
+                        .is_some_and(|target| {
+                            target.track_unlocked
+                                && target.clip.media_asset_id().is_some()
+                                && target.effect.effect_type
+                                    == mondrian_effects::EffectType::Stabilizer
+                        })
+            }
+            VisualEffectProductAction::CancelStabilization(payload) => matches!(
+                self.state.clip_stabilization_status(payload.clip_id, payload.effect_id, false),
+                super::clip_stabilization::ClipStabilizationStatus::Analyzing { .. }
+            ),
             VisualEffectProductAction::Remove(payload) => {
                 visual_effect_target(sequence, payload.clip_id, payload.effect_id)
                     .is_some_and(|target| target.track_unlocked)
@@ -3533,6 +3575,7 @@ impl<'a> ProductActionAvailability<'a> {
                 .and_then(|definition| definition.active())
                 .is_some_and(|version| {
                     version.graph.nodes.len() < mondrian_core::MAX_GRADE_GRAPH_NODES
+                        && payload.effect_type != mondrian_effects::EffectType::Stabilizer
                         && mondrian_effects::effect_definition(&payload.effect_type)
                             .is_some_and(|effect| effect.supports_visual_evaluation())
                 }),
@@ -4434,6 +4477,12 @@ mod tests {
             )),
             ProductAction::VisualEffect(VisualEffectProductAction::SetEnabled(
                 VisualEffectSetEnabledPayload { clip_id, effect_id, enabled: false },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::AnalyzeStabilization(
+                VisualEffectTargetPayload { clip_id, effect_id },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::CancelStabilization(
+                VisualEffectTargetPayload { clip_id, effect_id },
             )),
             ProductAction::VisualEffect(VisualEffectProductAction::Remove(
                 VisualEffectTargetPayload { clip_id, effect_id },
