@@ -270,6 +270,7 @@ pub mod selective_color;
 pub mod shape;
 pub mod shift_channels;
 pub mod smart_blur;
+pub mod stabilization;
 pub mod star_burst;
 pub(crate) mod straight_alpha;
 pub mod strobe;

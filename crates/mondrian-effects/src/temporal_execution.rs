@@ -3916,6 +3916,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::Ripple { .. } => "ripple",
         crate::EffectRenderOp::WaveWarp { .. } => "wave_warp",
         crate::EffectRenderOp::Transform { .. } => "transform",
+        crate::EffectRenderOp::StabilizationWarp { .. } => "stabilization_warp",
         crate::EffectRenderOp::CornerPin { .. } => "corner_pin",
         crate::EffectRenderOp::TurbulentDisplace { .. } => "turbulent_displace",
         crate::EffectRenderOp::Deband { .. } => "deband",

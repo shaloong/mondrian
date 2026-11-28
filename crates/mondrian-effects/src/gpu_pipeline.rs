@@ -194,6 +194,10 @@ pub enum EffectGpuSpatialPass {
         /// Authored anchor, position, scale, skew, rotation, and sampling.
         grade: crate::TransformGrade,
     },
+    StabilizationWarp {
+        /// Extent-independent inverse map frozen for this author time.
+        warp: crate::stabilization::StabilizationWarp,
+    },
     CornerPin {
         /// Authored destination quad in normalized frame coordinates.
         grade: crate::CornerPinGrade,
@@ -581,6 +585,7 @@ impl EffectGpuSpatialPass {
             Self::Ripple { .. } => "ripple",
             Self::WaveWarp { .. } => "wave_warp",
             Self::Transform { .. } => "transform",
+            Self::StabilizationWarp { .. } => "stabilization_warp",
             Self::CornerPin { .. } => "corner_pin",
             Self::TurbulentDisplace { .. } => "turbulent_displace",
             Self::Deband { .. } => "deband",
@@ -688,7 +693,7 @@ impl EffectGpuSpatialPass {
             Self::Ripple { .. } => u32::MAX,
             Self::WaveWarp { .. } => u32::MAX,
             Self::Transform { .. } => u32::MAX,
-            Self::CornerPin { .. } => u32::MAX,
+            Self::StabilizationWarp { .. } | Self::CornerPin { .. } => u32::MAX,
             Self::TurbulentDisplace { .. } => u32::MAX,
             Self::Deband { .. } => u32::MAX,
             Self::Glow { .. } => u32::MAX,
@@ -819,7 +824,7 @@ impl EffectGpuSpatialPass {
             Self::Ripple { .. } => u32::MAX,
             Self::WaveWarp { .. } => u32::MAX,
             Self::Transform { .. } => u32::MAX,
-            Self::CornerPin { .. } => u32::MAX,
+            Self::StabilizationWarp { .. } | Self::CornerPin { .. } => u32::MAX,
             Self::TurbulentDisplace { .. } => u32::MAX,
             Self::Deband { .. } => u32::MAX,
             Self::Glow { .. } => u32::MAX,
@@ -1490,6 +1495,9 @@ pub fn spatial_pass_for(op: &EffectRenderOp) -> Option<EffectGpuSpatialPass> {
         }
         EffectRenderOp::Transform { grade } => {
             Some(EffectGpuSpatialPass::Transform { grade: *grade })
+        }
+        EffectRenderOp::StabilizationWarp { warp } => {
+            Some(EffectGpuSpatialPass::StabilizationWarp { warp: *warp })
         }
         EffectRenderOp::CornerPin { grade } => {
             Some(EffectGpuSpatialPass::CornerPin { grade: *grade })

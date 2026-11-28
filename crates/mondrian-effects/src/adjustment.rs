@@ -290,6 +290,12 @@ pub(crate) fn apply_render_op(
                 parameter: "requires_float32",
             });
         }
+        EffectRenderOp::StabilizationWarp { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "stabilization_warp",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::CornerPin { .. } => {
             return Err(EffectExecutionError::InvalidRenderParameter {
                 op: "corner_pin",
@@ -1412,7 +1418,7 @@ pub(crate) const fn render_op_f32_scratch_frame_upper_bound(op: &EffectRenderOp)
         EffectRenderOp::Ripple { .. } => 0,
         EffectRenderOp::WaveWarp { .. } => 0,
         EffectRenderOp::Transform { .. } => 1,
-        EffectRenderOp::CornerPin { .. } => 1,
+        EffectRenderOp::CornerPin { .. } | EffectRenderOp::StabilizationWarp { .. } => 1,
         EffectRenderOp::TurbulentDisplace { .. } => 1,
         EffectRenderOp::Deband { .. } => 2,
         EffectRenderOp::Glow { .. } => 2,
@@ -2003,6 +2009,15 @@ fn apply_render_op_f32_region_impl<E>(
                 checkpoint,
             )?;
             Ok(true)
+        }
+        EffectRenderOp::StabilizationWarp { warp } => {
+            crate::stabilization::apply_stabilization_f32_controlled(
+                working,
+                region.width as usize,
+                region.height as usize,
+                *warp,
+                checkpoint,
+            )
         }
         EffectRenderOp::CornerPin { grade } => {
             crate::corner_pin::apply_corner_pin_f32_controlled(

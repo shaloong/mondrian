@@ -1165,6 +1165,26 @@ impl CompiledEffectGraph {
         &self.graph
     }
 
+    /// Original media admitted for each reachable authored stabilization warp.
+    pub fn stabilization_sources(
+        &self,
+    ) -> impl Iterator<Item = crate::stabilization::StabilizationSource> + '_ {
+        self.schedule
+            .ordered_nodes
+            .iter()
+            .filter_map(|id| match self.graph.node(*id)?.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::StabilizationWarp { warp },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::StabilizationWarp { warp },
+                    ..
+                } => warp.source(),
+                _ => None,
+            })
+    }
+
     /// Whether a reachable Glass operation consumes Sequence lighting.
     pub fn requires_scene_lighting(&self) -> bool {
         self.schedule.ordered_nodes.iter().filter_map(|id| self.graph.node(*id)).any(|node| {
@@ -3534,6 +3554,11 @@ pub(crate) fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementatio
             ..cpu_float
         },
         EffectRenderOp::Transform { .. } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_from_effect_input: EffectRoiPropagation::FullFrame,
+            ..cpu_float
+        },
+        EffectRenderOp::StabilizationWarp { .. } => EffectImplementationRequirements {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             roi_from_effect_input: EffectRoiPropagation::FullFrame,
             ..cpu_float

@@ -219,6 +219,14 @@ impl PreparedEffectStack {
                 &definition,
                 frame_context.map(|context| context.project_geometry()),
             )?;
+            // A newly added Stabilizer leaves the original Clip visible while
+            // its Inspector is waiting for analysis. Export uses strict prep.
+            if auxiliary_preview
+                && effect.effect_type == crate::EffectType::Stabilizer
+                && !crate::stabilization::StabilizationRecord::has_saved_analysis(effect)
+            {
+                continue;
+            }
             let definition = specialize_builtin_definition(effect, definition, frame_context);
             let contract = definition.execution_contract();
             contract.validate().map_err(|error| {

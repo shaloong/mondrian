@@ -7,6 +7,7 @@
 
 use glam::Vec2;
 use mondrian_core::mask_data::{BezierPoint, MaskShape, MaskTrackingModel, MaskTrackingSettings};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MIN_OBJECT_MATCHES: usize = 4;
@@ -23,6 +24,7 @@ pub struct TrackingFrame {
     width: u32,
     height: u32,
     luminance: Vec<f32>,
+    coverage: Option<Vec<bool>>,
 }
 
 impl TrackingFrame {
@@ -40,7 +42,7 @@ impl TrackingFrame {
         if luminance.iter().any(|sample| !sample.is_finite()) {
             return Err(TrackingError::NonFiniteFrame);
         }
-        Ok(Self { width, height, luminance })
+        Ok(Self { width, height, luminance, coverage: None })
     }
 
     /// Convert straight RGBA8 samples to analysis luminance.
@@ -87,6 +89,35 @@ impl TrackingFrame {
         Self::new(width, height, luminance)
     }
 
+    /// Build scene-linear analysis pixels with transparent texels excluded from matching.
+    pub fn from_covered_rgba_f32(
+        width: u32,
+        height: u32,
+        rgba: &[f32],
+    ) -> Result<Self, TrackingError> {
+        Ok(Self::from_rgba_f32(width, height, rgba)?
+            .with_coverage(rgba.chunks_exact(4).map(|pixel| pixel[3] > 0.0)))
+    }
+
+    /// Build encoded analysis pixels with the same zero-coverage exclusion.
+    pub fn from_covered_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<Self, TrackingError> {
+        Ok(Self::from_rgba8(width, height, rgba)?
+            .with_coverage(rgba.chunks_exact(4).map(|pixel| pixel[3] != 0)))
+    }
+
+    fn with_coverage(mut self, covered_pixels: impl Iterator<Item = bool>) -> Self {
+        let coverage = covered_pixels.collect::<Vec<_>>();
+        if coverage.iter().any(|&covered| !covered) {
+            for (sample, &covered) in self.luminance.iter_mut().zip(&coverage) {
+                if !covered {
+                    *sample = 0.0;
+                }
+            }
+            self.coverage = Some(coverage);
+        }
+        self
+    }
+
     /// Raster width in pixels.
     pub const fn width(&self) -> u32 {
         self.width
@@ -102,6 +133,17 @@ impl TrackingFrame {
             * usize::try_from(self.width).expect("u32 width fits usize")
             + usize::try_from(x).expect("validated positive x");
         f64::from(self.luminance[index])
+    }
+
+    fn patch_is_covered(&self, x: i32, y: i32, radius: i32, stride: usize) -> bool {
+        self.coverage.as_ref().is_none_or(|coverage| {
+            (y - radius..=y + radius).step_by(stride).all(|row| {
+                let start = row as usize * self.width as usize;
+                (x - radius..=x + radius)
+                    .step_by(stride)
+                    .all(|col| coverage[start + col as usize])
+            })
+        })
     }
 }
 
@@ -215,7 +257,8 @@ impl TrackingTransform {
 }
 
 /// Quality evidence for one accepted frame-pair observation.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrackingQuality {
     /// Feature correspondences surviving patch ambiguity checks.
     pub matched_features: u16,
@@ -293,6 +336,39 @@ pub fn track_frame_pair(
     region: TrackingRegion,
     model: MaskTrackingModel,
     settings: MaskTrackingSettings,
+    canceled: impl FnMut() -> bool,
+) -> Result<TrackingObservation, TrackingError> {
+    track_frame_pair_with_refinement(
+        reference, candidate, region, model, settings, false, canceled,
+    )
+}
+
+/// Estimate subpixel translation over the same safe feature patches used by mask tracking.
+pub(crate) fn track_stabilization_translation(
+    reference: &TrackingFrame,
+    candidate: &TrackingFrame,
+    region: TrackingRegion,
+    settings: MaskTrackingSettings,
+    canceled: impl FnMut() -> bool,
+) -> Result<TrackingObservation, TrackingError> {
+    track_frame_pair_with_refinement(
+        reference,
+        candidate,
+        region,
+        MaskTrackingModel::ObjectTranslation,
+        settings,
+        true,
+        canceled,
+    )
+}
+
+fn track_frame_pair_with_refinement(
+    reference: &TrackingFrame,
+    candidate: &TrackingFrame,
+    region: TrackingRegion,
+    model: MaskTrackingModel,
+    settings: MaskTrackingSettings,
+    refine: bool,
     mut canceled: impl FnMut() -> bool,
 ) -> Result<TrackingObservation, TrackingError> {
     settings
@@ -305,7 +381,14 @@ pub fn track_frame_pair(
         return Err(TrackingError::Canceled);
     }
     let features = select_features(reference, region, settings, &mut canceled)?;
-    let matches = match_features(reference, candidate, &features, settings, &mut canceled)?;
+    let matches = match_features(
+        reference,
+        candidate,
+        &features,
+        settings,
+        refine,
+        &mut canceled,
+    )?;
     let minimum = match model {
         MaskTrackingModel::ObjectTranslation => MIN_OBJECT_MATCHES,
         MaskTrackingModel::PlanarHomography => MIN_PLANAR_MATCHES,
@@ -343,6 +426,9 @@ fn select_features(
     let margin = i32::from(settings.patch_radius) + i32::from(settings.search_radius) + 2;
     let width = i32::try_from(frame.width).map_err(|_| TrackingError::InvalidFrameExtent)?;
     let height = i32::try_from(frame.height).map_err(|_| TrackingError::InvalidFrameExtent)?;
+    if width <= 2 * margin + 1 || height <= 2 * margin + 1 {
+        return Err(TrackingError::InvalidRegion);
+    }
     let min_x = ((f64::from(region.min.x) * f64::from(frame.width)).floor() as i32)
         .clamp(margin, width - margin - 1);
     let max_x = ((f64::from(region.max.x) * f64::from(frame.width)).ceil() as i32)
@@ -360,6 +446,9 @@ fn select_features(
             return Err(TrackingError::Canceled);
         }
         for x in (min_x..=max_x).step_by(3) {
+            if !frame.patch_is_covered(x, y, 2, 1) {
+                continue;
+            }
             let mut xx = 0.0;
             let mut yy = 0.0;
             let mut xy = 0.0;
@@ -412,6 +501,7 @@ fn match_features(
     candidate: &TrackingFrame,
     features: &[Feature],
     settings: MaskTrackingSettings,
+    refine: bool,
     canceled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<Match>, TrackingError> {
     let search = i32::from(settings.search_radius);
@@ -420,6 +510,9 @@ fn match_features(
     for feature in features {
         if canceled() {
             return Err(TrackingError::Canceled);
+        }
+        if !reference.patch_is_covered(feature.x, feature.y, patch, 2) {
+            continue;
         }
         let mut best = (f64::NEG_INFINITY, feature.x, feature.y);
         let mut second = f64::NEG_INFINITY;
@@ -459,19 +552,46 @@ fn match_features(
             }
         }
         if best.0 >= MIN_PATCH_CORRELATION && best.0 - second >= MIN_PATCH_MARGIN {
+            let (mut x, mut y) = (f64::from(best.1), f64::from(best.2));
+            if refine {
+                let score = |dx, dy| {
+                    patch_correlation(
+                        reference,
+                        candidate,
+                        feature.x,
+                        feature.y,
+                        best.1 + dx,
+                        best.2 + dy,
+                        patch,
+                    )
+                };
+                x += refine_peak(score(-1, 0), best.0, score(1, 0));
+                y += refine_peak(score(0, -1), best.0, score(0, 1));
+            }
             matches.push(Match {
                 from: [
                     f64::from(feature.x) / f64::from(reference.width),
                     f64::from(feature.y) / f64::from(reference.height),
                 ],
                 to: [
-                    f64::from(best.1) / f64::from(reference.width),
-                    f64::from(best.2) / f64::from(reference.height),
+                    x / f64::from(reference.width),
+                    y / f64::from(reference.height),
                 ],
             });
         }
     }
     Ok(matches)
+}
+
+fn refine_peak(left: f64, peak: f64, right: f64) -> f64 {
+    if !left.is_finite() || !right.is_finite() || left > peak || right > peak {
+        return 0.0;
+    }
+    let curvature = left - 2.0 * peak + right;
+    if curvature >= -1.0e-6 {
+        return 0.0;
+    }
+    ((left - right) / (2.0 * curvature)).clamp(-0.5, 0.5)
 }
 
 fn patch_correlation(
@@ -489,6 +609,7 @@ fn patch_correlation(
         || candidate_y - radius < 0
         || candidate_x + radius >= width
         || candidate_y + radius >= height
+        || !candidate.patch_is_covered(candidate_x, candidate_y, radius, 2)
     {
         return f64::NEG_INFINITY;
     }
@@ -533,17 +654,13 @@ fn fit_translation(
     dx.sort_by(f64::total_cmp);
     dy.sort_by(f64::total_cmp);
     let translation = [median(&dx), median(&dy)];
-    let threshold = 2.5 / f64::from(frame.width.max(frame.height));
     let mut inliers = Vec::new();
-    let mut squared_error_px = 0.0;
-    let scale = f64::from(frame.width.max(frame.height));
     for (index, pair) in matches.iter().enumerate() {
-        let ex = pair.to[0] - pair.from[0] - translation[0];
-        let ey = pair.to[1] - pair.from[1] - translation[1];
+        let ex = (pair.to[0] - pair.from[0] - translation[0]) * f64::from(frame.width);
+        let ey = (pair.to[1] - pair.from[1] - translation[1]) * f64::from(frame.height);
         let error = ex.hypot(ey);
-        if error <= threshold {
+        if error <= 2.5 {
             inliers.push(index);
-            squared_error_px += (error * scale).powi(2);
         }
     }
     if inliers.len() < MIN_OBJECT_MATCHES {
@@ -559,7 +676,17 @@ fn fit_translation(
         .collect::<Vec<_>>();
     inlier_dx.sort_by(f64::total_cmp);
     inlier_dy.sort_by(f64::total_cmp);
-    let transform = TrackingTransform::translation(median(&inlier_dx), median(&inlier_dy));
+    let offset = [median(&inlier_dx), median(&inlier_dy)];
+    let transform = TrackingTransform::translation(offset[0], offset[1]);
+    let squared_error_px: f64 = inliers
+        .iter()
+        .map(|&index| {
+            let pair = matches[index];
+            let dx = (pair.to[0] - pair.from[0] - offset[0]) * f64::from(frame.width);
+            let dy = (pair.to[1] - pair.from[1] - offset[1]) * f64::from(frame.height);
+            dx * dx + dy * dy
+        })
+        .sum();
     let rms = (squared_error_px / inliers.len() as f64).sqrt();
     Ok((transform, inliers, rms))
 }

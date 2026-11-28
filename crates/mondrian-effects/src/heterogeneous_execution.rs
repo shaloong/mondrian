@@ -2961,6 +2961,7 @@ pub(crate) const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8
         EffectRenderOp::BrightnessContrast { .. } => 63,
         EffectRenderOp::Levels { .. } => 64,
         EffectRenderOp::Transform { .. } => 65,
+        EffectRenderOp::StabilizationWarp { .. } => 160,
         EffectRenderOp::CornerPin { .. } => 66,
         EffectRenderOp::TurbulentDisplace { .. } => 67,
         EffectRenderOp::Deband { .. } => 68,
@@ -5575,6 +5576,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Levels { .. }
             | crate::EffectRenderOp::Transform { .. }
             | crate::EffectRenderOp::CornerPin { .. }
+            | crate::EffectRenderOp::StabilizationWarp { .. }
             | crate::EffectRenderOp::TurbulentDisplace { .. }
             | crate::EffectRenderOp::Deband { .. }
             | crate::EffectRenderOp::Glow { .. }

@@ -1142,6 +1142,7 @@ pub(crate) fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Ripple { .. } => "ripple",
         EffectRenderOp::WaveWarp { .. } => "wave_warp",
         EffectRenderOp::Transform { .. } => "transform",
+        EffectRenderOp::StabilizationWarp { .. } => "stabilization_warp",
         EffectRenderOp::CornerPin { .. } => "corner_pin",
         EffectRenderOp::TurbulentDisplace { .. } => "turbulent_displace",
         EffectRenderOp::Deband { .. } => "deband",

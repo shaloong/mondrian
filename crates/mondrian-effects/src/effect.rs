@@ -1,6 +1,7 @@
 //! 效果节点抽象
 
 pub(crate) mod denoise;
+mod stabilizer;
 pub(crate) mod timewarp;
 
 use crate::execution::{CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor};
@@ -948,6 +949,11 @@ pub enum EffectRenderOp {
     Transform {
         grade: crate::TransformGrade,
     },
+    /// Stabilization: inverse-sample a frozen camera correction on the actual frame.
+    StabilizationWarp {
+        /// Normalized source correction and inverse zoom.
+        warp: crate::stabilization::StabilizationWarp,
+    },
     /// Corner pin: pins the frame onto an arbitrary quadrilateral.
     CornerPin {
         grade: crate::CornerPinGrade,
@@ -1683,6 +1689,9 @@ impl std::fmt::Debug for EffectRenderOp {
             }
             Self::Transform { grade } => {
                 formatter.debug_struct("Transform").field("grade", grade).finish()
+            }
+            Self::StabilizationWarp { warp } => {
+                formatter.debug_struct("StabilizationWarp").field("warp", warp).finish()
             }
             Self::CornerPin { grade } => {
                 formatter.debug_struct("CornerPin").field("grade", grade).finish()
@@ -2611,6 +2620,11 @@ impl EffectRenderOp {
                 grade.use_composition_shutter().hash(state);
                 grade.sampling().as_u32().hash(state);
             }
+            EffectRenderOp::StabilizationWarp { warp } => {
+                160u8.hash(state);
+                warp.gpu_controls().map(f32::to_bits).hash(state);
+                warp.source().hash(state);
+            }
             EffectRenderOp::CornerPin { grade } => {
                 65u8.hash(state);
                 grade.corners().map(|corner| corner.map(f32::to_bits)).hash(state);
@@ -3446,6 +3460,7 @@ impl EffectRenderOp {
             EffectRenderOp::Ripple { .. } => 2,
             EffectRenderOp::WaveWarp { .. } => 3,
             EffectRenderOp::Transform { .. } => 4,
+            EffectRenderOp::StabilizationWarp { .. } => 3,
             EffectRenderOp::CornerPin { .. } => 4,
             EffectRenderOp::TurbulentDisplace { .. } => 5,
             EffectRenderOp::Deband { .. } => 3,
@@ -4100,7 +4115,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 158] {
+fn builtin_effect_types() -> [EffectType; 159] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -4231,6 +4246,7 @@ fn builtin_effect_types() -> [EffectType; 158] {
         EffectType::PosterizeTime,
         EffectType::Timewarp,
         EffectType::ParticleSystem,
+        EffectType::Stabilizer,
         EffectType::Deinterlace,
         EffectType::Watercolor,
         EffectType::Scanlines,
@@ -9329,6 +9345,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
         }
         EffectType::Timewarp => timewarp::define_properties(&mut properties),
         EffectType::ParticleSystem => define_particle_properties(&mut properties, &effect_type),
+        EffectType::Stabilizer => stabilizer::define_properties(&mut properties),
         EffectType::PosterizeTime => {
             define_builtin_property(
                 &mut properties,
@@ -18119,6 +18136,9 @@ fn define_builtin_property(
     if matches!(effect_type, EffectType::Qualifier) && parameter == "matte_preview" {
         descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Topology);
     }
+    if *effect_type == EffectType::Stabilizer {
+        descriptor = descriptor.with_animatable(false);
+    }
     if matches!(effect_type, EffectType::VideoCollage)
         && matches!(parameter, "columns" | "rows" | "tile_delay")
     {
@@ -18261,6 +18281,9 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
     match (effect_type, parameter) {
         (EffectType::Timewarp, "speed") => ParameterUnit::Percent,
         (EffectType::ParticleSystem, "emitter_position") => ParameterUnit::Normalized,
+        (EffectType::Stabilizer, "smoothness" | "max_zoom" | "additional_zoom") => {
+            ParameterUnit::Percent
+        }
         (EffectType::ParticleSystem, "emitter_size" | "size") => ParameterUnit::Pixels,
         (EffectType::ParticleSystem, "direction" | "spread" | "rotation" | "rotation_random") => {
             ParameterUnit::Degrees
@@ -19134,6 +19157,11 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             ..cpu_linear
         },
+        EffectType::Stabilizer => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: EffectRoiPropagation::FullFrame,
+            ..cpu_linear
+        },
         EffectType::MaskPathStroke => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             // Brush coverage depends on authored geometry, not neighboring source pixels.
@@ -19610,6 +19638,9 @@ fn finite_kernel_roi_contract(radius: f32) -> EffectRoiPropagation {
 }
 
 fn builtin_graph_preparer_for(effect_type: &EffectType) -> Option<EffectGraphPreparer> {
+    if *effect_type == EffectType::Stabilizer {
+        return Some(Arc::new(|effect, _, _| stabilizer::prepare(effect)));
+    }
     if *effect_type == EffectType::Timewarp {
         return Some(Arc::new(|effect, _, _| timewarp::prepare(effect)));
     }
@@ -29784,6 +29815,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::PosterizeTime => "抽帧",
         EffectType::Timewarp => "时间扭曲",
         EffectType::ParticleSystem => "粒子系统",
+        EffectType::Stabilizer => "画面稳定器",
         EffectType::Arithmetic => "算术",
         EffectType::LeaveColor => "保留颜色",
         EffectType::BroadcastSafe => "广播安全",
@@ -31268,6 +31300,7 @@ mod tests {
             EffectType::PosterizeTime,
             EffectType::Timewarp,
             EffectType::ParticleSystem,
+            EffectType::Stabilizer,
             EffectType::Deinterlace,
             EffectType::Watercolor,
             EffectType::Scanlines,
